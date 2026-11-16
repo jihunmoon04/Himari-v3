@@ -300,6 +300,24 @@ test("a new agent session from the home page opens once its task runs", async ({
   await done();
 });
 
+test("a session started before leaving home is told on coming back", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub opens sessions once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Send to").selectOption("work");
+  await page.getByLabel("Message", { exact: true }).fill("Start and leave");
+  await page.keyboard.press("Enter");
+  await page.getByRole("link", { name: "Approvals" }).click(); // within the page: what it follows stays
+  await expect(page).toHaveURL(/\/next\/approvals$/);
+  await page.getByRole("button", { name: "New task" }).click();
+  const told = page.getByRole("status").filter({ hasText: "The claude session in work started." });
+  await expect(told).toBeVisible({ timeout: 10_000 });
+  await expect(page).toHaveURL(/\/next\/?$/); // told, not moved
+  await told.getByRole("link", { name: "Open it" }).click();
+  await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Start and leave");
+  await done();
+});
+
 test("a message to a session the agent lost follows its task to the new session", async ({ page, isMobile }) => {
   test.skip(isMobile, "the scripted hub loses this session once, on desktop");
   const done = await watch(page);

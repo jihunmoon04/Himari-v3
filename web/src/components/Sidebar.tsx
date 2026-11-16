@@ -128,7 +128,7 @@ function HubSection() {
       <NavLink to="/approvals" className={rowClass}>
         <Inbox className="size-4" /> <span className="flex-1">Approvals</span>
         {(pending.data?.pending.length ?? 0) > 0 && (
-          <span className="rounded-full bg-wait px-1.5 text-xs text-white" aria-label="waiting">
+          <span className="rounded-full bg-wait px-1.5 text-xs text-white" aria-label={`${pending.data!.pending.length} waiting`}>
             {pending.data!.pending.length}
           </span>
         )}

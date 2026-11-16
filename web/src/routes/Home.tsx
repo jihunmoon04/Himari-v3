@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router";
 import { ApiError } from "@/api/client";
 import { createConversation, sendMessage } from "@/api/himari";
 import { startHubSession, type MessageChoices } from "@/api/hub";
@@ -16,7 +16,9 @@ const pick = "rounded-md border border-line bg-transparent px-1.5 py-1 text-xs t
 
 /** A new task (V3-P102 §4.1): to HIMARI (a new conversation), or straight to one of the hub's projects (another
  *  session of its lane, ``new``). An agent session exists only once its task runs, so the page follows the task
- *  and opens the session when the hub names it. */
+ *  and opens the session when the hub names it. The follow store keeps new tasks for the whole page: one started
+ *  here before the user went elsewhere is still told on coming back (opened, failed, or still starting), as a
+ *  notice rather than a jump. */
 export function Home() {
   const navigate = useNavigate();
   const client = useQueryClient();
@@ -25,8 +27,10 @@ export function Home() {
   const [target, setTarget] = useState(HIMARI);
   const [agent, setAgent] = useState<string | undefined>(undefined);
   const [choices, setChoices] = useState<MessageChoices>({});
-  const [starting, setStarting] = useState<number | null>(null);
+  const startedHere = useRef(new Set<number>()); // opened as soon as it runs; others are only told
   const followed = useFollowed();
+  const fresh = followed.filter((f) => f.from === null); // new sessions asked for from this page
+  const starting = fresh.some((f) => startedHere.current.has(f.task.id) && runsIn(f) === null && !f.done);
 
   const projects = hub.status === "on" ? (hub.data?.projects ?? []).filter((p) => p.name) : [];
   const project = projects.find((p) => p.name === target);
@@ -34,19 +38,21 @@ export function Home() {
   const chosenAgent = agent ?? project?.default_agent ?? agents[0];
 
   useEffect(() => {
-    const mine = followed.find((f) => f.task.id === starting);
-    if (!mine) return;
-    const where = runsIn(mine);
-    if (where !== null) {
-      dismiss(mine.task.id); // the session's own page shows it from here
-      setStarting(null);
-      navigate(`/s/${where}`);
-    } else if (failedBeforeRunning(mine)) {
-      setError(`The agent did not start: ${mine.lost ?? mine.task.result ?? "the task failed"}`);
-      dismiss(mine.task.id);
-      setStarting(null);
+    for (const mine of fresh) {
+      if (!startedHere.current.has(mine.task.id)) continue;
+      const where = runsIn(mine);
+      if (where !== null) {
+        dismiss(mine.task.id); // the session's own page shows it from here
+        navigate(`/s/${where}`);
+        return;
+      }
+      if (failedBeforeRunning(mine)) {
+        setError(`The agent did not start: ${mine.lost ?? mine.task.result ?? "the task failed"}`);
+        dismiss(mine.task.id);
+      }
     }
-  }, [followed, starting, navigate]);
+  }, [fresh, navigate]);
+  const elsewhere = fresh.filter((f) => !startedHere.current.has(f.task.id));
 
   const startHimari = async (text: string) => {
     const made = await createConversation();
@@ -57,8 +63,8 @@ export function Home() {
 
   const startAgent = async (name: string, text: string) => {
     const { task } = await startHubSession(name, text, { agent: chosenAgent, ...chosen(choices) });
+    startedHere.current.add(task.id);
     follow(task, null, name);
-    setStarting(task.id);
   };
 
   const start = async (text: string) => {
@@ -101,15 +107,38 @@ export function Home() {
             draftKey="home"
             onSend={start}
             autoFocus
-            disabled={starting !== null}
+            disabled={starting}
             placeholder={project
               ? `Start a ${chosenAgent ?? "agent"} session in ${project.name}`
               : "Ask HIMARI, or hand it a task"}
             tools={tools}
           />
-          {starting !== null && (
+          {starting && (
             <p role="status" className="mt-2 text-sm text-muted">Starting the agent… the session opens once it runs.</p>
           )}
+          {elsewhere.map((f) => {
+            const where = runsIn(f);
+            return (
+              <p key={f.task.id} role={failedBeforeRunning(f) ? "alert" : "status"}
+                className={failedBeforeRunning(f) ? "mt-2 text-sm text-danger" : "mt-2 text-sm text-muted"}>
+                {where !== null ? (
+                  <>
+                    The {f.task.agent ?? "agent"} session in {f.project} started.{" "}
+                    <Link to={`/s/${where}`} className="underline" onClick={() => dismiss(f.task.id)}>Open it</Link>
+                  </>
+                ) : failedBeforeRunning(f) ? (
+                  <>The agent in {f.project} did not start: {f.lost ?? f.task.result ?? "the task failed"}.</>
+                ) : (
+                  <>Starting an agent in {f.project}…</>
+                )}
+                {(where !== null || failedBeforeRunning(f)) && (
+                  <button type="button" className="ml-2 text-xs text-faint underline" onClick={() => dismiss(f.task.id)}>
+                    Dismiss
+                  </button>
+                )}
+              </p>
+            );
+          })}
           {error && <p role="alert" className="mt-2 text-sm text-danger">{error}</p>}
         </div>
       </div>
