@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -41,6 +42,12 @@ MAX_PROMPT = 200_000  # of a prompt sent to an agent
 
 class HubUnavailable(Exception):
     """The hub did not answer, or its token could not be read; nothing was sent or done."""
+
+
+class HubUnknown(HubUnavailable):
+    """The request may have reached the hub, but no answer came back (a timeout, a dropped connection, an
+    unreadable reply): it may have been done. A ``send`` or ``new`` must not be repeated blindly (the hub keeps no
+    key to drop a duplicate)."""
 
 
 class HubMisconfigured(HubUnavailable):
@@ -314,10 +321,14 @@ class HubClient:
             if error.code in (401, 403):
                 raise HubMisconfigured(f"the hub answered HTTP {error.code}") from None
             raise HubUnavailable(f"the hub answered HTTP {error.code}") from None
-        except (OSError, ValueError):
-            raise HubUnavailable("the hub could not be reached") from None
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
+                raise HubUnavailable("the hub could not be reached") from None  # nothing reached it
+            raise HubUnknown("the hub did not answer") from None
+        except (OSError, ValueError):  # sent, and the answer was lost or unreadable: it may have been done
+            raise HubUnknown("the hub's answer was lost") from None
         if not isinstance(reply, dict):
-            raise HubUnavailable("the hub's answer was not readable")
+            raise HubUnknown("the hub's answer was not readable")
         return reply
 
     async def pending(self) -> list[dict[str, Any]]:
@@ -348,7 +359,7 @@ class HubClient:
     async def session(self, session_id: int) -> dict[str, Any]:
         found = session_detail(await self._call("session", {"id": session_id}))
         if found is None:
-            raise HubUnavailable("the hub's answer was not readable")
+            raise HubUnknown("the hub's answer was not readable")
         return found
 
     async def events(self, session_id: int, after: int, limit: int | None = None) -> dict[str, Any]:
@@ -366,7 +377,7 @@ class HubClient:
     async def _task(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
         found = task_view((await self._call(op, body)).get("task"))
         if found is None:
-            raise HubUnavailable("the hub's answer was not readable")
+            raise HubUnknown("the hub's answer was not readable")
         return found
 
     async def send(self, session_id: int, prompt: str, *, model: str | None = None, effort: str | None = None,

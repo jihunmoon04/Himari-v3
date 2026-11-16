@@ -241,7 +241,8 @@ H1은 W3 전에 필요하다. 사용자가 직접 보낸 글도 hub 원장에
   스트림에 `hub_unavailable`을 보내고 닫는다. 목록 upstream은 서버가 지수 백오프로 다시 붙는다.
 - **오류:** hub 400 → 409 `hub_refused`(사람용 문구 그대로, 500자; `bad_cursor`면 409 `hub_bad_cursor`), 404 → 404,
   연결 실패 → 503 `hub_unavailable`, 401·403 → 503 `hub_misconfigured`(로그에 원인; V3-P95의 승인 경로도 같음),
-  남은 스트림 없음 → 503 `hub_stream_limit`. 계약대로 판단은 상태 코드로만 한다.
+  남은 스트림 없음 → 503 `hub_stream_limit`. 보냈지만 답을 받지 못함(시간 초과, 연결 끊김, 읽을 수 없는 답) →
+  503 `hub_unknown`: 했을 수도 있으므로 화면은 다시 보내기 전에 확인하게 한다(hub에는 중복을 막는 키가 없다). 계약대로 판단은 상태 코드로만 한다.
 - **설정:** 이미 있는 `HIMARI_HUB_URL`·`HIMARI_HUB_USER_TOKEN_FILE`에 `HIMARI_HUB_MCP_SOURCE`만 더한다.
 
 ## 7. 프론트엔드 구조

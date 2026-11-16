@@ -431,6 +431,8 @@ async def session_frames(stack: AsyncExitStack, stream: AsyncIterator[Message], 
 
     reading = asyncio.ensure_future(pump())
     try:
+        if not signed_in():  # the response may start well after the route checked
+            return
         yield f"retry: {RETRY_MS}\n\n"
         next_check = time.monotonic() + check
         while not closing.is_set():

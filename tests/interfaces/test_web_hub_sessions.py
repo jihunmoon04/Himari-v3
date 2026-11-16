@@ -73,6 +73,7 @@ class Hub:
         self.busy = False
         self.token_file: Path | None = None
         self.ended = 0  # list streams whose reader went away (a write to it failed)
+        self.on_stream: Callable[[], object] | None = None  # runs as a stream request arrives
         hub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -92,7 +93,11 @@ class Hub:
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     return self._reply(401, {"error": "token"})
                 hub.calls.append((op, body))
-                self._reply(*hub.replies.get(op, (200, {})))
+                status, reply = hub.replies.get(op, (200, {}))
+                if status == 0:  # done, and the answer lost on the way: the connection drops
+                    self.close_connection = True
+                    return
+                self._reply(status, reply)
 
             def do_GET(self) -> None:  # noqa: N802
                 parts = urlsplit(self.path)
@@ -100,6 +105,8 @@ class Hub:
                     return self._reply(401, {"error": "token"})
                 query = parse_qs(parts.query)
                 hub.streams.append((query, self.headers.get("Last-Event-ID")))
+                if hub.on_stream is not None:
+                    hub.on_stream()
                 if hub.busy:
                     return self._reply(503, {"error": "streams"})
                 if query.get("session") == ["404"]:
@@ -557,3 +564,23 @@ def test_a_browser_that_leaves_leaves_no_task_behind() -> None:
         return asyncio.all_tasks() - before - {asyncio.current_task()}
 
     assert asyncio.run(asyncio.wait_for(scenario(), 5)) == set()
+
+
+def test_a_prompt_whose_answer_was_lost_is_not_called_unsent(client: TestClient, hub: Hub) -> None:
+    hub.replies = {"send": (0, {}), "new": (0, {})}
+    for path, body in (("/api/hub/sessions/5/messages", {"prompt": "go"}),
+                       ("/api/hub/sessions", {"project": "demo", "prompt": "go"})):
+        lost = client.post(path, json=body, headers=SEND)
+        assert lost.status_code == 503 and lost.json()["error"]["code"] == "hub_unknown", path
+    assert [op for op, _ in hub.calls] == ["send", "new"]  # it did reach the hub
+    hub.close()
+    gone = client.post("/api/hub/sessions/5/messages", json={"prompt": "go"}, headers=SEND)
+    assert gone.json()["error"]["code"] == "hub_unavailable"  # nothing reached it
+
+
+def test_signed_out_while_the_session_stream_opened(client: TestClient, hub: Hub) -> None:
+    hub.on_stream = lambda: client.delete("/api/session", headers=SEND)
+    refused = client.get("/api/hub/sessions/5/stream")
+    assert refused.status_code == 401
+    hub.on_stream = None
+    assert client.get("/api/hub/sessions").status_code == 401  # signed out indeed

@@ -186,6 +186,7 @@ from himari.interfaces.web.hub import (
     HubNotFound,
     HubRefused,
     HubUnavailable,
+    HubUnknown,
 )
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.security import (
@@ -2518,6 +2519,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             return ApiError(404, "not_found", "No such session on the hub.")
         if isinstance(error, (hub_stream.HubStreamLimit, HubBusy)):
             return ApiError(503, "hub_stream_limit", "Too many live views of hub sessions; read the events instead.")
+        if isinstance(error, HubUnknown):
+            return ApiError(503, "hub_unknown", "The hub did not answer; it may have done it. Check before trying "
+                                               "again (a prompt sent twice runs twice).")
         if isinstance(error, HubMisconfigured):
             log.warning("the hub refused this server: %s (check HIMARI_HUB_URL and the user token)", error)
             return ApiError(503, "hub_misconfigured", "The hub refused this server's token or address.")
@@ -2645,6 +2649,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         except (HubRefused, HubNotFound, HubUnavailable, hub_stream.HubStreamLimit) as error:
             raise hub_error(error) from None
         streams = hub_session_streams
+        if not still():  # signed out while the upstream opened: nothing of the session goes out
+            streams.release()
+            await stack.aclose()
+            raise ApiError(401, "unauthenticated", "Sign in first.")
 
         def ended() -> None:  # however it ends, even when its body never started: the slot and the upstream
             streams.release()
