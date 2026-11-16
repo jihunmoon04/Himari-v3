@@ -178,5 +178,4 @@ def test_the_hub_settings_come_together() -> None:
                          ({"HIMARI_HUB_URL": "http://h", "HIMARI_HUB_USER_TOKEN_FILE": "t"}, "absolute")):
         with pytest.raises(WebConfigError, match=message):
             WebConfig.from_env({**base, **bad})
-    assert WebConfig.from_env({**base, "HIMARI_MACHINE_ATTACHED_WRITE": "0"}).machine_attached_write is False
-    assert WebConfig.from_env(base).machine_attached_write is True
+    assert not hasattr(WebConfig.from_env({**base, "HIMARI_MACHINE_ATTACHED_WRITE": "1"}), "machine_attached_write")

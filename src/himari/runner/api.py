@@ -32,9 +32,9 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROTOCOL_VERSION = 5  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
+PROTOCOL_VERSION = 6  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
 # 3 and 4 had ``copy_max``, ``delete_copied``, ``append`` and ``truncate`` (a PDF's writes from the web: V3-P77,
-# V3-P82); 5 is without them (V3-P96)
+# V3-P82); 5 is without them (V3-P96); 6 is without ``git_push`` and hello's ``push`` (V3-P100)
 KEEP_PROTOCOL = 2  # a runner older than this ignores ``keep`` and ``install`` (it would write plainly)
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_FDS = 4
@@ -58,11 +58,10 @@ DISCARD_COPY = "discard_copy"
 HOLDS = "holds"
 REMOVE_CONVERSATION_FOLDER = "remove_conversation_folder"
 CHECK_WORKSPACE = "check_workspace"  # a folder the user registers (§10.1): nothing is written
-GIT_PUSH = "git_push"  # a branch of a repository in the call's Workspaces (§12)
 CREATE_FILE = "create_file"  # a new empty file, never over one (V3-P75 §7.7)
 MKDIR = "mkdir"  # one new folder (V3-P75 §7.5)
 WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER,
-                    GIT_PUSH, CREATE_FILE, MKDIR})
+                    CREATE_FILE, MKDIR})
 # ``write`` with ``mode: "replace"`` (V3-P75 §7.4): ``expected`` required; the answer carries a copy of the
 # replaced file as an fd (none over 1 MiB). ``delete`` with ``expected``: the same for the deleted file.
 # ``write`` and ``delete`` with ``keep: true`` (V3-P76 §4.1, an agent's write): the same copy, never over a file

@@ -57,13 +57,10 @@ log = logging.getLogger("himari.environment.machine")
 
 _DENIED = {runner.OUTSIDE_WORKSPACES, runner.ACCESS, runner.UNAVAILABLE, runner.SETUP_FAILED}
 _PATHS = ("Paths are absolute, relative to the working directory, or start with ~ (the user's home). ")
-_WRITE_SCOPE = ("You can write only inside this conversation's workspaces (listed in the runtime state); "
-                "writing elsewhere is refused. ")
-# V3-P94: with ``attached_writable=False`` the attached folders are only read.
-_OWN_SCOPE = ("You can write only inside this conversation's own folder (the first workspace in the runtime "
-              "state); attached workspaces are read-only for you, and writing elsewhere is refused. ")
-_COMMAND_SCOPE = "write only inside this conversation's workspaces and /tmp"
-_OWN_COMMAND_SCOPE = "write only inside this conversation's own folder and /tmp (attached workspaces are read-only)"
+# V3-P94, V3-P100: the attached folders are only read.
+_WRITE_SCOPE = ("You can write only inside this conversation's own folder (the first workspace in the runtime "
+                "state); attached workspaces are read-only for you, and writing elsewhere is refused. ")
+_COMMAND_SCOPE = "write only inside this conversation's own folder and /tmp (attached workspaces are read-only)"
 _READ_ONLY = ("outside this conversation's own folder: attached workspaces are read-only for you, nothing was "
               "changed; to change files there, hand the work to a coding agent")
 _UNREACHABLE = "the machine runner is not reachable; nothing was done"
@@ -98,12 +95,9 @@ class _MachineTool:
 
     def __init__(self, env: MachineEnvironment) -> None:
         self._env = env
-        description = self.description
-        if not env.attached_writable:
-            description = description.replace(_WRITE_SCOPE, _OWN_SCOPE).replace(_COMMAND_SCOPE, _OWN_COMMAND_SCOPE)
         self.definition = ToolDefinition(
             tool_id=ToolId(f"machine/{self.name}"),
-            description=description,
+            description=self.description,
             input_schema=_schema(self.properties, self.required, binding=False),
             workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=self.effect,
@@ -133,7 +127,7 @@ class _MachineTool:
         except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:
-            if error.category == runner.OUTSIDE_WORKSPACES and not self._env.attached_writable:
+            if error.category == runner.OUTSIDE_WORKSPACES:
                 error = runner.RunnerError(runner.OUTSIDE_WORKSPACES, _READ_ONLY)
             return _refused(_shown(args.get(self.target, ".")), error)
 
@@ -335,13 +329,13 @@ class RunCommand(_MachineTool):
         "Run one command as the user in a Linux sandbox on this server. It can read what the user can read, "
         f"except hidden locations, and {_COMMAND_SCOPE} (each command "
         "gets its own /tmp). Network: HTTPS only, to the hosts the current state lists (others get 403 from "
-        "the proxy); no SSH, so use https:// git remotes; to push, use git_push (commands have no credentials). argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
+        "the proxy); no SSH, so use https:// git remotes; commands have no credentials, so they cannot push. argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
         "syntax. Unix domain sockets cannot be created: use TCP on 127.0.0.1, and the 'fork' start method for "
         "Python multiprocessing. Use a virtual environment in the project for Python packages (the home folder "
         f"is read-only). Runs in the working directory; timeout {DEFAULT_TIMEOUT_SECONDS}s by default "
         f"(max {MAX_TIMEOUT_SECONDS}s)."
     )
-    effect = EffectProfile.UNKNOWN  # may touch any file in the Workspaces
+    effect = EffectProfile.UNKNOWN  # may touch any file in the own folder
     properties = {
         "argv": {"type": "array", "items": {"type": "string"}, "description": "Program and arguments."},
         "timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds."},
@@ -377,40 +371,6 @@ class RunCommand(_MachineTool):
             raw = dict(outcome.raw_result) if isinstance(outcome.raw_result, Mapping) else {}
             return ToolOutcome(outcome.status, _text(text + note, error=True), raw_result={**raw, "oom": True})
         return outcome
-
-
-class GitPush(_MachineTool):
-    """``machine/git_push`` (§12): the runner pushes; the repository is only read, in the sandbox."""
-
-    name = "git_push"
-    description = (
-        "Push one local branch of a git repository in this conversation's workspaces to the branch of the same name "
-        "on its 'origin' remote. Only https remotes the current state lists under git_push. It pushes the branch's "
-        "commits (commit first with run_command), never forced: if the remote has commits the branch lacks, the push "
-        "is rejected; fetch and merge or rebase, then push again."
-    )
-    effect = EffectProfile.UNKNOWN  # changes a remote repository
-    target = "repository"
-    properties = {
-        "repository": {"type": "string", "description": "The repository's folder (default: working directory)."},
-        "branch": {"type": "string", "description": "The local branch to push."},
-    }
-    required = ["branch"]
-
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
-        result, _ = await self._env.call(runner.GIT_PUSH, {"repository": args.get("repository", "."),
-                                                           "branch": args.get("branch"), "cwd": cwd,
-                                                           "write_roots": roots})
-        branch, url, status = str(result["branch"]), str(result["url"]), str(result["status"])
-        new, message = str(result["new"])[:12], str(result["message"])
-        if status == "rejected":
-            return ToolOutcome(ToolStatus.FAILED, _text(f"the remote rejected {branch} at {url}; nothing was pushed: "
-                                                        f"{message}", error=True), raw_result=result)
-        text = {"created": f"pushed {branch} to {url}: a new branch at {new}",
-                "up_to_date": f"{branch} is already up to date at {url} ({new})"}.get(
-                    status, f"pushed {branch} to {url}: {message}")
-        return ToolOutcome(ToolStatus.SUCCEEDED, _text(text), raw_result=result)
 
 
 class MachineReadDocument(ReadDocument):
@@ -458,7 +418,7 @@ class MachineReadDocument(ReadDocument):
 
 def machine_tools(env: MachineEnvironment) -> list[ToolHandler]:
     tools: list[ToolHandler] = [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env),
-                                RunCommand(env), GitPush(env)]
+                                RunCommand(env)]
     if env.files is not None:
         tools.append(PresentFile(env))
     if env.documents is not None:

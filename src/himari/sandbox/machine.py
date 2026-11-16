@@ -221,19 +221,18 @@ class MachineSandbox:
         return self._state
 
     async def run(self, argv: list[str], layout: MachineLayout, timeout: float, *,
-                  max_output: int = MAX_OUTPUT_BYTES, stdout_to: int | None = None) -> CommandResult:
+                  max_output: int = MAX_OUTPUT_BYTES) -> CommandResult:
         if self._state is not SandboxState.ENFORCED:
             raise SandboxUnavailableError(self._state.value)
         try:
-            return await self.launch(argv, layout, timeout, max_output=max_output, stdout_to=stdout_to)
+            return await self.launch(argv, layout, timeout, max_output=max_output)
         except SandboxSetupError:
             self._state = SandboxState.SETUP_FAILED  # latched
             raise
 
     async def launch(self, argv: list[str], layout: MachineLayout, timeout: float, *,
-                     max_output: int = MAX_OUTPUT_BYTES, stdout_to: int | None = None) -> CommandResult:
-        """The one spawn of this profile (``run`` and the self-test). ``stdout_to``:
-        see ``protected_run`` (git push's bundle, §12)."""
+                     max_output: int = MAX_OUTPUT_BYTES) -> CommandResult:
+        """The one spawn of this profile (``run`` and the self-test)."""
         capability = self._capability
         if capability is None:
             raise SandboxUnavailableError(SandboxState.UNAVAILABLE.value)
@@ -252,8 +251,7 @@ class MachineSandbox:
                     return bwrap
                 return ["/bin/sh", "-c", _ENTER_CGROUP, "sh", layout.cgroup_procs, *bwrap]
 
-            return await protected_run(build, (*layout_fds(layout), *empty_fds), timeout, max_output=max_output,
-                                       stdout_to=stdout_to)
+            return await protected_run(build, (*layout_fds(layout), *empty_fds), timeout, max_output=max_output)
         finally:
             for fd in empty_fds:
                 os.close(fd)

@@ -16,7 +16,7 @@ from testkit import calls, final
 from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused, workspace_for
 from himari.common import PrincipalId, TrustedScope
 from himari.data.api import MAX_WORKSPACE_NOTE_CHARS
-from himari.environment.machine import DRIVE_NOTE, MachineEnvironment
+from himari.environment.machine import DRIVE_NOTE, READ_ONLY_NOTE, MachineEnvironment
 from himari.prompt.api import state_block
 from himari.provider.scripted import ScriptedAdapter
 
@@ -57,7 +57,7 @@ def test_a_machine_conversation_works_in_its_own_folder(tmp_path: Path, kit: Run
             block = state_block(first.current_state) or ""
             assert f'"working_directory":"{folder}"' in block.replace(" ", "") and '"this conversation"' in block
             assert '"read": "everything the user can read' in block
-            assert '"git_push": "not set up on this server"' in block and "machine/git_push" in tools
+            assert "git_push" not in block and "machine/git_push" not in tools  # V3-P100
             assert '"connection":"online"' in block.replace(" ", "")
             events = await app.data.read_events(scope)
             results = await app.data.read_tool_executions(scope, events[3].origin_run_id)  # type: ignore[arg-type]
@@ -150,7 +150,7 @@ def test_folders_are_registered_attached_and_shown_to_the_model(tmp_path: Path, 
             assert refused.value.code == "not_usable"
             await app.send(scope, "write it")
             await app.runner.wait(scope)
-            assert (Path(project) / "made.c").read_text() == "x"
+            assert not (Path(project) / "made.c").exists()  # V3-P100: an attached folder is only read
             block = state_block(adapter.prepared_inputs[0].current_state) or ""
             assert f'"working_directory": "{project}"' in block and '"label": "a"' in block
             with pytest.raises(WorkspaceRefused) as refused:
@@ -185,12 +185,13 @@ def test_a_cloud_folder_gets_the_drive_note(tmp_path: Path, kit: RunnerKit, monk
             await app.attach_workspace(scope, workspace_id=registered.workspace_id)
             assert app.machine is not None
             shown = (await app.machine.places(scope)).shown
-            assert [(w.label, w.note, w.notice) for w in shown[1:]] == [("lectures", None, DRIVE_NOTE)]
+            assert [(w.label, w.note, w.notice) for w in shown[1:]] == [("lectures", None,
+                                                                         f"{READ_ONLY_NOTE} {DRIVE_NOTE}")]
             assert shown[0].notice is None
             await app.send(scope, "go")
             await app.runner.wait(scope)
             block = state_block(adapter.prepared_inputs[0].current_state) or ""
-            assert f'"notice": "{DRIVE_NOTE}"' in block
+            assert f'"notice": "{READ_ONLY_NOTE} {DRIVE_NOTE}"' in block
         finally:
             await app.close()
 

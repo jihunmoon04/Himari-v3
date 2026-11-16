@@ -87,7 +87,6 @@ def main(argv: list[str] | None = None) -> int:
                                              time_zone=config.time_zone,
                                              machine_socket=config.machine_socket,
                                              machine_principals=config.machine_principals,
-                                             machine_attached_write=config.machine_attached_write,
                                              proactive=config.proactive)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "

@@ -55,9 +55,9 @@ Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
 runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
 of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
 ``operator``) work on this server as the user. Unset: every Conversation
-uses the Inside Workspace, as before. ``HIMARI_MACHINE_ATTACHED_WRITE=0``
-(V3-P94) lets HIMARI's own Tools write a Conversation's own folder only:
-attached Workspaces are read, and changed by the hub's coding agents.
+uses the Inside Workspace, as before. HIMARI's own Tools write a
+Conversation's own folder only: attached Workspaces are read, and changed
+by the hub's coding agents (V3-P94, V3-P100).
 
 Hub (V3-P95): ``HIMARI_HUB_URL`` (``http://127.0.0.1:8791``) and
 ``HIMARI_HUB_USER_TOKEN_FILE`` (the hub's ``user.token``, readable by this
@@ -109,7 +109,6 @@ MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; uns
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 HUB_URL_VAR = "HIMARI_HUB_URL"  # V3-P95: the hub server; unset: its requests are not shown here
 HUB_USER_TOKEN_FILE_VAR = "HIMARI_HUB_USER_TOKEN_FILE"  # V3-P95: the hub's user.token
-MACHINE_ATTACHED_WRITE_VAR = "HIMARI_MACHINE_ATTACHED_WRITE"  # V3-P94: 0 — attached Workspaces are read-only
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
@@ -180,7 +179,6 @@ class WebConfig:
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
-    machine_attached_write: bool = True  # V3-P94
     hub_url: str | None = None  # V3-P95
     hub_user_token_file: str | None = None
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
@@ -290,8 +288,6 @@ class WebConfig:
             machine_principals=machine_principals,
             hub_url=hub_url,
             hub_user_token_file=hub_user_token_file,
-            machine_attached_write=_flag(source.get(MACHINE_ATTACHED_WRITE_VAR), MACHINE_ATTACHED_WRITE_VAR,
-                                         default=True),
             proactive=_proactive(source),
         )
 
