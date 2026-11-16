@@ -65,6 +65,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 - [한 턴의 예산과 비용](docs/control-run-budget-v0.1.md) — Run 수 상한 없이, 토큰 예산·진척 없음·자리 비움이 한 턴을 지킴; 남은 예산 알림, 사용량 표시, 대화별 캐시 경로(V3-P62)
 - [대화 삭제와 업그레이드 백업](docs/conversation-delete-v0.1.md) — 휴지통 → N일 뒤 영구 삭제, 대화 폴더도 함께, 외부 서버 데이터는 알림만; DB 업그레이드 전 백업과 되돌리기(V3-P65)
 - **[반려 에이전트 1단계](docs/companion-v0.1.md)** — Windows 앱(몸, 로컬 에이전트가 만듦)과 서버의 HIMARI(두뇌), 기기 짝짓기와 좁은 권한의 기기 토큰, 모든 대화의 지금 시각, 지금 기기, 답 안의 표정 표시(V3-P83, 설계 초안)
+- **[Web 다시 디자인: hub 작업 콘솔](docs/web-console-v0.1.md)** — hub의 MCP·user 경로를 한 Web에서, Claude Code·Codex·Antigravity 같은 작업 화면, React+TypeScript로 옮기는 단계(V3-P102, 설계 초안)
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
