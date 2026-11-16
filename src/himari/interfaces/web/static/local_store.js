@@ -1,6 +1,6 @@
 /* What the user wrote and has not sent or saved, kept in this browser
  * (V3-P78 §5): IndexedDB "himari-local", with "drafts" (the composer's, by
- * place) and "unsaved" (a file's, by path; V3-P77 2c's ink goes there too).
+ * place) and "unsaved" (a file's, by path).
  *
  * Every call settles, never throws: a browser without the store (a private
  * window, a full disk, Safari dropping the connection in the background)
@@ -173,31 +173,6 @@ export async function wipe() {
   } catch (ignored) { /* the other tabs find no session, and sign in again */ }
 }
 
-/* Whether the tab that is ``writer`` (its WRITER) is open now (V3-P82 §4: its kept ink is then asked about,
- * not put back on its own): asked over the channel, an answer waited for ``ms``. False without a channel. */
-export function alive(writer, ms = 300) {
-  if (!channel || writer === WRITER) return Promise.resolve(writer === WRITER);
-  const ask = channel;
-  return new Promise((resolve) => {
-    const answered = (event) => {
-      if (!event.data || event.data.here !== writer) return;
-      done(true);
-    };
-    const timer = setTimeout(() => done(false), ms);
-    function done(result) {
-      clearTimeout(timer);
-      ask.removeEventListener("message", answered);
-      resolve(result);
-    }
-    ask.addEventListener("message", answered);
-    try {
-      ask.postMessage({ alive: writer });
-    } catch (ignored) {
-      done(false);
-    }
-  });
-}
-
 /* ``listener()`` runs when another tab wiped the store; writes are closed here first. */
 export function onWiped(listener) {
   wipedListeners.push(listener);
@@ -207,7 +182,6 @@ try {
   channel = new BroadcastChannel(CHANNEL);
   if (typeof channel.unref === "function") channel.unref(); // Node (the smokes): it never holds the process open
   channel.onmessage = (event) => {
-    if (event.data && event.data.alive === WRITER) channel.postMessage({ here: WRITER }); // open: this tab
     if (!event.data || !event.data.wiped) return;
     writable = false;
     for (const listener of wipedListeners) listener();

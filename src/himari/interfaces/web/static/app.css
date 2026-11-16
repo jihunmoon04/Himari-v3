@@ -3979,59 +3979,11 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-body:has(.files-editor) { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .files-editor { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .files-editor .cm-editor { height: 100%; }
-/* The PDF view (V3-P77 §3): pages on paper whatever the theme; the box pans, and pinches are its own. */
-.files-body:has(.pdf-view) { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
-.pdf-view { flex: 1 1 auto; min-height: 0; overflow: auto; background: var(--surface); touch-action: pan-x pan-y; overscroll-behavior: contain; outline: none; }
-.pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 12px; width: max-content; min-width: 100%; box-sizing: border-box; }
-.pdf-page { position: relative; flex: 0 0 auto; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
-.pdf-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-/* Ink (V3-P77 §4): over the page, multiplied with it, so a highlighter leaves the text under it dark. */
-.pdf-ink { position: absolute; inset: 0; width: 100%; height: 100%; mix-blend-mode: multiply; pointer-events: none; }
-.pdf-view.is-inking .pdf-pages { cursor: crosshair; }
-/* The stroke being drawn: over the part of the page in view, multiplied as the ink is. */
-.pdf-live { position: absolute; mix-blend-mode: multiply; pointer-events: none; }
-/* The ink lab (V3-P77 §4.6), only when asked for: a small box in the corner. */
-.ink-lab { position: fixed; right: 12px; bottom: 12px; z-index: 30; max-width: min(320px, calc(100vw - 24px)); padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, .18); }
-.ink-lab-title { cursor: pointer; font-weight: 600; }
-.ink-lab-numbers { margin: 6px 0; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; color: var(--text-muted); }
-.ink-lab-settings { display: grid; gap: 4px; }
-.ink-lab-row { display: grid; grid-template-columns: 76px 1fr 34px; align-items: center; gap: 6px; }
-.ink-lab-slider { width: 100%; min-height: 28px; }
-.ink-lab-value { text-align: right; font-variant-numeric: tabular-nums; }
-.ink-lab-reset { justify-self: start; }
-.files-body:has(.pdf-view) > .files-bar { flex: 0 0 auto; }
-.files-ink-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
-.files-ink-bar { flex: 0 0 auto; min-width: 0; }
-.files-ink-bar:has(.files-ink-tools:not([hidden])) { padding: 6px var(--chrome-gutter); border-bottom: 1px solid var(--border-subtle); }
-.files-ink-bar .files-ink-button { flex: 0 0 auto; width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); }
-.files-ink-bar .files-ink-swatch { min-height: 18px; flex: 0 0 18px; }
-.files-ink-tools[hidden], .files-ink-tools [hidden] { display: none; }
-.files-ink-button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--text-muted); }
-.files-ink-button:hover { background: var(--surface-hover); color: var(--text); }
-.files-ink-button[aria-pressed="true"] { background: var(--surface-selected); color: var(--text); }
-.files-ink-button:disabled { opacity: .4; cursor: default; background: none; }
-.files-ink-options { display: inline-flex; align-items: center; gap: 4px; margin: 0 4px; }
-.files-ink-swatch { width: 18px; height: 18px; padding: 0; border: 2px solid var(--bg); border-radius: 50%; box-shadow: 0 0 0 1px var(--border-strong); }
-.files-ink-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--text); }
-.files-ink-swatch.is-black { background: #1a1a1f; }
-.files-ink-swatch.is-blue { background: #1a52d9; }
-.files-ink-swatch.is-red { background: #d62929; }
-.files-ink-width { min-height: 28px; padding: 2px 8px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: none; color: var(--text); }
-.files-ink-tools .files-state { margin-left: 6px; }
-.pdf-page-note { position: sticky; top: 0; margin: 0; padding: var(--space-3); color: #5f6368; font-size: 13px; } /* on paper, whatever the theme */
-/* Widths kept as the text changes ("9 / 12" → "10 / 12", "Saved" → "Saving…"), so a head near its wrap point
-   does not flip lines — and move the pages under the pen — while writing or scrolling. */
-.files-page { font-size: 12px; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 7ch; text-align: right; }
-.files-ink-tools .files-state { min-width: 7ch; }
-.files-page[hidden] { display: none; }
-.files-page-input { width: 5em; font-size: 12px; padding: 2px 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); }
 .files-state-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ok); }
 .files-state-dot.is-dirty { background: var(--warn-edge); }
 .files-state { color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 /* A note (often an error) reads whole: it wraps, a little larger, in the warning colour. */
 .files-state.is-note { white-space: normal; max-width: 420px; font-size: 13px; color: var(--warn); }
-.files-zoom-tools { display: inline-flex; align-items: center; gap: 2px; }
-.files-zoom { min-width: 32px; padding: 2px 6px; font-size: 14px; }
 #conversation-list > .conversation-group { list-style: none; padding: var(--space-3) var(--space-3) var(--space-1); font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
 .question-dismiss { display: inline; padding: 0; min-height: 0; font-size: inherit; text-decoration: underline; }
 @media (pointer: coarse) { .question-dismiss { display: inline-block; min-height: 40px; padding: 0 4px; } } /* a finger's size (N3) */
@@ -4238,15 +4190,8 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .topbar .model-control { flex: 2 1 0; }
   .topbar #chat-menu-effort-field { flex: 1 1 0; }
 }
-@media (max-width: 767px) {
-  .has-compact-pdf-tools > .files-ink-bar { display: flex; align-items: center; flex: 0 0 auto; gap: 8px; padding: 6px 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; border-bottom: 1px solid var(--border-subtle); }
-  .has-compact-pdf-tools .files-ink-tools { flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; }
-  .has-compact-pdf-tools .files-ink-bar > .files-zoom-tools,
-  .has-compact-pdf-tools .files-ink-bar > .files-page { flex: 0 0 auto; }
-}
-/* A short viewport must retain a usable PDF while the conversation stays live. */
+/* A short viewport keeps more of the timeline in sight. */
 @media (max-width: 1099px) and (max-height: 500px) {
-  .workspace-panes > .file-panel:has(.pdf-view) { min-height: 180px; }
   .workspace-panes .timeline { padding-top: 8px; padding-bottom: 8px; }
 }
 @supports (view-transition-name: himari-main) {

@@ -4,8 +4,7 @@ Kept in HIMARI's data folder (``himari-v3``'s own, hidden from commands),
 one folder per file path, each version a file beside an index. What is kept
 is the copy the runner took right before the rename or unlink, so a version
 is what the file held when it was replaced. Versions older than
-KEEP_DAYS go, and the oldest go first while all of them pass the store's
-budget (MAX_BYTES; PDFs have a store and budget of their own, V3-P77 §6.2).
+KEEP_DAYS go, and the oldest go first while all of them pass MAX_BYTES.
 
 Files only; no Data table, so no database version changes.
 """
@@ -26,7 +25,7 @@ from typing import Any
 KEEP_DAYS = 30
 MAX_BYTES = 200 * 1024 * 1024
 HEADROOM_BYTES = 16 * 1024 * 1024  # free space a save must leave besides its copy (§7.4 step 1)
-MAX_VERSION_BYTES = 1024 * 1024  # the runner copies no more, unless asked (V3-P77 §6.1)
+MAX_VERSION_BYTES = 1024 * 1024  # the runner copies no more
 
 
 @dataclass(frozen=True)
@@ -35,17 +34,13 @@ class Version:
     saved_at: datetime
     size: int
     reason: str  # the owner's "save" | "delete" | "revert"; "agent" | "agent_delete" (V3-P76 §4.2: before an agent's
-    # first change of a file since review, the change a write or a delete); "ink" | "restore" (V3-P77 §6.2: before
-    # ink was saved into a PDF, before a previous version was put back over it)
+    # first change of a file since review, the change a write or a delete)
 
 
 class VersionStore:
-    def __init__(self, root: Path, max_bytes: int = MAX_BYTES, max_version_bytes: int = MAX_VERSION_BYTES) -> None:
-        """One store per budget: the agent's versions have a root of their own (V3-P76 Q5), and so have
-        PDFs' (V3-P77 §6.2: 1 GiB, each version up to 64 MiB)."""
+    def __init__(self, root: Path) -> None:
+        """One store per budget: the agent's versions have a root of their own (V3-P76 Q5)."""
         self.root = root
-        self.max_bytes = max_bytes
-        self.max_version_bytes = max_version_bytes
         self._lock = threading.Lock()  # the index files; called from threads
 
     def _folder(self, path: str) -> Path:
@@ -69,14 +64,14 @@ class VersionStore:
             with self._lock:
                 self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
                 folder.mkdir(mode=0o700, exist_ok=True)
-            # Copied as it is read, never whole in memory (a PDF's is up to 64 MiB); named only once complete.
+            # Copied as it is read, never whole in memory; named only once complete.
             temp = folder / f"{version_id}.part"
             size = 0
             try:
                 with open(temp, "xb") as out:
                     while chunk := os.read(fd, 1 << 20):
                         size += len(chunk)
-                        if size > self.max_version_bytes:
+                        if size > MAX_VERSION_BYTES:
                             raise OSError("a copy larger than the runner makes")
                         out.write(chunk)
                 temp.replace(folder / f"{version_id}.bin")
@@ -129,25 +124,6 @@ class VersionStore:
         found.sort(key=lambda item: item[1].saved_at, reverse=True)
         return tuple(found[:limit])
 
-    def latest(self, path: str) -> Version | None:
-        """The newest version of ``path`` (V3-P77 §6.2: ink saves keep one per 30 minutes)."""
-        versions = self.of(path)
-        return versions[0] if versions else None
-
-    def open(self, path: str, version_id: str) -> int | None:
-        """A version opened to read (an fd the caller closes), never read whole: a PDF's goes to the runner
-        as it is (V3-P77 §6.3)."""
-        if not all(c.isalnum() or c in "-T" for c in version_id):
-            return None
-        with self._lock:
-            folder = self._folder(path)
-            if not any(v["id"] == version_id for v in self._index(folder)["versions"]):
-                return None
-            try:
-                return os.open(folder / f"{version_id}.bin", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-            except OSError:
-                return None
-
     def has(self, path: str, version_id: str) -> bool:
         with self._lock:
             return any(v["id"] == version_id for v in self._index(self._folder(path))["versions"])
@@ -185,7 +161,7 @@ class VersionStore:
             raise
 
     def _prune(self, now: datetime) -> None:
-        """Older than KEEP_DAYS go; then the oldest, while all pass the budget."""
+        """Older than KEEP_DAYS go; then the oldest, while all pass MAX_BYTES."""
         everything: list[tuple[datetime, Path, str, int]] = []
         for folder in (p for p in self.root.iterdir() if p.is_dir()):
             for entry in self._index(folder)["versions"]:
@@ -195,7 +171,7 @@ class VersionStore:
         total = sum(size for *_, size in everything)
         gone: dict[Path, set[str]] = {}
         for saved_at, folder, version_id, size in everything:
-            if saved_at >= now - timedelta(days=KEEP_DAYS) and total <= self.max_bytes:
+            if saved_at >= now - timedelta(days=KEEP_DAYS) and total <= MAX_BYTES:
                 break
             gone.setdefault(folder, set()).add(version_id)
             total -= size
