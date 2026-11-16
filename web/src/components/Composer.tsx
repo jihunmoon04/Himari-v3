@@ -52,9 +52,10 @@ export function Composer({
     const message = text.trim();
     if (!message || sending || disabled) return;
     setSending(true);
+    const sent = text;
     try {
       await onSend(message);
-      setText("");
+      setText((now) => (now === sent ? "" : now)); // what was typed while it was sending stays
     } catch {
       // the caller shows why; the draft stays
     } finally {

@@ -35,6 +35,7 @@ export interface Job {
   job_id: string | null;
   state: string | null;
   detail: string | null;
+  error: string | null;
 }
 
 export interface Display {
@@ -86,8 +87,8 @@ export const signIn = (token: string) => post<void>("/api/session", { token });
 export const signOut = () => del<void>("/api/session");
 export const readServer = () => get<ServerInfo>("/api/server");
 
-export const listConversations = (limit = 50) =>
-  get<{ items: ConversationSummary[]; next_offset: number | null }>(`/api/conversations?limit=${limit}&offset=0`);
+export const listConversations = (limit = 50, offset = 0) =>
+  get<{ items: ConversationSummary[]; next_offset: number | null }>(`/api/conversations?limit=${limit}&offset=${offset}`);
 export const conversationActivity = () => get<{ working: string[]; waiting: string[] }>("/api/conversations/activity");
 export const createConversation = () => post<ConversationSummary>("/api/conversations", {});
 export const readConversation = (id: string) => get<ConversationDetail>(`/api/conversations/${enc(id)}`);

@@ -18,14 +18,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ConversationList() {
-  const { data, isLoading, error } = useConversations();
+  const { data, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage } = useConversations();
   const activity = useActivity().data;
+  const items = data?.pages.flatMap((page) => page.items) ?? [];
   if (isLoading) return <p className="px-3 py-1 text-sm text-faint">Loading…</p>;
   if (error) return <p className="px-3 py-1 text-sm text-danger">Could not load the conversations.</p>;
-  if (!data?.items.length) return <p className="px-3 py-1 text-sm text-faint">No conversations yet.</p>;
+  if (!items.length) return <p className="px-3 py-1 text-sm text-faint">No conversations yet.</p>;
   return (
+    <>
     <ul className="space-y-0.5" aria-label="Conversations">
-      {data.items.map((item) => {
+      {items.map((item) => {
         const working = activity?.working.includes(item.id);
         const waiting = activity?.waiting.includes(item.id);
         return (
@@ -47,6 +49,17 @@ function ConversationList() {
         );
       })}
     </ul>
+    {hasNextPage && (
+      <button
+        type="button"
+        disabled={isFetchingNextPage}
+        onClick={() => void fetchNextPage()}
+        className="mt-1 w-full rounded-lg px-3 py-1.5 text-left text-sm text-faint hover:bg-raised hover:text-ink"
+      >
+        {isFetchingNextPage ? "Loading…" : "Show more"}
+      </button>
+    )}
+    </>
   );
 }
 

@@ -14,24 +14,28 @@ import { EMPTY_LIVE, reduceLive } from "@/features/himari/live";
 import { cn } from "@/lib/cn";
 import { openStream } from "@/lib/sse";
 
-function useLive(id: string, running: boolean) {
+/** The live output of the running job ``job`` (null: none runs). One stream per job: a job that starts right
+ *  after another ended gets its own, and a frame of another job is not shown. */
+function useLive(id: string, job: string | null) {
   const client = useQueryClient();
   const [live, dispatch] = useReducer(reduceLive, EMPTY_LIVE);
   useEffect(() => {
     dispatch({ event: "idle", data: {} });
-    if (!running) return;
+    if (job === null) return;
     let close = () => undefined as void;
     close = openStream(`/api/conversations/${encodeURIComponent(id)}/live`,
       ["snapshot", "delta", "end", "idle", "done"], (frame) => {
+        const of = frame.data.job_id;
+        if (typeof of === "string" && job !== "" && of !== job) return; // another job's
         dispatch(frame);
         if (frame.event === "end") void client.invalidateQueries({ queryKey: keys.events(id) });
         if (frame.event === "done") {
-          close(); // the job ended: nothing more comes, and the browser would reconnect otherwise
+          close(); // this job ended: nothing more comes, and the browser would reconnect otherwise
           void client.invalidateQueries({ queryKey: keys.detail(id) });
         }
       });
     return () => close();
-  }, [client, id, running]);
+  }, [client, id, job]);
   return live;
 }
 
@@ -56,7 +60,7 @@ export function Conversation() {
   const detail = useDetail(id);
   const events = useEvents(id);
   const running = detail.data?.job.running ?? false;
-  const live = useLive(id, running);
+  const live = useLive(id, running ? (detail.data?.job.job_id ?? "") : null);
   const items = useMemo(() => toItems(events.data?.items ?? []), [events.data]);
   const { box, onScroll } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
@@ -89,7 +93,11 @@ export function Conversation() {
   const job = detail.data?.job;
   const waiting = detail.data?.waiting ?? null;
   const QUIET = ["completed", "waiting_for_user", "idle", "compacted", "cancelled"];
-  const ended = !running && job?.state && !QUIET.includes(job.state) ? job : null;
+  // why the last job stopped, when it did not end well; Continue whenever the server says a turn can go on
+  // (also after a restart or a stop, when there is no such job to show)
+  const stopped = !running && job ? job.error ?? (job.state && !QUIET.includes(job.state)
+    ? `Stopped (${job.state})${job.detail ? `: ${job.detail}` : ""}` : null) : null;
+  const continuable = !running && Boolean(detail.data?.continuable);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -106,11 +114,11 @@ export function Conversation() {
         <div ref={box} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-3xl px-4 py-6">
             {events.isLoading ? <p className="text-sm text-faint">Loading…</p> : <Timeline items={items} live={live} running={running} />}
-            {ended && (
+            {(stopped || continuable) && (
               <div className="mt-6 flex items-center gap-2 rounded-xl border border-line px-4 py-3 text-sm text-muted">
                 <CircleAlert className="size-4 shrink-0 text-wait" />
-                <span className="flex-1">Stopped ({ended.state}){ended.detail ? `: ${ended.detail}` : ""}</span>
-                {detail.data?.continuable && (
+                <span className="flex-1">{stopped ?? "This turn did not finish."}</span>
+                {continuable && (
                   <Button onClick={() => void act(() => resumeTurn(id)).catch(() => undefined)}>Continue</Button>
                 )}
               </div>

@@ -12,6 +12,14 @@ export class ApiError extends Error {
   }
 }
 
+let unauthorized: (() => void) | null = null;
+
+/** Called when a call is refused for the sign-in (it expired, or ended in another tab): the page asks again
+ *  whether it is signed in and shows the sign-in. Signing in itself is not such a call. */
+export function onUnauthorized(handler: () => void) {
+  unauthorized = handler;
+}
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const init: RequestInit = { method, credentials: "same-origin", headers: { Accept: "application/json" } };
   if (body !== undefined) {
@@ -32,6 +40,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   } catch {
     parsed = null;
   }
+  if (response.status === 401 && !(method === "POST" && path === "/api/session")) unauthorized?.();
   if (!response.ok) {
     const error = (parsed as { error?: { code?: unknown; message?: unknown } } | null)?.error;
     throw new ApiError(

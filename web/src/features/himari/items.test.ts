@@ -41,6 +41,12 @@ describe("toItems", () => {
     ]);
   });
 
+  it("shows the text without its marks, as the server gives it", () => {
+    expect(toItems([event(1, "assistant_final", { text: "[[mood:happy]] Hi", display: { text: "Hi" } })])).toEqual([
+      { kind: "answer", key: "1", text: "Hi", model: null },
+    ]);
+  });
+
   it("keeps unknown kinds out and a wake as a notice", () => {
     expect(toItems([event(1, "something_new"), event(2, "wake", { text: "back at the desk" })])).toEqual([
       { kind: "notice", key: "2", text: "back at the desk" },

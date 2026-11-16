@@ -76,6 +76,37 @@ test("a task: tool steps, a question, its answer, and safe rich text", async ({ 
   await done();
 });
 
+test("an answer streams in, and a second job right after gets its own stream", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted model's steps are used once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Message", { exact: true }).fill("one");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("status")).toHaveText("Thinking…"); // before the first words
+  await expect(page.locator(".answer.opacity-80")).toContainText("Answer 1."); // the words as they come
+  await expect(page.locator(".answer.opacity-80")).toHaveCount(0, { timeout: 20_000 }); // recorded
+  await expect(page.locator(".answer").filter({ hasText: "Answer 1." })).toBeVisible();
+  await page.getByLabel("Message", { exact: true }).fill("two");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".answer.opacity-80")).toContainText("Answer 2.");
+  await expect(page.locator(".answer").filter({ hasText: "Answer 2." })).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator(".answer.opacity-80")).toHaveCount(0, { timeout: 20_000 });
+  await done();
+});
+
+test("signed out in another tab: the next send shows the sign-in, the draft stays", async ({ page, baseURL }) => {
+  const done = await watch(page);
+  await signIn(page);
+  expect((await page.request.delete("/api/session", { headers: { origin: baseURL! } })).status()).toBe(204);
+  await page.getByLabel("Message", { exact: true }).fill("lost?");
+  await page.keyboard.press("Enter");
+  await expect(page.getByLabel("Operator token")).toBeVisible();
+  await page.getByLabel("Operator token").fill(token());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("lost?");
+  await done();
+});
+
 test("menus and themes keep the CSP: Radix's scroll lock styles carry the nonce", async ({ page, isMobile }) => {
   const done = await watch(page);
   await signIn(page);

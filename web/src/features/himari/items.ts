@@ -18,6 +18,9 @@ export type Item =
   | { kind: "question"; key: string; text: string; callKey: string }
   | { kind: "notice"; key: string; text: string };
 
+/** What the model wrote as it is shown: without its marks (moods, moves), as the server gives it. */
+const shown = (event: EventView) => event.display?.text ?? event.text ?? "";
+
 const callKey = (run: string | null | undefined, call: string | null | undefined) => `${run ?? ""}/${call ?? ""}`;
 
 function questionText(call: { arguments: Record<string, unknown>; display?: { text: string } }): string {
@@ -46,14 +49,14 @@ export function toItems(events: readonly EventView[]): Item[] {
         break;
       case "assistant_final":
         closeWork();
-        items.push({ kind: "answer", key, text: event.text ?? "", model: event.model ?? null });
+        items.push({ kind: "answer", key, text: shown(event), model: event.model ?? null });
         break;
       case "assistant_tool_calls": {
         const calls = event.calls ?? [];
         const asked = calls.find((call) => call.tool_id === ASK_USER);
         if (asked) {
           closeWork();
-          if (event.text?.trim()) items.push({ kind: "answer", key: `${key}:lead`, text: event.text, model: event.model ?? null });
+          if (shown(event).trim()) items.push({ kind: "answer", key: `${key}:lead`, text: shown(event), model: event.model ?? null });
           items.push({ kind: "question", key, text: questionText(asked), callKey: callKey(event.run_id, asked.call_id) });
           break;
         }
@@ -62,7 +65,7 @@ export function toItems(events: readonly EventView[]): Item[] {
           items.push(work);
         }
         const block: Extract<Item, { kind: "work" }> = work;
-        if (event.text?.trim()) block.notes.push(event.text);
+        if (shown(event).trim()) block.notes.push(shown(event));
         for (const call of calls) {
           const step: ToolStep = {
             key: callKey(event.run_id, call.call_id),

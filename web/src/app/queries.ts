@@ -1,8 +1,8 @@
 // Server state through TanStack Query (V3-P102 §7.1). The principal's event stream (/api/events) tells when to
 // read again: a job started or ended, a conversation changed. Nothing here polls while that stream is open.
-import { QueryCache, QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
-import { ApiError } from "@/api/client";
+import { ApiError, onUnauthorized } from "@/api/client";
 import {
   conversationActivity,
   listConversations,
@@ -14,14 +14,6 @@ import {
 import { openStream } from "@/lib/sse";
 
 export const queryClient: QueryClient = new QueryClient({
-  // a read refused for the sign-in (it expired, or ended elsewhere): ask again whether we are signed in
-  queryCache: new QueryCache({
-    onError: (error, query) => {
-      if (error instanceof ApiError && error.status === 401 && query.queryKey[0] !== "session") {
-        void queryClient.invalidateQueries({ queryKey: ["session"] });
-      }
-    },
-  }),
   defaultOptions: {
     queries: {
       staleTime: 10_000,
@@ -30,6 +22,9 @@ export const queryClient: QueryClient = new QueryClient({
     },
   },
 });
+
+// any call refused for the sign-in (a read or a send): ask again whether we are signed in
+onUnauthorized(() => void queryClient.invalidateQueries({ queryKey: ["session"] }));
 
 export const keys = {
   session: ["session"] as const,
@@ -43,7 +38,13 @@ export const keys = {
 export const useSession = () => useQuery({ queryKey: keys.session, queryFn: readSession, staleTime: 60_000 });
 export const useServer = (enabled: boolean) =>
   useQuery({ queryKey: keys.server, queryFn: readServer, enabled, staleTime: 300_000 });
-export const useConversations = () => useQuery({ queryKey: keys.conversations, queryFn: () => listConversations(100) });
+export const useConversations = () =>
+  useInfiniteQuery({
+    queryKey: keys.conversations,
+    queryFn: ({ pageParam }) => listConversations(50, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (last) => last.next_offset ?? undefined,
+  });
 export const useActivity = () => useQuery({ queryKey: keys.activity, queryFn: conversationActivity });
 
 export const useDetail = (id: string) =>
@@ -69,7 +70,11 @@ export function usePrincipalEvents(enabled: boolean) {
       }
     };
     return openStream("/api/events", ["hello", "activity", "job", "conversation"], ({ event, data }) => {
-      if (event === "hello") refresh(null);
+      if (event === "hello") {
+        // (re)connected: nothing is replayed, so whatever is open is read again
+        refresh(null);
+        void client.invalidateQueries({ queryKey: ["conversation"] });
+      }
       else refresh(data.conversation);
     });
   }, [client, enabled]);
