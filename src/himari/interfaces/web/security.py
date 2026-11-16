@@ -13,6 +13,8 @@ automatically.
 from __future__ import annotations
 
 import json
+import re
+import secrets
 from collections.abc import Callable
 from typing import Any
 
@@ -40,6 +42,20 @@ def page_csp() -> str:
     return _CSP
 
 
+STYLE_NONCE_STATE = "csp_style_nonce"  # request.state: the nonce the new page's HTML was given
+NONCE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+
+
+def new_style_nonce() -> str:
+    return secrets.token_urlsafe(18)
+
+
+def style_nonce_csp(csp: str, nonce: str) -> str:
+    """V3-P102 §7.2: the same policy, and ``<style>`` elements carrying ``nonce`` (Radix's scroll lock inserts
+    one at run time). Scripts stay ``'self'`` only."""
+    return f"{csp}; style-src 'self' 'nonce-{nonce}'"
+
+
 def error_body(code: str, message: str) -> bytes:
     return json.dumps({"error": {"code": code, "message": message}}).encode("utf-8")
 
@@ -55,6 +71,7 @@ class SecurityHeadersMiddleware:
 
     def __init__(self, app: ASGIApp, csp: str = _CSP) -> None:
         self._app = app
+        self._csp = csp
         self._headers = ((b"content-security-policy", csp.encode("latin-1")), *SECURITY_HEADERS[1:])
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -65,7 +82,14 @@ class SecurityHeadersMiddleware:
 
         async def with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
-                headers = [*message.get("headers", []), *self._headers]
+                fixed = self._headers
+                # V3-P102 §7.2: the new page's HTML carries a per-request style nonce. The one CSP header is
+                # built here with it (two policies would both apply, and the nonce would not help).
+                nonce = scope.get("state", {}).get(STYLE_NONCE_STATE)
+                if isinstance(nonce, str) and NONCE.fullmatch(nonce):
+                    fixed = ((b"content-security-policy", style_nonce_csp(self._csp, nonce).encode("latin-1")),
+                             *SECURITY_HEADERS[1:])
+                headers = [*message.get("headers", []), *fixed]
                 if is_api:
                     headers.append((b"cache-control", b"no-store"))
                 message = {**message, "headers": headers}

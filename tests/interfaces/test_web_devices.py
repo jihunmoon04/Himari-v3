@@ -64,7 +64,8 @@ ALLOWED = {
 # Routes without any sign-in: the session itself, pairing, and the page's files.
 PUBLIC = {("GET", "/api/session"), ("POST", "/api/session"), ("DELETE", "/api/session"),
           ("POST", "/api/devices/pair"), ("GET", "/assets/{name:path}"), ("GET", "/"),
-          ("GET", "/c/{conversation_id}"), *(("GET", p) for p in web.SURFACE_PATHS)}
+          ("GET", "/c/{conversation_id}"), *(("GET", p) for p in web.SURFACE_PATHS),
+          ("GET", "/next"), ("GET", "/next/assets/{name:path}"), ("GET", "/next/{rest:path}")}  # V3-P102 W1
 
 
 def new_token() -> str:

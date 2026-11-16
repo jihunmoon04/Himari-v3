@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -277,10 +277,12 @@ H1은 W3 전에 필요하다. 사용자가 직접 보낸 글도 hub 원장에
   wheel에 `dist/index.html`과 `dist/assets/`가 있는지 검사 → 설치해 서빙 확인. `package-data`에 `dist/**`를
   넣는 것만으로는 빌드가 돌지 않으므로, `dist`가 없으면 **릴리스가 실패**한다. 개발 중 `dist`가 없으면 서버는
   시작 로그에 알리고 `/next/`를 404로 둔다(옛 화면은 그대로).
-- **KaTeX:** 지금 `/assets/katex/…`에서 서빙하는 KaTeX와 글꼴을 `web/public/katex/`로 옮겨 빌드 결과에
-  함께 넣고(`<base>katex/…`), 옮긴 렌더러는 base 경로로 불러온다. 옛 `static/katex`는 W6에서 옛 화면과 함께 지운다.
+- **KaTeX:** W6에서 `/assets/katex/…`의 KaTeX와 글꼴을 `web/public/katex/`로 옮겨 빌드 결과에 함께 넣고
+  (`<base>katex/…`), 렌더러는 base 경로로 불러온다. 옛 `static/katex`는 그때 옛 화면과 함께 지운다. **W1~W5에서는**
+  렌더러(`rich_text.js`)를 옛 정적 파일 그대로 가져다 쓰고(한 벌, 기존 스모크 검사가 그대로 덮음) KaTeX도 옛
+  `/assets/katex/`에서 불러온다(같은 출처라 CSP `'self'`에 든다). 그래서 `/next/katex` 경로는 W6에서 생긴다.
 - **경로(전환 기간):** Vite `base: "/next/"`, Router `basename: "/next"`. 서버는 `/next/assets/{이름}`을
-  `dist/assets`의 **목록에 있는 이름만**(빌드 manifest로 만든 허용 목록), `/next/katex/{이름}`을 `dist/katex`의
+  `dist/assets`의 **목록에 있는 이름만**(서버가 시작할 때 읽은 빌드 폴더의 파일, 알려진 종류만), `/next/katex/{이름}`을 `dist/katex`의
   **목록에 있는 이름만**(빌드 때 만든 목록: JS·CSS·글꼴) 주고, 그 밖의 `/next/` 아래 GET은 `index.html`을 준다
   (SPA fallback). `/api`·`/next/assets`·`/next/katex`는 fallback에서 빠지므로, 목록에 없는 이름은 HTML이 아니라
   404다. 설치한 wheel로 띄워 수식과 글꼴이 실제로 불러와지는지도 W1에서 검사한다. 새 화면 안의 링크는 모두 basename 아래라
@@ -325,6 +327,21 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
 - Playwright: 가짜 hub(`tests/`의 가짜와 같은 방식)와 실제로 띄운 v3로 화면 흐름 몇 개. 데스크톱·모바일 크기.
 - CI(`static-checks`)에 `npm ci`·타입 검사·Vitest·빌드를 더한다. Playwright는 Web을 바꾸는 PR에서만.
 - 옛 스모크(`ui_state_smoke.mjs` 등)는 옛 화면을 지울 때 함께 지운다.
+
+### 7.6 W1에서 만든 것 (2026-11-16)
+
+- **서버:** `interfaces/web/next_page.py`가 시작할 때 `dist/`를 읽는다(없으면 `/next/`는 404, 옛 화면은 그대로).
+  `/next/assets/{이름}`은 그때 있던 파일 중 알려진 종류(js·css·woff2·woff·png·ico)만, 긴 캐시로 준다. 그 밖의
+  `/next/…` GET은 `index.html`(SPA fallback, `no-store`)이고, 요청마다 새 스타일 nonce를 `<meta name="csp-nonce">`와
+  `request.state`에 넣는다. `SecurityHeadersMiddleware`가 그 nonce로 CSP 머리를 **하나** 쓴다(`security.style_nonce_csp`).
+- **화면:** `web/`(React 19, TypeScript 7, Vite 8, Tailwind 4, Radix, TanStack Query, React Router 8). 로그인, 사이드바
+  (새 작업, HIMARI 대화와 작업 중·기다림 표시, 프로젝트 자리, 설정 메뉴: Classic·Warm과 밝음·어둠·시스템, 옛 화면으로,
+  로그아웃), 홈 입력창, 대화(작업 블록·질문·답·스트리밍·중지·Continue·자세히 패널), 좁은 화면 서랍.
+  `/api/events`가 바뀐 것을 알려 다시 읽는다. 공통 항목 모델(§7.4)은 `features/himari/items.ts`.
+- **검사:** Vitest(항목 변환, 스트리밍 상태), pytest `tests/interfaces/test_web_next.py`(서빙, CSP), Playwright
+  `web/e2e`(실제 서버 `scripts/web_next_server.py`와 대본 모델: 로그인, 작업·질문·답, 안전한 서식, 메뉴를 연 채
+  Radix `<style>`의 nonce, CSP 위반 0, 좁은 화면), `scripts/check_web_build.py`(wheel이 화면을 담는지), CI `web.yml`.
+- **아직:** 모델·강도 고르기, 첨부, 이름 바꾸기·휴지통 등 옛 화면의 나머지(W6), hub 세션(W2~).
 
 ## 8. hub에 필요한 것
 

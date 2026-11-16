@@ -7,3 +7,10 @@ __pycache__/
 .env.*
 uv.lock
 /build/
+
+# the new Web page (V3-P102): its build and dependencies are never committed
+/src/himari/interfaces/web/dist/
+/web/node_modules/
+/web/test-results/
+/web/playwright-report/
+/web/.e2e-token

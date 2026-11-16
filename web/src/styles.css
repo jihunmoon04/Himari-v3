@@ -1,0 +1,194 @@
+@import "tailwindcss";
+
+/* V3-P102 §7.1: the two looks of the old page (Classic, Warm), each light and dark, as tokens. The page sets
+   data-look (classic | warm) and data-mode (light | dark) on <html>; nothing else picks colours. */
+
+@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-sidebar: var(--sidebar);
+  --color-raised: var(--raised);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-mine: var(--mine);
+  --color-code: var(--code);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+  --color-wait: var(--wait);
+  --font-sans: var(--font-ui);
+  --font-answer: var(--font-reading);
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Code", "D2Coding", Consolas, monospace;
+}
+
+:root {
+  --font-ui: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Malgun Gothic", "Segoe UI", system-ui, sans-serif;
+  --font-reading: var(--font-ui);
+  color-scheme: light;
+}
+
+:root,
+[data-look="classic"][data-mode="light"] {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --sidebar: #f7f7f8;
+  --raised: #f2f2f3;
+  --ink: #1f1f22;
+  --muted: #5f6068;
+  --faint: #9a9ba3;
+  --line: #e6e6ea;
+  --accent: #2b2b30;
+  --accent-ink: #ffffff;
+  --mine: #f1f1f3;
+  --code: #f5f5f7;
+  --danger: #c43d3d;
+  --ok: #2f8f5b;
+  --wait: #c27a16;
+}
+
+[data-look="classic"][data-mode="dark"] {
+  --bg: #1b1b1e;
+  --panel: #1b1b1e;
+  --sidebar: #141416;
+  --raised: #26262a;
+  --ink: #ececef;
+  --muted: #a3a4ad;
+  --faint: #6c6d75;
+  --line: #2e2e33;
+  --accent: #ececef;
+  --accent-ink: #1b1b1e;
+  --mine: #2a2a2f;
+  --code: #232327;
+  --danger: #ef7070;
+  --ok: #5cc28a;
+  --wait: #e3a84d;
+  color-scheme: dark;
+}
+
+[data-look="warm"] {
+  --font-reading: "Noto Serif KR", "Nanum Myeongjo", "AppleMyungjo", "Batang", Georgia, serif;
+}
+
+[data-look="warm"][data-mode="light"] {
+  --bg: #faf7f2;
+  --panel: #fdfbf7;
+  --sidebar: #f3eee6;
+  --raised: #efe8dd;
+  --ink: #2b2620;
+  --muted: #6f655a;
+  --faint: #a59a8c;
+  --line: #e7dfd3;
+  --accent: #b5583a;
+  --accent-ink: #ffffff;
+  --mine: #f0e8dc;
+  --code: #f2ece3;
+  --danger: #b8432f;
+  --ok: #4c8a52;
+  --wait: #b9771f;
+}
+
+[data-look="warm"][data-mode="dark"] {
+  --bg: #1f1b17;
+  --panel: #221e19;
+  --sidebar: #191612;
+  --raised: #2c2620;
+  --ink: #efe6da;
+  --muted: #b3a797;
+  --faint: #7c7266;
+  --line: #352e27;
+  --accent: #e08463;
+  --accent-ink: #1f1b17;
+  --mine: #2f2822;
+  --code: #29231d;
+  --danger: #ec7a63;
+  --ok: #7cbc80;
+  --wait: #e3a84d;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The old renderer's output (rich_text.js): plain elements, styled here. */
+.answer {
+  font-family: var(--font-reading);
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.answer > * + * {
+  margin-top: 0.75em;
+}
+.answer h1,
+.answer h2,
+.answer h3,
+.answer h4 {
+  font-family: var(--font-ui);
+  font-weight: 650;
+  line-height: 1.35;
+  margin-top: 1.2em;
+}
+.answer h1 { font-size: 1.35em; }
+.answer h2 { font-size: 1.2em; }
+.answer h3 { font-size: 1.08em; }
+.answer ul { list-style: disc; padding-left: 1.4em; }
+.answer ol { list-style: decimal; padding-left: 1.4em; }
+.answer li + li { margin-top: 0.25em; }
+.answer blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 0.9em;
+  color: var(--muted);
+}
+.answer a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+[data-look="classic"] .answer a { color: #2f6fd6; }
+[data-look="classic"][data-mode="dark"] .answer a { color: #7aa7f0; }
+.answer code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--code);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.answer pre {
+  background: var(--code);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  font-size: 0.88em;
+  line-height: 1.55;
+}
+.answer pre code { background: none; padding: 0; font-size: inherit; }
+.answer table { border-collapse: collapse; display: block; overflow-x: auto; }
+.answer th,
+.answer td { border: 1px solid var(--line); padding: 0.35em 0.7em; text-align: left; }
+.answer hr { border: 0; border-top: 1px solid var(--line); }
+.answer .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2em 0; }
+
+@keyframes himari-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.pulse { animation: himari-pulse 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .pulse { animation: none; }
+}
