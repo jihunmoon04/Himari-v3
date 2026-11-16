@@ -13,7 +13,7 @@ import pytest
 from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
-from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused, workspace_for
+from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused
 from himari.common import PrincipalId, TrustedScope
 from himari.data.api import MAX_WORKSPACE_NOTE_CHARS
 from himari.environment.machine import DRIVE_NOTE, READ_ONLY_NOTE, MachineEnvironment
@@ -68,17 +68,21 @@ def test_a_machine_conversation_works_in_its_own_folder(tmp_path: Path, kit: Run
     asyncio.run(scenario())
 
 
-def test_other_principals_keep_inside(tmp_path: Path, kit: RunnerKit) -> None:
+def test_other_principals_only_talk(tmp_path: Path, kit: RunnerKit) -> None:
+    """V3-P101: a principal the machine Environment is not for gets no Environment: no file Tools, no uploads."""
     async def scenario() -> None:
-        adapter = ScriptedAdapter([calls(("inside/write_file", {"path": "a.txt", "content": "x"})), final("ok")])
+        adapter = ScriptedAdapter([final("ok")])
         app = await open_app(tmp_path / "data", kit.socket, adapter)
         try:
             scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
             await app.send(scope, "go")
             await app.runner.wait(scope)
-            inside = Path(app.inside.host_root(workspace_for(ALICE))) / "conversations" / scope.conversation_id
-            assert (inside / "a.txt").read_text() == "x"
+            tools = {str(t.tool_id) for t in adapter.prepared_inputs[0].tool_catalog}
+            assert not any(t.startswith(("inside/", "machine/")) for t in tools)
+            with pytest.raises(FilesUnavailable):
+                await app.upload(scope, "a.txt", None, chunks(b"a"))
             assert not (kit.himari_home / "conversations" / scope.conversation_id).exists()
+            assert not (tmp_path / "data" / "workspaces").exists()
         finally:
             await app.close()
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from himari.documents.api import Part, Piece
-from himari.environment.inside.documents import (
+from himari.environment.machine.documents import (
     SelectionError,
     _part_block,
     backstop,

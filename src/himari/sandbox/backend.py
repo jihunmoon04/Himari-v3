@@ -1,14 +1,10 @@
 """bubblewrap + Landlock protected spawn (adapted from HIMARI-v2
 ``sandbox/linux_backend.py``; no v2 import, no Task/Work authority).
 
-States::
-
-    discover: no capability -> UNAVAILABLE ; capability -> CAPABLE_INACTIVE
-    start():  real-spawn self-test passes -> ENFORCED ; fails -> SETUP_FAILED
-    run():    a setup failure latches SETUP_FAILED
-
-Nothing promotes back to ENFORCED within a process, and there is no
-unsandboxed fallback in any state.
+The shared mechanics of the profiles (machine, server): the host
+capability, the bwrap arguments, and ``protected_run``, which spawns,
+waits for the helper's report and never lets the command outlive it.
+There is no unsandboxed fallback in any state.
 """
 
 from __future__ import annotations
@@ -21,7 +17,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from dataclasses import dataclass
 
@@ -35,7 +31,6 @@ from himari.sandbox.api import (
     MAX_OUTPUT_BYTES as MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECONDS as MAX_TIMEOUT_SECONDS,
     TOOLKIT_MOUNT as TOOLKIT_MOUNT,
-    WORKSPACE_MOUNT as WORKSPACE_MOUNT,
     CommandResult as CommandResult,
     SandboxSetupError as SandboxSetupError,
     SandboxState as SandboxState,
@@ -139,25 +134,10 @@ def sandbox_arguments(capability: HostCapability, *, env: Mapping[str, str], bin
 
 
 def toolkit_env() -> dict[str, str]:
-    """What the Workspace profile adds when the documents toolkit is bound
+    """What a profile adds when the documents toolkit is bound
     (V3-P70 §6.3) — never part of SANDBOX_ENV, which server profiles may
     not override (review N1)."""
     return {"PYTHONPATH": f"{TOOLKIT_MOUNT}/site-packages", "HIMARI_FONTS": f"{TOOLKIT_MOUNT}/fonts"}
-
-
-def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd: int, argv: list[str],
-                    toolkit_fd: int | None = None) -> list[str]:
-    """The Workspace profile: the verified Workspace root fd at /workspace,
-    writable with /tmp, a cwd under /workspace, the fixed environment; with
-    the documents toolkit, its folder read-only at TOOLKIT_MOUNT and the two
-    variables that point there."""
-    binds = [("--bind-fd", root_fd, WORKSPACE_MOUNT)]
-    env = dict(SANDBOX_ENV)
-    if toolkit_fd is not None:
-        binds.append(("--ro-bind-fd", toolkit_fd, TOOLKIT_MOUNT))
-        env.update(toolkit_env())
-    return sandbox_arguments(capability, env=env, binds=binds, write_roots=[WORKSPACE_MOUNT, "/tmp"], cwd=cwd,
-                             sync_fd=sync_fd, argv=argv)
 
 
 def supports_tmp_size(capability: HostCapability) -> bool:
@@ -273,72 +253,6 @@ def _kill_tree(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
-
-
-SelfTest = Callable[["SandboxBackend", tuple[str, ...]], Awaitable[bool]]
-
-
-class SandboxBackend:
-    def __init__(self, capability: HostCapability | None, *, toolkit_fd: int | None = None) -> None:
-        self._capability = capability
-        # V3-P70 §6.3: the documents toolkit's checked folder, bound read-only
-        # in every command and the self-test alike; its owner closes it.
-        self.toolkit_fd = toolkit_fd
-        self._state = SandboxState.UNAVAILABLE if capability is None else SandboxState.CAPABLE_INACTIVE
-        self._started = False
-
-    @classmethod
-    def discover(cls, *, toolkit_fd: int | None = None) -> SandboxBackend:
-        return cls(discover_capability(), toolkit_fd=toolkit_fd)
-
-    @property
-    def state(self) -> SandboxState:
-        return self._state
-
-    async def start(self, self_test: SelfTest | None = None, *, protected_paths: Sequence[str] = ()) -> SandboxState:
-        """Once per process (V3-050): ENFORCED only if the real-spawn
-        self-test passes. ``protected_paths`` are real host roots (Workspace
-        root, data root, ...) the self-test proves invisible inside."""
-        if self._started:
-            raise RuntimeError("the sandbox backend starts once per process")
-        self._started = True
-        if self._state is not SandboxState.CAPABLE_INACTIVE:
-            return self._state
-        if self_test is None:
-            from himari.sandbox.self_test import run_self_test
-
-            self_test = run_self_test
-        try:
-            passed = await self_test(self, tuple(protected_paths))
-        except Exception:
-            passed = False
-        self._state = SandboxState.ENFORCED if passed else SandboxState.SETUP_FAILED
-        return self._state
-
-    async def run(self, argv: list[str], *, root_fd: int, cwd: str, timeout: float) -> CommandResult:
-        """The runtime entry: refuses unless ENFORCED; never unsandboxed."""
-        if self._state is not SandboxState.ENFORCED:
-            raise SandboxUnavailableError(self._state.value)
-        try:
-            return await self.launch(argv, root_fd=root_fd, cwd=cwd, timeout=timeout)
-        except SandboxSetupError:
-            self._state = SandboxState.SETUP_FAILED  # latched
-            raise
-
-    async def launch(self, argv: list[str], *, root_fd: int, cwd: str, timeout: float) -> CommandResult:
-        """The one protected spawn (used by ``run`` and by the self-test).
-        Returns only after the helper reported enforcement; otherwise the
-        tree is killed and SandboxSetupError raised (argv never ran)."""
-        capability = self._capability
-        if capability is None:
-            raise SandboxUnavailableError(SandboxState.UNAVAILABLE.value)
-        if not cwd.startswith(WORKSPACE_MOUNT):
-            raise ValueError("cwd must be under /workspace")
-        argv = validate_argv(argv)
-        toolkit_fd = self.toolkit_fd
-        return await protected_run(
-            lambda sync_w: bwrap_arguments(capability, root_fd, cwd, sync_w, argv, toolkit_fd),
-            (root_fd, *(() if toolkit_fd is None else (toolkit_fd,))), timeout)
 
 
 async def protected_run(build: Callable[[int], list[str]], pass_fds: Sequence[int], timeout: float, *,

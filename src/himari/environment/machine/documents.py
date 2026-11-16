@@ -1,4 +1,4 @@
-"""``inside/read_document`` (V3-P70 §4): a document as text in numbered
+"""``machine/read_document`` (V3-P70 §4): a document as text in numbered
 units, read on with ``next``; PDF pages or a document's pictures as images.
 
 The selection grammar, the fingerprint and every line the model reads that
@@ -13,10 +13,7 @@ import bisect
 import hashlib
 import posixpath
 import re
-from typing import TYPE_CHECKING
-
 from himari.common import EnvironmentKind, JsonValue, ToolId
-from himari.data.api import DEFAULT_FILE_MAX_BYTES, MAX_DOCUMENT_BYTES
 from himari.documents.api import (
     VIEW_LIMIT,
     DocumentReading,
@@ -26,9 +23,8 @@ from himari.documents.api import (
     Piece,
     Reading,
 )
-from himari.environment.inside import fs
-from himari.environment.inside.blocking import run_blocking
-from himari.environment.inside.tools import MAX_OBSERVATION_BYTES, _failure, _schema, _size, _text
+from himari.environment.machine.blocking import run_blocking
+from himari.environment.machine.results import MAX_OBSERVATION_BYTES, _schema, _size, _text
 from himari.tool.api import (
     EffectProfile,
     ResultImage,
@@ -39,9 +35,6 @@ from himari.tool.api import (
     ToolStatus,
     WorkspaceRequirement,
 )
-
-if TYPE_CHECKING:
-    from himari.environment.inside import InsideEnvironment
 
 TAIL_RESERVE = 4096  # the lines after the units: shown, notes, images, view
 PLAIN_PIECES, PLAIN_CHARS = 20, 100  # a selection the model wrote (§4)
@@ -59,7 +52,7 @@ _LIBRARIES = {".pdf": "pypdf", **dict.fromkeys((".docx", ".docm", ".dotx", ".dot
 GRAMMAR = ('use unit numbers like "1-5,8" or "12-", or pass the next value of an earlier result as given')
 
 DESCRIPTION = (
-    "Read a PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx) or HWPX file from the workspace as text, split "
+    "Read a PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx) or HWPX file as text, split "
     "into numbered units: pages (PDF), slides (PowerPoint), sheets (Excel) or parts (Word, HWPX). Large documents are shown in parts: the result ends with what to read next, which may hold a "
     "position inside a unit (\"9:61234\") and the document's fingerprint (\"@3f9a1c0b7e2d\"); pass it back as "
     "pages exactly as given. Each PDF page says whether it has pictures or drawings, or no text; these marks are "
@@ -238,8 +231,8 @@ def _part_block(part: Part, unit_name: str) -> str:
     return f"=== {unit_name} {part.n}{marks} ===\n" + backstop(body)
 
 
-def document_definition(namespace: str, *, binding: bool, description: str = DESCRIPTION) -> ToolDefinition:
-    """``<namespace>/read_document`` (Inside, or the machine Environment, V3-P74 §8.4)."""
+def document_definition(namespace: str, *, description: str = DESCRIPTION) -> ToolDefinition:
+    """``<namespace>/read_document`` (the machine Environment, V3-P74 §8.4)."""
     return ToolDefinition(
             tool_id=ToolId(f"{namespace}/read_document"),
             description=description,
@@ -252,7 +245,7 @@ def document_definition(namespace: str, *, binding: bool, description: str = DES
                 "pictures": {"type": "string", "description": "Not for PDFs: picture numbers to return as images, "
                                                               "like \"5-8\" (at most 4 per call); when given, pages "
                                                               "and view are ignored."},
-            }, ["path"], binding=binding),
+            }, ["path"]),
             workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=EffectProfile.READ,
             environment_kind=EnvironmentKind(namespace),
@@ -260,22 +253,18 @@ def document_definition(namespace: str, *, binding: bool, description: str = DES
 
 
 class ReadDocument:
-    """``inside/read_document``; offered only when the reader passed its startup check."""
+    """``read_document``, offered only when the reader passed its startup check. An
+    Environment gives ``definition``, the reader, and where the bytes come from."""
 
-    def __init__(self, env: InsideEnvironment, reader: DocumentReading) -> None:
-        self._env = env
-        self._reader = reader
-        self.definition = document_definition("inside", binding=True)
+    definition: ToolDefinition
+    _reader: DocumentReading
 
     def _limit(self) -> int:
-        return min(MAX_DOCUMENT_BYTES, self._env.files.max_bytes if self._env.files is not None
-                   else DEFAULT_FILE_MAX_BYTES)
+        raise NotImplementedError
 
     async def _fetch(self, ctx: ToolContext, raw_path: object, limit: int) -> ToolOutcome | tuple[str, bytes]:
         """The document's shown path and bytes, or the refusal."""
-        assert ctx.binding is not None and ctx.workspace is not None
-        return await run_blocking(_load, self._env.host_root(ctx.binding.workspace_id), ctx.workspace.cwd_relative,
-                                  raw_path, limit)
+        raise NotImplementedError
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
         if ctx.binding is None or ctx.workspace is None:
@@ -441,19 +430,3 @@ def _budget(shown: str) -> int:
 
 def _refused(message: str) -> ToolOutcome:
     return ToolOutcome(ToolStatus.FAILED, _text(message, error=True))
-
-
-def _load(host_root: str, cwd: str, raw_path: object, limit: int) -> ToolOutcome | tuple[str, bytes]:
-    shown = raw_path if isinstance(raw_path, str) else "?"
-    try:
-        relative = fs.to_relative(cwd, shown)
-        shown = fs.display(relative)
-        with fs.open_root(host_root) as root_fd:
-            fs.ensure_directory(root_fd, fs.to_relative(cwd, "."))
-            data, size = fs.read_whole(root_fd, relative, limit)
-    except fs.FsError as error:
-        return _failure(shown, error)
-    if data is None:
-        return _refused(f"{shown}: too large for read_document ({_size(size)}, limit {_size(limit)}); "
-                        "use run_command")
-    return shown, data

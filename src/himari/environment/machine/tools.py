@@ -1,7 +1,7 @@
 """The machine Environment's Tools (V3-P74 §8, §9): ``machine/<name>``.
 
-The same Tools as Inside, on the user's real paths, through the runner.
-Results are formatted by the shared Inside helpers. A refusal about the
+The file Tools, a command and documents on the user's real paths, through
+the runner; results are formatted by :mod:`.results`. A refusal about the
 boundary (outside the Workspaces, permission, hidden) is DENIED; other
 problems are FAILED. A request the runner never received is DENIED (nothing
 happened); one whose answer was lost raises, and the Dispatcher records the
@@ -19,13 +19,13 @@ from typing import TYPE_CHECKING, Any
 from himari.common import CallId, EnvironmentKind, JsonValue, TextBlock, ToolId
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, MAX_DOCUMENT_BYTES, DataError
 from himari.documents.api import DocumentReading
-from himari.environment.inside import fs
-from himari.environment.inside.blocking import run_blocking
-from himari.environment.inside.documents import DESCRIPTION, ReadDocument, document_definition
-from himari.environment.inside.tools import (
+from himari.environment.machine.blocking import run_blocking
+from himari.environment.machine.documents import ReadDocument, document_definition
+from himari.environment.machine.results import (
     MAX_LIST_ENTRIES,
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
+    Entry,
     _command_outcome,
     _schema,
     _size,
@@ -98,7 +98,7 @@ class _MachineTool:
         self.definition = ToolDefinition(
             tool_id=ToolId(f"machine/{self.name}"),
             description=self.description,
-            input_schema=_schema(self.properties, self.required, binding=False),
+            input_schema=_schema(self.properties, self.required),
             workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=self.effect,
             environment_kind=EnvironmentKind("machine"),
@@ -153,7 +153,7 @@ class ListFiles(_MachineTool):
                   call: CallId) -> ToolOutcome:
         result, _ = await self._env.call(runner.LIST, {"path": args.get("path", "."), "cwd": cwd,
                                                        "limit": MAX_LIST_ENTRIES})
-        entries = [fs.Entry(str(e["name"]), str(e["kind"]), e.get("size")) for e in result["entries"]]
+        entries = [Entry(str(e["name"]), str(e["kind"]), e.get("size")) for e in result["entries"]]
         return listing_outcome(str(result["path"]), entries, bool(result["truncated"]))
 
 
@@ -379,8 +379,7 @@ class MachineReadDocument(ReadDocument):
     def __init__(self, env: MachineEnvironment, reader: DocumentReading) -> None:
         self._machine = env
         self._reader = reader
-        self.definition = document_definition("machine", binding=False,
-                                              description=DESCRIPTION.replace(" from the workspace", ""))
+        self.definition = document_definition("machine")
 
     def _limit(self) -> int:
         files = self._machine.files

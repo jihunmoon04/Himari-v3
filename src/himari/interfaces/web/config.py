@@ -54,8 +54,8 @@ Time (V3-P83 §6.4): ``HIMARI_TIME_ZONE`` (an IANA name, default
 Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
 runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
 of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
-``operator``) work on this server as the user. Unset: every Conversation
-uses the Inside Workspace, as before. HIMARI's own Tools write a
+``operator``) work on this server as the user. Unset (or another principal):
+Conversations only talk, with no files, commands or uploads (V3-P101). HIMARI's own Tools write a
 Conversation's own folder only: attached Workspaces are read, and changed
 by the hub's coding agents (V3-P94, V3-P100).
 

@@ -1,14 +1,16 @@
 """Application and files (V3-P66 §5, §7, §8): upload, send with attachments,
-the model presenting a file, download, and the cleanup."""
+the model presenting a file, download, and the cleanup — in the machine
+Environment, through an in-process runner (V3-P101)."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
 from himari.prompt.system import BASE_INSTRUCTIONS
@@ -17,19 +19,27 @@ from himari.bootstrap.application import (
     Application,
     FileNameRefused,
     FilesUnavailable,
-    workspace_for,
 )
 from himari.common import AttachmentRef, PrincipalId, TextBlock, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode, JobStatus
 from himari.data.api import (
     MAX_STAGED_UPLOADS, DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind, UserMessage,
 )
-from himari.environment.inside import InsideEnvironment
-from himari.environment.inside import WorkspaceBusy
+from himari.environment.machine import WorkspaceBusy
 from himari.prompt.api import ATTACHMENT_NOTE, PROGRESS_NOTE, TOOL_IMAGES_NOTE
 from himari.provider.scripted import ScriptedAdapter
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
+KIT: RunnerKit | None = None
+
+
+@pytest.fixture(autouse=True)
+def runner(tmp_path: Path) -> Iterator[RunnerKit]:
+    global KIT
+    KIT = start_runner(tmp_path / "runner")
+    yield KIT
+    KIT.close()
+    KIT = None
 
 
 async def chunks(*parts: bytes) -> AsyncIterator[bytes]:
@@ -37,20 +47,25 @@ async def chunks(*parts: bytes) -> AsyncIterator[bytes]:
         yield part
 
 
-async def open_app(root: Path, adapter: ScriptedAdapter | None = None, **kwargs: object) -> Application:
+async def open_app(root: Path, adapter: ScriptedAdapter | None = None, *, machine: bool = True,
+                   **kwargs: object) -> Application:
     kwargs.setdefault("cleanup_seconds", None)
+    assert KIT is not None
+    if machine:
+        kwargs.update(machine_socket=KIT.socket, machine_principals=(ALICE, BOB))
     return await Application.open(root, adapter or ScriptedAdapter(), model_id="scripted-model", sandbox=False,
                                   **kwargs)  # type: ignore[arg-type]
 
 
 async def conversation(app: Application, owner: PrincipalId = ALICE) -> tuple[TrustedScope, Path]:
     scope = TrustedScope(owner, await app.create_conversation(owner))
-    return scope, Path(app.inside.host_root(workspace_for(owner))) / "conversations" / scope.conversation_id
+    assert KIT is not None
+    return scope, KIT.himari_home / "conversations" / scope.conversation_id
 
 
 def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path) -> None:
     async def scenario() -> None:
-        adapter = ScriptedAdapter([calls(("inside/read_file", {"path": "uploads/notes.txt"})), final("read it")])
+        adapter = ScriptedAdapter([calls(("machine/read_file", {"path": "uploads/notes.txt"})), final("read it")])
         app = await open_app(tmp_path / "data", adapter)
         try:
             scope, folder = await conversation(app)
@@ -65,7 +80,7 @@ def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path)
             system = "\n\n".join(prefix)  # V3-P89: sections in order, each holding its lines
             assert system.index(PROGRESS_NOTE) > system.index(TOOL_IMAGES_NOTE) > system.index(BASE_INSTRUCTIONS[0])
             info = first.attachments[f"{record.file_id}#1"]
-            assert info.path == f"/workspace/conversations/{scope.conversation_id}/uploads/notes.txt"
+            assert info.path == f"{folder}/uploads/notes.txt"
             events = await app.data.read_events(scope)
             assert events[0].payload == UserMessage((TextBlock("please read"), AttachmentRef(record.file_id, 1)),
                                                    interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
@@ -84,7 +99,7 @@ def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path)
 
 def test_a_presented_file_can_be_downloaded(tmp_path: Path) -> None:
     async def scenario() -> None:
-        adapter = ScriptedAdapter([calls(("inside/present_file", {"path": "out.csv"})), final("here")])
+        adapter = ScriptedAdapter([calls(("machine/present_file", {"path": "out.csv"})), final("here")])
         app = await open_app(tmp_path / "data", adapter)
         try:
             scope, folder = await conversation(app)
@@ -106,23 +121,19 @@ def test_a_presented_file_can_be_downloaded(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("origin_kind", [OriginKind.WEB, OriginKind.CLI, OriginKind.DEVICE])
-def test_upload_placement_failure_preserves_file_preparation_and_existing_downloads(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin_kind: OriginKind) -> None:
-    monkeypatch.setattr(InsideEnvironment, "placement_works", lambda self: False)
-
+def test_without_the_runner_uploads_stop_and_existing_downloads_stay(
+        tmp_path: Path, origin_kind: OriginKind) -> None:
     async def scenario() -> None:
         root = tmp_path / "data"
         origin = MessageOrigin(origin_kind, "d1" if origin_kind is OriginKind.DEVICE else None)
-        provider = ScriptedAdapter([calls(("inside/present_file", {"path": "out.csv"})), final("prepared")],
+        provider = ScriptedAdapter([calls(("machine/present_file", {"path": "out.csv"})), final("prepared")],
                                    companion=True)
         app = await open_app(root, provider)
         try:
-            assert not app.uploads_work
+            assert app.uploads_work
             scope, folder = await conversation(app)
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "out.csv").write_bytes(b"a,b\n1,2\n")
-            with pytest.raises(FilesUnavailable):
-                await app.upload(scope, "new.txt", None, chunks(b"upload"))
             await app.send(scope, "prepare this for the Web", origin=origin)
             await app.runner.wait(scope)
             (prepared,) = await app.files(scope)
@@ -133,11 +144,13 @@ def test_upload_placement_failure_preserves_file_preparation_and_existing_downlo
         finally:
             await app.close()
 
-        # Reopen with upload placement still unavailable: the existing immutable file remains downloadable.
+        # Reopen without the runner (V3-P101): no uploads, but the existing immutable file remains downloadable.
         next_provider = ScriptedAdapter([final("ready")], companion=True)
-        again = await open_app(root, next_provider)
+        again = await open_app(root, next_provider, machine=False)
         try:
             assert not again.uploads_work
+            with pytest.raises(FilesUnavailable):
+                await again.upload(scope, "new.txt", None, chunks(b"upload"))
             _, handle = await again.download(scope, prepared.file_id, prepared.version)
             with handle:
                 assert handle.read() == b"a,b\n1,2\n"
@@ -259,9 +272,10 @@ def test_sending_waits_for_the_workspace_only_so_long_and_then_frees_the_trash(
     async def scenario() -> None:
         app = await open_app(tmp_path / "data")
         try:
-            scope, _ = await conversation(app)
+            scope, folder = await conversation(app)
             record = await app.upload(scope, "a.txt", None, chunks(b"a"))
-            async with app.inside.write_lock(workspace_for(ALICE)):  # a long command elsewhere
+            assert app.machine is not None
+            async with app.machine.locks.hold([str(folder)]):  # a long command elsewhere
                 sending = asyncio.create_task(app.send(scope, "x", [record.file_id]))
                 await asyncio.sleep(0.05)
                 trashing = asyncio.create_task(app.trash(scope))
@@ -281,14 +295,15 @@ def test_a_purge_waits_for_a_send_and_leaves_no_file(tmp_path: Path) -> None:
         try:
             scope, folder = await conversation(app)
             record = await app.upload(scope, "a.txt", None, chunks(b"a"))
-            lock = app.inside.write_lock(workspace_for(ALICE))
-            await lock.acquire()
+            assert app.machine is not None
+            lock = app.machine.locks.hold([str(folder)])
+            await lock.__aenter__()
             sending = asyncio.create_task(app.send(scope, "x", [record.file_id]))
             await asyncio.sleep(0.05)
             deleting = asyncio.create_task(app.trash(scope))
             await asyncio.sleep(0.05)
             assert not deleting.done()  # the lifecycle lock is the send's (review C3)
-            lock.release()
+            await lock.__aexit__(None, None, None)
             await sending
             await deleting
             await app.purge(scope)
@@ -353,16 +368,17 @@ def test_a_crash_around_placing_never_places_a_file_twice(tmp_path: Path, when: 
         scope, folder = await conversation(app)
         a = await app.upload(scope, "a.txt", None, chunks(b"a"))
         b = await app.upload(scope, "b.txt", None, chunks(b"b"))
-        real = app.inside.commit_copy
+        assert app.machine is not None
+        real = app.machine.commit_copy
 
-        async def dying(workspace_id, cwd, temp, path):  # type: ignore[no-untyped-def]
+        async def dying(conversation_id, cwd, temp, path):  # type: ignore[no-untyped-def]
             if path.endswith("/b.txt"):
                 if when == "after the rename":
-                    await real(workspace_id, cwd, temp, path)
+                    await real(conversation_id, cwd, temp, path)
                 raise Crash
-            return await real(workspace_id, cwd, temp, path)
+            return await real(conversation_id, cwd, temp, path)
 
-        app.inside.commit_copy = dying  # type: ignore[method-assign]
+        app.machine.commit_copy = dying  # type: ignore[method-assign]
         with pytest.raises(Crash):
             await app.send(scope, "two", [a.file_id, b.file_id])
         app.runner._tasks.clear()  # the process is gone: nothing of it is waited for

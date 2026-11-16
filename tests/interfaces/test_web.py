@@ -1,9 +1,11 @@
 """Web server (V3-P46): security envelope, sign-in, and the conversation API
-over a real Application (SQLite, sandbox off, scripted provider)."""
+over a real Application (SQLite, sandbox off, scripted provider; the machine
+Environment through an in-process runner, V3-P101)."""
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import threading
 import time
@@ -19,6 +21,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import FakeMcpServer  # noqa: E402
+from runnerkit import start_runner  # noqa: E402
 from testkit import NoWakes, calls, final  # noqa: E402
 
 from himari.bootstrap import application as bootstrap  # noqa: E402
@@ -26,7 +29,6 @@ from himari.bootstrap.application import (  # noqa: E402
     DEFAULT_TURN_BUDGET,
     DEFAULT_UNATTENDED_RUNS,
     Application,
-    workspace_for,
 )
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
@@ -41,6 +43,7 @@ from himari.provider.api import ProviderCapabilities  # noqa: E402
 from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep  # noqa: E402
 
 ORIGIN = "http://testserver"
+_RUNNERS = itertools.count()
 
 
 def config(tmp_path: Path) -> WebConfig:
@@ -56,10 +59,12 @@ class Server:
                  models: tuple[tuple[str, str | None], ...] = ()) -> None:
         self.provider = ScriptedAdapter(script) if provider is None else provider
         self.application: Application | None = None
+        self.kit = start_runner(tmp_path / f"runner{next(_RUNNERS)}")
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
                                                       sandbox=False, context_tokens=context_tokens,
+                                                      machine_socket=self.kit.socket,
                                                       mcp_transport=None if mcp is None else mcp.transport(),
                                                       models=models, **(turn or {}))
             return self.application
@@ -93,6 +98,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
     s = Server(tmp_path, [])
     with s.client:
         yield s
+    s.kit.close()
 
 
 def queue(server: Server, *steps: ScriptStep) -> None:
@@ -282,7 +288,7 @@ def test_sign_in_cookie_and_sign_out(server: Server) -> None:
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=strict" in cookie and "Path=/" in cookie and server.secret not in cookie
     session = server.client.get("/api/session").json()
-    assert session == {"authenticated": True, "model": "scripted-model", "sandbox": "unavailable"}
+    assert session == {"authenticated": True, "model": "scripted-model", "sandbox": "enforced"}
     assert server.client.get("/api/conversations").status_code == 200
     assert server.client.delete("/api/session", headers={"origin": ORIGIN}).status_code == 204
     assert server.client.get("/api/conversations").status_code == 401
@@ -292,7 +298,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     assert server.client.get("/api/server").status_code == 401
     server.sign_in()
     info = server.client.get("/api/server").json()
-    assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000, "trash_days": 30,
+    assert info == {"model": "scripted-model", "sandbox": "enforced", "context_budget": 128_000, "trash_days": 30,
                     "images": False,  # V3-P67: no image sandbox in this test
                     "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
                     "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
@@ -312,16 +318,13 @@ def test_the_server_info_follows_a_sandbox_that_broke_after_startup(server: Serv
     application = server.application
     assert application is not None
 
-    class Backend:
-        state = SandboxState.ENFORCED
-
-    backend = Backend()
-    application.inside.sandbox = backend  # type: ignore[assignment]
+    assert application.machine is not None  # the runner's sandbox, as its last hello said (V3-P101)
+    application.machine.sandbox_state = SandboxState.ENFORCED
     assert server.client.get("/api/server").json()["sandbox"] == "enforced"
-    backend.state = SandboxState.SETUP_FAILED
+    application.machine.sandbox_state = SandboxState.SETUP_FAILED
     assert server.client.get("/api/server").json()["sandbox"] == "setup_failed"
     assert server.client.get("/api/session").json()["sandbox"] == "setup_failed"
-    assert application.sandbox_state is SandboxState.UNAVAILABLE  # the startup value is kept as such
+    assert application.sandbox_state is SandboxState.ENFORCED  # the startup value (the kit's) is kept as such
 
 
 def test_cookie_mutations_need_an_allowed_origin(server: Server) -> None:
@@ -375,7 +378,7 @@ def test_activity_tells_waiting_and_working_without_counting_as_a_reader(server:
 def test_conversation_flow_with_a_tool_and_a_question(server: Server) -> None:
     server.sign_in()
     cid = server.post("/api/conversations", {"title": "  Trip  "}).json()["id"]
-    queue(server, calls(("inside/write_file", {"path": "plan.txt", "content": "draft"})),
+    queue(server, calls(("machine/write_file", {"path": "plan.txt", "content": "draft"})),
           calls((ASK_USER_TOOL_ID, {"question": "Which city?"})))
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "plan a trip"}).status_code == 202
     detail = server.wait_idle(cid)
@@ -772,7 +775,7 @@ def test_a_finished_job_says_why_as_bounded_text(server: Server) -> None:
 def test_a_job_reports_what_its_turn_used(server: Server) -> None:
     server.sign_in()
     cid = server.post("/api/conversations", {}).json()["id"]
-    queue(server, calls(("inside/write_file", {"path": "a.txt", "content": "x"})), final("done"))
+    queue(server, calls(("machine/write_file", {"path": "a.txt", "content": "x"})), final("done"))
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
     usage = server.wait_idle(cid)["job"]["turn_usage"]
     assert usage["runs"] == 2 and usage["budget"] == 3_000_000 and usage["max_runs"] is None
@@ -784,17 +787,17 @@ def test_a_turn_stopped_by_its_budget_continues_with_a_new_one(tmp_path: Path,
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
     # The scripted model reports no usage: each Run is charged its estimate and the 8,192 reserve
     # (sized with V3-P89's system text).
-    s = Server(tmp_path, [], turn={"turn_budget": 26_000})
+    s = Server(tmp_path, [], turn={"turn_budget": 30_000})
     with s.client:
         s.sign_in()
         cid = s.post("/api/conversations", {}).json()["id"]
-        queue(s, *(calls(("inside/write_file", {"path": f"{n}.txt", "content": "x"})) for n in range(3)),
+        queue(s, *(calls(("machine/write_file", {"path": f"{n}.txt", "content": "x"})) for n in range(3)),
               final("done"))
         assert s.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
         detail = s.wait_idle(cid)
         assert detail["job"]["state"] == "budget_reached" and detail["continuable"]
         first = detail["job"]["turn_usage"]
-        assert first["budget"] == 26_000 and first["runs"] == 2
+        assert first["budget"] == 30_000 and first["runs"] == 2
         assert s.post(f"/api/conversations/{cid}/resume").status_code == 202  # a new budget: two more Runs
         detail = s.wait_idle(cid)
         assert detail["job"]["state"] == "completed" and not detail["continuable"]
@@ -908,15 +911,15 @@ def test_answers_carry_their_model_and_a_change_applies_from_the_next_turn(model
 def test_trash_restore_and_delete_for_good(server: Server) -> None:
     server.sign_in()
     cid = server.post("/api/conversations", {"title": "Trip"}).json()["id"]
-    queue(server, calls(("inside/write_file", {"path": "plan.txt", "content": "draft"})), final("written"))
+    queue(server, calls(("machine/write_file", {"path": "plan.txt", "content": "draft"})), final("written"))
     server.post(f"/api/conversations/{cid}/messages", {"text": "write it down"})
     server.wait_idle(cid)
     assert server.application is not None
-    folder = Path(server.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    folder = server.kit.himari_home / "conversations" / cid
     assert (folder / "plan.txt").read_text() == "draft"
     assert server.client.get(f"/api/conversations/{cid}/delete-notice").json() == {
         "servers": [], "unconfigured": [], "running": False, "trash_days": 30,
-        "memory_count": 0, "episode_count": 0}  # inside/… is HIMARI's own
+        "memory_count": 0, "episode_count": 0}  # machine/… is HIMARI's own
 
     for refused, code in [(server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN}),
                            "not_in_trash"),

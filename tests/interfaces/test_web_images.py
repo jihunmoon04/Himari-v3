@@ -16,10 +16,11 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
+from runnerkit import start_runner  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap import application as application_module  # noqa: E402
-from himari.bootstrap.application import Application, workspace_for  # noqa: E402
+from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, FileId, TrustedScope  # noqa: E402
 from himari.data.api import PreparedView  # noqa: E402
@@ -52,10 +53,12 @@ class Server:
     def __init__(self, tmp_path: Path) -> None:
         self.provider = ScriptedAdapter([])
         self.application: Application | None = None
+        self.kit = start_runner(tmp_path / "runner")  # the machine Environment (V3-P101)
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
-                                                      sandbox=False, cleanup_seconds=None)
+                                                      sandbox=False, cleanup_seconds=None,
+                                                      machine_socket=self.kit.socket)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),
@@ -94,6 +97,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
         assert s.client.post("/api/session", json={"token": s.application.operator_secret},
                              headers={"origin": ORIGIN}).status_code == 204
         yield s
+    s.kit.close()
 
 
 def test_an_uploaded_image_has_a_preview_of_its_copy(server: Server) -> None:
@@ -158,10 +162,10 @@ def test_a_tool_results_images_come_with_it(server: Server) -> None:
     """§8: ``images`` on the tool result; they are not files given to the user."""
     cid = server.new()
     assert server.application is not None
-    folder = Path(server.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    folder = server.kit.himari_home / "conversations" / cid
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "chart.png").write_bytes(encoded((64, 48), "PNG"))
-    server.provider.extend([calls(("inside/read_file", {"path": "chart.png"})), final("a chart")])
+    server.provider.extend([calls(("machine/read_file", {"path": "chart.png"})), final("a chart")])
     server.client.post(f"/api/conversations/{cid}/messages", json={"text": "look at it"}, headers={"origin": ORIGIN})
     result = next(e for e in server.events(cid) if e["kind"] == "tool_result")
     image, = result["images"]

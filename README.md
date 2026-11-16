@@ -10,8 +10,8 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 | Data | Conversation Event/Run/ToolExecution/Artifact, raw 요청·응답, T3/T6 claim 및 UNKNOWN 복구. 인메모리(테스트) + **SQLite 영속 저장**(WAL·`synchronous=FULL`, 포트 호출당 트랜잭션 1개, 단일 writer 잠금, 0600 파일·비공개 폴더 강제, 스키마 식별 검증) | 스키마 마이그레이션, 저장 데이터 암호화·보존/삭제 정책, 백업 |
 | Prompt | 전체 이력·ToolResult·CurrentState·턴별 continuation 재구성 | Context 압축·예산, Snapshot의 압축 활용 |
 | Provider | Scripted Fake + 실제 OpenRouter, wire-exact 요청 전송·요청/응답 원본 기록, reasoning effort/usage/continuation | 추가 Provider, Streaming |
-| Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋, Inside 파일 Tool 5종, `inside/run_command` | Memory·Plan Tool, 병렬 Scheduler(현재 순차 + Workspace별 직렬화) |
-| Environment | EnvironmentPlugin SPI, Binding별 작업 폴더, Inside(openat2 경계), bubblewrap+Landlock Sandbox·시작 시 탈출 자체 검사·Workspace admission·이 서버 실호스트 게이트 | CPU·메모리·프로세스 수 한도, 다른 배포 호스트 검증, 원격·로컬 PC Environment |
+| Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋, machine 파일 Tool·`machine/run_command`(runner 경유, V3-P101) | Memory·Plan Tool, 병렬 Scheduler(현재 순차 + Workspace별 직렬화) |
+| Environment | EnvironmentPlugin SPI, Binding별 작업 폴더, machine Environment(runner, V3-P74; Inside는 V3-P101에서 제거), bubblewrap+Landlock Sandbox·시작 시 탈출 자체 검사·이 서버 실호스트 게이트 | CPU·메모리·프로세스 수 한도, 다른 배포 호스트 검증, 원격·로컬 PC Environment |
 | 인터페이스 | **Web 서버와 화면**(v2 화면·보안 계층 재사용, 운영자 로그인, 대화 목록·실행·질문 답변), **CLI**(Web 서버의 클라이언트, Web에 없는 명령 몇 개만), `Application` 조립, 대화 목록 포트, 백그라운드 실행기 | 파일 업로드·다운로드, 실시간 스트리밍(현재 폴링), 다중 사용자 |
 
 **검증 경계:** Data·통합 테스트는 인메모리와 SQLite 두 백엔드로 모두 실행되며, SQLite에서는 재시작이 DB 파일을 닫고 다시 여는 것이고 실제 `SIGKILL` 크래시(송신 중·부작용 중·트랜잭션 도중·커밋 직후)도 검증합니다. 전원 차단 내구성은 SQLite·파일시스템의 fsync 보장에 의존하며 직접 시험하지 않았습니다. OS Sandbox는 이 서버에서 실호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`)를 통과했지만 다른 호스트에서는 다시 실행해야 하고, 자원 한도는 아직 없습니다. 구현된 공개 계약은 각 모듈 `api.py`가 원본입니다.
@@ -193,13 +193,7 @@ himari memory retry conv_1 mpass_3              # 실패한 기억 정리 하나
 
 MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`, 리소스 Tool `resources.py`·URI 템플릿 `uritemplate.py`, 프롬프트 글 `prompts.py`; V3-P52/P53/P59/P60). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
 
-Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
-
-```python
-sandbox = SandboxBackend.discover()
-await sandbox.start()            # ENFORCED only if the real-spawn self-test passes
-inside = InsideEnvironment(workspaces_root, sandbox=sandbox)
-```
+Machine Environment: `environment/machine/`(V3-P74). 파일 Tool·`run_command`·업로드는 사용자 계정으로 도는 runner(`runner/`, bubblewrap + Landlock Sandbox)를 거친다. `HIMARI_MACHINE_SOCKET`이 없거나 `HIMARI_MACHINE_PRINCIPALS`에 없는 사용자의 대화는 말만 한다(Inside Environment는 V3-P101에서 없어졌다).
 
 실호스트 Sandbox 검증(선택 실행): `HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`.
 

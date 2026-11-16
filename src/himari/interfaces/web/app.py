@@ -84,7 +84,6 @@ from himari.bootstrap.application import (
     PromptView,
     ToolSourceView,
     UnknownToolSource,
-    UploadsFolderUnusable,
     WorkspaceBusy,
     WorkspaceRefused,
     AttachedFolder,
@@ -1353,12 +1352,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def workspace_busy(request: Request, error: WorkspaceBusy) -> JSONResponse:
         return JSONResponse({"error": {"code": "workspace_busy", "message": "A command is running in the workspace; "
                                        "send again shortly."}}, status_code=409)
-
-    @app.exception_handler(UploadsFolderUnusable)
-    async def uploads_unusable(request: Request, error: UploadsFolderUnusable) -> JSONResponse:
-        return JSONResponse({"error": {"code": "uploads_folder_unusable",
-                                       "message": "The conversation's uploads is not a folder. Ask the model to tidy "
-                                                  "it up, or remove it yourself."}}, status_code=409)
 
     @app.exception_handler(PromptRefused)
     async def prompt_refused(request: Request, error: PromptRefused) -> JSONResponse:

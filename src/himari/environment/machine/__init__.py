@@ -38,10 +38,11 @@ from himari.common import EnvironmentKind, PrincipalId, TrustedScope, WorkspaceI
 from himari.data.api import TEMP_PREFIX, BindingAuthority, WorkspaceRegistry
 from himari.documents.api import DocumentReading
 from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
-from himari.environment.inside import InsideFiles, WorkspaceBusy
 from himari.environment.machine.client import RunnerClient
 from himari.environment.machine.locks import PathLocks
+from himari.environment.machine.results import ToolFiles
 from himari.runner import api as runner
+from himari.sandbox.api import SandboxState
 from himari.tool.api import ToolHandler
 
 MACHINE = EnvironmentKind("machine")
@@ -76,7 +77,7 @@ class Places:
 
 def machine_workspace_for(principal: PrincipalId) -> WorkspaceId:
     """A principal's machine Workspace id (its HIMARI home): stable, and told
-    apart from Inside ids (``ws_``) by its prefix."""
+    apart from other ids (the old Inside ``ws_``) by its prefix."""
     return WorkspaceId(_PREFIX + hashlib.sha256(principal.encode()).hexdigest()[:24])
 
 
@@ -84,8 +85,12 @@ class MachineUnavailable(Exception):
     """The runner could not be reached (or is not enforced); nothing was done."""
 
 
+class WorkspaceBusy(Exception):
+    """The Conversation's folder lock was not free in time (V3-P66 §5.1, review N4)."""
+
+
 class MachineEnvironment:
-    def __init__(self, socket_path: str, *, files: InsideFiles | None = None,
+    def __init__(self, socket_path: str, *, files: ToolFiles | None = None,
                  documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None) -> None:
         from himari.environment.machine.tools import machine_tools
 
@@ -95,6 +100,8 @@ class MachineEnvironment:
         # The attached Workspaces (§10); None: each Conversation has its own folder only.
         self.registry = registry
         self.locks = PathLocks()
+        # The runner's sandbox as it last said (V3-P101: what the interfaces show as the commands' state).
+        self.sandbox_state = SandboxState.UNAVAILABLE
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
 
     @property
@@ -113,6 +120,10 @@ class MachineEnvironment:
 
     async def hello(self) -> dict[str, Any]:
         result, _ = await self.call(runner.HELLO, {})
+        try:
+            self.sandbox_state = SandboxState(result.get("state"))
+        except ValueError:
+            self.sandbox_state = SandboxState.UNAVAILABLE
         return result
 
     async def folder(self, conversation_id: str, cwd_relative: str) -> str:
@@ -191,7 +202,7 @@ class MachineEnvironment:
                                    network=network)
                 for b in bindings]
 
-    # --- uploads (V3-P66 §5.2), the same steps as Inside -------------------------------------
+    # --- uploads (V3-P66 §5.2) ---------------------------------------------------------------
 
     @asynccontextmanager
     async def locked(self, workspace_id: WorkspaceId, timeout: float, *, conversation_id: str,

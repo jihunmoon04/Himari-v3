@@ -4,7 +4,6 @@ One data root, private to the server user::
 
     <data_root>/                 0700
         himari.db (+ .lock)      SQLite Data (V3-P42), 0600
-        workspaces/<ws>/         Inside Workspaces, one per principal (0700)
         control/operator.secret  the local operator's credential (0600)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
 
@@ -150,12 +149,10 @@ from himari.presence.devices import DeviceRegistry
 from himari.presence.hub import PresenceHub
 from himari.proactive import ProactiveSettings
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
-from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
 from himari.bootstrap.explorer import Explorer, ExplorerRefused
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
-from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
-from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
+from himari.environment.machine import WorkspaceBusy as WorkspaceBusy
 # For the interfaces (V3-P74 §14): which registered folders are cloud-synced.
 from himari.environment.machine import CLOUD_FILESYSTEMS as CLOUD_FILESYSTEMS
 from himari.environment.machine import (
@@ -165,11 +162,12 @@ from himari.environment.machine import (
     MachineUnavailable,
     machine_workspace_for,
 )
+from himari.environment.machine.results import ToolFiles
 from himari.runner import api as runner_api
 from himari.runner.api import RunnerError
 from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
-from himari.sandbox.backend import SandboxBackend, discover_capability, supports_tmp_size
+from himari.sandbox.backend import discover_capability, supports_tmp_size
 from himari.sandbox.server import ServerSandbox
 from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, load_config
 from himari.mcp.jsonrpc import McpError
@@ -193,8 +191,8 @@ DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 DEFAULT_TIME_ZONE = "Asia/Seoul"  # V3-P83 §6.4: HIMARI_TIME_ZONE when unset
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
-BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
-PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the Workspace write lock (V3-P66 review N4)
+BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # HIMARI's own Tool ids (inside: old Conversations, V3-P101)
+PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the folder's lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
 # One turn's guards (V3-P62): no Run limit by default; a token budget, a
@@ -251,12 +249,6 @@ def context_limit(ceiling: int | None, configured: int | None) -> int:
                              " (its window less the room kept for an answer)")
         return configured
     return min(ceiling, DEFAULT_CONTEXT_TOKENS) if ceiling is not None else UNKNOWN_WINDOW_TOKENS
-
-
-def workspace_for(principal: PrincipalId) -> WorkspaceId:
-    """A principal's Inside Workspace id: stable, and safe as a folder name
-    whatever characters the principal id has."""
-    return WorkspaceId("ws_" + hashlib.sha256(principal.encode()).hexdigest()[:24])
 
 
 def check_tool_sources(data_root: str | os.PathLike[str], environ: Mapping[str, str]) -> None:
@@ -785,8 +777,7 @@ class Application:
     data: SqliteData
     runtime: Runtime
     runner: BackgroundRunner
-    inside: InsideEnvironment
-    sandbox_state: SandboxState  # at startup; ``current_sandbox_state`` follows later changes
+    sandbox_state: SandboxState  # the runner's, at startup; ``current_sandbox_state`` follows later changes
     model_id: str
     context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
@@ -798,7 +789,7 @@ class Application:
     unverified_models: tuple[str, ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES  # V3-P66 §8.3
-    uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
+    uploads_work: bool = True  # there is a place for uploads: the machine Environment (V3-P101)
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
     companion_models: tuple[str, ...] = ()  # offered models that satisfy all companion features
@@ -815,7 +806,7 @@ class Application:
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
     companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
     # V3-P74: the machine Environment (its runner's socket was configured) and
-    # the principals whose new Conversations use it instead of Inside (Q1).
+    # the principals whose new Conversations use it (Q1); the others only talk (V3-P101).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
     # One registration at a time (§10.1): the runner's same-folder check and
@@ -945,8 +936,6 @@ class Application:
         assert default_budget is not None
         root = Path(os.path.abspath(data_root))
         ensure_private_dir(str(root))
-        workspaces = root / "workspaces"
-        ensure_private_dir(str(workspaces))
         secret = ensure_operator_secret(str(root / "control"))
         mcp_config = load_config(str(root / CONFIG_NAME), os.environ if environ is None else environ)
 
@@ -964,48 +953,29 @@ class Application:
             mcp.statuses = tuple(replace(s, enabled_by_default=saved_defaults.get(s.source, s.enabled_by_default))
                                  for s in mcp.statuses)
             toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
-            backend: SandboxBackend | None = None
-            state = SandboxState.UNAVAILABLE
             scripts = "off"
-            if sandbox:
-                protected = (str(root), str(workspaces))
-                candidate = SandboxBackend.discover(toolkit_fd=None if toolkit is None else toolkit.fd)
-                state = await candidate.start(protected_paths=protected)
-                if state is SandboxState.SETUP_FAILED and toolkit is not None:
-                    # A toolkit the self-test does not accept costs the scripts, never run_command (§6.4).
-                    scripts = f"the self-test refused the toolkit bind ({state.value})"
-                    candidate = SandboxBackend.discover()
-                    state = await candidate.start(protected_paths=protected)
-                if state is SandboxState.ENFORCED:
-                    backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
-                    if backend.toolkit_fd is not None:
+            machine = None
+            if machine_socket is not None:
+                machine = MachineEnvironment(machine_socket,
+                                             files=ToolFiles(store.blobs, SqliteData(store), file_max_bytes),
+                                             documents=reader, registry=SqliteData(store))
+                try:
+                    hello = await machine.hello()
+                    log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
+                    if hello.get("toolkit") is True:  # the runner binds its own toolkit in every command
                         scripts = "on"
+                except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
+                    log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
+            else:
+                log.warning("HIMARI_MACHINE_SOCKET is not set: Conversations only talk (no files, commands or "
+                            "uploads; V3-P101)")
             if reader is not None:
                 reader.scripts = scripts == "on"
             log.info("documents: read_document %s; run_command toolkit %s%s", documents_reason,
                      scripts if reader is not None else "off",
                      f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
-            inside = InsideEnvironment(workspaces, sandbox=backend,
-                                       files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                       documents=reader)
-            uploads_work = inside.placement_works()
-            if not uploads_work:
-                log.warning("this filesystem cannot place uploads without replacing files (renameat2); "
-                            "attaching files is off")
-            elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2), V3-P70 review N8
-                log.warning("commands cannot run (sandbox %s): the model can read attached text files%s, "
-                            "but cannot run scripts on other files", state.value,
-                            " and PDF, Office and HWPX documents" if reader is not None else "")
-            machine = None
-            if machine_socket is not None:
-                machine = MachineEnvironment(machine_socket,
-                                             files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                             documents=reader, registry=SqliteData(store))
-                try:
-                    hello = await machine.hello()
-                    log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
-                except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
-                    log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
+            state = machine.sandbox_state if machine is not None else SandboxState.UNAVAILABLE
+            uploads_work = machine is not None
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             zones = frozenset(available_timezones())
@@ -1013,7 +983,7 @@ class Application:
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
             screens = ScreenRequests(hub) if companion else None  # V3-P91: the screen Tool's requests
             machine_allowed = frozenset(PrincipalId(p) for p in machine_principals)
-            runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
+            runtime = build_runtime(provider, store=store, environments=[machine] if machine else [],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=base,  # V3-P89: the base; the sections are the Prompt module's
@@ -1051,7 +1021,7 @@ class Application:
         listeners = _JobListeners(events, wake_events)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
                                   listener=listeners)
-        application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
+        application = cls(root, store, runtime.data, runtime, runner, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models),
                           tuple(companion_models), resolved_companion_default, companion_models_only, reader, toolkit,
@@ -1107,9 +1077,9 @@ class Application:
 
     @property
     def current_sandbox_state(self) -> SandboxState:
-        """The sandbox as it is now: a setup failure while running a command
-        latches SETUP_FAILED after startup, and commands are refused from then on."""
-        return self.inside.sandbox.state if self.inside.sandbox is not None else self.sandbox_state
+        """The runner's sandbox as it last said (each turn asks): a setup
+        failure latches SETUP_FAILED there, and commands are refused from then on."""
+        return self.machine.sandbox_state if self.machine is not None else SandboxState.UNAVAILABLE
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
@@ -1727,20 +1697,15 @@ class Application:
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None,
                                   initial_model: str | None = None) -> ConversationId:
-        """T0 with the principal's Inside Workspace activated (provisioned
-        first) — or, for a machine principal, the machine Environment (V3-P74
-        Q1: new Conversations only; its folder is made on first use)."""
+        """T0: for a machine principal, the machine Environment activated
+        (V3-P74 Q1; its folder is made on first use); for anyone else, no
+        Environment: the Conversation only talks (V3-P101)."""
         setting = ModelSetting(initial_model, None) if initial_model is not None else None
         if self.machine is not None and principal in self.machine_principals:
             return await self.data.create_conversation(
                 principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),),
                 model_setting=setting)
-        workspace = workspace_for(principal)
-        self.inside.provision(workspace)
-        return await self.data.create_conversation(
-            principal, title=title, activations=(InitialActivation(INSIDE, workspace),),
-            model_setting=setting,
-        )
+        return await self.data.create_conversation(principal, title=title, model_setting=setting)
 
     # --- files (V3-P66) ----------------------------------------------------------------
 
@@ -1784,6 +1749,8 @@ class Application:
             if error.code is DataErrorCode.NOT_FOUND:
                 raise FilesUnavailable(scope.conversation_id) from None
             raise
+        if self.machine is None or not self.machine.owns(workspace.workspace_id):  # an old Inside one (V3-P101)
+            raise FilesUnavailable(scope.conversation_id)
         return workspace.workspace_id, workspace.cwd_relative
 
     async def upload_screen(self, scope: TrustedScope, chunks: AsyncIterator[bytes]) -> FileRecord:
@@ -1852,15 +1819,12 @@ class Application:
                 if self.runner.status(scope).running:
                     raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
                 workspace_id, cwd = await self._workspace(scope)
-                machine = self.machine if self.machine is not None and self.machine.owns(workspace_id) else None
+                machine = self.machine
+                assert machine is not None  # _workspace: only the machine's folders take uploads
                 try:
-                    if machine is not None:
-                        locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
-                                                cwd_relative=cwd)
-                        placer = _machine_placer(machine, scope.conversation_id, cwd)
-                    else:
-                        locked = self.inside.locked(workspace_id, PLACE_LOCK_SECONDS)
-                        placer = _inside_placer(self.inside, workspace_id, cwd)
+                    locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
+                                            cwd_relative=cwd)
+                    placer = _machine_placer(machine, scope.conversation_id, cwd)
                     async with locked:
                         # Read again under the lock: another tab may have placed them (review C4).
                         fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
@@ -2014,8 +1978,7 @@ class Application:
             workspace = trashed.workspace
             if workspace is not None and self.machine is not None and self.machine.owns(workspace.workspace_id):
                 await self.machine.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
-            elif workspace is not None:
-                await self.inside.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            # An old Inside folder (<data>/workspaces) is left: V3-P101 removes it by hand.
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)
             self.runner.reopen(scope)
@@ -2097,8 +2060,6 @@ class Application:
                 await self.mcp.aclose()
             finally:
                 if self.toolkit is not None:
-                    if isinstance(self.inside.sandbox, SandboxBackend):
-                        self.inside.sandbox.toolkit_fd = None  # the number may be reused once closed (review N8)
                     self.toolkit.close()
                 self.store.close()
 
@@ -2139,29 +2100,19 @@ class Application:
 
     def check_layout(self) -> None:
         """Re-verify the private directories (e.g. before serving)."""
-        for path in (self.data_root, self.data_root / "workspaces", self.data_root / "control"):
+        for path in (self.data_root, self.data_root / "control"):
             check_private_dir(str(path))
 
 
 @dataclass(frozen=True)
 class _Placer:
-    """One upload's steps (V3-P66 §5.2) in a Conversation's folder: Inside's or the machine's."""
+    """One upload's steps (V3-P66 §5.2) in a Conversation's own machine folder."""
 
     holds: Callable[[str, int, str], Awaitable[bool]]
     copy_in: Callable[[BinaryIO, bool], Awaitable[str]]
     free_path: Callable[[str, str | None], Awaitable[str]]
     commit_copy: Callable[[str, str], Awaitable[bool]]
     discard_copy: Callable[[str], Awaitable[None]]
-
-
-def _inside_placer(inside: InsideEnvironment, workspace_id: WorkspaceId, cwd: str) -> _Placer:
-    return _Placer(
-        holds=lambda path, size, sha256: inside.holds(workspace_id, cwd, path, size, sha256),
-        copy_in=lambda source, clear: inside.copy_in(workspace_id, cwd, source, clear=clear),
-        free_path=lambda name, preferred: inside.free_path(workspace_id, cwd, name, preferred),
-        commit_copy=lambda temp, path: inside.commit_copy(workspace_id, cwd, temp, path),
-        discard_copy=lambda temp: inside.discard_copy(workspace_id, cwd, temp),
-    )
 
 
 def _machine_placer(machine: MachineEnvironment, conversation_id: str, cwd: str) -> _Placer:

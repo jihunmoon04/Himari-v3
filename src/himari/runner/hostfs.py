@@ -879,7 +879,7 @@ class Host:
         if not isinstance(path, str) or not path.startswith("/"):
             raise api.RunnerError(api.INVALID)
         masks = self.rules.masks()
-        self._make_parents(posixpath.join(path, "x"), roots, masks)
+        self._make_parents(path, roots, masks)  # the folder itself (it once made an empty "x" in it)
         fd = _open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self._inside(self._judge(fd, masks), roots, masks)

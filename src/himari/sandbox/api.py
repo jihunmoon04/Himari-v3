@@ -5,8 +5,8 @@ used for is a profile. Bootstrap builds the backends and hands them to their
 consumers, which see only this module (or, for the MCP connector, a Protocol
 of their own with the same shape: V3-059).
 
-- **Workspace** (``inside/run_command``): one bounded command with a
-  principal's Workspace bound at ``WORKSPACE_MOUNT``.
+- **Machine** (``machine/run_command``, :mod:`himari.sandbox.machine`): one
+  bounded command as the user, run by ``himari-runner`` (V3-P74 §6).
 - **Server** (stdio MCP servers, V3-P59 §4): a long-lived process with pipes,
   the operator's ``read_only`` and ``writable`` directories bound at their
   host paths, no network. It has its own self-test and state.
@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-WORKSPACE_MOUNT = "/workspace"
 TOOLKIT_MOUNT = "/run/himari/documents"  # the documents toolkit, read-only (V3-P70 §6.3)
 
 # V3-051
@@ -95,25 +94,6 @@ def validate_argv(argv: object) -> list[str]:
     ):
         raise ValueError(f"argv must be 1..{MAX_ARGV} non-empty strings of at most {MAX_ARG_CHARS} characters")
     return list(argv)
-
-
-class WorkspaceSandbox(Protocol):
-    """The Workspace profile: one bounded command per call, the verified
-    principal root bound at ``WORKSPACE_MOUNT``, network isolated."""
-
-    @property
-    def state(self) -> SandboxState: ...
-
-    async def start(self, *, protected_paths: Sequence[str] = ()) -> SandboxState:
-        """Once per process: ENFORCED only if the real-spawn self-test passes.
-        ``protected_paths`` are host roots the self-test proves invisible."""
-        ...
-
-    async def run(self, argv: list[str], *, root_fd: int, cwd: str, timeout: float) -> CommandResult:
-        """Refuses (SandboxUnavailableError) unless ENFORCED; a setup failure
-        raises SandboxSetupError and latches SETUP_FAILED. ``cwd`` is under
-        ``WORKSPACE_MOUNT``."""
-        ...
 
 
 @dataclass(frozen=True)
