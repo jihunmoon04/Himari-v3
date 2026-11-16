@@ -17,6 +17,10 @@ const RANGE = 200;
 const POLL_MS = 5_000;
 const RETRY_MS = 30_000;
 const FIRST_RETRY_MS = [2_000, 5_000, 10_000, 30_000];
+// Reading again after a reset waits longer each time it repeats (a hub that keeps answering reset, or refusing the
+// cursor, is not read in a loop); a minute without one starts over.
+const RESTART_MS = [0, 1_000, 3_000, 10_000, 30_000];
+const RESTART_QUIET_MS = 60_000;
 
 /** Kinds after which what waits for the user may have changed (§7.3). */
 export const PENDING_SIGNALS = new Set(["request", "answer", "turn_end"]);
@@ -69,6 +73,18 @@ export function useHubSessionEvents(id: number, onSignal: (session: HubSession |
   const onSignalRef = useRef(onSignal);
   onSignalRef.current = onSignal;
   const readToken = useRef(0); // the read the answers belong to; a late one of another is dropped
+  const restarts = useRef({ count: 0, at: 0, id }); // resets in a row, for the backoff
+
+  /** What was held is gone at the hub (a reset, a refused cursor): read everything again, unless ``token`` is not
+   *  the current read any more. */
+  const restartFrom = useCallback((token: number) => {
+    if (readToken.current !== token) return;
+    const now = Date.now();
+    const kept = restarts.current;
+    restarts.current = { id, at: now, count: kept.id === id && now - kept.at < RESTART_QUIET_MS ? kept.count + 1 : 1 };
+    readToken.current += 1; // whatever of this read comes late is dropped
+    setGeneration((n) => n + 1);
+  }, [id]);
 
   useEffect(() => {
     const token = ++readToken.current;
@@ -86,13 +102,15 @@ export function useHubSessionEvents(id: number, onSignal: (session: HubSession |
     setFirstSeq(null);
 
     const current = () => !ended && readToken.current === token;
+    const kept = restarts.current;
+    const delay = kept.id === id ? RESTART_MS[Math.min(kept.count, RESTART_MS.length - 1)]! : 0;
     const add = (incoming: HubEvent[]) => {
       if (!current() || !incoming.length) return;
       cursor = Math.max(cursor, ...incoming.map((e) => e.seq));
       setEvents((held) => mergeEvents(held, incoming));
       if (incoming.some((e) => PENDING_SIGNALS.has(e.kind))) onSignalRef.current(null);
     };
-    const restart = () => current() && setGeneration((n) => n + 1);
+    const restart = () => current() && restartFrom(token);
 
     const readByAsking = async () => {
       try {
@@ -159,7 +177,8 @@ export function useHubSessionEvents(id: number, onSignal: (session: HubSession |
         retry = window.setTimeout(() => void first(attempt + 1), wait); // the hub may be back by then
       }
     };
-    void first(0);
+    if (delay > 0) retry = window.setTimeout(() => void first(0), delay);
+    else void first(0);
 
     return () => {
       ended = true;
@@ -167,7 +186,7 @@ export function useHubSessionEvents(id: number, onSignal: (session: HubSession |
       window.clearInterval(poll);
       window.clearTimeout(retry);
     };
-  }, [id, generation]);
+  }, [id, generation, restartFrom]);
 
   const oldest = events[0]?.seq ?? null;
   const earlier = firstSeq !== null && oldest !== null && oldest > firstSeq;
@@ -181,12 +200,16 @@ export function useHubSessionEvents(id: number, onSignal: (session: HubSession |
     readHubEvents(id, after, oldest - 1 - after)
       .then((page) => {
         if (readToken.current !== token) return; // another session, or read again: not ours any more
-        if (page.first_seq !== null && page.first_seq > firstSeq) setFirstSeq(page.first_seq); // pruned meanwhile
+        if (page.reset) return restartFrom(token); // pruned under what is held: all of it is read again
         setEvents((held) => mergeEvents(held, page.events.filter((e) => e.seq < oldest)));
       })
-      .catch(() => readToken.current === token && setEarlierError("Could not read the earlier events."))
+      .catch((failure) => {
+        if (readToken.current !== token) return;
+        if (failure instanceof ApiError && failure.code === "hub_bad_cursor") return restartFrom(token);
+        setEarlierError("Could not read the earlier events.");
+      })
       .finally(() => readToken.current === token && setLoadingEarlier(false));
-  }, [earlier, firstSeq, id, loadingEarlier, oldest]);
+  }, [earlier, firstSeq, id, loadingEarlier, oldest, restartFrom]);
 
   return { events, loading, error, earlier, loadingEarlier, earlierError, live, loadEarlier };
 }

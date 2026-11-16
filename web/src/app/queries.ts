@@ -92,7 +92,16 @@ export const hubKeys = {
 
 /** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
 export function useHubProjects() {
-  const query = useQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 60_000, retry: false });
+  const notSetUp = (error: unknown) => error instanceof ApiError && error.status === 404;
+  const query = useQuery({
+    queryKey: hubKeys.projects,
+    queryFn: readHubProjects,
+    staleTime: 60_000,
+    // a hub that did not answer is asked again (with backoff, then every 30 s) until it does; "not set up" is final
+    retry: (count, error) => !notSetUp(error) && count < 3,
+    retryDelay: (count) => Math.min(30_000, 2_000 * 2 ** count),
+    refetchInterval: (q) => (q.state.error && !notSetUp(q.state.error) ? 30_000 : false),
+  });
   const status = query.isLoading ? "loading"
     : query.error instanceof ApiError && query.error.status === 404 ? "off"
     : query.error ? "down" : "on";
