@@ -99,9 +99,11 @@ test("an answer streams in, and a second job right after gets its own stream", a
 test("signed out in another tab: the next send shows the sign-in, the draft stays", async ({ page, baseURL }) => {
   const done = await watch(page);
   await signIn(page);
+  const composer = page.getByLabel("Message", { exact: true });
+  await composer.fill("lost?");
   expect((await page.request.delete("/api/session", { headers: { origin: baseURL! } })).status()).toBe(204);
-  await page.getByLabel("Message", { exact: true }).fill("lost?");
-  await page.keyboard.press("Enter");
+  // the page may notice by itself first (a background read is refused); otherwise the send is
+  if (await composer.isVisible()) await composer.press("Enter");
   await expect(page.getByLabel("Operator token")).toBeVisible();
   await page.getByLabel("Operator token").fill(token());
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -150,4 +152,71 @@ test("an unknown asset is 404, never the page", async ({ request }) => {
   expect((await request.get("/next/assets/..%2Findex.html")).status()).toBe(404);
   const redirect = await request.get("/next", { maxRedirects: 0 });
   expect(redirect.status()).toBe(308);
+});
+
+// -- the hub's sessions (V3-P102 W2), against the scripted hub of scripts/web_next_hub.py -----------------------
+
+async function openSidebar(page: Page, isMobile: boolean) {
+  if (isMobile) await page.getByRole("button", { name: "Open sidebar" }).first().click();
+}
+
+test("the sidebar lists the hub's projects and their open sessions", async ({ page, isMobile }) => {
+  const done = await watch(page);
+  await signIn(page);
+  await openSidebar(page, isMobile);
+  const demo = page.getByRole("list", { name: "Sessions of demo" });
+  await expect(demo.getByRole("link", { name: /claude@linux/ })).toContainText("1"); // a permission waits
+  await expect(demo.getByRole("link", { name: /codex@laptop/ })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Sessions of empty" })).toContainText("No open sessions");
+  await expect(page.getByRole("link", { name: "Work overview" })).toBeVisible();
+  await done();
+});
+
+test("a session: its turn, thought, edit with its diff, plan, request and text, then a live line", async ({ page }) => {
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/s/5");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("demo › claude@linux");
+  await expect(page.getByText("Waiting for you").first()).toBeVisible();
+  await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Fix the failing test");
+  await expect(page.getByText("The test reads the wrong file.")).toHaveCount(0); // the thought starts folded
+  await page.getByRole("button", { name: "Thinking" }).click();
+  await expect(page.getByText("The test reads the wrong file.")).toBeVisible();
+  const edit = page.getByRole("button", { name: /Edit src\/app\.py/ });
+  await expect(edit).toContainText("+2");
+  await expect(edit).toContainText("−1");
+  await edit.click();
+  await expect(page.locator("figure").filter({ hasText: "src/app.py" })).toContainText("z = 4");
+  await expect(page.getByRole("group", { name: "Agent request" })).toContainText("Permission · Waiting for you");
+  await expect(page.getByRole("group", { name: "Agent request" })).toContainText("Run pytest");
+  await expect(page.locator(".answer").filter({ hasText: "I changed y and I am waiting" })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+  await expect(page.getByText("A live line from the agent.")).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("list", { name: "Plan" }).last()).toContainText("Run the tests");
+  await done();
+});
+
+test("the overview shows every open session and follows the list as it changes", async ({ page }) => {
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/agents");
+  const cards = page.getByRole("list", { name: "Open sessions" }).getByRole("listitem");
+  await expect(cards).toHaveCount(3);
+  await expect(cards.first()).toContainText("1 waiting for you"); // what waits comes first
+  await expect(cards.filter({ hasText: "codex@laptop" })).toContainText("Working", { timeout: 10_000 });
+  await done();
+});
+
+test("a long session shows its latest events and reads the earlier ones on request", async ({ page }) => {
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/s/7");
+  await expect(page.getByText("Prompt 225", { exact: true })).toBeVisible();
+  await expect(page.getByText("Prompt 125", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Earlier" }).click();
+  await expect(page.getByText("Prompt 26", { exact: true })).toBeAttached();
+  await page.getByRole("button", { name: "Earlier" }).click();
+  await expect(page.getByText("Prompt 1", { exact: true })).toBeAttached();
+  await expect(page.getByRole("button", { name: "Earlier" })).toHaveCount(0); // nothing older
+  await done();
 });

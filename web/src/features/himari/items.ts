@@ -1,22 +1,11 @@
 // V3-P102 §7.4: HIMARI's events as the timeline's items. The timeline knows only these kinds; hub sessions get
 // their own converter into the same kinds (W2). Pure functions, tested in items.test.ts.
 import type { EventView } from "@/api/himari";
+import type { Item, ToolStep } from "@/features/timeline";
+
+export type { Item, ToolStep } from "@/features/timeline";
 
 export const ASK_USER = "ask_user";
-
-export interface ToolStep {
-  key: string; // run_id/call_id: call ids repeat across Runs
-  toolId: string;
-  arguments: Record<string, unknown>;
-  result: { text: string; isError: boolean } | null;
-}
-
-export type Item =
-  | { kind: "user"; key: string; text: string; answers: boolean }
-  | { kind: "answer"; key: string; text: string; model: string | null }
-  | { kind: "work"; key: string; notes: string[]; steps: ToolStep[]; model: string | null }
-  | { kind: "question"; key: string; text: string; callKey: string }
-  | { kind: "notice"; key: string; text: string };
 
 /** What the model wrote as it is shown: without its marks (moods, moves), as the server gives it. */
 const shown = (event: EventView) => event.display?.text ?? event.text ?? "";
@@ -96,6 +85,7 @@ export function toItems(events: readonly EventView[]): Item[] {
 
 /** A short line for a tool step: its tool and the argument a person looks for first. */
 export function stepTitle(step: ToolStep): string {
+  if (step.title) return step.title.length > 100 ? `${step.title.slice(0, 99)}…` : step.title; // the agent's own
   const name = step.toolId.includes("/") ? step.toolId.slice(step.toolId.indexOf("/") + 1) : step.toolId;
   for (const field of ["path", "query", "command", "url", "name", "project"]) {
     const value = step.arguments[field];

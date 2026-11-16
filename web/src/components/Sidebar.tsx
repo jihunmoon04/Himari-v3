@@ -1,8 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { FolderGit2, LogOut, Monitor, Moon, PanelLeftClose, Settings, SquarePen, Sun } from "lucide-react";
+import { ChevronRight, FolderGit2, LayoutGrid, LogOut, Monitor, Moon, PanelLeftClose, Settings, SquarePen, Sun } from "lucide-react";
+import { useState } from "react";
 import { NavLink, useNavigate } from "react-router";
 import { signOut } from "@/api/himari";
-import { keys, useActivity, useConversations } from "@/app/queries";
+import { keys, useActivity, useConversations, useHubPending, useHubProjects } from "@/app/queries";
+import { byProject, useHubList } from "@/features/hub/list";
+import { StatusDot, activityOf, sessionName } from "./SessionBadge";
 import { setLook, setMode, useAppearance, type Look, type Mode } from "@/lib/appearance";
 import { cn } from "@/lib/cn";
 import { IconButton } from "./ui/button";
@@ -63,6 +66,75 @@ function ConversationList() {
       </button>
     )}
     </>
+  );
+}
+
+const rowClass = ({ isActive }: { isActive: boolean }) =>
+  cn("flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-raised hover:text-ink",
+    isActive && "bg-raised text-ink");
+
+function Project({ name, sessions, waits }: {
+  name: string;
+  sessions: ReturnType<typeof byProject>[number][1];
+  waits: Map<number, number>;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-sm text-ink hover:bg-raised"
+      >
+        <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
+        <FolderGit2 className="size-4 shrink-0 text-muted" />
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+      </button>
+      {open && (
+        <ul className="ml-4 space-y-0.5 border-l border-line pl-1" aria-label={`Sessions of ${name}`}>
+          {sessions.length === 0 && <li className="px-3 py-1 text-xs text-faint">No open sessions</li>}
+          {sessions.map((session) => {
+            const count = session.task != null ? waits.get(session.task) ?? 0 : 0;
+            const { label, tone } = activityOf(session, count);
+            return (
+              <li key={session.id}>
+                <NavLink to={`/s/${session.id}`} className={rowClass} title={label}>
+                  <StatusDot tone={tone} />
+                  <span className="min-w-0 flex-1 truncate">{sessionName(session)}</span>
+                  {count > 0 && <span className="rounded-full bg-wait px-1.5 text-xs text-white">{count}</span>}
+                </NavLink>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/** The hub's projects and their open sessions (V3-P102 §4.1); nothing when the hub is not set up here. */
+function HubSection() {
+  const hub = useHubProjects();
+  const list = useHubList(hub.status === "on");
+  const pending = useHubPending(hub.status === "on");
+  if (hub.status === "off" || hub.status === "loading") return null;
+  const waits = new Map<number, number>();
+  for (const p of pending.data?.pending ?? []) waits.set(p.task_id, (waits.get(p.task_id) ?? 0) + 1);
+  const names = (hub.data?.projects ?? []).map((p) => p.name).filter((n): n is string => Boolean(n));
+  const groups = byProject(list.sessions.filter((s) => s.state !== "closed"), names);
+  return (
+    <Section title="Projects">
+      <NavLink to="/agents" className={rowClass}>
+        <LayoutGrid className="size-4" /> Work overview
+      </NavLink>
+      {(hub.status === "down" || !list.reachable) && (
+        <p className="px-3 py-1 text-xs text-danger">The hub is not answering.</p>
+      )}
+      <ul className="mt-1 space-y-0.5" aria-label="Projects">
+        {groups.map(([name, sessions]) => <Project key={name} name={name} sessions={sessions} waits={waits} />)}
+      </ul>
+    </Section>
   );
 }
 
@@ -131,11 +203,7 @@ export function Sidebar({ onClose }: { onClose: () => void }) {
         <Section title="HIMARI">
           <ConversationList />
         </Section>
-        <Section title="Projects">
-          <p className="flex items-center gap-2 px-3 py-1 text-sm text-faint">
-            <FolderGit2 className="size-4" /> Agent sessions come next.
-          </p>
-        </Section>
+        <HubSection />
       </div>
       <div className="border-t border-line p-2">
         <SettingsMenu />

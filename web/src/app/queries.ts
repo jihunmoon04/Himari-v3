@@ -11,6 +11,7 @@ import {
   readServer,
   readSession,
 } from "@/api/himari";
+import { readHubPending, readHubProjects, readHubSession } from "@/api/hub";
 import { openStream } from "@/lib/sse";
 
 export const queryClient: QueryClient = new QueryClient({
@@ -79,3 +80,26 @@ export function usePrincipalEvents(enabled: boolean) {
     });
   }, [client, enabled]);
 }
+
+// -- the hub (V3-P102 W2) ---------------------------------------------------------------------------------------
+
+export const hubKeys = {
+  projects: ["hub", "projects"] as const,
+  pending: ["hub", "pending"] as const,
+  session: (id: number) => ["hub", "session", id] as const,
+};
+
+/** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
+export function useHubProjects() {
+  const query = useQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 60_000, retry: false });
+  const status = query.isLoading ? "loading"
+    : query.error instanceof ApiError && query.error.status === 404 ? "off"
+    : query.error ? "down" : "on";
+  return { ...query, status } as const;
+}
+
+export const useHubSessionDetail = (id: number) =>
+  useQuery({ queryKey: hubKeys.session(id), queryFn: () => readHubSession(id), retry: false });
+
+export const useHubPending = (enabled: boolean) =>
+  useQuery({ queryKey: hubKeys.pending, queryFn: readHubPending, enabled, refetchInterval: 30_000 });
