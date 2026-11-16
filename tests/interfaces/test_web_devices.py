@@ -4,6 +4,7 @@ permission, and where messages come from."""
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import secrets
 import time
@@ -19,6 +20,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.routing import APIRoute  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from runnerkit import start_runner  # noqa: E402
 from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
@@ -91,16 +93,20 @@ class Bare:
         return self.request("POST", url, **kwargs)
 
 
+_RUNNERS = itertools.count()
+
+
 class Server:
     def __init__(self, tmp_path: Path, companion: bool = True, *, provider: ScriptedAdapter | None = None,
                  model_id: str = "scripted-model", models: tuple[tuple[str, str | None], ...] = ()) -> None:
         self.provider = provider if provider is not None else ScriptedAdapter([], companion=companion)
         self.application: Application | None = None
+        self.kit = start_runner(tmp_path / f"runner{next(_RUNNERS)}")  # the machine Environment: uploads go there (V3-P101)
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id=model_id,
                                                       models=models, sandbox=False, cleanup_seconds=None,
-                                                      companion=companion)
+                                                      companion=companion, machine_socket=self.kit.socket)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),
@@ -154,6 +160,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
         s.app.devices._failure_delay = 0  # type: ignore[attr-defined]
         s.sign_in()
         yield s
+    s.kit.close()
 
 
 def error_code(response: Any) -> str:
@@ -945,7 +952,6 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
 
 def test_device_presented_files_list_and_download_scope(server: Server) -> None:
     from testkit import calls as tool_calls
-    from himari.bootstrap.application import workspace_for
 
     me = server.as_device(server.paired("데스크톱"))
     other_device = server.as_device(server.paired("노트북"))
@@ -960,15 +966,15 @@ def test_device_presented_files_list_and_download_scope(server: Server) -> None:
         f"/api/conversations/{cid}/uploads?name=secret.txt", content=b"secret", headers=SEND
     ).json()
 
-    folder = Path(server.app.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    folder = server.kit.himari_home / "conversations" / cid
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "report.txt").write_bytes(b"version-1")
-    server.provider.extend([tool_calls(("inside/present_file", {"path": "report.txt"})), final("v1 ready")])
+    server.provider.extend([tool_calls(("machine/present_file", {"path": "report.txt"})), final("v1 ready")])
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "make v1"}, headers=SEND).status_code == 202
     server.wait(cid)
 
     (folder / "report.txt").write_bytes(b"version-2-longer")
-    server.provider.extend([tool_calls(("inside/present_file", {"path": "report.txt"})), final("v2 ready")])
+    server.provider.extend([tool_calls(("machine/present_file", {"path": "report.txt"})), final("v2 ready")])
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "make v2"}, headers=SEND).status_code == 202
     server.wait(cid)
 

@@ -9,8 +9,7 @@ Configuration comes from the environment (see ``config.py``):
 ``HIMARI_FILE_MAX_BYTES``, ``HIMARI_FILE_STORE_MAX_BYTES``, ``HIMARI_FILE_KEEP_DAYS`` (files, V3-P66),
 ``HIMARI_MEMORY`` (0 turns memory off, V3-P71),
 ``HIMARI_CONVERSATION_SEARCH`` (0 turns conversation search off, V3-P72),
-``HIMARI_WEB_SANDBOX_PORT`` (Tool views' origin; started only when some
-MCP server's views are shown) and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
+and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
 real environment variables win; the token variables named in
 ``<data_root>/mcp.json`` are read from the same place. Secrets are never
 printed.
@@ -19,15 +18,12 @@ printed.
 from __future__ import annotations
 
 import argparse
-import asyncio
-import contextlib
 import os
 import sys
-from collections.abc import Iterator
 from types import FrameType
 
 from himari.bootstrap import read_env_file
-from himari.bootstrap.application import Application, TurnSettings, check_tool_sources, tool_views_configured
+from himari.bootstrap.application import Application, TurnSettings, check_tool_sources
 from himari.interfaces.web.config import WebConfig, WebConfigError
 
 API_KEY_VAR = "OPENROUTER_API_KEY"
@@ -57,7 +53,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         check_tool_sources(config.data_root, environment)
-        views = tool_views_configured(config.data_root, environment)
     except ValueError as error:
         print(f"configuration error: {error}", file=sys.stderr)
         return 2
@@ -65,7 +60,6 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     from himari.interfaces.web.app import begin_shutdown, create_app
-    from himari.interfaces.web.sandbox import SandboxSigner, create_sandbox_app
     from himari.provider.api import ProviderAdapter
 
     def provider() -> ProviderAdapter:
@@ -93,7 +87,6 @@ def main(argv: list[str] | None = None) -> int:
                                              time_zone=config.time_zone,
                                              machine_socket=config.machine_socket,
                                              machine_principals=config.machine_principals,
-                                             machine_attached_write=config.machine_attached_write,
                                              proactive=config.proactive)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
@@ -136,10 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                   "Conversation as it was, including ones deleted since)", file=sys.stderr, flush=True)
         return application
 
-    # One key per process: a restart (the only way the MCP policy changes)
-    # voids every view URL signed before it (V3-P58 §3.4).
-    signer = SandboxSigner()
-    web_app = create_app(config, opener, signer)
+    web_app = create_app(config, opener)
 
     class MainServer(uvicorn.Server):
         def handle_exit(self, sig: int, frame: FrameType | None) -> None:
@@ -148,29 +138,7 @@ def main(argv: list[str] | None = None) -> int:
 
     main_server = MainServer(uvicorn.Config(web_app, host=config.host, port=config.port, log_level="info",
                                             server_header=False, proxy_headers=False))
-    if not views:
-        main_server.run()
-        return 0
-
-    class SandboxServer(uvicorn.Server):
-        @contextlib.contextmanager
-        def capture_signals(self) -> Iterator[None]:
-            yield  # the main server handles signals and stops this one when it stops
-
-    sandbox_server = SandboxServer(uvicorn.Config(create_sandbox_app(sorted(config.allowed_hosts), signer),
-                                                  host=config.host, port=config.view_port, log_level="warning",
-                                                  server_header=False, proxy_headers=False))
-
-    async def serve() -> None:
-        sandbox = asyncio.create_task(sandbox_server.serve())
-        try:
-            await main_server.serve()
-        finally:
-            sandbox_server.should_exit = True
-            await sandbox
-
-    print(f"HIMARI web: Tool views from http://{config.host}:{config.view_port}/", file=sys.stderr, flush=True)
-    asyncio.run(serve())
+    main_server.run()
     return 0
 
 

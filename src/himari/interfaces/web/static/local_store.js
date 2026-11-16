@@ -1,6 +1,7 @@
 /* What the user wrote and has not sent or saved, kept in this browser
  * (V3-P78 §5): IndexedDB "himari-local", with "drafts" (the composer's, by
- * place) and "unsaved" (a file's, by path; V3-P77 2c's ink goes there too).
+ * place) and "unsaved" (a file's, by path: the file editor's, gone with V3-P99;
+ * it is kept only so that signing out still wipes what an earlier version left).
  *
  * Every call settles, never throws: a browser without the store (a private
  * window, a full disk, Safari dropping the connection in the background)
@@ -157,7 +158,7 @@ export async function prune(store, max, maxAgeMs, now = Date.now()) {
 /* How many records there are in all (for the sign-out's confirmation). */
 export async function count() {
   let total = 0;
-  for (const store of STORES) {
+  for (const store of ["drafts"]) { // what the user can still see (V3-P99: no screen shows "unsaved")
     const n = await run(store, "readonly", (s) => s.count());
     total += typeof n === "number" ? n : 0;
   }
@@ -173,31 +174,6 @@ export async function wipe() {
   } catch (ignored) { /* the other tabs find no session, and sign in again */ }
 }
 
-/* Whether the tab that is ``writer`` (its WRITER) is open now (V3-P82 §4: its kept ink is then asked about,
- * not put back on its own): asked over the channel, an answer waited for ``ms``. False without a channel. */
-export function alive(writer, ms = 300) {
-  if (!channel || writer === WRITER) return Promise.resolve(writer === WRITER);
-  const ask = channel;
-  return new Promise((resolve) => {
-    const answered = (event) => {
-      if (!event.data || event.data.here !== writer) return;
-      done(true);
-    };
-    const timer = setTimeout(() => done(false), ms);
-    function done(result) {
-      clearTimeout(timer);
-      ask.removeEventListener("message", answered);
-      resolve(result);
-    }
-    ask.addEventListener("message", answered);
-    try {
-      ask.postMessage({ alive: writer });
-    } catch (ignored) {
-      done(false);
-    }
-  });
-}
-
 /* ``listener()`` runs when another tab wiped the store; writes are closed here first. */
 export function onWiped(listener) {
   wipedListeners.push(listener);
@@ -207,7 +183,6 @@ try {
   channel = new BroadcastChannel(CHANNEL);
   if (typeof channel.unref === "function") channel.unref(); // Node (the smokes): it never holds the process open
   channel.onmessage = (event) => {
-    if (event.data && event.data.alive === WRITER) channel.postMessage({ here: WRITER }); // open: this tab
     if (!event.data || !event.data.wiped) return;
     writable = false;
     for (const listener of wipedListeners) listener();

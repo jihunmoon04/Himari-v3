@@ -761,8 +761,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         # unknown (recovery) or its result kept out of the conversation (ConversationRecord.OMIT).
         cid = page.locator(".conv-row.is-selected").get_attribute("data-id")
         call = {"sequence": 2, "kind": "assistant_tool_calls", "created_at": None, "text": "", "model": None,
-                "run_id": "r1", "calls": [{"call_id": "c0", "tool_id": "calliope/stamp", "arguments": {},
-                                           "app_view": False}]}
+                "run_id": "r1", "calls": [{"call_id": "c0", "tool_id": "calliope/stamp", "arguments": {}}]}
         asked = {"sequence": 1, "kind": "user_message", "created_at": None, "text": "Stamp it", "answers_call": None,
                  "answers_run": None, "attachments": []}
         answer = {"sequence": 3, "kind": "assistant_final", "created_at": None, "text": "Stamped.", "model": None}

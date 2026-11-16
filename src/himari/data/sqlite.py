@@ -92,7 +92,6 @@ from himari.data.api import (
     PRESENT_WINDOW,
     STAGED_SEND_CUTOFF,
     AnswerCommit,
-    AppView,
     Artifact,
     ArtifactMutation,
     AssistantFinal,
@@ -174,14 +173,11 @@ from himari.data.api import (
     RunPurpose,
     RunRecord,
     RunStatus,
-    StoredAppView,
     ToolCompletion,
     ToolExecutionRecord,
     ToolExecutionStatus,
     ToolResultRecord,
     TrashedConversation,
-    UiCsp,
-    UiResource,
     InterfaceSnapshot,
     MessageOrigin,
     OriginKind,
@@ -335,7 +331,9 @@ CREATE TABLE external_settings (
 ) STRICT;
 """
 # v5: Tool views (MCP Apps, V3-P58), content-addressed and shared by every
-# Conversation; a call stored with its view names it and keeps its payload.
+# Conversation; a call stored with its view named it and kept its payload.
+# Views are no longer stored or read: the table and columns stay, with
+# whatever an earlier version put in them.
 # A new database runs the same ALTERs, so its schema matches an upgraded one.
 _V5_ADDITIONS = """
 CREATE TABLE ui_resources (
@@ -1285,36 +1283,6 @@ def _execution(row: sqlite3.Row) -> ToolExecutionRecord:
         workspace_binding_id=None if row["workspace_binding_id"] is None else BindingId(row["workspace_binding_id"]),
         unknown_outcome=None if row["unknown_outcome"] is None else UnknownOutcomePolicy(row["unknown_outcome"]),
         record_event=None if record_event is None else bool(record_event),
-        ui_digest=row["ui_digest"],
-    )
-
-
-def _ui_meta(resource: UiResource) -> str:
-    csp = resource.csp
-    return codec.dump_json({
-        "csp": {"connect_domains": csp.connect_domains, "resource_domains": csp.resource_domains,
-                "frame_domains": csp.frame_domains, "base_uri_domains": csp.base_uri_domains},
-        "prefers_border": resource.prefers_border,
-    })
-
-
-def _ui_resource(row: sqlite3.Row) -> UiResource:
-    meta = codec.load_json(row["meta"])
-    assert isinstance(meta, Mapping)
-    csp = meta["csp"]
-    assert isinstance(csp, Mapping)
-
-    def domains(key: str) -> tuple[str, ...]:
-        value = csp[key]
-        assert isinstance(value, tuple)
-        return tuple(str(d) for d in value)
-
-    prefers_border = meta["prefers_border"]
-    return UiResource(
-        row["digest"], row["source"], row["uri"], row["html"],
-        UiCsp(domains("connect_domains"), domains("resource_domains"), domains("frame_domains"),
-              domains("base_uri_domains")),
-        prefers_border if isinstance(prefers_border, bool) else None,
     )
 
 
@@ -1778,7 +1746,6 @@ class SqliteData:
                 raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is {status.value}")
             if completion.status not in _TERMINAL_COMPLETIONS:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"not a definite outcome: {completion.status}")
-            view = rules.check_app_view(completion)
             if completion.presented_files and completion.status is not ToolExecutionStatus.SUCCEEDED:
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
             if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
@@ -1786,44 +1753,17 @@ class SqliteData:
             self._apply_artifacts(tx, scope, completion.artifact_mutations)  # CAS errors roll everything back
             if completion.memory_change is not None:
                 self._apply_memory(tx, scope, call, completion.memory_change)
-            if view is not None:
-                self._store_ui_resource(tx, view.resource)
             if completion.presented_files:
                 self._present(tx, scope, call, completion.presented_files)
             self._attach_tool_images(tx, scope, call, completion.model_result.blocks)
             tx.execute(
-                "UPDATE tool_executions SET status=?, model_result=?, raw_result=?, ui_digest=?, app_payload=?"
-                " WHERE seq=?",
+                "UPDATE tool_executions SET status=?, model_result=?, raw_result=? WHERE seq=?",
                 completion.status.value, codec.model_result(completion.model_result),
-                codec.dump_json(completion.raw_result),
-                None if view is None else view.resource.digest,
-                None if view is None else codec.dump_json(view.payload), record["seq"],
+                codec.dump_json(completion.raw_result), record["seq"],
             )
             if not completion.record_event:
                 return None
             return self._new_event(tx, scope, ToolResultRecord(call, completion.model_result), call.run_id)
-
-    @staticmethod
-    def _store_ui_resource(tx: _Tx, resource: UiResource) -> None:
-        """Content-addressed: an existing digest must hold the same view."""
-        known = tx.one("SELECT * FROM ui_resources WHERE digest=?", resource.digest)
-        if known is None:
-            tx.execute("INSERT INTO ui_resources (digest, source, uri, html, meta) VALUES (?, ?, ?, ?, ?)",
-                       resource.digest, resource.source, resource.uri, resource.html, _ui_meta(resource))
-        elif _ui_resource(known) != resource:
-            raise DataError(DataErrorCode.INVALID_ARGUMENT, "another view is stored under this digest")
-
-    async def read_app_view(self, scope: TrustedScope, call: CallRef) -> StoredAppView | None:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            row = self._execution_row(tx, scope, call)
-            if row["ui_digest"] is None:
-                return None
-            resource = tx.one("SELECT * FROM ui_resources WHERE digest=?", row["ui_digest"])
-            assert resource is not None  # REFERENCES
-            record = _execution(row)
-            view = AppView(_ui_resource(resource), codec.load_json(row["app_payload"]))
-            return StoredAppView(call, record.tool_id, record.arguments, record.status, view)
 
     async def commit_unknown_outcome(
         self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult
@@ -2399,6 +2339,7 @@ class SqliteData:
         with self._tx() as tx:
             if tx.owned(scope)["purge_started_at"] is None:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not being deleted")
+            # V3-P97 keeps the table for the views stored before: they still go with their last call
             digests = [r["ui_digest"] for r in tx.all(
                 "SELECT DISTINCT ui_digest FROM tool_executions WHERE conversation_id=? AND ui_digest IS NOT NULL",
                 scope.conversation_id)]

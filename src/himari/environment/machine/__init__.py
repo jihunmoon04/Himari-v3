@@ -4,17 +4,16 @@ HIMARI runs as its service user; commands and file operations are done by
 ``himari-runner``, which runs as the user (``coder``), through
 :mod:`himari.runner.api` (§4, §5). Paths are the user's real paths.
 Reading reaches what the user can read except the runner's hidden list;
-writing reaches only the Conversation's Workspaces (§3) — or, with
-``attached_writable=False`` (V3-P94), only the Conversation's own folder:
-the attached folders are then only read, and their files are changed by
-the coding agents the hub runs, not by HIMARI.
+writing reaches only the Conversation's own folder (V3-P94, V3-P100):
+the attached folders are only read, and their files are changed by the
+coding agents the hub runs, not by HIMARI.
 
 A Conversation's own folder, ``<HIMARI home>/conversations/<conversation_id>``,
 is its first Workspace — the T0 Binding's ``cwd_relative`` under the
 runner's HIMARI home. The user attaches more (§10): each is a Binding of a
 registered folder, whose real path Data keeps (``WorkspaceRegistry``). A
-call may write in all of them; its working directory is the activation's
-default Binding (§10.4).
+call reads in all of them and writes in the own folder only; its working
+directory is the activation's default Binding (§10.4).
 
 Writes and commands take path locks (§9.1) on all of the Conversation's
 folders at once: overlapping paths wait for each other, other
@@ -39,11 +38,11 @@ from himari.common import EnvironmentKind, PrincipalId, TrustedScope, WorkspaceI
 from himari.data.api import TEMP_PREFIX, BindingAuthority, WorkspaceRegistry
 from himari.documents.api import DocumentReading
 from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
-from himari.environment.inside import InsideFiles, WorkspaceBusy
-from himari.environment.machine.changes import ChangeLog
 from himari.environment.machine.client import RunnerClient
 from himari.environment.machine.locks import PathLocks
+from himari.environment.machine.results import ToolFiles
 from himari.runner import api as runner
+from himari.sandbox.api import SandboxState
 from himari.tool.api import ToolHandler
 
 MACHINE = EnvironmentKind("machine")
@@ -55,11 +54,9 @@ READ_SCOPE = ("everything the user can read on this server, except hidden locati
               "data); the user's home is {home}")
 NETWORK = "HTTPS only, through a proxy, to these hosts (others are refused with 403): {hosts}"
 NO_NETWORK = "none: commands cannot reach the network"
-PUSH = "to the 'origin' remote of a repository in the workspaces, if it is one of: {repos} (https remotes only)"
-NO_PUSH = "not set up on this server"
 # §14: what the model is told of a cloud-synced folder, apart from the user's note.
 CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
-# V3-P94: what the model is told of an attached folder it may not write.
+# V3-P94, V3-P100: what the model is told of an attached folder (it may not write it).
 READ_ONLY_NOTE = ("Read-only for you: your file tools and commands cannot change anything in it. To change its "
                   "files, hand the work to a coding agent.")
 DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
@@ -69,8 +66,8 @@ DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from othe
 @dataclass(frozen=True)
 class Places:
     """A Conversation's folders as real paths (§3.2): its working directory,
-    its folders (its own first), each with its label, and the ones it may
-    write (all of them, or its own only: V3-P94)."""
+    its folders (its own first), each with its label, and the one it may
+    write (its own: V3-P100)."""
 
     cwd: str
     roots: tuple[str, ...]
@@ -80,7 +77,7 @@ class Places:
 
 def machine_workspace_for(principal: PrincipalId) -> WorkspaceId:
     """A principal's machine Workspace id (its HIMARI home): stable, and told
-    apart from Inside ids (``ws_``) by its prefix."""
+    apart from other ids (the old Inside ``ws_``) by its prefix."""
     return WorkspaceId(_PREFIX + hashlib.sha256(principal.encode()).hexdigest()[:24])
 
 
@@ -88,10 +85,13 @@ class MachineUnavailable(Exception):
     """The runner could not be reached (or is not enforced); nothing was done."""
 
 
+class WorkspaceBusy(Exception):
+    """The Conversation's folder lock was not free in time (V3-P66 §5.1, review N4)."""
+
+
 class MachineEnvironment:
-    def __init__(self, socket_path: str, *, files: InsideFiles | None = None,
-                 documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None,
-                 changes: ChangeLog | None = None, attached_writable: bool = True) -> None:
+    def __init__(self, socket_path: str, *, files: ToolFiles | None = None,
+                 documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None) -> None:
         from himari.environment.machine.tools import machine_tools
 
         self.client = RunnerClient(socket_path)
@@ -99,12 +99,9 @@ class MachineEnvironment:
         self.documents = documents
         # The attached Workspaces (§10); None: each Conversation has its own folder only.
         self.registry = registry
-        # The review record of the file Tools' changes (V3-P76 §8); None: written without one.
-        self.changes = changes
-        # V3-P94: False — the Tools write the Conversation's own folder only; attached folders are only read.
-        self.attached_writable = attached_writable
-        self._protocol = 0  # the runner's, once it is new enough (it is asked again until then)
         self.locks = PathLocks()
+        # The runner's sandbox as it last said (V3-P101: what the interfaces show as the commands' state).
+        self.sandbox_state = SandboxState.UNAVAILABLE
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
 
     @property
@@ -122,46 +119,16 @@ class MachineEnvironment:
         return await self.client.call(op, args, fds)
 
     async def hello(self) -> dict[str, Any]:
-        result, _ = await self.call(runner.HELLO, {})
+        try:
+            result, _ = await self.call(runner.HELLO, {})
+        except Exception:
+            self.sandbox_state = SandboxState.UNAVAILABLE  # not answering: commands cannot run (V3-P101)
+            raise
+        try:
+            self.sandbox_state = SandboxState(result.get("state"))
+        except ValueError:
+            self.sandbox_state = SandboxState.UNAVAILABLE
         return result
-
-    async def keeps(self) -> bool:
-        """The runner keeps copies and installs in one step (V3-P76 §4.1).
-        One older (not restarted since HIMARI was updated) would take such a
-        request for a plain write: then none is sent, until it is new."""
-        if self._protocol < runner.KEEP_PROTOCOL:
-            version = (await self.hello()).get("version")
-            self._protocol = version if isinstance(version, int) else 0
-        return self._protocol >= runner.KEEP_PROTOCOL
-
-    async def copies_large(self, fresh: bool = False) -> bool:
-        """The runner takes ``copy_max`` and ``delete_copied`` (V3-P77 §6.1):
-        a PDF up to 64 MiB replaced or deleted with its copy. One older would
-        copy 1 MiB at most: a PDF's write is then refused before it is sent.
-        ``fresh``: asked again, not as told before (a runner rolled back since
-        refuses those writes; PR #103 review P1)."""
-        if fresh:
-            self._protocol = 0
-        if self._protocol < runner.COPY_MAX_PROTOCOL:
-            version = (await self.hello()).get("version")
-            self._protocol = version if isinstance(version, int) else 0
-        return self._protocol >= runner.COPY_MAX_PROTOCOL
-
-    async def appends(self, fresh: bool = False) -> bool:
-        """The runner writes a PDF's save in place and cuts it back (``append``, ``truncate``; V3-P82 §3.6). One
-        older refuses both as unknown, writing nothing; ``fresh`` asks again (after such a refusal)."""
-        if fresh:
-            self._protocol = 0
-        if self._protocol < runner.APPEND_PROTOCOL:
-            version = (await self.hello()).get("version")
-            self._protocol = version if isinstance(version, int) else 0
-        return self._protocol >= runner.APPEND_PROTOCOL
-
-    async def change_log(self) -> ChangeLog | None:
-        """The review record, when there is one and the runner can serve it."""
-        if self.changes is None or not await self.keeps():
-            return None
-        return self.changes
 
     async def folder(self, conversation_id: str, cwd_relative: str) -> str:
         """The Binding's folder as a real path; the Conversation's own folder
@@ -208,13 +175,11 @@ class MachineEnvironment:
             path = item.workspace.location
             if path not in roots:
                 roots.append(path)
-                notes = ([] if self.attached_writable else [READ_ONLY_NOTE]) + (
-                    [DRIVE_NOTE] if item.workspace.filesystem in CLOUD_FILESYSTEMS else [])
-                notice = " ".join(notes) or None
-                shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note, notice))
+                notes = [READ_ONLY_NOTE] + ([DRIVE_NOTE] if item.workspace.filesystem in CLOUD_FILESYSTEMS else [])
+                shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note, " ".join(notes)))
             if item.binding.binding_id == working:
                 cwd = path
-        return Places(cwd, tuple(roots), tuple(shown), tuple(roots) if self.attached_writable else (own,))
+        return Places(cwd, tuple(roots), tuple(shown), (own,))
 
     async def observe(self, scope: TrustedScope, bindings: Sequence[BindingAuthority]) -> Sequence[BindingObservation]:
         """Every Binding is told online or offline; the working one (the
@@ -236,14 +201,12 @@ class MachineEnvironment:
         readable = READ_SCOPE.format(home=about["home"])
         hosts = about.get("network")
         network = NETWORK.format(hosts=", ".join(map(str, hosts))) if isinstance(hosts, list) and hosts else NO_NETWORK
-        repos = about.get("push")
-        push = PUSH.format(repos=", ".join(map(str, repos))) if isinstance(repos, list) and repos else NO_PUSH
         return [BindingObservation(b.binding_id, ConnectionStatus.ONLINE, now, working_directory=places.cwd,
                                    writable=places.writable, workspaces=places.shown, readable=readable,
-                                   network=network, push=push)
+                                   network=network)
                 for b in bindings]
 
-    # --- uploads (V3-P66 §5.2), the same steps as Inside -------------------------------------
+    # --- uploads (V3-P66 §5.2) ---------------------------------------------------------------
 
     @asynccontextmanager
     async def locked(self, workspace_id: WorkspaceId, timeout: float, *, conversation_id: str,

@@ -272,9 +272,9 @@ def test_a_prompt_list_over_its_byte_bound_is_left_out() -> None:
 
 
 
-def test_a_prompt_list_that_never_answers_keeps_the_tools_views(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_prompt_list_that_never_answers_keeps_a_stdio_servers_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     """PR #40 re-review B3: a timed-out prompts/list leaves a stdio listing
-    session checking; the views are read before it, so they stay."""
+    session checking; the Tools are read before it, so they stay."""
     monkeypatch.setattr(tools_module, "PROMPTS_STARTUP_SECONDS", 0.3)
     from mcp_fake import ECHO_SCHEMA, VIEW_URI, view_entry
 
@@ -292,7 +292,6 @@ def test_a_prompt_list_that_never_answers_keeps_the_tools_views(monkeypatch: pyt
         try:
             (status,) = connection.statuses
             assert status.available and status.tool_ids == ("calliope/echo", "calliope/list_resources", "calliope/read_resource")
-            assert connection.ui_for("calliope/echo") is not None  # the view was read
             assert status.problems == ("prompts left out: no answer in time",)
         finally:
             await connection.aclose()

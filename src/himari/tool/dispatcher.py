@@ -374,14 +374,12 @@ class Dispatcher:
     async def _commit_kept(
         self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome, record_event: bool
     ) -> None:
-        ran = outcome.status in (ToolStatus.SUCCEEDED, ToolStatus.FAILED)
         completion = ToolCompletion(
             status=_STATUS[outcome.status],
             model_result=outcome.model_result,
             raw_result=outcome.raw_result,
             artifact_mutations=outcome.artifact_mutations,
             record_event=record_event,
-            app_view=outcome.app_view if ran else None,  # only a call that ran has a view (V3-P58)
             presented_files=outcome.presented_files if outcome.status is ToolStatus.SUCCEEDED else (),
             memory_change=outcome.memory_change if outcome.status is ToolStatus.SUCCEEDED else None,
         )
@@ -390,15 +388,6 @@ class Dispatcher:
             return
         except DataError as first:
             error = first
-        if completion.app_view is not None and error.code is DataErrorCode.INVALID_ARGUMENT:
-            # A view Data refuses must not cost the call its definite result:
-            # the commit is atomic, so commit the result without it.
-            completion = replace(completion, app_view=None)
-            try:
-                await self._log.commit_tool_outcome(scope, call, completion)
-                return
-            except DataError as again:
-                error = again
         if completion.memory_change is not None and error.code in _MEMORY_REFUSED:
             await self._commit_refused(scope, call, completion, ModelToolResult(
                 (TextBlock(f"Nothing was saved: {_MEMORY_REFUSED[error.code]}."),), is_error=True),
@@ -424,12 +413,7 @@ class Dispatcher:
         failed = replace(
             completion, status=ToolExecutionStatus.FAILED, presented_files=(), artifact_mutations=(),
             memory_change=None, model_result=model_result, raw_result=raw_result)
-        try:
-            await self._log.commit_tool_outcome(scope, call, failed)
-        except DataError as again:
-            if failed.app_view is None or again.code is not DataErrorCode.INVALID_ARGUMENT:
-                raise
-            await self._log.commit_tool_outcome(scope, call, replace(failed, app_view=None))
+        await self._log.commit_tool_outcome(scope, call, failed)
 
     @staticmethod
     def _group_state(run_id: RunId, records: Sequence[ToolExecutionRecord]) -> GroupDispatchResult:

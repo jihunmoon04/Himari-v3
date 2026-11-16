@@ -392,7 +392,7 @@ class ServerSandbox:
                 limit=STREAM_LIMIT,
             ))
             try:
-                process = await asyncio.shield(spawn)  # see SandboxBackend.launch: never interrupt a spawn
+                process = await asyncio.shield(spawn)  # as protected_run: never interrupt a spawn
             except asyncio.CancelledError:
                 await _abandon(spawn)
                 raise

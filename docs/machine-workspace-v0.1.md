@@ -1,5 +1,7 @@
 # 머신 Workspace v0.1
 
+> **일부 제거됨(2026-11-16, V3-P100):** 붙인 Workspace에 쓰는 길과 `git_push`(§12, §23)를 코드에서 뺐다. HIMARI의 `machine` Tool은 대화 폴더에만 쓰고, 붙인 Workspace는 읽기만 한다(§25). 아래의 쓰기 범위·push 설명은 기록으로만 남긴다.
+
 > 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5, 배포 2026-10-25). 2단계 구현(§21; 외부 검수 B1~B3 반영, 병합). 3단계 구현(§22; 외부 검수 B1·B2 §22.5, 병합). 4단계 구현(§23; 외부 검수 B1·B2 §23.5, 재검수 C1 §23.6). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
@@ -411,6 +413,8 @@ Tool 설명에 고정 문장으로 쓰기 범위·숨김·네트워크·push 방
 - 안 되는 것: SSH git(`git@github.com:`, HTTPS를 쓰라고 Tool 설명에 적음), `apt`(root 필요. 시스템 패키지는 운영자가 설치, §19), 허용 목록 밖의 웹(웹 읽기는 Exa Tool로).
 
 ## 12. git push (Q7)
+
+> **제거됨(V3-P100, §25).** 아래는 기록이다.
 
 push는 인증 정보가 필요하고 밖에 영향을 주는 일이라 Sandbox 밖의 runner가 한다. 그래서 **모델이 만든 것을 Sandbox 밖에서 실행하지 않는 것**이 핵심이다. 저장소의 `.git/hooks`, `.git/config`(`core.fsmonitor`, `core.sshCommand`, `credential.helper`, `include.path` 등)는 모두 모델이 쓸 수 있다.
 
@@ -939,7 +943,7 @@ pids_max = 1024
 
 ### 24.2 무엇이 바뀌나
 
-설정 `HIMARI_MACHINE_ATTACHED_WRITE=0`(web.env)일 때만 바뀐다. 없거나 `1`이면 §3.2 그대로다.
+설정 `HIMARI_MACHINE_ATTACHED_WRITE=0`(web.env)일 때만 바뀐다. 없거나 `1`이면 §3.2 그대로다. (V3-P100 뒤로는 설정 없이 늘 `0`의 동작이다: §25.)
 
 | | 기본 (`1`) | `0` |
 | --- | --- | --- |
@@ -965,3 +969,30 @@ pids_max = 1024
 
 - pytest(WSL Ubuntu, Python 3.12.3): `tests/environment/test_machine.py`에 두 시험을 더했다. 붙인 폴더의 쓰기·고치기·지우기가 DENIED이고 파일이 그대로인 것, 대화 폴더에는 써지는 것, 명령의 쓰기 묶음이 대화 폴더뿐이고 작업 위치는 붙인 폴더인 것, Current State와 Tool 설명이 읽기 전용을 알리는 것, 기본값에서는 설명이 바뀌지 않는 것.
 - 실제 runner·Sandbox(bubblewrap + Landlock)에서 붙인 폴더에 쓰는 명령이 막히는 것은 이 변경에서 다시 돌리지 않았다. 운영 서버에 설정을 넣을 때 확인한다.
+
+## 25. 붙인 Workspace 쓰기와 `git_push` 제거 (V3-P100, 2026-11-16)
+
+### 25.1 무엇을 뺐나
+
+- **붙인 Workspace에 쓰기:** §24의 `0`이 유일한 동작이 됐다. 설정 `HIMARI_MACHINE_ATTACHED_WRITE`와 `MachineEnvironment(attached_writable=…)`가 없어졌다. runner에 주는 `write_roots`는 늘 대화 폴더 하나이고, 쓰기 Tool의 설명·Current State의 `notice`·거부 글은 늘 읽기 전용을 말한다. 붙이지 않은 폴더에 쓰려던 호출도 같은 글을 받는다("attach the folder"는 이제 틀린 말이라서).
+- **`git_push`:** Tool `machine/git_push`, runner의 `git_push` 연산과 `hello.push`, `runner/push.py`(URL 검사, bundle, 빈 bare 저장소에서 push, 토큰 검사), `runner.toml`의 `[push]` 읽기, Current State의 `git_push` 줄, push만 쓰던 Sandbox의 `stdout_to`(stdout을 파일로 받기, `_spool`). `run_command` 설명은 "명령에는 인증 정보가 없어 push할 수 없다"고 말한다.
+- runner 프로토콜은 6이다(5에서 `git_push`와 `hello.push`를 뺌).
+
+### 25.2 그대로인 것
+
+- 읽기(§3.1), 작업 위치(§10.4: 붙인 폴더가 읽는 자리로 남음), 붙이기와 떼기(§10), Drive 알림(§14), 업로드(대화 폴더).
+- lock(§9.1)은 여전히 대화의 모든 폴더를 잡는다(쓰는 곳은 대화 폴더뿐이지만 동작을 바꾸지 않았다).
+- runner의 `writable_under`·`check_workspace`(등록할 때의 검사)는 그대로다.
+- 바뀐 동작 하나: 붙인 폴더가 디스크에서 사라져도 대화 폴더에 쓰는 일은 막히지 않는다. 전에는 사라진 폴더가 `write_roots`에 들어가 runner가 모든 쓰기를 거부했다.
+
+### 25.3 운영에서 할 일 (배포 때)
+
+- `runner.toml`의 `[push]`는 남아 있어도 무시된다(모르는 키와 같다). web.env의 `HIMARI_MACHINE_ATTACHED_WRITE`도 무시된다.
+- `/etc/himari-runner/push-token`의 GitHub 토큰은 더는 쓰이지 않는다. 소유자가 GitHub에서 토큰을 폐기하고 파일을 지운다.
+- runner와 Web을 같은 release로 다시 시작한다.
+
+### 25.4 확인
+
+- 지운 시험: `tests/runner/test_push.py`, `tests/gitserver.py`(로컬 HTTPS git 서버), `tests/environment/test_machine.py`의 `test_git_push`·붙인 곳에 쓰는 시험, 호스트 게이트 `tests/sandbox_host/test_machine_host.py`의 push 세 시험.
+- 고친 시험: 붙인 폴더는 읽기만, 대화 폴더로 작업 위치를 옮기면 쓰기, 사라진 붙인 폴더가 대화 폴더 쓰기를 막지 않음, Current State에 `git_push`가 없음.
+- 호스트 게이트(실제 bubblewrap + Landlock)는 이 변경에서 돌리지 않았다.

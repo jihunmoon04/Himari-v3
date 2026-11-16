@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import replace
 
 from testkit import FAKE, SCOPE, RecordingTool, text_result
 
@@ -17,7 +16,6 @@ from himari.data.api import (
 )
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.tool.api import (
-    AppView,
     EffectProfile,
     GroupState,
     RefusalRule,
@@ -26,7 +24,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    UiResource,
     WorkspaceRequirement,
 )
 from himari.tool.access import ConfiguredExternalAccess
@@ -219,11 +216,6 @@ def test_the_catalog_shows_external_tools_of_enabled_sources_only() -> None:
     assert registry.external_sources() == {"remote", "other"}
 
 
-# --- Tool views (MCP Apps, V3-P58) ---------------------------------------------
-
-VIEW = UiResource.create("remote", "ui://remote/view", "<p>view</p>")
-
-
 def dispatch_one(outcome: ToolOutcome, *, effect: EffectProfile = EffectProfile.SCOPED_WRITE,
                  ) -> tuple[InMemoryData, ToolExecutionRecord]:
     """One External call whose handler returns ``outcome``; the data and its record."""
@@ -245,25 +237,6 @@ def dispatch_one(outcome: ToolOutcome, *, effect: EffectProfile = EffectProfile.
         return data, record
 
     return asyncio.run(scenario())
-
-
-def test_a_view_is_committed_with_the_result() -> None:
-    data, record = dispatch_one(ToolOutcome(ToolStatus.SUCCEEDED, text_result("ok"), app_view=AppView(VIEW, {"n": 1})))
-    assert (record.status, record.ui_digest) == (ToolExecutionStatus.SUCCEEDED, VIEW.digest)
-    stored = asyncio.run(data.read_app_view(SCOPE, record.call))
-    assert stored is not None and stored.view == AppView(VIEW, {"n": 1})
-
-
-def test_a_view_on_a_call_that_did_not_run_is_dropped() -> None:
-    _, record = dispatch_one(ToolOutcome(ToolStatus.DENIED, text_result("no"), app_view=AppView(VIEW, {})))
-    assert (record.status, record.ui_digest) == (ToolExecutionStatus.DENIED, None)
-
-
-def test_a_view_data_refuses_does_not_cost_the_call_its_result() -> None:
-    forged = replace(VIEW, html="<p>not what the digest says</p>")
-    _, record = dispatch_one(ToolOutcome(ToolStatus.SUCCEEDED, text_result("ok"), app_view=AppView(forged, {})))
-    # Claimed (SCOPED_WRITE), yet definite: not UNKNOWN because of the view.
-    assert (record.status, record.model_result, record.ui_digest) == (ToolExecutionStatus.SUCCEEDED, text_result("ok"), None)
 
 
 # --- presented files (V3-P66 §7.1) ------------------------------------------------

@@ -48,7 +48,6 @@ from himari.data.api import (
     PRESENT_WINDOW,
     STAGED_SEND_CUTOFF,
     AnswerCommit,
-    AppView,
     Artifact,
     ArtifactMutation,
     AssistantFinal,
@@ -127,13 +126,11 @@ from himari.data.api import (
     RunPurpose,
     RunRecord,
     RunStatus,
-    StoredAppView,
     ToolCompletion,
     ToolExecutionRecord,
     ToolExecutionStatus,
     ToolResultRecord,
     TrashedConversation,
-    UiResource,
     InterfaceSnapshot,
     MessageOrigin,
     OriginKind,
@@ -215,7 +212,6 @@ class _Conversation:
     idempotency: dict[str, EventId] = field(default_factory=dict)
     external: dict[str, bool] = field(default_factory=dict)  # V3-P53 choices by source
     model: ModelSetting | None = None  # V3-P64
-    app_payloads: dict[CallRef, JsonValue] = field(default_factory=dict)  # V3-P58, by call
     trashed_at: datetime | None = None  # V3-P65
     purge_started_at: datetime | None = None
     files: list[_File] = field(default_factory=list)  # V3-P66, in creation order
@@ -239,7 +235,6 @@ class InMemoryStore:
     def __init__(self) -> None:
         self._conversations: dict[ConversationId, _Conversation] = {}
         self._ids = itertools.count(1)
-        self.ui_resources: dict[str, UiResource] = {}  # V3-P58: by digest, shared by every Conversation
         self.blob_rows: dict[str, BlobRow] = {}  # V3-P66: by key, shared by a principal's Conversations
         self.blobs = FileStore(MemoryBlobFiles(), _MemoryBlobRows(self))
         self.instructions: dict[tuple[PrincipalId, InstructionScope], Instructions] = {}  # V3-P69
@@ -894,10 +889,6 @@ class InMemoryData:
             raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is {record.status.value}")
         if completion.status not in _TERMINAL_COMPLETIONS:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"not a definite outcome: {completion.status}")
-        view = rules.check_app_view(completion)
-        known = None if view is None else self._store.ui_resources.get(view.resource.digest)
-        if view is not None and known is not None and known != view.resource:
-            raise DataError(DataErrorCode.INVALID_ARGUMENT, "another view is stored under this digest")
         if completion.presented_files and completion.status is not ToolExecutionStatus.SUCCEEDED:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
         if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
@@ -916,27 +907,15 @@ class InMemoryData:
         conv.artifacts.update(staged)
         conv.files.extend(presented)
         self._mark_attached(images)
-        if view is not None:
-            self._store.ui_resources.setdefault(view.resource.digest, view.resource)
-            conv.app_payloads[call] = view.payload
         conv.executions[call] = replace(
             record,
             status=completion.status,
             model_result=completion.model_result,
             raw_result=completion.raw_result,
-            ui_digest=None if view is None else view.resource.digest,
         )
         if not completion.record_event:
             return None
         return self._new_event(conv, scope, ToolResultRecord(call, completion.model_result), call.run_id)
-
-    async def read_app_view(self, scope: TrustedScope, call: CallRef) -> StoredAppView | None:
-        conv = self._conv(scope)
-        record = self._execution(conv, call)
-        if record.ui_digest is None:
-            return None
-        view = AppView(self._store.ui_resources[record.ui_digest], conv.app_payloads[call])
-        return StoredAppView(call, record.tool_id, record.arguments, record.status, view)
 
     async def commit_unknown_outcome(
         self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult
@@ -1257,10 +1236,6 @@ class InMemoryData:
             for table in (self._store.pass_calls, self._store.pass_items):
                 for row_key in [k for k in table if k[0] == pass_id]:
                     del table[row_key]
-        used = {e.ui_digest for c in self._store._conversations.values() for e in c.executions.values()}
-        for digest in {e.ui_digest for e in conv.executions.values()} - used:
-            if digest is not None:
-                del self._store.ui_resources[digest]
         await self.blobs.release({k for f in conv.files for k in f.keys()})  # never fails the purge (V3-P66 §8.1)
 
     async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:

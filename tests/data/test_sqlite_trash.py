@@ -22,7 +22,6 @@ from himari.data.api import (
     PassItem,
     PassKind,
     PassStart,
-    AppView,
     ArtifactMutation,
     AssistantToolCalls,
     ModelSetting,
@@ -33,8 +32,6 @@ from himari.data.api import (
     RunPurpose,
     ToolCompletion,
     ToolExecutionStatus,
-    UiCsp,
-    UiResource,
 )
 from himari.data.sqlite import SCHEMA_VERSION, SqliteData, SqliteStore, StoreBackupError
 
@@ -64,10 +61,9 @@ async def fill(data: SqliteData, scope: TrustedScope) -> None:
     await data.mark_dispatch(scope, run_id)
     await data.record_raw_outcome(scope, run_id, RawReceived(b"r", "application/json"))
     await data.project_model_output(scope, run_id, AssistantToolCalls((ToolCall(CallId("c"), 0, ToolId("fake/v"), {}),)))
-    view = AppView(UiResource.create("fake", f"ui://fake/{scope.conversation_id}", "<!DOCTYPE html>", UiCsp()), {})
     given = await data.blobs.put(scope.principal_id, chunks(f"out {scope.conversation_id}".encode()), 1000)
     await data.commit_tool_outcome(scope, CallRef(run_id, CallId("c")), ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("v"), app_view=view, artifact_mutations=(ArtifactMutation("note", "n"),),
+        ToolExecutionStatus.SUCCEEDED, text_result("v"), artifact_mutations=(ArtifactMutation("note", "n"),),
         presented_files=(PresentedFile(given, "o.txt", "text/plain", "/workspace/o.txt"),)))
     now = datetime.now(UTC)  # V3-P85: an applied memory pass: its cursor, episode, call and item
     pass_id = await data.begin_pass(scope, PassStart(PassKind.LIVE, 0, 3, 3, "p", "m"))
@@ -116,7 +112,6 @@ def test_a_purge_leaves_no_row_of_the_conversation_in_any_table(tmp_path: Path) 
     assert conn.execute("SELECT count(*) FROM compaction_runs").fetchone()[0] == 1  # only the other one's
     for table in ("memory_pass_calls", "memory_pass_items", "memories"):  # V3-P85: only the other one's
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1, table
-    assert conn.execute("SELECT count(*) FROM ui_resources").fetchone()[0] == 1
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     store.close()
 

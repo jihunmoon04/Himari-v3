@@ -23,7 +23,6 @@ def main() -> None:
         args.screenshots.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
     checks: list[dict[str, object]] = []
-    pdf_bytes = (Path(__file__).resolve().parents[1] / "tests/fixtures/pdf/table.pdf").read_bytes()
     with tempfile.TemporaryDirectory(prefix="himari-touch-") as tmp:
         root = str(Path(tmp) / "data")
         server = serve(root, port=8809)
@@ -47,17 +46,9 @@ def main() -> None:
                             data = {"path": path, "parent": path.rsplit("/", 1)[0] or "/", "next": None,
                                     "workspace": None, "entries": [
                                         {"name": "nested", "kind": "directory", "size": None, "modified": 0},
-                                        {"name": "note.txt", "kind": "file", "size": 12, "modified": 0},
-                                        {"name": "sample.pdf", "kind": "file", "size": len(pdf_bytes), "modified": 0}]}
-                        elif url.path.endswith("/download") and path.endswith(".pdf"):
-                            route.fulfill(body=pdf_bytes, content_type="application/pdf",
-                                          headers={"x-himari-identity": f"1,2,{len(pdf_bytes)},4"})
-                            return
-                        elif url.path.endswith("/file") and path.endswith(".pdf"):
-                            data = {"path": path, "kind": "pdf", "editable": False, "size": len(pdf_bytes),
-                                    "identity": [1, 2, len(pdf_bytes), 4], "modified": 0, "truncated": False}
+                                        {"name": "note.txt", "kind": "file", "size": 12, "modified": 0}]}
                         elif url.path.endswith("/file"):
-                            data = {"path": path, "kind": "text", "text": "touch note\n", "editable": True,
+                            data = {"path": path, "kind": "text", "text": "touch note\n",
                                     "size": 11, "identity": [1, 2, 3, 4], "modified": 0, "truncated": False}
                         elif url.path.endswith("/conversations"):
                             data = {"path": path, "own": False, "refused": None, "above": [], "conversations": []}
@@ -119,21 +110,15 @@ def main() -> None:
                         "e => getComputedStyle(e).borderBottomColor === 'rgba(0, 0, 0, 0)'")
                     body.get_by_title("/home/demo/nested", exact=True).click()
                     body.get_by_title("/home/demo/nested/note.txt", exact=True).click()
-                    expect(panel.locator(".cm-content")).to_contain_text("touch note")
+                    expect(panel.locator(".files-text")).to_contain_text("touch note")
                     file_control("Go back in files").click()
                     expect(body.get_by_title("/home/demo/nested/nested", exact=True)).to_be_visible()
                     file_control("Go to parent folder").click()
                     expect(body.get_by_title("/home/demo/note.txt", exact=True)).to_be_visible()
                     page.keyboard.press("Escape")
                     body.get_by_title("/home/demo/note.txt", exact=True).click()
-                    editor = panel.locator(".cm-content")
-                    editor.click()
-                    editor.press("ControlOrMeta+End")
-                    page.keyboard.type("unsaved")
-                    file_control("Go back in files").click()
-                    expect(page.locator("#confirm-dialog")).to_be_visible()
-                    page.locator("#confirm-dialog").get_by_role("button", name="Cancel", exact=True).click()
-                    expect(editor).to_contain_text("unsaved")
+                    editor = panel.locator(".files-text")  # the file shown: it stays through every layout below
+                    expect(editor).to_contain_text("touch note")
                     page.keyboard.press("Escape")
                     next_mode(modes[1])
                     expect(page.locator("#main")).to_be_hidden()
@@ -141,7 +126,7 @@ def main() -> None:
                     next_mode(modes[2])
                     expect(page.locator("#main")).to_be_visible()
                     expect(page.locator("#composer-text")).to_have_value("draft to keep")
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     page.wait_for_timeout(250)
                     chat_box = page.locator("#main").bounding_box()
                     file_box = panel.bounding_box()
@@ -152,11 +137,11 @@ def main() -> None:
                     expect(page.locator("#chat-menu-model-select")).to_be_visible()
                     expect(page.locator("#composer-text")).to_have_value("draft to keep")
                     next_mode(modes[0])
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     # Rapid clicks skip an in-flight snapshot and commit each cycle once.
                     page.evaluate("for (let i = 0; i < 4; i++) document.getElementById('chat-files-toggle').click()")
                     expect(page.locator("#workspace-panes")).to_have_attribute("data-mode", modes[0])
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     expect(page.locator("#composer-text")).to_have_value("draft to keep")
                     page.wait_for_timeout(250)
                     grip = page.locator("#file-panel-grip")
@@ -170,7 +155,7 @@ def main() -> None:
                     page.emulate_media(reduced_motion="reduce")
                     for mode in modes[1:] + modes[:1]:
                         next_mode(mode)
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     page.emulate_media(reduced_motion="no-preference")
                     assert page.locator("#confirm-dialog").is_visible() is False
                     assert page.locator("#file-panel-expand, #file-panel-close").count() == 0
@@ -208,27 +193,17 @@ def main() -> None:
                         page.set_viewport_size({"width": width, "height": 450})
                         expect(page.locator("#chat-files-toggle")).to_be_visible()
                         assert page.locator("#composer-text").bounding_box()["y"] < 450
-                        # A short viewport and multiline draft must not consume the PDF or composer.
-                        file_control("Go back in files").click()
-                        page.locator("#confirm-dialog").get_by_role("button", name="Discard", exact=True).click()
-                        panel.locator(".files-open").filter(has_text="sample.pdf").click()
-                        expect(panel.locator(".pdf-view")).to_be_visible()
-                        panel.get_by_role("button", name="Pen", exact=True).click()
+                        # A short viewport and multiline draft must not consume the composer.
                         page.set_viewport_size({"width": width, "height": 350})
                         page.locator("#composer-text").fill("multiline draft\n" * 30)
-                        page.wait_for_function("() => document.querySelector('#file-panel .pdf-view').clientHeight >= 40")
                         compose = page.locator("#composer").bounding_box()
                         main_box = page.locator("#main").bounding_box()
                         assert compose["y"] >= main_box["y"] and compose["y"] + compose["height"] <= main_box["y"] + main_box["height"] + 1
                         if args.screenshots:
-                            page.screenshot(path=str(args.screenshots / f"workspace-pdf-short-{width}.png"))
-                        page.set_viewport_size({"width": 390, "height": 700})
-                        expect(panel.locator(".files-ink-bar .files-zoom-tools")).to_be_visible()
+                            page.screenshot(path=str(args.screenshots / f"workspace-short-{width}.png"))
                         page.set_viewport_size({"width": 820, "height": 900})
-                        expect(panel.locator(".files-head .files-zoom-tools")).to_be_visible()
-                        expect(panel.get_by_role("button", name="Pen", exact=True)).to_have_attribute("aria-pressed", "true")
                         expect(page.locator("#composer-text")).to_have_value("multiline draft\n" * 30)
-                    checks.append({"width": width, "file_back_and_up": True, "cancel_keeps_editor": True,
+                    checks.append({"width": width, "file_back_and_up": True, "file_stays_shown": True,
                                    "cycle": list(modes), "header_height_preserved": height,
                                    "draft_and_editor_survive_view_switch": True, "root_scroll": 0})
                     context.close()

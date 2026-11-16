@@ -13,12 +13,11 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from runnerkit import start_runner  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
-from himari.bootstrap.application import Application, workspace_for  # noqa: E402
-from himari.bootstrap.operator import OPERATOR  # noqa: E402
+from himari.bootstrap.application import Application  # noqa: E402
 from himari.data.api import DataError, DataErrorCode  # noqa: E402
-from himari.environment.inside import InsideEnvironment  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
@@ -31,10 +30,12 @@ class Server:
         self.provider = ScriptedAdapter(script)
         self.application: Application | None = None
         self.root = tmp_path / "data"
+        self.kit = start_runner(tmp_path / "runner")  # the machine Environment: uploads go there (V3-P101)
 
         async def opener() -> Application:
             self.application = await Application.open(self.root, self.provider, model_id="scripted-model",
-                                                      sandbox=False, cleanup_seconds=None, **kwargs)
+                                                      sandbox=False, cleanup_seconds=None,
+                                                      machine_socket=self.kit.socket, **kwargs)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),
@@ -74,6 +75,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
     with s.client:
         s.sign_in()
         yield s
+    s.kit.close()
 
 
 def error(response: Any) -> tuple[int, str]:
@@ -86,7 +88,7 @@ def test_upload_send_and_download(server: Server) -> None:
     up = server.upload(cid, "notes.txt", big, "text/plain; charset=utf-8")
     assert up.status_code == 201, up.text
     body = up.json()
-    assert (body["name"], body["media_type"], body["size"], body["commands"]) == ("notes.txt", "text/plain", 300_000, False)
+    assert (body["name"], body["media_type"], body["size"], body["commands"]) == ("notes.txt", "text/plain", 300_000, True)  # the runner can run commands
     server.provider.extend([final("got it")])
     sent = server.send(cid, "", body["file_id"])
     assert sent.status_code == 202, sent.text
@@ -120,21 +122,23 @@ def test_html_never_opens_on_this_origin_and_names_are_escaped(server: Server) -
 @pytest.mark.parametrize("uploads_work", [True, False])
 def test_a_presented_file_comes_with_its_tool_result(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, uploads_work: bool) -> None:
-    monkeypatch.setattr(InsideEnvironment, "placement_works", lambda self: uploads_work)
     s = Server(tmp_path)
     with s.client:
         s.sign_in()
+        assert s.application is not None
+        s.application.uploads_work = uploads_work
         check_presented_download(s, uploads_work)
+    s.kit.close()
 
 
 def check_presented_download(server: Server, uploads_work: bool) -> None:
     cid = server.new()
     assert server.application is not None
     assert server.application.uploads_work is uploads_work
-    folder = Path(server.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    folder = server.kit.himari_home / "conversations" / cid
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "out.csv").write_text("a,b\n")
-    server.provider.extend([calls(("inside/present_file", {"path": "out.csv"})), final("here")])
+    server.provider.extend([calls(("machine/present_file", {"path": "out.csv"})), final("here")])
     server.send(cid, "make it")
     server.wait_idle(cid)
     result = next(e for e in server.client.get(f"/api/conversations/{cid}/events").json()["items"]
@@ -256,17 +260,16 @@ def test_a_huge_version_is_refused_not_a_crash(server: Server) -> None:
 @pytest.mark.parametrize("raised, expected", [
     ("too_many", (409, "too_many_pending")),
     ("busy", (409, "workspace_busy")),
-    ("folder", (409, "uploads_folder_unusable")),
     ("missing", (410, "file_missing")),
 ])
 def test_more_of_the_error_table(server: Server, monkeypatch: pytest.MonkeyPatch, raised: str,
                                  expected: tuple[int, str]) -> None:
-    from himari.bootstrap.application import UploadsFolderUnusable, WorkspaceBusy
+    from himari.bootstrap.application import WorkspaceBusy
     cid = server.new()
     up = server.upload(cid, "a.txt", b"a").json()
     assert server.application is not None
     errors = {"too_many": DataError(DataErrorCode.LIMIT_EXCEEDED, "x"), "busy": WorkspaceBusy("ws"),
-              "folder": UploadsFolderUnusable("/workspace/x/uploads"), "missing": DataError(DataErrorCode.BLOB_MISSING, "k")}
+              "missing": DataError(DataErrorCode.BLOB_MISSING, "k")}
 
     async def refuse(*args: Any, **kwargs: Any) -> Any:
         raise errors[raised]

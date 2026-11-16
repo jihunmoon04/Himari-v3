@@ -46,8 +46,8 @@ class Runtime:
     data: InMemoryData | SqliteData
     registry: ToolRegistry
     driver: Driver
-    # The one ExternalAccess the catalog and Dispatcher ask; Tool views ask it
-    # too (V3-P58 §3.7), so "is this source on here" has one answer.
+    # The one ExternalAccess the catalog and Dispatcher ask, so "is this
+    # source on here" has one answer.
     access: ConfiguredExternalAccess
     models: ModelCatalog  # the offered models (V3-P64)
 

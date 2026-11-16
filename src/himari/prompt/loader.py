@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 
 from himari.common import AttachmentRef, ContentBlock, EnvironmentKind, FileId, ProviderContinuation, RunId, TrustedScope
@@ -147,7 +148,7 @@ class ContextLoader:
                     usage_mark = UsageMark(run.usage.input_tokens, used.event_sequence, used.snapshot_revision,
                                            used.context_key, used.state_revision, run.provider_key, used.state_key)
         attachments = await self._attachments(scope, events, executions)
-        basis = await self._state.read_current_state_basis(scope)
+        basis = _registered(await self._state.read_current_state_basis(scope), self._environments)
         active = frozenset(a.environment_kind for a in basis.environments)
         enabled = frozenset() if self._external_access is None else await self._external_access.enabled_sources(scope)
         return PromptInputs(
@@ -167,7 +168,9 @@ class ContextLoader:
             source_notes=tuple(n for n in self._source_notes if n.source in enabled),
             attachments=attachments,
             user_instructions=user_instructions,
-            system=self._system,
+            # V3-P101: the attachment, file reference and documents sentences name an Environment's Tools
+            system=self._system if self._system is None or active else replace(
+                self._system, attachments=False, file_references=False, documents=()),
             companion_persona=companion_persona,
             wake_notes=await self._wake_notes(scope, events),
             memories=memories,
@@ -215,3 +218,15 @@ def _info(record: FileRecord) -> AttachmentInfo:
                           view_media_type=None if view is None else view.media_type,
                           view_width=0 if view is None else view.width, view_height=0 if view is None else view.height,
                           view_bytes=0 if view is None else view.blob.size)
+
+
+def _registered(basis: PersistedStateBasis, environments: Mapping[EnvironmentKind, EnvironmentPlugin]) -> PersistedStateBasis:
+    """V3-P101: an activation of an Environment this server does not have (an old
+    Inside Conversation) is not shown to the model: its Tools are not offered, and
+    its folder is not reachable. Without one left, neither is the T0 folder."""
+    if all(a.environment_kind in environments for a in basis.environments):
+        return basis
+    kept = tuple(a for a in basis.environments if a.environment_kind in environments)
+    return replace(basis, environments=kept,
+                   bindings=tuple(b for b in basis.bindings if b.environment_kind in environments),
+                   conversation_workspace=basis.conversation_workspace if kept else None)

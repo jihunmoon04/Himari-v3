@@ -33,7 +33,7 @@ def test_without_a_working_toolkit_nothing_is_offered(tmp_path: Path, caplog: py
     app = open_app(tmp_path, documents_dir=documents_dir)
     try:
         assert app.documents is None and app.toolkit is None
-        assert "inside/read_document" not in {t.definition.tool_id for t in app.inside.tools()}
+        assert app.machine is None  # no runner: no Environment, no read_document (V3-P101)
         assert not any("read_document" in n for n in instructions(app))
     finally:
         asyncio.run(app.close())
@@ -66,10 +66,12 @@ def test_the_sentences() -> None:
     assert "HIMARI_FONTS" not in no_fonts
 
 
-def test_a_refused_toolkit_bind_costs_the_scripts_not_run_command(tmp_path: Path,
-                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
-    # Review C6: the Workspace self-test refuses the bind; run_command stays, without the toolkit.
+@pytest.mark.parametrize("bound", [True, False])
+def test_the_scripts_sentence_follows_the_runners_toolkit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                          bound: bool) -> None:
+    # V3-P101: run_command is the machine Environment's; the scripts are told only when its runner binds the toolkit.
     from himari.bootstrap import application as boot
+    from himari.environment.machine import MachineEnvironment
     from himari.sandbox.api import SandboxState
 
     class Kit:
@@ -83,18 +85,9 @@ def test_a_refused_toolkit_bind_costs_the_scripts_not_run_command(tmp_path: Path
         versions = {"python-docx": "1"}
         scripts = False
 
-    class Backend:
-        def __init__(self, toolkit_fd: int | None) -> None:
-            self.toolkit_fd = toolkit_fd
-            self.state = SandboxState.CAPABLE_INACTIVE
-
-        @classmethod
-        def discover(cls, *, toolkit_fd: int | None = None) -> Backend:
-            return cls(toolkit_fd)
-
-        async def start(self, **_: Any) -> SandboxState:
-            self.state = SandboxState.SETUP_FAILED if self.toolkit_fd is not None else SandboxState.ENFORCED
-            return self.state
+    async def hello(self: MachineEnvironment) -> dict[str, Any]:
+        self.sandbox_state = SandboxState.ENFORCED
+        return {"state": "enforced", "himari_home": "/home/u/HIMARI", "toolkit": bound}
 
     kit, reader = Kit(), Reading()
 
@@ -110,18 +103,47 @@ def test_a_refused_toolkit_bind_costs_the_scripts_not_run_command(tmp_path: Path
         return None
 
     monkeypatch.setattr(boot, "_documents", documents)
-    monkeypatch.setattr(boot, "SandboxBackend", Backend)
+    monkeypatch.setattr(MachineEnvironment, "hello", hello)
     monkeypatch.setattr(boot, "_image_views", no_views)
     monkeypatch.setattr(boot, "_server_launchers", no_servers)
     app = asyncio.run(Application.open(tmp_path / "data", ScriptedAdapter([]), model_id="m", sandbox=True,
-                                       cleanup_seconds=None))
+                                       cleanup_seconds=None, machine_socket=str(tmp_path / "runner.sock")))
     try:
-        tools = {t.definition.tool_id for t in app.inside.tools()}
-        assert {"inside/run_command", "inside/read_document"} <= tools
-        assert app.inside.sandbox is not None and app.inside.sandbox.toolkit_fd is None  # type: ignore[attr-defined]
-        assert reader.scripts is False
+        assert app.machine is not None
+        tools = {t.definition.tool_id for t in app.machine.tools()}
+        assert {"machine/run_command", "machine/read_document"} <= tools
+        assert reader.scripts is bound and app.current_sandbox_state is SandboxState.ENFORCED
         notes = instructions(app)
-        assert DOCUMENTS_READ_NOTE in notes and not any("run_command as `python3" in n for n in notes)
+        assert DOCUMENTS_READ_NOTE in notes
+        assert any("run_command as `python3" in n for n in notes) is bound
+    finally:
+        asyncio.run(app.close())
+
+
+def test_a_working_toolkit_without_the_runner_tells_the_model_nothing(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    # V3-P101: read_document is the machine Environment's; without the runner there is no Tool to tell of.
+    from himari.bootstrap import application as boot
+
+    class Kit:
+        fd = 99
+        manifest: dict[str, Any] = {}
+
+        def close(self) -> None:
+            self.fd = -1
+
+    class Reading:
+        versions = {"python-docx": "1"}
+        scripts = False
+
+    async def documents(*_: Any) -> tuple[Any, Any, str]:
+        return Kit(), Reading(), "on"
+
+    monkeypatch.setattr(boot, "_documents", documents)
+    app = open_app(tmp_path)
+    try:
+        assert app.documents is not None and app.machine is None
+        assert not any("read_document" in n for n in instructions(app))
     finally:
         asyncio.run(app.close())
 
@@ -155,7 +177,8 @@ def test_any_startup_failure_closes_the_toolkit(tmp_path: Path, monkeypatch: pyt
 
 
 def test_the_documents_status(tmp_path: Path) -> None:
-    # V3-P70 §9 (review N9): scripts only while run_command's sandbox is enforced.
+    # V3-P70 §9 (review N9): scripts only while run_command's sandbox (the runner's: V3-P101) is enforced.
+    from himari.environment.machine import MachineEnvironment
     from himari.sandbox.api import SandboxState
 
     class On:
@@ -168,7 +191,8 @@ def test_the_documents_status(tmp_path: Path) -> None:
         assert app.documents_status == {"read": False, "scripts": False, "libraries": {}}
         app.documents = On()  # type: ignore[assignment]
         assert app.documents_status == {"read": True, "scripts": False, "libraries": {"openpyxl": "3.1.5"}}
-        app.sandbox_state = SandboxState.ENFORCED
+        app.machine = MachineEnvironment(str(tmp_path / "runner.sock"))
+        app.machine.sandbox_state = SandboxState.ENFORCED
         assert app.current_sandbox_state is SandboxState.ENFORCED and app.documents_status["scripts"] is True
     finally:
         app.documents = None

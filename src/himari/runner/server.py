@@ -34,12 +34,10 @@ from himari.runner import api
 from himari.runner.cgroups import Commands
 from himari.runner.config import RunnerConfig
 from himari.runner.hidden import under
-from himari.runner.hostfs import MAX_SNAPSHOT_BYTES, Host, mount_type
+from himari.runner.hostfs import Host
 from himari.runner.proxy import Door, Proxy
-from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote, token_problem
 from himari.sandbox.api import (
     MAX_ARGV,
-    MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECONDS,
     CommandResult,
     SandboxSetupError,
@@ -47,13 +45,12 @@ from himari.sandbox.api import (
     SandboxUnavailableError,
     validate_argv,
 )
-from himari.sandbox.machine import MachineLayout, MachineSandbox, Mask
+from himari.sandbox.machine import MachineLayout, MachineSandbox
 from himari.sandbox.machine_self_test import probe
 
 log = logging.getLogger("himari.runner")
 MAX_LIST = 1000
 MAX_CONTENT_BYTES = 256 * 1024  # a write Tool's content (V3-051)
-BUNDLE_SECONDS = 300  # git push's steps in the sandbox (§12)
 READ_SECONDS = 15.0  # a listing, stat or open answers within this, or is given up (V3-P75 §5.1, PR #92 review B1)
 MAX_READS = 4  # reads under way, given-up ones included: a stuck mount holds at most these threads
 _PEERCRED = struct.Struct("3i")
@@ -81,10 +78,6 @@ class Runner:
         self.commands = commands
         self.report_failures: list[str] = []
         self.proxy: Proxy | None = None  # commands' way out (§11); None: no network
-        # git push's steps outside the sandbox (§12); None: not set up
-        self.pusher = None if config.push is None else Pusher(config.push, config.push_token, config.state_dir)
-        # One push at a time: at most one bundle (2 GiB) on disk (PR #90 review B2).
-        self._pushing = asyncio.Semaphore(1)
         # Reads that can hang on a slow mount (PR #92 review B1): threads of their own, a bounded number.
         self._read_pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-read")
         self._reads = 0
@@ -114,8 +107,6 @@ class Runner:
             return report.passed
 
         state = await self.sandbox.start(self_test)
-        if self.pusher is not None and (problem := await self._token_problem()) is not None:
-            log.error("git push is off: %s (%s)", problem, self.pusher.token_file)
         if state is not SandboxState.ENFORCED:
             log.error("the machine sandbox is %s: %s", state.value, self.report_failures)
         elif config.network is not None:
@@ -174,7 +165,7 @@ class Runner:
             try:
                 result, out = await self.dispatch(op, args, fds, conn)
             except api.RunnerError as error:
-                await api.send_frame(conn, api.failed(error.category, str(error), error.identity, error.partial))
+                await api.send_frame(conn, api.failed(error.category, str(error)))
                 return
             except asyncio.CancelledError:
                 raise
@@ -240,9 +231,7 @@ class Runner:
                     "memory_max": config.memory_max if self.commands else None,
                     "pids_max": config.pids_max if self.commands else None,
                     "toolkit": config.documents_toolkit is not None,
-                    "network": None if self.proxy is None else list(self.proxy.allow),
-                    "push": None if self.pusher is None or await self._token_problem(masks) is not None
-                    else list(self.pusher.repos)}, []
+                    "network": None if self.proxy is None else list(self.proxy.allow)}, []
         if self.sandbox.state is not SandboxState.ENFORCED:
             # §13 (PR #87 review B1): without a passed self-test nothing but hello is done — files included.
             raise api.RunnerError(api.UNAVAILABLE)
@@ -264,16 +253,9 @@ class Runner:
             return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd"),
                                                                        follow=args.get("follow") is True))}, []
         if op == api.OPEN:
-            def opened() -> tuple[int, str, os.stat_result, str | None]:
-                fd, real, info = host.open_read(args.get("path"), _text(args, "cwd"))
-                try:  # its filesystem as the mount table names it: a PDF on a cloud mount is saved less often
-                    return fd, real, info, mount_type(real)  # (V3-P82 §3.2)
-                except BaseException:
-                    os.close(fd)
-                    raise
-
-            fd, real, info, filesystem = await self._read(opened, abandoned=lambda done: os.close(done[0]))
-            return {"path": real, "size": info.st_size, "identity": host.identity(info), "filesystem": filesystem}, [fd]
+            fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
+                                              abandoned=lambda opened: os.close(opened[0]))
+            return {"path": real, "size": info.st_size, "identity": host.identity(info)}, [fd]
         if op == api.HOLDS:
             size, digest = args.get("size"), args.get("sha256")
             if not isinstance(size, int) or not isinstance(digest, str):
@@ -293,10 +275,6 @@ class Runner:
             return await self._write(args, fds, roots), []
         if op == api.DELETE and args.get("expected") is not None:
             return await self._delete_checked(args, roots)
-        if op == api.DELETE_COPIED:
-            return await self._delete_checked(args, roots, copied=True)
-        if op in (api.APPEND, api.TRUNCATE):
-            return await self._in_place(op, args, fds, roots), []
         if op in (api.CREATE_FILE, api.MKDIR):
             def make() -> dict[str, Any]:
                 parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
@@ -319,8 +297,6 @@ class Runner:
             return {"path": await self._blocking(delete)}, []
         if op == api.RUN:
             return await self._run(args, roots, conn), []
-        if op == api.GIT_PUSH:
-            return await self._push(args, roots, conn), []
         if op in (api.COPY_IN, api.FREE_PATH, api.COMMIT_COPY, api.DISCARD_COPY):
             return await self._blocking(lambda: self._upload(op, args, fds, roots)), []
         raise api.RunnerError(api.INVALID, f"unknown operation {op}")
@@ -332,26 +308,17 @@ class Runner:
             raise api.RunnerError(api.INVALID, "the file's identity, as it was read, is required")
         return expected
 
-    @staticmethod
-    def _copy_max(args: dict[str, Any]) -> int:
-        """V3-P77 §6.1: the largest file a replace or ``delete_copied`` copies."""
-        copy_max = args.get("copy_max", MAX_SNAPSHOT_BYTES)
-        if not isinstance(copy_max, int) or isinstance(copy_max, bool) \
-                or not MAX_SNAPSHOT_BYTES <= copy_max <= api.MAX_COPY_BYTES:
-            raise api.RunnerError(api.INVALID, "copy_max is 1 MiB to 64 MiB")
-        return copy_max
-
     async def _replace(self, args: dict[str, Any], fds: Sequence[int],
                        roots: list[str]) -> tuple[dict[str, Any], list[int]]:
         """V3-P75 §7.4: the web editor's save; the content comes as an fd."""
-        host, expected, copy_max = self.host, self._expected(args), self._copy_max(args)
+        host, expected = self.host, self._expected(args)
         if len(fds) != 1:
             raise api.RunnerError(api.INVALID, "the content comes as one file")
 
         def replace() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                identity, copy = host.replace(parent_fd, name, fds[0], expected, copy_max)
+                identity, copy = host.replace(parent_fd, name, fds[0], expected)
             finally:
                 os.close(parent_fd)
             return ({"path": posixpath.join(parent, name), "identity": identity, "previous": copy is not None},
@@ -359,45 +326,19 @@ class Runner:
 
         return await self._blocking(replace)
 
-    async def _delete_checked(self, args: dict[str, Any], roots: list[str],
-                              copied: bool = False) -> tuple[dict[str, Any], list[int]]:
-        """§7.4: a checked delete, its copy up to 1 MiB; ``copied`` (``delete_copied``, V3-P77 §6.3): up to the
-        ``copy_max`` it requires, and never without its copy."""
+    async def _delete_checked(self, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
+        """§7.4: a checked delete, its copy up to 1 MiB."""
         host, expected = self.host, self._expected(args)
-        if copied and "copy_max" not in args:
-            raise api.RunnerError(api.INVALID, "copy_max is required")
-        copy_max = self._copy_max(args) if copied else MAX_SNAPSHOT_BYTES
 
         def delete() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                copy = host.delete_checked(parent_fd, name, expected, copy_max, copied)
+                copy = host.delete_checked(parent_fd, name, expected)
             finally:
                 os.close(parent_fd)
             return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
 
         return await self._blocking(delete)
-
-    async def _in_place(self, op: str, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
-        """V3-P82 §3.6: a PDF's save written at its end, or the file cut back to one of its saves."""
-        host, expected = self.host, self._expected(args)
-        if op == api.APPEND and len(fds) != 1:
-            raise api.RunnerError(api.INVALID, "the bytes come as one file")
-        to = args.get("to", 0)
-        if op == api.TRUNCATE and (not isinstance(to, int) or isinstance(to, bool)):
-            raise api.RunnerError(api.INVALID, "to is required")
-        cut = to if isinstance(to, int) else 0
-
-        def in_place() -> dict[str, Any]:
-            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
-            try:
-                identity = host.append(parent_fd, name, fds[0], expected) if op == api.APPEND \
-                    else host.truncate(parent_fd, name, expected, cut)
-            finally:
-                os.close(parent_fd)
-            return {"path": posixpath.join(parent, name), "identity": identity}
-
-        return await self._blocking(in_place)
 
     async def _kept(self, op: str, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
         """V3-P76 §4.1: an agent's write or delete, with a copy of what the file held (an fd, when there is one)."""
@@ -533,76 +474,15 @@ class Runner:
             return None
         return task
 
-    async def _sandboxed(self, argv: list[str], layout: MachineLayout, timeout: float, *,
-                         max_output: int = MAX_OUTPUT_BYTES, stdout_to: int | None = None) -> CommandResult:
+    async def _sandboxed(self, argv: list[str], layout: MachineLayout, timeout: float) -> CommandResult:
         try:
-            return await self.sandbox.run(argv, layout, timeout, max_output=max_output, stdout_to=stdout_to)
+            return await self.sandbox.run(argv, layout, timeout)
         except SandboxUnavailableError:
             raise api.RunnerError(api.UNAVAILABLE) from None
         except SandboxSetupError:
             log.error("a command's sandbox could not be set up; the machine sandbox is now %s",
                       self.sandbox.state.value)
             raise api.RunnerError(api.SETUP_FAILED) from None
-
-    async def _push(self, args: dict[str, Any], roots: list[str], conn: socket.socket) -> dict[str, Any] | None:
-        """§12: a branch of a repository in the call's Workspaces, to its
-        checked https remote; the repository is read only in the sandbox."""
-        host, pusher = self.host, self.pusher
-        if pusher is None:
-            raise api.RunnerError(api.ACCESS, "git push is not set up on this server")
-        if (problem := await self._token_problem()) is not None:
-            log.error("git push refused: %s (%s)", problem, pusher.token_file)
-            raise api.RunnerError(api.ACCESS, f"git push is not set up safely on this server: {problem}")
-        branch = check_branch(args.get("branch"))
-        repository = await self._blocking(lambda: host.directory(args.get("repository", "."), _text(args, "cwd")))
-        if not any(under(repository, root) for root in roots):
-            raise api.RunnerError(api.OUTSIDE_WORKSPACES, "git_push pushes repositories inside this conversation's "
-                                                          "workspaces only; ask the user to attach the folder")
-        work = await self._unless_cancelled(self._one_push(pusher, repository, branch), conn)
-        return None if work is None else work.result()
-
-    async def _one_push(self, pusher: Pusher, repository: str, branch: str) -> dict[str, Any]:
-        async with self._pushing:
-            return await self._push_steps(pusher, repository, branch)
-
-    async def _token_problem(self, masks: tuple[Mask, ...] | None = None) -> str | None:
-        """Checked on every use: the file, or the hidden list, may have changed (PR #90 review B1)."""
-        pusher, rules = self.pusher, self.host.rules
-        if pusher is None:
-            return "git push is not set up"
-        return await self._blocking(lambda: token_problem(pusher.token_file, rules,
-                                                          rules.masks() if masks is None else masks))
-
-    async def _push_steps(self, pusher: Pusher, repository: str, branch: str) -> dict[str, Any]:
-        config = self.config
-        masks = await self._blocking(self.host.rules.masks)
-        # Nothing writable but its own /tmp, no network, no cache: the repository is only read.
-        layout = MachineLayout(home=config.home, cwd=repository, writable=(), masks=masks,
-                               cgroup_procs=None if self.commands is None else self.commands.procs)
-        with pusher.workdir() as folder:
-            asked = await self._sandboxed(["git", "remote", "get-url", "--push", "origin"], layout, BUNDLE_SECONDS)
-            if asked.timed_out:
-                raise api.RunnerError(api.OTHER, "git remote get-url took too long; nothing was pushed")
-            if asked.exit_code != 0:
-                raise api.RunnerError(api.INVALID, "the repository has no 'origin' remote to push to: "
-                                                   + asked.stderr.decode("utf-8", "replace").strip()[-500:])
-            url = remote(asked.stdout.decode("utf-8", "replace"), pusher.repos)
-            bundle = os.path.join(folder, "bundle")
-            fd = os.open(bundle, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
-            try:
-                made = await self._sandboxed(["git", "bundle", "create", "-", f"refs/heads/{branch}"], layout,
-                                             BUNDLE_SECONDS, max_output=MAX_BUNDLE_BYTES, stdout_to=fd)
-            finally:
-                os.close(fd)
-            if made.timed_out:
-                raise api.RunnerError(api.OTHER, f"git bundle took over {BUNDLE_SECONDS}s; nothing was pushed")
-            if made.stdout_total > MAX_BUNDLE_BYTES:
-                raise api.RunnerError(api.TOO_LARGE, "the branch is too large to push from here (bundle over 2 GiB)")
-            if made.exit_code != 0:
-                raise api.RunnerError(api.INVALID, f"git bundle failed for {branch}: "
-                                                   + made.stderr.decode("utf-8", "replace").strip()[-500:])
-            pushed = await pusher.push(folder, bundle, branch, url)
-        return {**pushed.result(), "repository": repository}
 
     def _upload(self, op: str, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
         host = self.host

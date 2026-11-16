@@ -13,7 +13,7 @@ automatically.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -35,11 +35,9 @@ SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 )
 
 
-def page_csp(frame_origins: Iterable[str] = ()) -> str:
-    """The page's CSP; ``frame_origins``: where Tool views are framed from
-    (the sandbox origins, V3-P58). Nothing else may be framed."""
-    origins = " ".join(sorted(frame_origins))
-    return f"{_CSP}; frame-src {origins}" if origins else _CSP
+def page_csp() -> str:
+    """The page's CSP: nothing may be framed."""
+    return _CSP
 
 
 def error_body(code: str, message: str) -> bytes:
@@ -107,7 +105,7 @@ class BodyLimitMiddleware:
         self._app = app
         self._inner = RequestBodyLimitMiddleware(app, max_body_size)
         self._exempt = exempt  # (method, path) → the route holds the body to its own limit (e.g. uploads)
-        self._larger = larger  # (method, path) → that route's own limit: larger for a saved file
+        self._larger = larger  # (method, path) → that route's own limit
         # (V3-P75 §7.7), smaller for pairing (V3-P83)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

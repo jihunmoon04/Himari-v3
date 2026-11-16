@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import io
-import os
 import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import gitserver
 import pytest
 from runnerkit import RunnerKit, start_runner
 
@@ -82,7 +80,7 @@ def test_plugin_conforms(env: MachineEnvironment) -> None:
     assert all("workspace_binding_id" not in t.definition.input_schema["properties"] for t in tools)  # type: ignore[operator]
     effects = {str(t.definition.tool_id): t.definition.effect_profile for t in tools}
     assert effects["machine/read_file"] is EffectProfile.READ and effects["machine/run_command"] is EffectProfile.UNKNOWN
-    assert effects["machine/git_push"] is EffectProfile.UNKNOWN
+    assert "machine/git_push" not in effects  # V3-P100
     ToolRegistry(tools)
     assert MachineEnvironment.owns(WORKSPACE) and not MachineEnvironment.owns(WorkspaceId("ws_x"))
 
@@ -105,7 +103,7 @@ def test_reading_is_broad_writing_is_not(env: MachineEnvironment, kit: RunnerKit
     hidden = call(env, "read_file", path="~/.ssh/id")
     assert hidden.status is ToolStatus.FAILED and "no such file" in text(hidden)
     outside = call(env, "write_file", path="~/projects/a/x.c", content="x")
-    assert outside.status is ToolStatus.DENIED and "attach the folder as a workspace" in text(outside)
+    assert outside.status is ToolStatus.DENIED and "read-only" in text(outside)  # V3-P100: attaching is not writing
     assert not (kit.home / "projects/a/x.c").exists()
     listing = text(call(env, "list_files", path="~"))
     assert ".ssh" not in listing and ".gitconfig" in listing and "projects/" in listing
@@ -358,8 +356,7 @@ def test_a_cancelled_command_keeps_the_folder_until_it_is_reaped(env: MachineEnv
 # --- attached Workspaces (V3-P74 §10) ------------------------------------------------------------
 
 
-def attached_setup(kit: RunnerKit, *, attached_writable: bool = True,
-                   ) -> tuple[MachineEnvironment, InMemoryData, TrustedScope, str]:
+def attached_setup(kit: RunnerKit) -> tuple[MachineEnvironment, InMemoryData, TrustedScope, str]:
     """A Conversation with ~/projects/a attached (the working directory)."""
     data = InMemoryData(InMemoryStore())
     scope = TrustedScope(PrincipalId("operator"), asyncio.run(data.create_conversation(
@@ -367,7 +364,7 @@ def attached_setup(kit: RunnerKit, *, attached_writable: bool = True,
     project = str(kit.home / "projects/a")
     registered = asyncio.run(data.register_workspace(scope.principal_id, MACHINE, project, "a", "the C project"))
     asyncio.run(data.attach_workspace(scope, registered.workspace_id))
-    return MachineEnvironment(kit.socket, registry=data, attached_writable=attached_writable), data, scope, project
+    return MachineEnvironment(kit.socket, registry=data), data, scope, project
 
 
 def call_in(env: MachineEnvironment, data: InMemoryData, scope: TrustedScope, tool: str, **args: Any) -> ToolOutcome:
@@ -383,29 +380,10 @@ def call_in(env: MachineEnvironment, data: InMemoryData, scope: TrustedScope, to
     return asyncio.run(go())
 
 
-def test_attached_folders_are_written_and_the_working_one_is_the_cwd(kit: RunnerKit) -> None:
+def test_attached_folders_are_only_read_and_the_working_one_is_the_cwd(kit: RunnerKit) -> None:
+    """V3-P94, V3-P100: the Tools write the Conversation's own folder only; the attached one is read, and is
+    still the working directory."""
     env, data, scope, project = attached_setup(kit)
-    own = kit.himari_home / "conversations" / scope.conversation_id
-    assert call_in(env, data, scope, "write_file", path="new.c", content="x").status is ToolStatus.SUCCEEDED
-    assert (Path(project) / "new.c").read_text() == "x"  # relative to the working directory
-    assert call_in(env, data, scope, "write_file", path=f"{own}/notes.md", content="n").status is ToolStatus.SUCCEEDED
-    outside = call_in(env, data, scope, "write_file", path="~/projects/other.c", content="x")
-    assert outside.status is ToolStatus.DENIED and "attach" in text(outside)
-    assert call_in(env, data, scope, "run_command", argv=["make"]).status is ToolStatus.SUCCEEDED
-    _, layout, _ = kit.sandbox.calls[-1]
-    assert layout.cwd == project and sorted(p for p, _ in layout.writable) == sorted([str(own), project])
-    found = asyncio.run(data.read_conversation_workspaces(scope, MACHINE))
-    asyncio.run(data.set_working_workspace(scope, found.attached[0].binding.binding_id))  # back to the own folder
-    assert call_in(env, data, scope, "write_file", path="here.txt", content="h").status is ToolStatus.SUCCEEDED
-    assert (own / "here.txt").read_text() == "h"
-    asyncio.run(data.detach_workspace(scope, found.attached[1].binding.binding_id))
-    assert call_in(env, data, scope, "write_file", path=f"{project}/late.c", content="x").status is ToolStatus.DENIED
-
-
-def test_attached_folders_are_only_read_when_writing_them_is_off(kit: RunnerKit) -> None:
-    """V3-P94: the Tools write the Conversation's own folder only; the attached one is read, and is still
-    the working directory."""
-    env, data, scope, project = attached_setup(kit, attached_writable=False)
     own = kit.himari_home / "conversations" / scope.conversation_id
     (Path(project) / "main.c").write_text("int main;")
     assert "int main;" in text(call_in(env, data, scope, "read_file", path="main.c"))
@@ -418,13 +396,19 @@ def test_attached_folders_are_only_read_when_writing_them_is_off(kit: RunnerKit)
     assert (Path(project) / "main.c").read_text() == "int main;" and not (Path(project) / "new.c").exists()
     assert call_in(env, data, scope, "write_file", path=f"{own}/notes.md", content="n").status is ToolStatus.SUCCEEDED
     assert (own / "notes.md").read_text() == "n"
+    outside = call_in(env, data, scope, "write_file", path="~/projects/other.c", content="x")
+    assert outside.status is ToolStatus.DENIED and "read-only" in text(outside)
     assert call_in(env, data, scope, "run_command", argv=["make"]).status is ToolStatus.SUCCEEDED
     _, layout, _ = kit.sandbox.calls[-1]
     assert layout.cwd == project and [p for p, _ in layout.writable] == [str(own)]
+    found = asyncio.run(data.read_conversation_workspaces(scope, MACHINE))
+    asyncio.run(data.set_working_workspace(scope, found.attached[0].binding.binding_id))  # back to the own folder
+    assert call_in(env, data, scope, "write_file", path="here.txt", content="h").status is ToolStatus.SUCCEEDED
+    assert (own / "here.txt").read_text() == "h"
 
 
 def test_the_state_and_the_tools_say_attached_folders_are_only_read(kit: RunnerKit) -> None:
-    env, data, scope, project = attached_setup(kit, attached_writable=False)
+    env, data, scope, project = attached_setup(kit)
     bindings = asyncio.run(data.read_current_state_basis(scope)).bindings
     view = asyncio.run(env.observe(scope, bindings))[0]
     own = str(kit.himari_home / "conversations" / scope.conversation_id)
@@ -434,8 +418,6 @@ def test_the_state_and_the_tools_say_attached_folders_are_only_read(kit: RunnerK
     described = {t.definition.tool_id: t.definition.description for t in env.tools()}
     for tool in ("write_file", "edit_file", "delete_file", "run_command"):
         assert "own folder" in described[ToolId(f"machine/{tool}")], tool
-    writable = {t.definition.tool_id: t.definition.description for t in attached_setup(kit)[0].tools()}
-    assert all("own folder" not in d for d in writable.values())
 
 
 def test_the_state_names_the_folders_and_what_may_be_read(kit: RunnerKit) -> None:
@@ -449,12 +431,12 @@ def test_the_state_names_the_folders_and_what_may_be_read(kit: RunnerKit) -> Non
                                                                     (project, "a", "the C project")]
     assert view.readable is not None and str(kit.home) in view.readable
     assert view.network == "none: commands cannot reach the network"  # this runner's proxy is not started
-    assert view.push == "not set up on this server"
 
 
 def test_a_write_waits_for_every_folder_of_the_conversation(kit: RunnerKit) -> None:
     """§9.1: a write locks all of the Conversation's folders (which one a path lands in is not known first)."""
     env, data, scope, project = attached_setup(kit)
+    own = kit.himari_home / "conversations" / scope.conversation_id
 
     async def scenario() -> None:
         handler = next(t for t in env.tools() if t.definition.tool_id == "machine/write_file")
@@ -464,7 +446,7 @@ def test_a_write_waits_for_every_folder_of_the_conversation(kit: RunnerKit) -> N
                           workspace=ConversationWorkspace(binding.workspace_id, binding.cwd_relative or ""))
         async with env.locks.hold([f"{project}/sub"]):  # another Conversation's command under the project
             task = asyncio.create_task(handler.run(ToolInvocation(ToolId("machine/write_file"), CallId("c"),
-                                                                  {"path": "own.txt", "content": "x"}), ctx))
+                                                                  {"path": f"{own}/own.txt", "content": "x"}), ctx))
             await asyncio.sleep(0.2)
             assert not task.done()
         assert (await task).status is ToolStatus.SUCCEEDED
@@ -472,14 +454,15 @@ def test_a_write_waits_for_every_folder_of_the_conversation(kit: RunnerKit) -> N
     asyncio.run(scenario())
 
 
-def test_a_workspace_gone_from_disk_is_named(kit: RunnerKit) -> None:
-    """A registered folder moved or deleted later: the refusal says which, and how to go on."""
+def test_a_workspace_gone_from_disk_does_not_stop_the_own_folder(kit: RunnerKit) -> None:
+    """A registered folder moved or deleted later: only the own folder is written (V3-P100), so writing it
+    goes on."""
     env, data, scope, project = attached_setup(kit)
     found = asyncio.run(data.read_conversation_workspaces(scope, MACHINE))
     asyncio.run(data.set_working_workspace(scope, found.attached[0].binding.binding_id))
     Path(project).rename(kit.home / "projects/moved")
-    refused = call_in(env, data, scope, "write_file", path="x.txt", content="x")
-    assert refused.status is ToolStatus.FAILED and project in text(refused) and "detach" in text(refused)
+    assert call_in(env, data, scope, "write_file", path="x.txt", content="x").status is ToolStatus.SUCCEEDED
+    assert (kit.himari_home / "conversations" / scope.conversation_id / "x.txt").read_text() == "x"
 
 
 def test_folders_data_will_not_give_run_nothing(kit: RunnerKit) -> None:
@@ -503,157 +486,12 @@ def test_folders_data_will_not_give_run_nothing(kit: RunnerKit) -> None:
     assert not (Path(project) / "x.txt").exists()
 
 
-@pytest.mark.skipif(not gitserver.AVAILABLE, reason="needs git-http-backend and openssl")
-def test_git_push(tmp_path: Path) -> None:
-    """§12 through the Tool: created, up to date, rejected; told in the state; refused when not set up."""
-    server = gitserver.GitServer(tmp_path / "server", "tok")
-    token = tmp_path / "kit/secret-root/token"  # on the kit's hidden list
-    token.parent.mkdir(parents=True)
-    token.write_text("tok")
-    token.chmod(0o600)
-    kit = start_runner(tmp_path / "kit", push={"repos": ["github.com/owner/*"], "token_file": str(token)})
-    try:
-        server.bare("repo")
-        assert kit.runner.pusher is not None
-        kit.runner.pusher = gitserver.LocalPusher(server, kit.runner.pusher.repos, str(token),
-                                                  kit.runner.config.state_dir)
-        kit.sandbox.execute = True
-        env = MachineEnvironment(kit.socket)
-        repo = kit.himari_home / "conversations/c1"
-        repo.mkdir()
-        gitserver.git("init", "-q", "-b", "main", cwd=repo)
-        gitserver.git("commit", "-q", "--allow-empty", "-m", "a", cwd=repo)
-        gitserver.git("remote", "add", "origin", "https://github.com/owner/repo.git", cwd=repo)
-        head = gitserver.git("rev-parse", "HEAD", cwd=repo).strip()
-        pushed = call(env, "git_push", branch="main")
-        assert pushed.status is ToolStatus.SUCCEEDED
-        assert text(pushed) == f"pushed main to https://github.com/owner/repo.git: a new branch at {head[:12]}"
-        assert text(call(env, "git_push", branch="main")).startswith("main is already up to date")
-        gitserver.git("commit", "-q", "--amend", "--allow-empty", "-m", "b", cwd=repo)
-        rejected = call(env, "git_push", branch="main")
-        assert rejected.status is ToolStatus.FAILED and "rejected main" in text(rejected) and server.head("repo") == head
-        bindings = (binding(),)
-        assert asyncio.run(env.observe(SCOPE, bindings))[0].push == (
-            "to the 'origin' remote of a repository in the workspaces, if it is one of: github.com/owner/* "
-            "(https remotes only)")
-        kit.runner.pusher = None
-        refused = call(env, "git_push", branch="main", repository=".")
-        assert refused.status is ToolStatus.DENIED and "not set up" in text(refused)
-    finally:
-        kit.close()
-        server.close()
+def test_a_runner_that_does_not_answer_is_not_shown_as_ready(tmp_path: Path) -> None:
+    """The commands' state the interfaces show is the runner's last answer (V3-P101): no answer, no commands."""
+    from himari.sandbox.api import SandboxState
 
-
-
-# --- the review record of the file Tools' changes (V3-P76 §7, §8) -----------------------------------
-
-
-class RecordingLog:
-    """A ChangeLog that records what the Tools tell it."""
-
-    def __init__(self, fail_begin: bool = False) -> None:
-        self.seen: list[tuple[Any, ...]] = []
-        self.fail_begin = fail_begin
-
-    async def begin(self, scope: TrustedScope, call: CallId, path: str) -> object:
-        if self.fail_begin:
-            raise OSError("the record cannot be written")
-        self.seen.append(("begin", path))
-        return len(self.seen)
-
-    async def kept(self, token: object, path: str, copy: int | None, prior: tuple[int, ...],
-                   after: tuple[int, ...] | None, complete: bool) -> None:
-        held = b"" if copy is None else os.read(copy, 1 << 20)
-        if copy is not None:
-            os.close(copy)
-        self.seen.append(("kept", path, held, bool(prior), after == (), complete))
-
-    async def dropped(self, token: object) -> None:
-        self.seen.append(("dropped",))
-
-    async def unknown(self, token: object) -> None:
-        self.seen.append(("unknown",))
-
-    async def commands_ran(self, scope: TrustedScope) -> None:
-        self.seen.append(("commands_ran",))
-
-
-def test_each_change_goes_to_the_record(kit: RunnerKit) -> None:
-    log = RecordingLog()
-    env = MachineEnvironment(kit.socket, changes=log)
-    folder = kit.himari_home / "conversations/c1"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "real.txt").write_text("before\n")
-    (folder / "link.txt").symlink_to("real.txt")
-    assert call(env, "write_file", path="link.txt", content="after\n").status is ToolStatus.SUCCEEDED
-    assert call(env, "write_file", path="new/deep.txt", content="x").status is ToolStatus.SUCCEEDED
-    assert call(env, "edit_file", path="real.txt", old_text="after", new_text="edited").status is ToolStatus.SUCCEEDED
-    assert call(env, "delete_file", path="link.txt").status is ToolStatus.SUCCEEDED  # the link itself
-    assert call(env, "delete_file", path="missing.txt").status is ToolStatus.FAILED
-    assert call(env, "run_command", argv=["true"]).status is ToolStatus.SUCCEEDED
-    real, deep, link = str(folder / "real.txt"), str(folder / "new/deep.txt"), str(folder / "link.txt")
-    assert log.seen == [
-        ("begin", real), ("kept", real, b"before\n", True, False, True),  # recorded under where it lands
-        ("begin", deep), ("kept", deep, b"", False, False, True),
-        ("begin", real), ("kept", real, b"after\n", True, False, True),
-        ("begin", link), ("kept", link, b"", True, True, True),  # a link goes without a copy
-        ("begin", str(folder / "missing.txt")), ("dropped",),
-        ("commands_ran",)]
-
-
-def test_a_lost_answer_is_unknown_and_an_unrecorded_change_is_not_made(kit: RunnerKit,
-                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
-    from himari.runner import api as runner
-
-    log = RecordingLog()
-    env = MachineEnvironment(kit.socket, changes=log)
-    folder = kit.himari_home / "conversations/c1"
-    calls_made = env.call
-
-    async def lost(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
-        if args.get("keep"):
-            await calls_made(op, args, fds)
-            raise runner.RunnerUnavailable("the connection broke")
-        return await calls_made(op, args, fds)
-
-    monkeypatch.setattr(env, "call", lost)
-    with pytest.raises(runner.RunnerUnavailable):  # the Dispatcher records the call's outcome as unknown
-        call(env, "write_file", path="a.txt", content="x")
-    assert log.seen == [("begin", str(folder / "a.txt")), ("unknown",)] and (folder / "a.txt").exists()
-    monkeypatch.undo()
-    unrecorded = MachineEnvironment(kit.socket, changes=RecordingLog(fail_begin=True))
-    outcome = call(unrecorded, "write_file", path="b.txt", content="x")
-    assert outcome.status is ToolStatus.FAILED and "could not be recorded" in text(outcome)
-    assert not (folder / "b.txt").exists()
-
-
-def test_a_new_file_written_in_part_says_so(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
-    """§4.1: the O_EXCL path's unfinished write is told apart from a whole one."""
-    env = MachineEnvironment(kit.socket, changes=RecordingLog())
-    calls_made = env.call
-
-    async def partial(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
-        result, received = await calls_made(op, args, fds)
-        if args.get("keep"):
-            result = {**result, "partial": True, "complete": False, "after_identity": None}
-        return result, received
-
-    monkeypatch.setattr(env, "call", partial)
-    outcome = call(env, "write_file", path="p.txt", content="x")
-    assert outcome.status is ToolStatus.SUCCEEDED and "its content may be partial" in text(outcome)
-
-
-def test_an_older_runner_gets_plain_writes(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One not restarted since HIMARI was updated would take ``keep`` for a plain write: none is sent."""
-    log = RecordingLog()
-    env = MachineEnvironment(kit.socket, changes=log)
-    hello = env.hello
-
-    async def old() -> dict[str, Any]:
-        return {**await hello(), "version": 1}
-
-    monkeypatch.setattr(env, "hello", old)
-    assert call(env, "write_file", path="a.txt", content="x").status is ToolStatus.SUCCEEDED and log.seen == []
-    monkeypatch.undo()  # restarted: recorded from then on
-    assert call(env, "write_file", path="a.txt", content="y").status is ToolStatus.SUCCEEDED
-    assert [s[0] for s in log.seen] == ["begin", "kept"]
+    machine = MachineEnvironment(str(tmp_path / "gone.sock"))
+    machine.sandbox_state = SandboxState.ENFORCED  # as a runner said before it stopped
+    with pytest.raises(Exception):
+        asyncio.run(machine.hello())
+    assert machine.sandbox_state is SandboxState.UNAVAILABLE

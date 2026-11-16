@@ -14,10 +14,6 @@ public name in ``HIMARI_WEB_ALLOWED_HOSTS`` and its ``https://`` origin in
 ``HIMARI_WEB_ALLOWED_ORIGINS``. A plain ``http://`` origin is accepted only
 for a loopback host, and any https origin makes the cookie ``Secure``.
 
-Tool views (MCP Apps, V3-P58) are framed from a second origin: the same
-scheme and host as the page, on ``HIMARI_WEB_SANDBOX_PORT`` (default: the
-port + 1). A reverse proxy must forward that port too, for the same host.
-
 Models (V3-P64 §3): ``HIMARI_MODEL`` is the default; ``HIMARI_MODELS``
 optionally lists every offered model as ``id[=effort]`` (comma-separated;
 an id may hold ``:``, so the effort follows ``=``). The default must be
@@ -58,10 +54,10 @@ Time (V3-P83 §6.4): ``HIMARI_TIME_ZONE`` (an IANA name, default
 Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
 runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
 of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
-``operator``) work on this server as the user. Unset: every Conversation
-uses the Inside Workspace, as before. ``HIMARI_MACHINE_ATTACHED_WRITE=0``
-(V3-P94) lets HIMARI's own Tools write a Conversation's own folder only:
-attached Workspaces are read, and changed by the hub's coding agents.
+``operator``) work on this server as the user. Unset (or another principal):
+Conversations only talk, with no files, commands or uploads (V3-P101). HIMARI's own Tools write a
+Conversation's own folder only: attached Workspaces are read, and changed
+by the hub's coding agents (V3-P94, V3-P100).
 
 Hub (V3-P95): ``HIMARI_HUB_URL`` (``http://127.0.0.1:8791``) and
 ``HIMARI_HUB_USER_TOKEN_FILE`` (the hub's ``user.token``, readable by this
@@ -81,7 +77,6 @@ from himari.bootstrap.proactive import ProactiveSettings, parse_quiet
 
 HOST_VAR = "HIMARI_WEB_HOST"
 PORT_VAR = "HIMARI_WEB_PORT"
-SANDBOX_PORT_VAR = "HIMARI_WEB_SANDBOX_PORT"
 ALLOWED_HOSTS_VAR = "HIMARI_WEB_ALLOWED_HOSTS"
 ALLOWED_ORIGINS_VAR = "HIMARI_WEB_ALLOWED_ORIGINS"
 SECURE_COOKIE_VAR = "HIMARI_WEB_SECURE_COOKIE"
@@ -114,7 +109,6 @@ MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; uns
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 HUB_URL_VAR = "HIMARI_HUB_URL"  # V3-P95: the hub server; unset: its requests are not shown here
 HUB_USER_TOKEN_FILE_VAR = "HIMARI_HUB_USER_TOKEN_FILE"  # V3-P95: the hub's user.token
-MACHINE_ATTACHED_WRITE_VAR = "HIMARI_MACHINE_ATTACHED_WRITE"  # V3-P94: 0 — attached Workspaces are read-only
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
@@ -161,7 +155,6 @@ class WebConfig:
     reasoning_effort: str | None
     sandbox: bool
     context_tokens: int | None = None  # None: the model's window, capped (Application)
-    sandbox_port: int | None = None  # Tool views' origin (V3-P58); None: port + 1
     # One turn's guards (V3-P62); None turns one off.
     turn_budget: int | None = DEFAULT_TURN_BUDGET
     unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS
@@ -186,34 +179,15 @@ class WebConfig:
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
-    machine_attached_write: bool = True  # V3-P94
     hub_url: str | None = None  # V3-P95
     hub_user_token_file: str | None = None
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
-
-    @property
-    def view_port(self) -> int:
-        return self.sandbox_port if self.sandbox_port is not None else self.port + 1
-
-    def sandbox_origin(self, origin: str) -> str:
-        """The sandbox origin that pairs with an allowed page origin: its
-        scheme and host on the sandbox port."""
-        parts = urlsplit(origin)
-        host = parts.hostname or ""
-        return f"{parts.scheme}://{f'[{host}]' if ':' in host else host}:{self.view_port}"
-
-    @property
-    def sandbox_origins(self) -> frozenset[str]:
-        return frozenset(self.sandbox_origin(o) for o in self.allowed_origins)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WebConfig:
         source: Mapping[str, str] = os.environ if env is None else env
         host = _non_empty(source.get(HOST_VAR), DEFAULT_HOST, HOST_VAR)
         port = _port(source.get(PORT_VAR))
-        sandbox_port = _port(source.get(SANDBOX_PORT_VAR), SANDBOX_PORT_VAR, default=port + 1)
-        if sandbox_port == port or sandbox_port > 65535:
-            raise WebConfigError(f"{SANDBOX_PORT_VAR} must be a port other than {PORT_VAR}: views need their own origin")
         hosts_raw, origins_raw = source.get(ALLOWED_HOSTS_VAR), source.get(ALLOWED_ORIGINS_VAR)
         # Loopback names are always allowed (a DNS-rebinding attack needs a
         # name the attacker controls), so the local CLI keeps working when a
@@ -290,7 +264,6 @@ class WebConfig:
             reasoning_effort=effort,
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
             context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
-            sandbox_port=sandbox_port,
             turn_budget=turn_budget,
             unattended_runs=unattended,
             max_runs=max_runs,
@@ -315,8 +288,6 @@ class WebConfig:
             machine_principals=machine_principals,
             hub_url=hub_url,
             hub_user_token_file=hub_user_token_file,
-            machine_attached_write=_flag(source.get(MACHINE_ATTACHED_WRITE_VAR), MACHINE_ATTACHED_WRITE_VAR,
-                                         default=True),
             proactive=_proactive(source),
         )
 

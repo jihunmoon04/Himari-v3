@@ -1,5 +1,7 @@
 # MCP Apps 1단계 — 읽기 전용 화면 표시 v0.1
 
+> **제거됨(2026-11-16, V3-P97):** 소유자 결정으로 이 기능(MCP 서버가 준 Tool 화면, V3-P58·V3-P63)을 코드에서 뺐다. Web 다시 디자인 전의 기능 정리이며, 이 문서는 기록으로만 남긴다.
+
 > 2026-10-15 · **PROPOSED (V3-P58)** · 1단계 구현됨(브랜치 `feat/mcp-apps-view`). 설계와 달라진 점은 §10.
 >
 > 기준 사양: MCP Apps 확장 `io.modelcontextprotocol/ui`, **안정판 2026-01-26** ([apps.mdx](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx), SEP-1865 Final). `draft`는 따르지 않는다.

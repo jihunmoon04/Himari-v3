@@ -31,11 +31,6 @@ the files a call presented. An image's model copy (V3-P67 §8) is shown
 inline from ``GET …/files/{id}/{version}/view``: a JPEG or PNG HIMARI made,
 never the uploaded bytes; file views say whether there is one (``image``)
 and tool results list the images the call returned (``images``).
-
-Tool views (MCP Apps, V3-P58): events say which calls have one
-(``app_view``); ``GET …/calls/{run}/{call}/app`` gives a view as JSON with a
-signed URL of the sandbox origin's proxy (``sandbox.py``). The view's HTML
-is never served from this origin.
 """
 
 from __future__ import annotations
@@ -70,8 +65,6 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from himari.bootstrap.application import (
     CLOUD_FILESYSTEMS,
     Application,
-    AppViewRefused,
-    AppViewState,
     ConnectionGenerationRequired,
     ConversationStillStopping,
     DeleteNotice,
@@ -91,18 +84,16 @@ from himari.bootstrap.application import (
     PromptView,
     ToolSourceView,
     UnknownToolSource,
-    UploadsFolderUnusable,
     WorkspaceBusy,
     WorkspaceRefused,
     AttachedFolder,
     FolderConversations,
     ReferenceRequest,
 )
-from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.companion import origin_view
 from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
-from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
+from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
 from himari.presence.api import (
@@ -188,7 +179,6 @@ from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
 from himari.interfaces.web.hub import HubClient, HubRefused, HubUnavailable
 from himari.sandbox.api import SandboxState
-from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
     BodyLimitMiddleware,
@@ -204,22 +194,11 @@ MAX_MESSAGE_CHARS = 32_000
 MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
-STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
+STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript",
                 "hub.js": "text/javascript",  # the hub's waiting requests (V3-P95)
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
                 "local_store.js": "text/javascript", "drafts.js": "text/javascript",  # kept in the browser (V3-P78 §5)
-                "codemirror/codemirror.js": "text/javascript",  # the web editor (V3-P75 §7.6), loaded on first use
-                # The PDF view (V3-P77 §3): its part, and PDF.js with its worker, the image decoders it may
-                # import and the CMaps it may fetch; each loaded on first use.
-                "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
-                # Its ink (§4, §5): the strokes, perfect-freehand's outlines, the incremental update it writes.
-                "pdfink.js": "text/javascript", "pdfdoc.js": "text/javascript",
-                "inklab.js": "text/javascript",  # the ink lab (§4.6), asked for with ?ink-lab
-                "freehand/perfect-freehand.mjs": "text/javascript",
-                "pdfjs/pdf.worker.min.mjs": "text/javascript",
-                "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
-                "pdfjs/wasm/jbig2_nowasm_fallback.js": "text/javascript",
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -227,9 +206,6 @@ KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktu
                "SansSerif-Bold", "SansSerif-Italic", "SansSerif-Regular", "Script-Regular", "Size1-Regular",
                "Size2-Regular", "Size3-Regular", "Size4-Regular", "Typewriter-Regular")
 STATIC_FILES.update({f"katex/fonts/KaTeX_{name}.woff2": "font/woff2" for name in KATEX_FONTS})
-STATIC_FILES.update({f"pdfjs/cmaps/{cmap.name}": "application/octet-stream"
-                     for cmap in (resources.files("himari.interfaces.web") / "static/pdfjs/cmaps").iterdir()
-                     if cmap.name.endswith(".bcmap")})
 
 Opener = Callable[[], Awaitable[Application]]
 
@@ -550,76 +526,6 @@ def identity_out(identity: Iterable[object]) -> list[str]:
     return [str(v) for v in identity]
 
 
-def identity_in(header: str) -> list[int]:
-    """An identity sent in a header (V3-P77 §5.3): four decimal numbers, comma-separated."""
-    parts = [part.strip() for part in header.split(",")]
-    if len(parts) != 4 or not all(re.fullmatch(r"[0-9]{1,20}", part) for part in parts):
-        raise ApiError(400, "invalid_argument", "X-Himari-Expected is the PDF's identity as it was read.")
-    return [int(part) for part in parts]
-
-
-class SaveFileBody(_Body):
-    """A file saved from the web editor (V3-P75 §7.7): its whole text, and its identity as it was read."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
-    expected: IdentityIn
-
-
-class RecreateFileBody(_Body):
-    """V3-P78 §4.2: the editor's text as a new file where the file it was editing is gone."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
-
-
-class NewPathBody(_Body):
-    """A new empty file or folder (V3-P75 §7.5, §7.7)."""
-
-    path: str = Field(min_length=1, max_length=4096)
-
-
-class DeleteFileBody(_Body):
-    path: str = Field(min_length=1, max_length=4096)
-    expected: IdentityIn
-
-
-class PutBackBody(_Body):
-    """A PDF's previous version written over the file as it was read (V3-P77 §6.3)."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    expected: IdentityIn
-
-
-class TruncateBody(_Body):
-    """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves; ``expected`` its identity as read."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    expected: IdentityIn
-    to: int
-
-
-class FileStateIn(_Body):
-    """A file as the owner saw it (V3-P76 §6): there, with this identity, or not there."""
-
-    exists: bool
-    identity: IdentityIn | None = None
-
-
-class AcceptChangesBody(_Body):
-    """Accept the agent's changes of ``paths``, or ``all`` of them (the hidden ones too)."""
-
-    paths: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=1000)
-    all: bool = False
-
-
-class RevertChangeBody(_Body):
-    """Revert one file; ``seen``: after a conflict, the state shown, to revert anyway if it is still so."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    seen: FileStateIn | None = None
-
-
 class FolderConversationBody(_Body):
     """Open a conversation in a folder (V3-P75 §6): its latest, or ``new`` one."""
 
@@ -803,17 +709,14 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
     return "HIMARI reached out · " + " · ".join(parts)
 
 
-def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
+def event_view(event: ConversationEvent,
                models: dict[RunId, str] | None = None, files: Files | None = None,
                presented: dict[CallRef, list[FileRecord]] | None = None,
                memory: dict[CallRef, MemoryLine] | None = None) -> dict[str, Any]:
-    """``views``: Application.view_flags for the page — (shown while it
-    runs, stored with its result) per call with a view that may be shown.
-    ``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
+    """``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
     ``files``: the page's attachments by (id, version); ``presented``: the
     files each call gave the user (V3-P66 §7.3); ``memory``: what each
     memory call changed (V3-P71 §7.1)."""
-    views = {} if views is None else views
     models = {} if models is None else models
     files = {} if files is None else files
     presented = {} if presented is None else presented
@@ -839,9 +742,7 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
-        run = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
-                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0],
                           **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
                              else {})}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
@@ -854,7 +755,6 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["call_id"] = payload.call.call_id
         view["is_error"] = payload.model_result.is_error
         view["text"] = _text(payload.model_result.blocks)
-        view["app_view"] = views.get(payload.call, (False, False))[1]
         view["presented_files"] = [file_view(f) for f in presented.get(payload.call, [])]
         line = memory.get(payload.call)
         view["memory"] = None if line is None else {"action": line.action, "id": line.memory_id, "text": line.text,
@@ -864,30 +764,6 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
                           if (found := files.get((b.file_id, b.version))) is not None
                           and found.origin is FileOrigin.TOOL]
-    return view
-
-
-def app_view_view(state: AppViewState, sandbox_url: str | None) -> dict[str, Any]:
-    view: dict[str, Any] = {
-        "state": state.state, "source": state.source, "tool_id": state.tool_id,
-        "tool": None if state.tool is None else thaw(state.tool),
-        "arguments": thaw(state.arguments), "status": state.status.value,
-    }
-    if state.resource is None:  # ended without a view: how to close it, and why
-        view["outcome"], view["reason"] = state.outcome, state.reason
-        return view
-    declared = state.resource.csp
-    view.update({
-        "digest": state.resource.digest, "html": state.resource.html, "prefers_border": state.resource.prefers_border,
-        "csp": {"connect_domains": list(state.csp.connect_domains),
-                "resource_domains": list(state.csp.resource_domains)},
-        "declared_csp": {"connect_domains": list(declared.connect_domains),
-                         "resource_domains": list(declared.resource_domains),
-                         "frame_domains": list(declared.frame_domains),
-                         "base_uri_domains": list(declared.base_uri_domains)},
-        "sandbox_url": sandbox_url,
-        "result": None if state.state != "done" else thaw(state.result),
-    })
     return view
 
 
@@ -1204,15 +1080,9 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SCREEN_PATH = re.compile(r"^/api/device/screens/[^/]+$")  # V3-P91 §4.2: a screen of at most SCREEN_MAX_BYTES
-SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
 SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders",
                  "/settings/devices")  # V3-P79 §3.1, V3-P83
 PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
-SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
-PDF_APPEND_PATH = "/api/machine/pdf/append"
-PDF_TRUNCATE_PATH = "/api/machine/pdf/truncate"
-EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
-IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
 GENERATION_HEADER = "X-Himari-Connection-Generation"  # V3-P93 §6.1.2: a device SSE stream's generation id
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
@@ -1245,36 +1115,16 @@ def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
 def shown_file_view(shown: ShownFile) -> dict[str, Any]:
     """V3-P75 §5.2: text as text; an image or other file by its kind only."""
     return {"path": shown.path, "size": shown.size, "identity": identity_out(shown.identity), "modified": shown.modified,
-            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable,
-            "cloud_synced": shown.cloud_synced}
-
-
-def changes_view(changes: ChangesView, running: bool) -> dict[str, Any]:
-    """V3-P76 §5: the agent's changes not yet reviewed; the hidden ones counted only (§10)."""
-    return {"items": [{"path": c.path, "name": posixpath.basename(c.path), "kind": c.kind, "state": c.state,
-                       "interleaved": c.interleaved, "count": c.count, "revertible": c.revertible,
-                       "changed_at": _time(c.changed_at)} for c in changes.items],
-            "hidden": changes.hidden, "commands_ran": _time(changes.commands_ran), "running": running}
-
-
-def file_state_out(identity: tuple[int, ...] | None) -> dict[str, Any]:
-    return {"exists": bool(identity), "identity": identity_out(identity) if identity else None}
-
-
-def change_diff_view(diff: ChangeDiff) -> dict[str, Any]:
-    return {"path": diff.path, "name": posixpath.basename(diff.path), "kind": diff.kind, "state": diff.state,
-            "revertible": diff.state == "ok", "changed": diff.changed,
-            "interleaved": diff.interleaved, "before": {"state": diff.before.state, "text": diff.before.text},
-            "now": {**file_state_out(diff.now.identity), "text": diff.now.text}}
+            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated}
 
 
 # How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status. too_large is
 # 422, not 413: the body limit middleware turns every 413 into "request_too_large".
 EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 422,
-                   "changed": 409, "exists": 409, "versions_unavailable": 507, "reference_stale": 409,
+                   "changed": 409, "exists": 409, "reference_stale": 409,
                    "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
                    "not_directory": 400, "not_regular": 415, "links": 400, "other": 500,
-                   "unsupported": 422, "busy": 409, "not_revertible": 409, "outdated": 409}
+                   "unsupported": 422}
 
 
 def attached_view(folder: AttachedFolder) -> dict[str, Any]:
@@ -1373,11 +1223,8 @@ def begin_shutdown(app: FastAPI) -> None:
         loop.call_soon_threadsafe(app.state.closing.set)
 
 
-def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None = None) -> FastAPI:
-    """``signer``: shared with the sandbox server (``sandbox.py``); made here
-    when not given (one per process, so a restart voids old view URLs)."""
+def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     sessions = Sessions()
-    signer = SandboxSigner() if signer is None else signer
     closing = asyncio.Event()  # set as the server begins to shut down: the live streams end
     live_slots = live.Slots()  # open live streams of each principal
     # V3-P83 §8.1: the live streams each device opened, ended when it is revoked.
@@ -1506,17 +1353,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return JSONResponse({"error": {"code": "workspace_busy", "message": "A command is running in the workspace; "
                                        "send again shortly."}}, status_code=409)
 
-    @app.exception_handler(UploadsFolderUnusable)
-    async def uploads_unusable(request: Request, error: UploadsFolderUnusable) -> JSONResponse:
-        return JSONResponse({"error": {"code": "uploads_folder_unusable",
-                                       "message": "The conversation's uploads is not a folder. Ask the model to tidy "
-                                                  "it up, or remove it yourself."}}, status_code=409)
-
-    @app.exception_handler(AppViewRefused)
-    async def no_view(request: Request, error: AppViewRefused) -> JSONResponse:
-        return JSONResponse({"error": {"code": error.code, "message": "No view to show for this call."}},
-                            status_code=404)
-
     @app.exception_handler(PromptRefused)
     async def prompt_refused(request: Request, error: PromptRefused) -> JSONResponse:
         return JSONResponse({"error": {"code": error.code, "message": error.message}},
@@ -1534,18 +1370,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.exception_handler(ExplorerRefused)
     async def explorer_refused(request: Request, error: ExplorerRefused) -> JSONResponse:
-        body: dict[str, Any] = {"code": error.category, "message": str(error)}
-        if error.identity is not None:  # a PDF's failed save: the file as it is now (V3-P82 §3.6)
-            body["identity"] = identity_out(error.identity)
-        if error.partial:
-            body["partial"] = True
-        return JSONResponse({"error": body}, status_code=EXPLORER_STATUS.get(error.category, 400))
-
-    @app.exception_handler(ChangeConflict)
-    async def change_conflict(request: Request, error: ChangeConflict) -> JSONResponse:
-        """V3-P76 §6: not reverted; ``now`` is what the file is, to revert anyway with as ``seen``."""
-        return JSONResponse({"error": {"code": "changed", "message": str(error), "now": file_state_out(error.now),
-                                       "interleaved": error.interleaved}}, status_code=409)
+        return JSONResponse({"error": {"code": error.category, "message": str(error)}},
+                            status_code=EXPLORER_STATUS.get(error.category, 400))
 
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
@@ -1759,78 +1585,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     # -- the editor (V3-P75 §7): the owner's own writes, anywhere but hidden paths ------------
 
-    @app.put("/api/machine/file")
-    async def save_file(body: SaveFileBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        saved = await himari(request).explorer(who).save(body.path, body.content.encode("utf-8", "surrogatepass"),
-                                                          [int(v) for v in body.expected])
-        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
-
-    @app.post("/api/machine/file", status_code=201)
-    async def create_file(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, identity = await himari(request).explorer(who).create_file(body.path)
-        return {"path": path, "identity": identity_out(identity)}
-
-    @app.post("/api/machine/file/install", status_code=201)
-    async def recreate_file(body: RecreateFileBody, request: Request,
-                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, identity = await himari(request).explorer(who).recreate(
-            body.path, body.content.encode("utf-8", "surrogatepass"))
-        return {"path": path, "identity": identity_out(identity) if identity is not None else None}
-
-    @app.post("/api/machine/folder", status_code=201)
-    async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return {"path": await himari(request).explorer(who).make_folder(body.path)}
-
-    @app.post("/api/machine/file/delete")
-    async def delete_machine_file(body: DeleteFileBody, request: Request,
-                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, kept = await himari(request).explorer(who).delete(body.path, [int(v) for v in body.expected])
-        return {"path": path, "previous_kept": kept}
-
-    @app.get("/api/machine/versions")
-    async def list_versions(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A file's previous versions (§7.4), newest first. ``path``: its real path, as saved."""
-        versions = await himari(request).explorer(who).previous(path)
-        return {"items": [{"id": v.version_id, "saved_at": _time(v.saved_at), "size": v.size, "reason": v.reason}
-                          for v in versions]}
-
-    @app.get("/api/machine/versions/deleted")
-    async def deleted_files(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Files deleted from the folder ``path`` whose content is kept (PR #95 review B3), latest first."""
-        found = await himari(request).explorer(who).deleted(path)
-        return {"items": [{"path": p, "name": posixpath.basename(p), "id": v.version_id, "saved_at": _time(v.saved_at),
-                           "size": v.size} for p, v in found]}
-
-    @app.post("/api/machine/versions/{version_id}/put_back")
-    async def put_back_version(version_id: str, body: PutBackBody, request: Request,
-                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A PDF's previous version over the file (V3-P77 §6.3); the file as it was is kept first."""
-        saved = await himari(request).explorer(who).put_back(body.path, version_id, [int(v) for v in body.expected])
-        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
-
-    @app.get("/api/machine/versions/{version_id}/download")
-    async def download_version(version_id: str, request: Request, path: str,
-                               who: PrincipalId = Depends(principal)) -> Response:
-        """A previous version's bytes (a PDF's, to view: V3-P77 §6.2), as a download is: never rendered here."""
-        real, size, fd = await himari(request).explorer(who).open_version(path, version_id)
-        return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
-            "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
-            "Content-Length": str(size),
-            "Content-Security-Policy": "sandbox",
-        })
-
-    @app.get("/api/machine/versions/{version_id}")
-    async def read_version(version_id: str, request: Request, path: str,
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return {"text": await himari(request).explorer(who).previous_text(path, version_id)}
-
-    @app.post("/api/machine/versions/{version_id}/restore", status_code=201)
-    async def restore_version(version_id: str, body: NewPathBody, request: Request,
-                              who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A deleted file put back in one step (V3-P76 §4.1): 409 changed if the name is taken, 422 unsupported
-        where the file system cannot."""
-        return {"path": await himari(request).explorer(who).restore(body.path, version_id)}
-
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         found = await himari(request).explorer(who).stat(path)
@@ -1844,33 +1598,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def download_machine_file(request: Request, path: str,
                                     who: PrincipalId = Depends(principal)) -> Response:
         """An attachment of type octet-stream, sandboxed: never rendered on this origin (V3-P75 §8.2)."""
-        real, size, identity, fd = await himari(request).explorer(who).open(path)
+        real, size, fd = await himari(request).explorer(who).open(path)
         return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
             "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
             "Content-Length": str(size),
             "Content-Security-Policy": "sandbox",
-            IDENTITY_HEADER: ",".join(identity_out(identity)),
         })
-
-    @app.post(PDF_APPEND_PATH)
-    async def append_pdf(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """V3-P77 §5.3, V3-P82 §3.6: ink saved into a PDF — the body is the bytes to add after it (an incremental
-        update, at most 8 MiB), written at its end in place; ``X-Himari-Expected`` its identity as read. 409
-        changed; 422 too_large over 64 MiB in all; a failed write's error tells the file's ``identity`` after it
-        and ``partial`` when bytes of it were left."""
-        if request.headers.get("content-type", "").split(";")[0].strip() != "application/octet-stream":
-            raise ApiError(415, "invalid_argument", "The ink comes as application/octet-stream.")
-        expected = identity_in(request.headers.get(EXPECTED_HEADER, ""))
-        saved = await himari(request).explorer(who).append_pdf(path, await request.body(), expected)
-        return {"path": saved.path, "identity": identity_out(saved.identity)}
-
-    @app.post(PDF_TRUNCATE_PATH)
-    async def truncate_pdf(body: TruncateBody, request: Request,
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves' ``%%EOF`` — a save whose writing
-        was cut short taken off its end; ``expected``: its identity as read."""
-        saved = await himari(request).explorer(who).truncate_pdf(body.path, [int(v) for v in body.expected], body.to)
-        return {"path": saved.path, "identity": identity_out(saved.identity)}
 
     @app.get("/api/machine/image")
     async def show_image(request: Request, path: str, who: PrincipalId = Depends(principal)) -> Response:
@@ -1996,9 +1729,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
             events = tuple(e for e in events if e.sequence not in unshown)
         application.seen(scope)  # a client is reading (V3-P62 §5): only after the read was authorized
-        runs = [e.origin_run_id for e in events if isinstance(e.payload, AssistantToolCalls) and e.origin_run_id]
-        runs += [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
-        views = await application.view_flags(scope, runs) if runs and application.views_configured else {}
         writers = [e.origin_run_id for e in events
                    if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
         models = await application.run_models(scope, writers) if writers else {}
@@ -2013,7 +1743,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         presented = {call: list(records) for call, records in given.items()}
         results = [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
         memory = await application.memory_lines(scope, results) if results else {}
-        return {"items": [event_view(e, views, models, files, presented, memory) for e in events],
+        return {"items": [event_view(e, models, files, presented, memory) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
 
     @app.get("/api/conversations/{conversation_id}/live")
@@ -2044,20 +1774,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended,
                                          awake=lambda: application.seen(scope)), done,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
-
-    @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
-    async def read_app_view(conversation_id: str, run_id: str, call_id: str, request: Request, origin: str,
-                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A call's view (V3-P58 §6.1). ``origin``: the page's own origin,
-        one of the allowed ones; the view is framed only by it."""
-        if origin not in config.allowed_origins:
-            raise ApiError(400, "invalid_argument", "origin must be this page's origin.")
-        state = await himari(request).app_view(scope_of(conversation_id, who), CallRef(RunId(run_id), CallId(call_id)))
-        url = None
-        if state.resource is not None:
-            grant = SandboxGrant(origin, state.csp.connect_domains, state.csp.resource_domains)
-            url = f"{config.sandbox_origin(origin)}/sandbox?{signer.query(grant)}"
-        return app_view_view(state, url)
 
     @app.get("/api/conversations/{conversation_id}/context")
     async def read_context(conversation_id: str, request: Request,
@@ -2368,49 +2084,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         text = await himari(request).expand_prompt(scope_of(conversation_id, who), body.source, body.name,
                                                    body.arguments)
         return {"text": text}
-
-    # -- the review of the agent's file changes (V3-P76 §5, §6) ------------------------------
-
-    @app.get("/api/conversations/{conversation_id}/changes")
-    async def file_changes(conversation_id: str, request: Request,
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        application, scope = himari(request), scope_of(conversation_id, who)
-        changes = await application.file_changes(scope)
-        return changes_view(changes, application.runner.shown_status(scope).running)
-
-    @app.get("/api/conversations/{conversation_id}/changes/diff")
-    async def file_change_diff(conversation_id: str, path: str, request: Request,
-                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return change_diff_view(await himari(request).file_change_diff(scope_of(conversation_id, who), path))
-
-    @app.post("/api/conversations/{conversation_id}/changes/accept")
-    async def accept_file_changes(conversation_id: str, body: AcceptChangesBody, request: Request,
-                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        if body.all == bool(body.paths):
-            raise ApiError(400, "invalid_argument", "Give the paths to accept, or all.")
-        await himari(request).accept_file_changes(scope_of(conversation_id, who), None if body.all else body.paths)
-        return {"accepted": True}
-
-    @app.post("/api/conversations/{conversation_id}/changes/revert")
-    async def revert_file_change(conversation_id: str, body: RevertChangeBody, request: Request,
-                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        seen = None
-        if body.seen is not None:
-            if body.seen.exists != (body.seen.identity is not None):
-                raise ApiError(400, "invalid_argument", "A file seen is there with its identity, or not there.")
-            seen = tuple(int(v) for v in body.seen.identity) if body.seen.identity is not None else ()
-        await himari(request).revert_file_change(scope_of(conversation_id, who), body.path, seen)
-        return {"reverted": True}
-
-    @app.post("/api/conversations/{conversation_id}/changes/revert-all")
-    async def revert_all_file_changes(conversation_id: str, request: Request,
-                                      who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Each shown file in turn; the ones left (changed since, refused, or
-        not revertible) and why, and how many hidden ones were left."""
-        done = await himari(request).revert_all_file_changes(scope_of(conversation_id, who))
-        return {"left": [{"path": path, "code": why.category if isinstance(why, ExplorerRefused) else "changed",
-                          "message": str(why)} for path, why in done.left],
-                "hidden": done.hidden}
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
@@ -2854,11 +2527,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
-                       larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
-                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH
-                       else PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH
+                       larger=lambda method, path: PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH
                        else SCREEN_MAX_BYTES if method == "POST" and SCREEN_PATH.match(path) else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
-    app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))
+    app.add_middleware(SecurityHeadersMiddleware, csp=page_csp())
     return app

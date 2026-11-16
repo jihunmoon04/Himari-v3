@@ -13,11 +13,11 @@ import pytest
 from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
-from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused, workspace_for
-from himari.common import PrincipalId, TrustedScope
+from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused
+from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.data.api import MAX_WORKSPACE_NOTE_CHARS
-from himari.environment.machine import DRIVE_NOTE, MachineEnvironment
-from himari.prompt.api import state_block
+from himari.environment.machine import DRIVE_NOTE, READ_ONLY_NOTE, MachineEnvironment
+from himari.prompt.api import ATTACHMENT_NOTE, FILE_REFERENCE_NOTE, ToolGroupTurn, state_block
 from himari.provider.scripted import ScriptedAdapter
 
 OPERATOR, ALICE = PrincipalId("operator"), PrincipalId("alice")
@@ -57,7 +57,7 @@ def test_a_machine_conversation_works_in_its_own_folder(tmp_path: Path, kit: Run
             block = state_block(first.current_state) or ""
             assert f'"working_directory":"{folder}"' in block.replace(" ", "") and '"this conversation"' in block
             assert '"read": "everything the user can read' in block
-            assert '"git_push": "not set up on this server"' in block and "machine/git_push" in tools
+            assert "git_push" not in block and "machine/git_push" not in tools  # V3-P100
             assert '"connection":"online"' in block.replace(" ", "")
             events = await app.data.read_events(scope)
             results = await app.data.read_tool_executions(scope, events[3].origin_run_id)  # type: ignore[arg-type]
@@ -68,17 +68,21 @@ def test_a_machine_conversation_works_in_its_own_folder(tmp_path: Path, kit: Run
     asyncio.run(scenario())
 
 
-def test_other_principals_keep_inside(tmp_path: Path, kit: RunnerKit) -> None:
+def test_other_principals_only_talk(tmp_path: Path, kit: RunnerKit) -> None:
+    """V3-P101: a principal the machine Environment is not for gets no Environment: no file Tools, no uploads."""
     async def scenario() -> None:
-        adapter = ScriptedAdapter([calls(("inside/write_file", {"path": "a.txt", "content": "x"})), final("ok")])
+        adapter = ScriptedAdapter([final("ok")])
         app = await open_app(tmp_path / "data", kit.socket, adapter)
         try:
             scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
             await app.send(scope, "go")
             await app.runner.wait(scope)
-            inside = Path(app.inside.host_root(workspace_for(ALICE))) / "conversations" / scope.conversation_id
-            assert (inside / "a.txt").read_text() == "x"
+            tools = {str(t.tool_id) for t in adapter.prepared_inputs[0].tool_catalog}
+            assert not any(t.startswith(("inside/", "machine/")) for t in tools)
+            with pytest.raises(FilesUnavailable):
+                await app.upload(scope, "a.txt", None, chunks(b"a"))
             assert not (kit.himari_home / "conversations" / scope.conversation_id).exists()
+            assert not (tmp_path / "data" / "workspaces").exists()
         finally:
             await app.close()
 
@@ -150,7 +154,11 @@ def test_folders_are_registered_attached_and_shown_to_the_model(tmp_path: Path, 
             assert refused.value.code == "not_usable"
             await app.send(scope, "write it")
             await app.runner.wait(scope)
-            assert (Path(project) / "made.c").read_text() == "x"
+            assert not (Path(project) / "made.c").exists()  # V3-P100: an attached folder is only read
+            results = [str(b.text) for part in adapter.prepared_inputs[-1].conversation
+                       if isinstance(part, ToolGroupTurn)
+                       for r in part.results.values() for b in r.blocks if isinstance(b, TextBlock)]
+            assert any("read-only" in t for t in results), results  # refused as read-only, not for another reason
             block = state_block(adapter.prepared_inputs[0].current_state) or ""
             assert f'"working_directory": "{project}"' in block and '"label": "a"' in block
             with pytest.raises(WorkspaceRefused) as refused:
@@ -185,12 +193,13 @@ def test_a_cloud_folder_gets_the_drive_note(tmp_path: Path, kit: RunnerKit, monk
             await app.attach_workspace(scope, workspace_id=registered.workspace_id)
             assert app.machine is not None
             shown = (await app.machine.places(scope)).shown
-            assert [(w.label, w.note, w.notice) for w in shown[1:]] == [("lectures", None, DRIVE_NOTE)]
+            assert [(w.label, w.note, w.notice) for w in shown[1:]] == [("lectures", None,
+                                                                         f"{READ_ONLY_NOTE} {DRIVE_NOTE}")]
             assert shown[0].notice is None
             await app.send(scope, "go")
             await app.runner.wait(scope)
             block = state_block(adapter.prepared_inputs[0].current_state) or ""
-            assert f'"notice": "{DRIVE_NOTE}"' in block
+            assert f'"notice": "{READ_ONLY_NOTE} {DRIVE_NOTE}"' in block
         finally:
             await app.close()
 
@@ -244,6 +253,33 @@ def test_inside_conversations_and_other_principals_attach_nothing(tmp_path: Path
             assert refused.value.code == "unavailable"
             with pytest.raises(WorkspaceRefused):
                 await app.machine_workspaces(ALICE)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_old_inside_conversation_is_told_of_no_files(tmp_path: Path, kit: RunnerKit) -> None:
+    """V3-P101: Inside is gone; a Conversation made with it only talks, so the model is told of no file Tools,
+    attachments or folder, while a machine Conversation on the same server still is."""
+    from himari.common import EnvironmentKind, WorkspaceId
+    from himari.data.api import InitialActivation
+
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([final("old"), final("new")])
+        app = await open_app(tmp_path / "data", kit.socket, adapter)
+        try:
+            old = TrustedScope(OPERATOR, await app.data.create_conversation(
+                OPERATOR, activations=(InitialActivation(EnvironmentKind("inside"), WorkspaceId("ws_old")),)))
+            new = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
+            for scope in (old, new):
+                await app.send(scope, "hi")
+                await app.runner.wait(scope)
+            told_old, told_new = ("\n".join(i.stable_prefix) for i in adapter.prepared_inputs)
+            assert ATTACHMENT_NOTE not in told_old and FILE_REFERENCE_NOTE not in told_old
+            assert ATTACHMENT_NOTE in told_new and FILE_REFERENCE_NOTE in told_new
+            block = state_block(adapter.prepared_inputs[0].current_state) or ""
+            assert "inside" not in block and "working_directory" not in block, block
         finally:
             await app.close()
 

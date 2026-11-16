@@ -41,7 +41,6 @@ from himari.common import (
 from himari.control.api import DriveState
 from himari.data.api import (
     MemoryCursor,
-    AppView,
     InstructionScope,
     MemoryCategory,
     ArtifactMutation,
@@ -59,8 +58,6 @@ from himari.data.api import (
     RunStatus,
     ToolCompletion,
     ToolExecutionStatus,
-    UiCsp,
-    UiResource,
 )
 from himari.data.sqlite import (
     APPLICATION_ID,
@@ -561,9 +558,8 @@ async def op_create(store: SqliteStore, data: SqliteData) -> Operation:
 async def op_purge(store: SqliteStore, data: SqliteData) -> Operation:
     run_id = await _received(data)
     await data.project_model_output(SCOPE, run_id, AssistantToolCalls(GROUP))
-    view = AppView(UiResource.create("fake", "ui://fake/v", "<!DOCTYPE html><p>v</p>", UiCsp()), {"v": 1})
     await data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c2")), ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("v"), app_view=view, artifact_mutations=(ArtifactMutation("note", "n"),)))
+        ToolExecutionStatus.SUCCEEDED, text_result("v"), artifact_mutations=(ArtifactMutation("note", "n"),)))
     await data.set_external_setting(SCOPE, "fake", False)
     await data.set_model_setting(SCOPE, ModelSetting("m", None))
     await data.trash_conversation(SCOPE)

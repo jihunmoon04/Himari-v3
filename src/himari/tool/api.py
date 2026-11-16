@@ -37,16 +37,10 @@ from himari.common import (
     UnknownOutcomePolicy,
 )
 from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, ConversationWorkspace, MemoryChange
-# Tool views (MCP Apps, V3-P58): owned by Data, re-exported here so that a
-# Tool implementation (e.g. the MCP connector, which may import only
-# tool.api — V3-059) can build them.
-from himari.data.api import MAX_APP_PAYLOAD_BYTES as MAX_APP_PAYLOAD_BYTES
-from himari.data.api import MAX_UI_HTML_BYTES as MAX_UI_HTML_BYTES
-from himari.data.api import AppView as AppView
+# Owned by Data, re-exported here so that a Tool implementation (e.g. the MCP
+# connector, which may import only tool.api — V3-059) can use them.
 from himari.data.api import PresentedFile as PresentedFile
 from himari.data.api import MAX_RESULT_IMAGES as MAX_RESULT_IMAGES
-from himari.data.api import UiCsp as UiCsp
-from himari.data.api import UiResource as UiResource
 from himari.data.api import DEFAULT_FILE_MAX_BYTES
 
 # An image content item's base64, checked before it is decoded (V3-P67 review B3): one stored file.
@@ -203,10 +197,6 @@ class ToolOutcome(DeepFrozen):
     model_result: ModelToolResult
     artifact_mutations: tuple[ArtifactMutation, ...] = ()
     raw_result: JsonValue = None
-    # V3-P58: the call's view, stored with the result by the Dispatcher. Kept
-    # only when the call ran (SUCCEEDED/FAILED); a view Data refuses is
-    # dropped and the result is committed without it.
-    app_view: AppView | None = None
     # V3-P66 §7.1: files given to the user, recorded with the result (SUCCEEDED
     # only). If Data refuses them the call is committed FAILED instead: the
     # result said they were given, so it cannot stand without them.

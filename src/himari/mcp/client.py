@@ -7,13 +7,10 @@ matches answers to requests and says what an answer means.
 
 Only what HIMARI uses: ``initialize``, ``tools/list``, ``tools/call``,
 ``prompts/list`` and ``prompts/get``, and ``resources/list``,
-``resources/templates/list`` and ``resources/read`` (a Tool's view, MCP
-Apps, and the resource Tools, V3-P60). The client declares no
+``resources/templates/list`` and ``resources/read`` (the resource Tools,
+V3-P60). The client declares no
 capabilities of its own, so a server has no reason to send requests back;
 any it sends inside a response stream, and every notification, is ignored.
-For a server whose views are shown it declares the MCP Apps extension
-(``capabilities.extensions``), which tells the server it may describe
-views; that asks for nothing back either.
 
 Each JSON-RPC request is one ``POST`` answered by ``application/json`` or
 a ``text/event-stream`` that carries the response. The session id the
@@ -100,18 +97,10 @@ REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
 CONNECT_SECONDS = 5.0
 CANCEL_SECONDS = 5.0  # sending one cancellation notification
 MAX_TOOL_PAGES = 20
-UI_EXTENSION = "io.modelcontextprotocol/ui"  # MCP Apps (V3-P58)
-UI_MIME_TYPE = "text/html;profile=mcp-app"
 
 
 class _SessionExpired(Exception):
     pass
-
-
-def capabilities(ui: bool) -> dict[str, Any]:
-    """What HIMARI declares: nothing, or the MCP Apps extension for a server
-    whose views are shown (V3-P58), which asks for nothing back either."""
-    return {"extensions": {UI_EXTENSION: {"mimeTypes": [UI_MIME_TYPE]}}} if ui else {}
 
 
 class Channel(Protocol):
@@ -231,8 +220,8 @@ class McpClient:
 
 
 def http_client(url: str, token: str | None, *, timeout_seconds: float,
-                transport: httpx.AsyncBaseTransport | None = None, ui: bool = False) -> McpClient:
-    return McpClient(HttpChannel(url, token, timeout_seconds=timeout_seconds, transport=transport, ui=ui))
+                transport: httpx.AsyncBaseTransport | None = None) -> McpClient:
+    return McpClient(HttpChannel(url, token, timeout_seconds=timeout_seconds, transport=transport))
 
 
 class HttpChannel:
@@ -246,7 +235,6 @@ class HttpChannel:
         *,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
-        ui: bool = False,  # declare the MCP Apps extension (V3-P58)
     ) -> None:
         headers = {"accept": "application/json, text/event-stream", "accept-encoding": "identity"}
         if token:
@@ -258,7 +246,6 @@ class HttpChannel:
             headers=headers, timeout=httpx.Timeout(timeout_seconds, connect=CONNECT_SECONDS),
             follow_redirects=False, trust_env=False, transport=transport,
         )
-        self._capabilities = capabilities(ui)
         self._session: str | None = None
         self._version: str | None = None
         self._epoch = 0  # which session: counts (re)initializations (V3-P60 C6)
@@ -321,7 +308,7 @@ class HttpChannel:
     async def _initialize(self) -> Mapping[str, Any]:
         self._session, self._version = None, None
         self._epoch += 1
-        result = await self._rpc(REVISION.initialize, REVISION.initialize_params(self._capabilities),
+        result = await self._rpc(REVISION.initialize, REVISION.initialize_params({}),
                                  initializing=True)
         self._version = REVISION.accept(result)
         await self._notify(REVISION.initialized)

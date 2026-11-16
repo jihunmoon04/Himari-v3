@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import stat
-import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -24,14 +23,12 @@ from himari.bootstrap.application import (
     TurnSettings,
     context_limit,
     input_ceiling,
-    workspace_for,
 )
 from himari.bootstrap.operator import OperatorSecretError
-from himari.common import PrincipalId, ToolId, TrustedScope
+from himari.common import EnvironmentKind, PrincipalId, TrustedScope
 from himari.control.api import DriveState
 from himari.data.api import DataError, ModelSetting
 from himari.data.sqlite import StoreLockedError
-from himari.environment.inside import INSIDE
 from himari.sandbox.api import SandboxState
 from himari.provider.api import ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
@@ -55,12 +52,12 @@ def test_layout_is_private_and_reused(tmp_path: Path) -> None:
         app, _ = await open_app(root)
         secret = app.operator_secret
         assert app.sandbox_state is SandboxState.UNAVAILABLE
-        tools = {d.tool_id for d in app.runtime.registry.catalog(frozenset({INSIDE}))}
-        assert ToolId("inside/write_file") in tools and ToolId("inside/run_command") not in tools
+        tools = {str(d.tool_id) for d in app.runtime.registry.catalog(frozenset({EnvironmentKind("inside")}))}
+        assert not any(t.startswith(("inside/", "machine/")) for t in tools)  # V3-P101: no runner, no files
         with pytest.raises(StoreLockedError):  # one server per data root
             await open_app(root)
         await app.close()
-        assert [mode(root / p) for p in ("", "workspaces", "control")] == [0o700] * 3
+        assert [mode(root / p) for p in ("", "control")] == [0o700] * 2 and not (root / "workspaces").exists()
         assert mode(root / "himari.db") == 0o600 and mode(root / "control/operator.secret") == 0o600
         again, _ = await open_app(root)
         assert again.operator_secret == secret
@@ -81,6 +78,7 @@ def test_a_data_root_others_can_access_is_refused(tmp_path: Path) -> None:
 
 def test_conversation_flow_survives_a_restart(tmp_path: Path) -> None:
     root = tmp_path / "data"
+    # A call to an old Inside Tool (V3-P101): with no Environment it is refused, and the refusal is kept.
     script: list[ScriptStep] = [calls(("inside/write_file", {"path": "notes.txt", "content": "remember me"})), final("saved")]
 
     async def first() -> str:
@@ -90,8 +88,7 @@ def test_conversation_flow_survives_a_restart(tmp_path: Path) -> None:
         await app.runner.submit(scope, user("save a note"))
         status = await app.runner.wait(scope)
         assert status.result is not None and status.result.state is DriveState.COMPLETED
-        host = root / "workspaces" / workspace_for(ALICE) / "conversations" / cid / "notes.txt"
-        assert host.read_text() == "remember me" and mode(root / "workspaces" / workspace_for(ALICE)) == 0o700
+        assert not (root / "workspaces").exists()  # no Environment without the runner (V3-P101)
         assert len(provider.sent) == 2
         await app.close()
         return cid
@@ -100,21 +97,14 @@ def test_conversation_flow_survives_a_restart(tmp_path: Path) -> None:
         app, _ = await open_app(root)
         (summary,) = await app.data.list_conversations(ALICE)
         assert summary.conversation_id == cid and summary.title == "Notes" and summary.preview == "save a note"
-        assert summary.last_sequence == 4  # user, tool calls, tool result, final
+        assert summary.last_sequence == 4  # user, tool calls, the refused tool result, final
         assert await app.data.list_conversations(BOB) == ()
         bob = await app.create_conversation(BOB)
-        assert workspace_for(BOB) != workspace_for(ALICE)
-        assert (await app.data.resolve_conversation_workspace(TrustedScope(BOB, bob))).workspace_id == workspace_for(BOB)
+        with pytest.raises(DataError):  # it only talks: no Workspace
+            await app.data.resolve_conversation_workspace(TrustedScope(BOB, bob))
         await app.close()
 
     asyncio.run(second(asyncio.run(first())))
-
-
-def test_workspace_ids_are_safe_for_any_principal() -> None:
-    for principal in ("operator", "../../etc", "ünïcødé", "a" * 500):
-        ws = workspace_for(PrincipalId(principal))
-        assert ws.startswith("ws_") and len(ws) == 27 and ws[3:].isalnum()
-    assert workspace_for(PrincipalId("a")) != workspace_for(PrincipalId("b"))
 
 
 # --- PR #11 review -------------------------------------------------------------------------
@@ -127,43 +117,6 @@ def test_the_operator_secret_is_not_in_the_repr(tmp_path: Path) -> None:
             assert app.operator_secret not in repr(app)
         finally:
             await app.close()
-
-    asyncio.run(scenario())
-
-
-def test_close_waits_for_a_started_file_operation_past_the_grace_period(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from himari.environment.inside import tools as inside_tools
-
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
-    real_act = inside_tools.WriteFile.act
-
-    def slow_act(self: Any, root_fd: int, relative: str, args: Any) -> Any:
-        entered.set()
-        release.wait(10)
-        try:
-            return real_act(self, root_fd, relative, args)
-        finally:
-            finished.set()
-
-    monkeypatch.setattr(inside_tools.WriteFile, "act", slow_act)
-    script: list[ScriptStep] = [calls(("inside/write_file", {"path": "slow.txt", "content": "late"})), final("x")]
-
-    async def scenario() -> None:
-        app, _ = await open_app(tmp_path / "data", script)
-        cid = await app.create_conversation(ALICE)
-        scope = TrustedScope(ALICE, cid)
-        await app.runner.submit(scope, user("write slowly"))
-        while not entered.is_set():
-            await asyncio.sleep(0.01)
-        closing = asyncio.create_task(app.close(grace_seconds=0.05))
-        await asyncio.sleep(0.3)  # well past the grace period: the job was cancelled
-        assert not closing.done(), "close() returned while a file write was still running"
-        assert app.inside.write_lock(workspace_for(ALICE)).locked()
-        release.set()
-        await closing
-        assert finished.is_set() and app.runner.status(scope).error == "cancelled"
-        assert not app.inside.write_lock(workspace_for(ALICE)).locked()
 
     asyncio.run(scenario())
 

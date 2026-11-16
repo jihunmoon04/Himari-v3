@@ -4,12 +4,7 @@ One data root, private to the server user::
 
     <data_root>/                 0700
         himari.db (+ .lock)      SQLite Data (V3-P42), 0600
-        workspaces/<ws>/         Inside Workspaces, one per principal (0700)
         control/operator.secret  the local operator's credential (0600)
-        file-versions/           previous versions of files the web editor saved or deleted (V3-P75)
-        file-versions-agent/     files as they were before the agent changed them (V3-P76)
-        file-versions-pdf/       deleted PDFs and what a put-back wrote over (V3-P77; ink saves keep none, V3-P82)
-        file-changes/            the agent's file changes, per Conversation, for review (V3-P76)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
 
 ``Application.open`` checks the layout, opens the store (single writer),
@@ -47,7 +42,7 @@ import posixpath
 import re
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -73,7 +68,6 @@ from himari.common import (
     CallRef,
     ConversationId,
     FileId,
-    JsonValue,
     PrincipalId,
     RunId,
     TextBlock,
@@ -130,8 +124,6 @@ from himari.data.api import (
     ModelSetting,
     ToolExecutionRecord,
     ToolExecutionStatus,
-    UiCsp,
-    UiResource,
     UserMessage,
     clean_file_name,
     clean_media_type,
@@ -157,14 +149,10 @@ from himari.presence.devices import DeviceRegistry
 from himari.presence.hub import PresenceHub
 from himari.proactive import ProactiveSettings
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
-from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
-from himari.bootstrap.changes import ChangeDiff, ChangeReview, ChangesView, ChangeStore, RevertedAll
-from himari.bootstrap.explorer import PDF_MAX_BYTES, Explorer, ExplorerRefused
-from himari.bootstrap.versions import VersionStore
+from himari.bootstrap.explorer import Explorer, ExplorerRefused
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
-from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
-from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
+from himari.environment.machine import WorkspaceBusy as WorkspaceBusy
 # For the interfaces (V3-P74 §14): which registered folders are cloud-synced.
 from himari.environment.machine import CLOUD_FILESYSTEMS as CLOUD_FILESYSTEMS
 from himari.environment.machine import (
@@ -174,13 +162,14 @@ from himari.environment.machine import (
     MachineUnavailable,
     machine_workspace_for,
 )
+from himari.environment.machine.results import ToolFiles
 from himari.runner import api as runner_api
 from himari.runner.api import RunnerError
 from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
-from himari.sandbox.backend import SandboxBackend, discover_capability, supports_tmp_size
+from himari.sandbox.backend import discover_capability, supports_tmp_size
 from himari.sandbox.server import ServerSandbox
-from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, McpUiPolicy, load_config
+from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, load_config
 from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
@@ -202,9 +191,8 @@ DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 DEFAULT_TIME_ZONE = "Asia/Seoul"  # V3-P83 §6.4: HIMARI_TIME_ZONE when unset
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
-BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
-PDF_VERSIONS_BYTES = 1024 * 1024 * 1024  # PDFs' previous versions, all together (V3-P77 Q3)
-PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the Workspace write lock (V3-P66 review N4)
+BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # HIMARI's own Tool ids (inside: old Conversations, V3-P101)
+PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the folder's lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
 # One turn's guards (V3-P62): no Run limit by default; a token budget, a
@@ -263,23 +251,10 @@ def context_limit(ceiling: int | None, configured: int | None) -> int:
     return min(ceiling, DEFAULT_CONTEXT_TOKENS) if ceiling is not None else UNKNOWN_WINDOW_TOKENS
 
 
-def workspace_for(principal: PrincipalId) -> WorkspaceId:
-    """A principal's Inside Workspace id: stable, and safe as a folder name
-    whatever characters the principal id has."""
-    return WorkspaceId("ws_" + hashlib.sha256(principal.encode()).hexdigest()[:24])
-
-
 def check_tool_sources(data_root: str | os.PathLike[str], environ: Mapping[str, str]) -> None:
     """Fails (ValueError) on an ``mcp.json`` that ``Application.open`` would
     refuse, so a server can report it before starting."""
     load_config(os.path.join(os.path.abspath(data_root), CONFIG_NAME), environ)
-
-
-def tool_views_configured(data_root: str | os.PathLike[str], environ: Mapping[str, str]) -> bool:
-    """Whether ``mcp.json`` shows some server's views (V3-P58): the Web
-    server starts its sandbox origin only then. Fails like check_tool_sources."""
-    config = load_config(os.path.join(os.path.abspath(data_root), CONFIG_NAME), environ)
-    return any(server.ui is not None for server in config.servers)
 
 
 class UnknownToolSource(LookupError):
@@ -591,54 +566,6 @@ class PromptView:
     arguments: tuple[PromptArgument, ...]
 
 
-class AppViewRefused(LookupError):
-    """A call has no view to show here (V3-P58). ``code``: ``no_app_view``
-    (none stored and none to show), ``source_disabled`` (this Conversation
-    turned the source off), ``app_view_disabled`` (the operator does not show
-    this server's views, or the server is no longer configured)."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-# How a view whose call ended without one is closed (V3-P58 §3.5): only a
-# call that did not run is "cancelled"; one that ran, or may have, is not.
-_ENDED_OUTCOME = {
-    ToolExecutionStatus.CANCELLED: "not_run",
-    ToolExecutionStatus.DENIED: "not_run",
-    ToolExecutionStatus.SUCCEEDED: "view_unavailable",
-    ToolExecutionStatus.FAILED: "view_unavailable",
-    ToolExecutionStatus.UNKNOWN: "unknown",
-}
-_RUNNING = frozenset({ToolExecutionStatus.PENDING, ToolExecutionStatus.EXECUTION_CLAIMED})
-MAX_REASON_CHARS = 300
-
-
-@dataclass(frozen=True)
-class AppViewState:
-    """What a call's view shows now (V3-P58 §6.1).
-
-    ``state``: ``running`` (the call has not ended; the view read at connect),
-    ``done`` (the view stored with the result) or ``ended`` (it ended without
-    one: ``outcome`` says how the view is closed, ``reason`` why; no resource).
-    ``csp`` is what the view may reach now: what its server declared that the
-    operator also allows."""
-
-    state: str
-    call: CallRef
-    source: str
-    tool_id: str
-    tool: Mapping[str, object] | None  # as the server listed it, while it is registered
-    arguments: Mapping[str, JsonValue]
-    status: ToolExecutionStatus
-    resource: UiResource | None = None
-    result: JsonValue = None
-    csp: UiCsp = field(default_factory=UiCsp)
-    outcome: str | None = None
-    reason: str | None = None
-
-
 @dataclass(frozen=True)
 class ToolSourceView:
     """One configured External Tool source as a Conversation sees it."""
@@ -850,8 +777,7 @@ class Application:
     data: SqliteData
     runtime: Runtime
     runner: BackgroundRunner
-    inside: InsideEnvironment
-    sandbox_state: SandboxState  # at startup; ``current_sandbox_state`` follows later changes
+    sandbox_state: SandboxState  # the runner's, at startup; ``current_sandbox_state`` follows later changes
     model_id: str
     context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
@@ -863,7 +789,7 @@ class Application:
     unverified_models: tuple[str, ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES  # V3-P66 §8.3
-    uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
+    uploads_work: bool = True  # there is a place for uploads: the machine Environment (V3-P101)
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
     companion_models: tuple[str, ...] = ()  # offered models that satisfy all companion features
@@ -880,10 +806,9 @@ class Application:
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
     companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
     # V3-P74: the machine Environment (its runner's socket was configured) and
-    # the principals whose new Conversations use it instead of Inside (Q1).
+    # the principals whose new Conversations use it (Q1); the others only talk (V3-P101).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
-    changes: ChangeStore | None = None  # V3-P76: the review record of the machine file Tools' changes
     # One registration at a time (§10.1): the runner's same-folder check and
     # Data's insert together, so two paths to one folder cannot both pass.
     _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -954,8 +879,6 @@ class Application:
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
-        machine_attached_write: bool = True,  # V3-P94: HIMARI_MACHINE_ATTACHED_WRITE=0 — the Tools write the
-        # Conversation's own folder only
         proactive: ProactiveSettings | None = None,  # V3-P87 §11: HIMARI_PROACTIVE…; None: off
     ) -> Application:
         speaking_first = proactive if proactive is not None else ProactiveSettings()
@@ -1013,8 +936,6 @@ class Application:
         assert default_budget is not None
         root = Path(os.path.abspath(data_root))
         ensure_private_dir(str(root))
-        workspaces = root / "workspaces"
-        ensure_private_dir(str(workspaces))
         secret = ensure_operator_secret(str(root / "control"))
         mcp_config = load_config(str(root / CONFIG_NAME), os.environ if environ is None else environ)
 
@@ -1032,56 +953,29 @@ class Application:
             mcp.statuses = tuple(replace(s, enabled_by_default=saved_defaults.get(s.source, s.enabled_by_default))
                                  for s in mcp.statuses)
             toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
-            backend: SandboxBackend | None = None
-            state = SandboxState.UNAVAILABLE
             scripts = "off"
-            if sandbox:
-                protected = (str(root), str(workspaces))
-                candidate = SandboxBackend.discover(toolkit_fd=None if toolkit is None else toolkit.fd)
-                state = await candidate.start(protected_paths=protected)
-                if state is SandboxState.SETUP_FAILED and toolkit is not None:
-                    # A toolkit the self-test does not accept costs the scripts, never run_command (§6.4).
-                    scripts = f"the self-test refused the toolkit bind ({state.value})"
-                    candidate = SandboxBackend.discover()
-                    state = await candidate.start(protected_paths=protected)
-                if state is SandboxState.ENFORCED:
-                    backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
-                    if backend.toolkit_fd is not None:
+            machine = None
+            if machine_socket is not None:
+                machine = MachineEnvironment(machine_socket,
+                                             files=ToolFiles(store.blobs, SqliteData(store), file_max_bytes),
+                                             documents=reader, registry=SqliteData(store))
+                try:
+                    hello = await machine.hello()
+                    log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
+                    if hello.get("toolkit") is True:  # the runner binds its own toolkit in every command
                         scripts = "on"
+                except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
+                    log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
+            else:
+                log.warning("HIMARI_MACHINE_SOCKET is not set: Conversations only talk (no files, commands or "
+                            "uploads; V3-P101)")
             if reader is not None:
                 reader.scripts = scripts == "on"
             log.info("documents: read_document %s; run_command toolkit %s%s", documents_reason,
                      scripts if reader is not None else "off",
                      f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
-            inside = InsideEnvironment(workspaces, sandbox=backend,
-                                       files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                       documents=reader)
-            uploads_work = inside.placement_works()
-            if not uploads_work:
-                log.warning("this filesystem cannot place uploads without replacing files (renameat2); "
-                            "attaching files is off")
-            elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2), V3-P70 review N8
-                log.warning("commands cannot run (sandbox %s): the model can read attached text files%s, "
-                            "but cannot run scripts on other files", state.value,
-                            " and PDF, Office and HWPX documents" if reader is not None else "")
-            machine = changes = None
-            if machine_socket is not None:
-                # V3-P76 §4.2, §5: the agent's file changes, recorded for review, with versions of their own.
-                changes = ChangeStore(root / "file-changes", VersionStore(root / "file-versions-agent"))
-                if cut_short := await asyncio.to_thread(changes.recover):
-                    log.warning("%d file change(s) were cut short by a stop; they are shown as unknown", cut_short)
-                machine = MachineEnvironment(machine_socket,
-                                             files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                             documents=reader, registry=SqliteData(store), changes=changes,
-                                             attached_writable=machine_attached_write)
-                try:
-                    hello = await machine.hello()
-                    log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
-                    if not await machine.keeps():
-                        log.warning("the machine runner is older than HIMARI (protocol %s): the agent's file changes "
-                                    "are not recorded for review until it is restarted", hello.get("version"))
-                except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
-                    log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
+            state = machine.sandbox_state if machine is not None else SandboxState.UNAVAILABLE
+            uploads_work = machine is not None
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             zones = frozenset(available_timezones())
@@ -1089,14 +983,15 @@ class Application:
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
             screens = ScreenRequests(hub) if companion else None  # V3-P91: the screen Tool's requests
             machine_allowed = frozenset(PrincipalId(p) for p in machine_principals)
-            runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
+            runtime = build_runtime(provider, store=store, environments=[machine] if machine else [],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=base,  # V3-P89: the base; the sections are the Prompt module's
                                     system=SystemSpec(companion=companion, attachments=uploads_work,
                                                       file_references=machine is not None,
                                                       proactive=companion and speaking_first.enabled,
-                                                      documents=_documents_notes(reader, toolkit, scripts == "on")),
+                                                      documents=_documents_notes(reader, toolkit, scripts == "on")
+                                                      if machine is not None else ()),  # read_document is the machine's (V3-P101)
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
@@ -1127,13 +1022,12 @@ class Application:
         listeners = _JobListeners(events, wake_events)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
                                   listener=listeners)
-        application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
+        application = cls(root, store, runtime.data, runtime, runner, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models),
                           tuple(companion_models), resolved_companion_default, companion_models_only, reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
-                          changes=changes,
                           machine_principals=machine_allowed,
                           hub=hub, events=events)
         application.time_zone = time_zone
@@ -1184,9 +1078,9 @@ class Application:
 
     @property
     def current_sandbox_state(self) -> SandboxState:
-        """The sandbox as it is now: a setup failure while running a command
-        latches SETUP_FAILED after startup, and commands are refused from then on."""
-        return self.inside.sandbox.state if self.inside.sandbox is not None else self.sandbox_state
+        """The runner's sandbox as it last said (each turn asks): a setup
+        failure latches SETUP_FAILED there, and commands are refused from then on."""
+        return self.machine.sandbox_state if self.machine is not None else SandboxState.UNAVAILABLE
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
@@ -1257,60 +1151,8 @@ class Application:
         except WorkspaceRefused:
             raise ExplorerRefused("not_found", "Not available.") from None
         if self._explorer is None:
-            self._explorer = Explorer(machine, self.views, VersionStore(self.data_root / "file-versions"),
-                                      None if self.changes is None else self.changes.versions,
-                                      VersionStore(self.data_root / "file-versions-pdf", PDF_VERSIONS_BYTES,
-                                                   PDF_MAX_BYTES))
+            self._explorer = Explorer(machine, self.views)
         return self._explorer
-
-    # --- the review of the agent's file changes (V3-P76 §5, §6) -----------------------------
-
-    async def _review(self, scope: TrustedScope) -> ChangeReview:
-        """For a Conversation of the caller's (404 otherwise), when folders
-        are offered to them."""
-        await self.data.read_conversation(scope)
-        explorer = self.explorer(scope.principal_id)
-        if self.changes is None:
-            raise ExplorerRefused("not_found", "Not available.")
-        return ChangeReview(self.changes, explorer)
-
-    @asynccontextmanager
-    async def _reviewing(self, scope: TrustedScope) -> AsyncIterator[ChangeReview]:
-        """Accepting or reverting (§6): under the Conversation's lifecycle
-        lock (no trash meanwhile), refused while a turn runs or an input is
-        being accepted, and no turn starts until it is done."""
-        async with self._exclusive(scope.conversation_id):
-            review = await self._review(scope)
-            with ExitStack() as held:
-                try:
-                    held.enter_context(self.runner.hold(scope))
-                except ControlError as error:
-                    if error.code is not ControlErrorCode.BUSY:
-                        raise
-                    raise ExplorerRefused("busy", "HIMARI is working in this conversation: wait until it has "
-                                                  "finished.") from None
-                yield review
-
-    async def file_changes(self, scope: TrustedScope) -> ChangesView:
-        return await (await self._review(scope)).view(scope.conversation_id)
-
-    async def file_change_diff(self, scope: TrustedScope, path: str) -> ChangeDiff:
-        return await (await self._review(scope)).diff(scope.conversation_id, path)
-
-    async def accept_file_changes(self, scope: TrustedScope, paths: Sequence[str] | None) -> None:
-        """``paths``: None accepts all (the hidden ones too, §10)."""
-        async with self._reviewing(scope) as review:
-            await review.accept(scope.conversation_id, paths)
-
-    async def revert_file_change(self, scope: TrustedScope, path: str, seen: tuple[int, ...] | None) -> None:
-        """ChangeConflict: changed by something else since; ``seen`` (what
-        the owner saw: ``()`` no file) reverts anyway if it is still so."""
-        async with self._reviewing(scope) as review:
-            await review.revert(scope.conversation_id, path, seen)
-
-    async def revert_all_file_changes(self, scope: TrustedScope) -> RevertedAll:
-        async with self._reviewing(scope) as review:
-            return await review.revert_all(scope.conversation_id)
 
     # --- conversations in a folder (V3-P75 §6) ----------------------------------------
 
@@ -1663,62 +1505,6 @@ class Application:
         except PromptContentError as error:
             raise PromptRefused("unsupported_content", f"This prompt cannot be used: {error}.") from None
 
-    # --- Tool views (MCP Apps, V3-P58) ---------------------------------------------------
-
-    @property
-    def views_configured(self) -> bool:
-        """Some configured server's views are shown (its ``ui`` is set)."""
-        return any(policy is not None for policy in self.mcp.ui_policies.values())
-
-    def _view_source(self, tool_id: str) -> str | None:
-        """The configured MCP server whose Tool this is, if any."""
-        source, slash, _ = tool_id.partition("/")
-        return source if slash and source in self.mcp.ui_policies else None
-
-    async def view_flags(self, scope: TrustedScope, run_ids: Iterable[RunId]) -> dict[CallRef, tuple[bool, bool]]:
-        """For each call of these Runs with a view that may be shown here:
-        (it has a view to show while it runs, its result was stored with a
-        view). A call is left out when its source is off in this Conversation
-        or the operator does not show its server's views (§3.7)."""
-        enabled = await self.runtime.access.enabled_sources(scope)
-        flags: dict[CallRef, tuple[bool, bool]] = {}
-        for run_id in dict.fromkeys(run_ids):
-            for record in await self.data.read_tool_executions(scope, run_id):
-                source = self._view_source(record.tool_id)
-                if source is None or source not in enabled or self.mcp.ui_policy(source) is None:
-                    continue
-                current = self.mcp.ui_for(record.tool_id) is not None
-                if current or record.ui_digest is not None:
-                    flags[record.call] = (current, record.ui_digest is not None)
-        return flags
-
-    async def app_view(self, scope: TrustedScope, call: CallRef) -> AppViewState:
-        """A call's view as it should be shown now; AppViewRefused when there
-        is none to show here. Checks, in this order: the source is on in this
-        Conversation, the operator shows its views, there is a view."""
-        record = next((r for r in await self.data.read_tool_executions(scope, call.run_id) if r.call == call), None)
-        source = None if record is None else self._view_source(record.tool_id)
-        if record is None or source is None:
-            raise AppViewRefused("no_app_view")
-        if source not in await self.runtime.access.enabled_sources(scope):
-            raise AppViewRefused("source_disabled")
-        policy = self.mcp.ui_policy(source)
-        if policy is None:
-            raise AppViewRefused("app_view_disabled")
-        ended = AppViewState("ended", call, source, record.tool_id, self.mcp.tool_info(record.tool_id),
-                             record.arguments, record.status)
-        stored = await self.data.read_app_view(scope, call) if record.ui_digest is not None else None
-        if stored is not None:
-            resource = stored.view.resource
-            return replace(ended, state="done", resource=resource, result=stored.view.payload,
-                           csp=_allowed(resource.csp, policy))
-        current = self.mcp.ui_for(record.tool_id)
-        if current is None:
-            raise AppViewRefused("no_app_view")
-        if record.status in _RUNNING:
-            return replace(ended, state="running", resource=current, csp=_allowed(current.csp, policy))
-        return replace(ended, outcome=_ENDED_OUTCOME[record.status], reason=_ended_reason(record))
-
     # --- the user's instructions (V3-P69) ----------------------------------------------
 
     async def instructions(self, principal: PrincipalId,
@@ -1912,20 +1698,15 @@ class Application:
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None,
                                   initial_model: str | None = None) -> ConversationId:
-        """T0 with the principal's Inside Workspace activated (provisioned
-        first) — or, for a machine principal, the machine Environment (V3-P74
-        Q1: new Conversations only; its folder is made on first use)."""
+        """T0: for a machine principal, the machine Environment activated
+        (V3-P74 Q1; its folder is made on first use); for anyone else, no
+        Environment: the Conversation only talks (V3-P101)."""
         setting = ModelSetting(initial_model, None) if initial_model is not None else None
         if self.machine is not None and principal in self.machine_principals:
             return await self.data.create_conversation(
                 principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),),
                 model_setting=setting)
-        workspace = workspace_for(principal)
-        self.inside.provision(workspace)
-        return await self.data.create_conversation(
-            principal, title=title, activations=(InitialActivation(INSIDE, workspace),),
-            model_setting=setting,
-        )
+        return await self.data.create_conversation(principal, title=title, model_setting=setting)
 
     # --- files (V3-P66) ----------------------------------------------------------------
 
@@ -1969,6 +1750,8 @@ class Application:
             if error.code is DataErrorCode.NOT_FOUND:
                 raise FilesUnavailable(scope.conversation_id) from None
             raise
+        if self.machine is None or not self.machine.owns(workspace.workspace_id):  # an old Inside one (V3-P101)
+            raise FilesUnavailable(scope.conversation_id)
         return workspace.workspace_id, workspace.cwd_relative
 
     async def upload_screen(self, scope: TrustedScope, chunks: AsyncIterator[bytes]) -> FileRecord:
@@ -2037,15 +1820,12 @@ class Application:
                 if self.runner.status(scope).running:
                     raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
                 workspace_id, cwd = await self._workspace(scope)
-                machine = self.machine if self.machine is not None and self.machine.owns(workspace_id) else None
+                machine = self.machine
+                assert machine is not None  # _workspace: only the machine's folders take uploads
                 try:
-                    if machine is not None:
-                        locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
-                                                cwd_relative=cwd)
-                        placer = _machine_placer(machine, scope.conversation_id, cwd)
-                    else:
-                        locked = self.inside.locked(workspace_id, PLACE_LOCK_SECONDS)
-                        placer = _inside_placer(self.inside, workspace_id, cwd)
+                    locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
+                                            cwd_relative=cwd)
+                    placer = _machine_placer(machine, scope.conversation_id, cwd)
                     async with locked:
                         # Read again under the lock: another tab may have placed them (review C4).
                         fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
@@ -2199,11 +1979,8 @@ class Application:
             workspace = trashed.workspace
             if workspace is not None and self.machine is not None and self.machine.owns(workspace.workspace_id):
                 await self.machine.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
-            elif workspace is not None:
-                await self.inside.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            # An old Inside folder (<data>/workspaces) is left: V3-P101 removes it by hand.
             await self.data.purge_conversation(scope)
-            if self.changes is not None:
-                await asyncio.to_thread(self.changes.forget, scope.conversation_id)
             self.runner.forget(scope)
             self.runner.reopen(scope)
             self._activity_changed(scope)
@@ -2284,8 +2061,6 @@ class Application:
                 await self.mcp.aclose()
             finally:
                 if self.toolkit is not None:
-                    if isinstance(self.inside.sandbox, SandboxBackend):
-                        self.inside.sandbox.toolkit_fd = None  # the number may be reused once closed (review N8)
                     self.toolkit.close()
                 self.store.close()
 
@@ -2326,29 +2101,19 @@ class Application:
 
     def check_layout(self) -> None:
         """Re-verify the private directories (e.g. before serving)."""
-        for path in (self.data_root, self.data_root / "workspaces", self.data_root / "control"):
+        for path in (self.data_root, self.data_root / "control"):
             check_private_dir(str(path))
 
 
 @dataclass(frozen=True)
 class _Placer:
-    """One upload's steps (V3-P66 §5.2) in a Conversation's folder: Inside's or the machine's."""
+    """One upload's steps (V3-P66 §5.2) in a Conversation's own machine folder."""
 
     holds: Callable[[str, int, str], Awaitable[bool]]
     copy_in: Callable[[BinaryIO, bool], Awaitable[str]]
     free_path: Callable[[str, str | None], Awaitable[str]]
     commit_copy: Callable[[str, str], Awaitable[bool]]
     discard_copy: Callable[[str], Awaitable[None]]
-
-
-def _inside_placer(inside: InsideEnvironment, workspace_id: WorkspaceId, cwd: str) -> _Placer:
-    return _Placer(
-        holds=lambda path, size, sha256: inside.holds(workspace_id, cwd, path, size, sha256),
-        copy_in=lambda source, clear: inside.copy_in(workspace_id, cwd, source, clear=clear),
-        free_path=lambda name, preferred: inside.free_path(workspace_id, cwd, name, preferred),
-        commit_copy=lambda temp, path: inside.commit_copy(workspace_id, cwd, temp, path),
-        discard_copy=lambda temp: inside.discard_copy(workspace_id, cwd, temp),
-    )
 
 
 def _machine_placer(machine: MachineEnvironment, conversation_id: str, cwd: str) -> _Placer:
@@ -2359,26 +2124,3 @@ def _machine_placer(machine: MachineEnvironment, conversation_id: str, cwd: str)
         commit_copy=lambda temp, path: machine.commit_copy(conversation_id, cwd, temp, path),
         discard_copy=lambda temp: machine.discard_copy(conversation_id, cwd, temp),
     )
-
-
-def _allowed(declared: UiCsp, policy: McpUiPolicy) -> UiCsp:
-    """V3-P58 §3.3: what the server declares that the operator also allows,
-    as the operator wrote it. Nested frames and other base URIs: never."""
-    def both(values: tuple[str, ...], allowed: frozenset[str]) -> tuple[str, ...]:
-        return tuple(sorted({v.lower() for v in values} & allowed))
-    return UiCsp(both(declared.connect_domains, policy.connect_domains),
-                 both(declared.resource_domains, policy.resource_domains))
-
-
-def _ended_reason(record: ToolExecutionRecord) -> str:
-    """Why a call's view closes, from what the call already told the model
-    (and the connector's own note when the result was too large to show)."""
-    raw = record.raw_result
-    problem = raw.get("ui_problem") if isinstance(raw, Mapping) else None
-    if isinstance(problem, str):
-        return problem[:MAX_REASON_CHARS]
-    blocks = () if record.model_result is None else record.model_result.blocks
-    text = " ".join(b.text for b in blocks if isinstance(b, TextBlock)).strip()
-    if not text:
-        text = record.status.value
-    return text if len(text) <= MAX_REASON_CHARS else text[: MAX_REASON_CHARS - 1] + "…"
