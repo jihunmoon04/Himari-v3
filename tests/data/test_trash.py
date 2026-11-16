@@ -259,3 +259,30 @@ def test_a_trashed_conversation_takes_no_late_tool_results() -> None:
         assert record.status is ToolExecutionStatus.EXECUTION_CLAIMED  # nothing was written meanwhile
 
     asyncio.run(scenario())
+
+
+def test_a_purge_takes_the_mcp_views_only_its_calls_named() -> None:
+    """V3-P97 keeps ui_resources for the views stored before; a purge still takes the ones only its calls named."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        if not isinstance(data, SqliteData):
+            pytest.skip("ui_resources is SQLite's")
+        scope, other = await conversation(data), await conversation(data)
+        mine = await called(data, scope, "calliope/board", "calliope/board")  # calls c0 and c1
+        theirs = await called(data, other, "calliope/board")
+        with data._tx() as tx:  # as an earlier version stored them
+            for digest in ("d_mine", "d_shared"):
+                tx.execute("INSERT INTO ui_resources (digest, source, uri, html, meta) VALUES (?, ?, ?, ?, ?)",
+                           digest, "calliope", "ui://board", "<p>board</p>", "{}")
+            for run_id, call_id, digest in ((mine.run_id, "c0", "d_mine"), (mine.run_id, "c1", "d_shared"),
+                                            (theirs.run_id, "c0", "d_shared")):
+                tx.execute("UPDATE tool_executions SET ui_digest=? WHERE run_id=? AND call_id=?", digest, run_id,
+                           call_id)
+        await data.trash_conversation(scope)
+        await data.begin_purge(scope)
+        await data.purge_conversation(scope)
+        with data._tx() as tx:
+            left = {r["digest"] for r in tx.all("SELECT digest FROM ui_resources")}
+        assert left == {"d_shared"}  # another conversation's call still names it
+
+    asyncio.run(scenario())

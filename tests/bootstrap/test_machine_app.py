@@ -17,7 +17,7 @@ from himari.bootstrap.application import Application, FilesUnavailable, Workspac
 from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.data.api import MAX_WORKSPACE_NOTE_CHARS
 from himari.environment.machine import DRIVE_NOTE, READ_ONLY_NOTE, MachineEnvironment
-from himari.prompt.api import ToolGroupTurn, state_block
+from himari.prompt.api import ATTACHMENT_NOTE, FILE_REFERENCE_NOTE, ToolGroupTurn, state_block
 from himari.provider.scripted import ScriptedAdapter
 
 OPERATOR, ALICE = PrincipalId("operator"), PrincipalId("alice")
@@ -253,6 +253,33 @@ def test_inside_conversations_and_other_principals_attach_nothing(tmp_path: Path
             assert refused.value.code == "unavailable"
             with pytest.raises(WorkspaceRefused):
                 await app.machine_workspaces(ALICE)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_old_inside_conversation_is_told_of_no_files(tmp_path: Path, kit: RunnerKit) -> None:
+    """V3-P101: Inside is gone; a Conversation made with it only talks, so the model is told of no file Tools,
+    attachments or folder, while a machine Conversation on the same server still is."""
+    from himari.common import EnvironmentKind, WorkspaceId
+    from himari.data.api import InitialActivation
+
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([final("old"), final("new")])
+        app = await open_app(tmp_path / "data", kit.socket, adapter)
+        try:
+            old = TrustedScope(OPERATOR, await app.data.create_conversation(
+                OPERATOR, activations=(InitialActivation(EnvironmentKind("inside"), WorkspaceId("ws_old")),)))
+            new = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
+            for scope in (old, new):
+                await app.send(scope, "hi")
+                await app.runner.wait(scope)
+            told_old, told_new = ("\n".join(i.stable_prefix) for i in adapter.prepared_inputs)
+            assert ATTACHMENT_NOTE not in told_old and FILE_REFERENCE_NOTE not in told_old
+            assert ATTACHMENT_NOTE in told_new and FILE_REFERENCE_NOTE in told_new
+            block = state_block(adapter.prepared_inputs[0].current_state) or ""
+            assert "inside" not in block and "working_directory" not in block, block
         finally:
             await app.close()
 

@@ -2339,12 +2339,19 @@ class SqliteData:
         with self._tx() as tx:
             if tx.owned(scope)["purge_started_at"] is None:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not being deleted")
+            # V3-P97 keeps the table for the views stored before: they still go with their last call
+            digests = [r["ui_digest"] for r in tx.all(
+                "SELECT DISTINCT ui_digest FROM tool_executions WHERE conversation_id=? AND ui_digest IS NOT NULL",
+                scope.conversation_id)]
             keys = [r["k"] for r in tx.all("SELECT blob_key AS k FROM files WHERE conversation_id=? UNION"
                                            " SELECT view_blob_key FROM files WHERE conversation_id=?"
                                            " AND view_blob_key IS NOT NULL", scope.conversation_id,
                                            scope.conversation_id)]
             for statement in self._PURGE:
                 tx.execute(statement, scope.conversation_id)
+            for digest in digests:  # a view another call still names stays
+                tx.execute("DELETE FROM ui_resources WHERE digest=?"
+                           " AND NOT EXISTS (SELECT 1 FROM tool_executions WHERE ui_digest=?)", digest, digest)
         await self.blobs.release(keys)  # after the commit, never failing the purge (V3-P66 §8.1)
 
     async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:

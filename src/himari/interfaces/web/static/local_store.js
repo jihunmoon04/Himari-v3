@@ -1,6 +1,7 @@
 /* What the user wrote and has not sent or saved, kept in this browser
  * (V3-P78 §5): IndexedDB "himari-local", with "drafts" (the composer's, by
- * place) and "unsaved" (a file's, by path).
+ * place) and "unsaved" (a file's, by path: the file editor's, gone with V3-P99;
+ * it is kept only so that signing out still wipes what an earlier version left).
  *
  * Every call settles, never throws: a browser without the store (a private
  * window, a full disk, Safari dropping the connection in the background)
@@ -157,7 +158,7 @@ export async function prune(store, max, maxAgeMs, now = Date.now()) {
 /* How many records there are in all (for the sign-out's confirmation). */
 export async function count() {
   let total = 0;
-  for (const store of STORES) {
+  for (const store of ["drafts"]) { // what the user can still see (V3-P99: no screen shows "unsaved")
     const n = await run(store, "readonly", (s) => s.count());
     total += typeof n === "number" ? n : 0;
   }

@@ -119,7 +119,11 @@ class MachineEnvironment:
         return await self.client.call(op, args, fds)
 
     async def hello(self) -> dict[str, Any]:
-        result, _ = await self.call(runner.HELLO, {})
+        try:
+            result, _ = await self.call(runner.HELLO, {})
+        except Exception:
+            self.sandbox_state = SandboxState.UNAVAILABLE  # not answering: commands cannot run (V3-P101)
+            raise
         try:
             self.sandbox_state = SandboxState(result.get("state"))
         except ValueError:

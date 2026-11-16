@@ -484,3 +484,14 @@ def test_folders_data_will_not_give_run_nothing(kit: RunnerKit) -> None:
     assert len(kit.sandbox.calls) == calls
     assert not (kit.himari_home / "conversations" / scope.conversation_id / "x.txt").exists()
     assert not (Path(project) / "x.txt").exists()
+
+
+def test_a_runner_that_does_not_answer_is_not_shown_as_ready(tmp_path: Path) -> None:
+    """The commands' state the interfaces show is the runner's last answer (V3-P101): no answer, no commands."""
+    from himari.sandbox.api import SandboxState
+
+    machine = MachineEnvironment(str(tmp_path / "gone.sock"))
+    machine.sandbox_state = SandboxState.ENFORCED  # as a runner said before it stopped
+    with pytest.raises(Exception):
+        asyncio.run(machine.hello())
+    assert machine.sandbox_state is SandboxState.UNAVAILABLE
