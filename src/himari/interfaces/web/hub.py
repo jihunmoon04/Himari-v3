@@ -234,6 +234,22 @@ def task_view(raw: object) -> dict[str, Any] | None:
     return shown if shown is not None and isinstance(shown.get("id"), int) else None
 
 
+def task_detail(raw: object) -> dict[str, Any] | None:
+    """``task`` (H1, user-api-v1 §4.5): the task, its project, the session it really ran in (null until it has one),
+    the start of its result, and what it waits on; None without its id."""
+    shown = task_view(raw)
+    if shown is None or not isinstance(raw, dict):
+        return None
+    project, result, pending = raw.get("project"), raw.get("result"), raw.get("pending")
+    shown["project"] = project[:MAX_TEXT] if isinstance(project, str) else None
+    shown["session"] = shown.get("session")  # null (no session yet) is an answer of its own
+    shown["result"] = result[:MAX_TEXT] if isinstance(result, str) else None
+    shown["result_truncated"] = raw.get("result_truncated") is True
+    shown["pending"] = [view for view in map(request_view, (pending if isinstance(pending, list) else [])[:MAX_ITEMS])
+                        if view is not None]
+    return shown
+
+
 def session_view(raw: object) -> dict[str, Any] | None:
     """A session as listed (§3.3), or None without its id."""
     shown = _view(SESSION, raw)
@@ -392,6 +408,13 @@ class HubClient:
         """Another session of the project's lane, started with ``prompt``; the task (no session id yet)."""
         return await self._task("new", {"project": project, "prompt": prompt, **_options(
             agent=agent, runner=runner, profile=profile, model=model, effort=effort, mode=mode)})
+
+    async def task(self, task_id: int) -> dict[str, Any]:
+        """A task followed to its end (H1): where it really runs and how it ended."""
+        found = task_detail((await self._call("task", {"id": task_id})).get("task"))
+        if found is None:
+            raise HubUnknown("the hub's answer was not readable")
+        return found
 
     async def close(self, session_id: int) -> dict[str, Any]:
         reply = await self._call("close", {"session": session_id})

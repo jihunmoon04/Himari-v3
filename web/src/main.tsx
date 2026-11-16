@@ -8,6 +8,7 @@ import { queryClient, useSession } from "@/app/queries";
 import { Shell } from "@/components/Shell";
 import { applyAppearance, watchAppearance } from "@/lib/appearance";
 import { Agents } from "@/routes/Agents";
+import { Approvals } from "@/routes/Approvals";
 import { Conversation } from "@/routes/Conversation";
 import { Home } from "@/routes/Home";
 import { HubSession } from "@/routes/HubSession";
@@ -38,6 +39,7 @@ const router = createBrowserRouter(
         { path: "c/:id", element: <Conversation /> },
         { path: "s/:id", element: <HubSession /> },
         { path: "agents", element: <Agents /> },
+        { path: "approvals", element: <Approvals /> },
         { path: "*", element: <Navigate to="/" replace /> },
       ],
     },

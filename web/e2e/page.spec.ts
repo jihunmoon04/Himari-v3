@@ -201,7 +201,8 @@ test("the overview shows every open session and follows the list as it changes",
   await signIn(page);
   await page.goto("/next/agents");
   const cards = page.getByRole("list", { name: "Open sessions" }).getByRole("listitem");
-  await expect(cards).toHaveCount(3);
+  await expect(cards.filter({ hasText: "archive" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "demo" })).toHaveCount(2);
   await expect(cards.first()).toContainText("1 waiting for you"); // what waits comes first
   // the scripted hub flips codex@laptop between idle and working every 3 s: the card follows the next flip
   const codex = cards.filter({ hasText: "codex@laptop" });
@@ -222,5 +223,94 @@ test("a long session shows its latest events and reads the earlier ones on reque
   await page.getByRole("button", { name: "Earlier" }).click();
   await expect(page.getByText("Prompt 1", { exact: true })).toBeAttached();
   await expect(page.getByRole("button", { name: "Earlier" })).toHaveCount(0); // nothing older
+  await done();
+});
+
+// -- W3: the user's own work on the hub's sessions (the scripted hub's project "work") ----------------------------
+
+test("a message runs in an idle session; one sent meanwhile waits its turn and can be cancelled", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub's sessions change once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/s/8");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("work › claude@linux");
+  await page.getByLabel("Model").selectOption("sonnet"); // the hub offers it for claude
+  await page.getByLabel("Message", { exact: true }).fill("First job");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("article", { name: "Your message" }).first()).toHaveText("First job");
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible(); // it runs: Stop beside Send
+  await page.getByLabel("Message", { exact: true }).fill("Second job");
+  await page.keyboard.press("Enter");
+  const queue = page.getByLabel("Queued messages");
+  await expect(queue).toContainText("Second job");
+  await queue.getByRole("button", { name: "Cancel" }).click();
+  await expect(queue).toHaveCount(0);
+  await expect(page.locator(".answer").filter({ hasText: "Done: First job" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+  await expect(page.getByText("Done: Second job")).toHaveCount(0); // cancelled: it never ran
+  await done();
+});
+
+test("a permission is answered in its session, and the agent goes on", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub's requests are answered once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/s/9");
+  const card = page.getByRole("group", { name: "Permission request" });
+  await expect(card).toContainText("Write notes.md");
+  await expect(card.getByRole("button", { name: "Refuse" })).toHaveCount(0); // the agent's own Reject says it
+  await card.getByRole("button", { name: "Allow once" }).click();
+  await expect(page.locator(".answer").filter({ hasText: "Allowed: Write notes.md." })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Agent request" })).toContainText("Answered");
+  await expect(page.getByRole("group", { name: "Permission request" })).toHaveCount(0);
+  await done();
+});
+
+test("approvals lists what waits; a question is answered there; the tab title counts", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub's requests are answered once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/approvals");
+  const question = page.getByRole("group", { name: "Question" });
+  await expect(question).toContainText("Which color?");
+  await expect(question).toContainText("work · codex · on linux");
+  await expect(page.getByRole("group", { name: "Permission request" })).toContainText("Run pytest"); // demo's
+  await expect(page).toHaveTitle("(2) HIMARI");
+  await question.getByLabel("Color").selectOption("blue");
+  await question.getByRole("button", { name: "Answer" }).click();
+  await expect(page.getByRole("group", { name: "Question" })).toHaveCount(0);
+  await expect(page).toHaveTitle("(1) HIMARI");
+  await page.goto("/next/s/10");
+  await expect(page.locator(".answer").filter({ hasText: "You chose blue." })).toBeVisible();
+  await done();
+});
+
+test("a new agent session from the home page opens once its task runs", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub opens sessions once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Send to").selectOption("work");
+  await expect(page.getByLabel("Agent")).toHaveValue("claude");
+  await page.getByLabel("Message", { exact: true }).fill("Start fresh");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("status").filter({ hasText: "Starting the agent" })).toBeVisible();
+  await expect(page).toHaveURL(/\/next\/s\/\d+$/, { timeout: 10_000 });
+  await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Start fresh");
+  await expect(page.locator(".answer").filter({ hasText: "Done: Start fresh" })).toBeVisible({ timeout: 10_000 });
+  await done();
+});
+
+test("a message to a session the agent lost follows its task to the new session", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub loses this session once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/s/12");
+  await page.getByLabel("Message", { exact: true }).fill("Carry on");
+  await page.keyboard.press("Enter");
+  await expect(page).not.toHaveURL(/\/next\/s\/12$/, { timeout: 10_000 });
+  await expect(page.getByRole("status").filter({ hasText: "The agent had lost session #12" })).toBeVisible();
+  await expect(page.locator(".answer").filter({ hasText: "Done: Carry on" })).toBeVisible({ timeout: 10_000 });
+  await page.goto("/next/s/12");
+  await expect(page.getByText(/This session is closed/)).toBeVisible();
   await done();
 });

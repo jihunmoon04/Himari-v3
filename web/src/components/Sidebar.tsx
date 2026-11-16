@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, FolderGit2, LayoutGrid, LogOut, Monitor, Moon, PanelLeftClose, Settings, SquarePen, Sun } from "lucide-react";
+import { ChevronRight, FolderGit2, Inbox, LayoutGrid, LogOut, Monitor, Moon, PanelLeftClose, Settings, SquarePen, Sun } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useNavigate } from "react-router";
 import { signOut } from "@/api/himari";
@@ -125,6 +125,14 @@ function HubSection() {
   const groups = byProject(list.sessions.filter((s) => s.state !== "closed"), names);
   return (
     <Section title="Projects">
+      <NavLink to="/approvals" className={rowClass}>
+        <Inbox className="size-4" /> <span className="flex-1">Approvals</span>
+        {(pending.data?.pending.length ?? 0) > 0 && (
+          <span className="rounded-full bg-wait px-1.5 text-xs text-white" aria-label="waiting">
+            {pending.data!.pending.length}
+          </span>
+        )}
+      </NavLink>
       <NavLink to="/agents" className={rowClass}>
         <LayoutGrid className="size-4" /> Work overview
       </NavLink>
