@@ -57,8 +57,8 @@ def test_a_due_loop_is_spoken_of_once(tmp_path: Path) -> None:
         app = await opened(tmp_path / "data", adapter)
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
-            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "내일 면접이야", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
@@ -108,8 +108,8 @@ def test_a_return_after_hours_away_is_greeted(tmp_path: Path) -> None:
 
         app = await opened(root, answers("좋은 아침!"))  # the server restarted meanwhile
         try:
-            app.hub.subscribe(ME, device)
-            app.hub.signal(ME, device, 0, "Asia/Seoul", Signals(after=After.UNLOCK))
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul", Signals(after=After.UNLOCK))
             scheduler = app.scheduler
             assert scheduler is not None
             for _ in range(50):
@@ -136,7 +136,7 @@ def test_nothing_runs_with_speaking_first_off(tmp_path: Path) -> None:
         app = await opened(tmp_path / "data", answers(), ProactiveSettings())
         try:
             assert app.scheduler is None and app.inputs is not None  # inputs are kept anyway
-            assert app.hub.on_returned is None
+            assert app.presence.on_returned is None
             assert (await app.proactive_status(ME))["enabled"] is False
         finally:
             await app.close()
@@ -236,8 +236,8 @@ def test_a_loop_cut_by_a_restart_before_a_word_is_spoken_of_after_it(tmp_path: P
         app = await opened(root, adapter)
         try:
             assert (await app.data.read_wake(ME, cut.payload.wake_id)).status.value == "failed"  # type: ignore[union-attr]
-            app.hub.subscribe(ME, device)
-            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
             scheduler = app.scheduler
             assert scheduler is not None
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=15)
@@ -261,8 +261,8 @@ def test_what_changed_after_the_look_read_it_is_checked_again(tmp_path: Path) ->
         app = await opened(tmp_path / "data", answers("응"))
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
-            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "내일 면접이야", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
@@ -288,9 +288,9 @@ def test_what_changed_after_the_look_read_it_is_checked_again(tmp_path: Path) ->
             after_read(lambda: setattr(runner, "running", lambda principal: (scope.conversation_id,)))
             assert (await scheduler.look(ME)).outcome == "busy"  # a job started in another conversation
             runner.running = running  # type: ignore[method-assign]
-            after_read(lambda: app.hub.signal(ME, device, 0, "Asia/Seoul", Signals(session=Session.LOCKED)))
+            after_read(lambda: app.presence.signal(ME, device, 0, "Asia/Seoul", Signals(session=Session.LOCKED)))
             assert (await scheduler.look(ME)).outcome == "no_device"  # the screen locked
-            app.hub.signal(ME, device, 0, "Asia/Seoul", Signals(after=After.UNLOCK))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", Signals(after=After.UNLOCK))
             after_read(lambda: scheduler.__setattr__("_clock", lambda: datetime.now(UTC)))  # the user just spoke
             assert (await scheduler.look(ME)).outcome == "talking"
             assert await app.data.opened_wakes() == () and await app.data.wakes_since(ME, datetime.min.replace(
@@ -312,8 +312,8 @@ def test_a_failed_wake_counts_only_when_its_turn_left_output(tmp_path: Path) -> 
         app = await opened(tmp_path / "data", ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), calls], companion=True))
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
-            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
@@ -342,8 +342,8 @@ def test_a_reminder_is_told_while_the_user_talks_and_is_delivered(tmp_path: Path
         app = await opened(tmp_path / "data", adapter)
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
-            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "오늘 너무 피곤하다", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
@@ -379,12 +379,12 @@ def asleep_signals(sleep: Sleep | None = Sleep.IDLE) -> Signals:
 async def told_while_asleep(app: Application, adapter: ScriptedAdapter) -> tuple[str, TrustedScope, int]:
     """V3-P90 §5.1: the character sleeps (idle); a reminder comes due; it is told and marked told."""
     device = await paired(app)
-    app.hub.subscribe(ME, device)
-    app.hub.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))
+    app.presence.subscribe(ME, device)
+    app.presence.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))
     scope = TrustedScope(ME, await app.create_conversation(ME))
     await app.send(scope, "나 잠깐 나갔다 올게", origin=MessageOrigin(OriginKind.WEB))
     await app.runner.wait(scope)
-    app.hub.signal(ME, device, 700, "Asia/Seoul", asleep_signals())
+    app.presence.signal(ME, device, 700, "Asia/Seoul", asleep_signals())
     at = parse_note_date((datetime.now(UTC) - timedelta(minutes=1)).isoformat(timespec="minutes"), "UTC")
     assert at is not None
     note = await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 저녁 약을 먹어야 한다",
@@ -407,7 +407,7 @@ def test_a_reminder_told_while_asleep_is_seen_at_a_return_soon_after(tmp_path: P
         app = await opened(tmp_path / "data", adapter)
         try:
             device, _, memory_id = await told_while_asleep(app, adapter)
-            app.hub.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))  # the user comes to the bubble
+            app.presence.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))  # the user comes to the bubble
             scheduler = app.scheduler
             assert scheduler is not None
             for _ in range(50):
@@ -459,16 +459,16 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
         app = await opened(tmp_path / "data", adapter)
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
+            app.presence.subscribe(ME, device)
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "일 시작한다", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
-            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
             scheduler = app.scheduler
             assert scheduler is not None
             # 27 minutes into the task, the message 16 minutes ago (past talking): step 1 is due
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
-            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
             look = await scheduler.look(ME)
             assert look.outcome == "spoke" and look.decision.reasons[0].kind is WakeKind.FREE, look
             await settled(app, scope)
@@ -497,7 +497,7 @@ def test_a_task_longer_than_the_wakes_read_keeps_its_steps(tmp_path: Path) -> No
         app = await opened(tmp_path / "data", adapter)
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
+            app.presence.subscribe(ME, device)
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "일 시작한다", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
@@ -512,7 +512,7 @@ def test_a_task_longer_than_the_wakes_read_keeps_its_steps(tmp_path: Path) -> No
             scheduler = app.scheduler
             assert scheduler is not None
             scheduler._clock = lambda: later
-            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27 * 60 + 20))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(27 * 60 + 20))
             look = await scheduler.look(ME)
             assert look.outcome == "spoke" and look.decision.reasons[0].step == 3, look
             await settled(app, scope)
@@ -528,14 +528,14 @@ def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
         app = await opened(tmp_path / "data", adapter)
         try:
             device = await paired(app)
-            app.hub.subscribe(ME, device)
+            app.presence.subscribe(ME, device)
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "일 시작한다", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
             scheduler = app.scheduler
             assert scheduler is not None
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
-            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
             assert (await scheduler.look(ME)).outcome == "spoke"
             await settled(app, scope)
             wake, answer = (await app.data.read_events(scope))[-2:]

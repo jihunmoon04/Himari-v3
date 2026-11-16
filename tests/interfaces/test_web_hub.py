@@ -129,7 +129,7 @@ def test_a_hub_that_does_not_answer_is_said_so(client: TestClient, hub: Hub, tmp
     (tmp_path / "user.token").write_text("wrong", encoding="ascii")  # the hub answers 401
     assert client.get("/api/hub/pending").json() == {"enabled": True, "reachable": False, "pending": []}
     refused = client.post("/api/hub/pending/7/answer", json={"refuse": True}, headers=SEND)
-    assert refused.status_code == 503 and refused.json()["error"]["code"] == "hub_unavailable"
+    assert refused.status_code == 503 and refused.json()["error"]["code"] == "hub_misconfigured"  # V3-P102 §6
     (tmp_path / "user.token").unlink()  # nothing is sent without the token
     calls = len(hub.calls)
     assert client.get("/api/hub/pending").json()["reachable"] is False and len(hub.calls) == calls

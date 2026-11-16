@@ -55,7 +55,7 @@ def test_the_runners_events_reach_the_stream(tmp_path: Path) -> None:
         app = await opened(tmp_path, ScriptedAdapter(two_runs(), companion=True))
         try:
             scope = TrustedScope(ME, await app.create_conversation(ME))
-            stream = app.hub.subscribe(ME)
+            stream = app.presence.subscribe(ME)
             origin = MessageOrigin(OriginKind.DEVICE, "d1")
             await app.send(scope, "hello", origin=origin)
             await app.runner.wait(scope)
@@ -90,8 +90,8 @@ def test_the_model_is_told_where_the_user_is(tmp_path: Path) -> None:
         try:
             desk = await paired(app)
             await paired(app, "노트북")
-            app.hub.subscribe(ME, desk)
-            app.hub.signal(ME, desk, 120, "Europe/London")
+            app.presence.subscribe(ME, desk)
+            app.presence.signal(ME, desk, 120, "Europe/London")
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "hello", origin=MessageOrigin(OriginKind.DEVICE, desk))
             await app.runner.wait(scope)
@@ -120,8 +120,8 @@ def test_the_model_is_told_what_the_current_device_shows_and_the_quiet(tmp_path:
         app = await opened(tmp_path, adapter)
         try:
             desk = await paired(app)
-            app.hub.subscribe(ME, desk)
-            app.hub.signal(ME, desk, 0, "Asia/Seoul", Signals(
+            app.presence.subscribe(ME, desk)
+            app.presence.signal(ME, desk, 0, "Asia/Seoul", Signals(
                 session=Session.ACTIVE, activity_known=True, activity=ActivitySignal("coding", "Code", 2700.0, False),
                 media_known=True, media=None, mic_or_camera=True))
             until = datetime.now(UTC) + timedelta(hours=1)
