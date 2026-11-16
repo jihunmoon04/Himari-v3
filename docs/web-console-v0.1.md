@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안(검토 전)** · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 2(Codex 설계 검수 1차 반영) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -32,7 +32,7 @@ Windows 반려 앱은 바꾸지 않는다.
 
 ### 2.1 v3 Web
 
-- 프레임워크 없는 JS다: `app.js` 4,815줄, `app.css` 4,293줄, 그 밖 모듈 8개(`live.js`, `files.js`,
+- 프레임워크 없는 JS다: `app.js` 4,815줄, `app.css` 4,293줄, 그 밖 모듈 7개(`live.js`, `files.js`,
   `rich_text.js`, `drafts.js`, `hub.js` 등). 상태는 DOM과 전역 객체에 흩어져 있고, 검사는 DOM을 흉내 내는
   스모크 스크립트(`scripts/*_smoke.mjs`)다. 화면 하나를 더할 때마다 `app.js`가 커지는 구조다.
 - 보안 계층은 좋다: 운영자 로그인, `default-src 'self'` CSP(`security.py`), 외부 CDN 없음(KaTeX 자체 서빙),
@@ -53,8 +53,12 @@ Windows 반려 앱은 바꾸지 않는다.
 | 조작 | `send`, `new`, `close`, `cancel`, `answer`, `preset` |
 
 이벤트 종류는 `session`, `setup`, `turn_start`, `text`, `thought`, `tool`(kind·status·input·output·
-locations·`diffs`), `plan`, `usage`, `request`, `answer`, `turn_end`, `truncated`다. 모양이 ACP
-`session/update`와 같아서, Claude·Codex·Antigravity를 같은 카드로 그릴 수 있다. v1 안에서는 더하기만
+locations·`diffs`), `plan`, `usage`, `request`, `answer`, `turn_end`, `truncated`다. hub가 ACP
+`session/update`를 정규화한 모양이라, Claude·Codex·Antigravity를 같은 카드로 그릴 수 있다.
+
+계약에 **없는** 것(화면이 지어내지 않는다): 세션의 마지막 활동 시각, 목록에서의 작업 글, 세션별 승인 수,
+턴이 쓴 토큰. `usage`(`used`/`size`)는 컨텍스트 사용량이지 턴의 소비량이 아니다. `new`의 응답(작업)에는
+세션 id가 없다. 이것들을 어떻게 얻는지는 §4·§8에 적는다. v1 안에서는 더하기만
 하므로 클라이언트는 모르는 칸과 종류를 무시한다.
 
 ## 3. 참고한 제품
@@ -113,12 +117,17 @@ HIMARI 대화와 에이전트 세션이 **같은 기록 컴포넌트**를 쓴다
   인라인 미리보기와 "오른쪽에서 보기". 같은 `id`의 갱신은 같은 카드에 합친다. 연속된 읽기 도구는
   "도구 5개" 묶음으로 접는다.
 - **계획:** 최신 계획을 입력창 위에 고정해 보이고(진행 중 항목 강조), 기록에는 바뀐 때만 작은 줄.
-- **승인·질문 카드:** 대화 흐름 안, 그 앞의 글 뒤에 놓인다. 답할 수 있는지는 `pending`이 정한다(계약
-  §7): 답할 수 있으면 선택지 버튼·질문 칸, 끝났으면 결과(`answered`·`refused`·`expired`)만.
-- **턴 경계:** `turn_start`의 모델·강도·모드 칩, `turn_end`의 결과·걸린 시간·사용량. `failed`·`lost`·
-  `limited`는 이유와 함께 눈에 띄게.
+- **승인·질문 카드:** 대화 흐름 안, 그 앞의 글 뒤에 놓인다. 답할 수 있는지와 선택지·질문 칸은 **늘 최신
+  `pending`에서** 가져온다(계약 §7). `request` 이벤트는 자리만 정한다. `pending`에 없으면 결과
+  (`answer` 이벤트의 `answered`·`refused`·`expired`·`cancelled`)만 보인다. 다시 읽는 때는 §7.3.
+- **턴 경계:** `turn_start`의 모델·강도·모드 칩, `turn_end`의 결과와 걸린 시간(`turn_start`·`turn_end`의
+  `at` 차이). 컨텍스트 사용량은 최신 `usage`로 정보 탭에 보인다(턴이 쓴 토큰은 hub가 주지 않으므로 보이지
+  않는다). `failed`·`lost`·`limited`는 `why`와 함께 눈에 띄게.
 - **잘림:** `truncated` 이벤트와 잘린 diff(`cut`, `more`)는 회색 안내로.
-- 긴 기록은 가상 스크롤로 그리고, 위로 올리면 `events`로 앞부분을 더 읽는다.
+- **처음 열 때와 앞부분:** `events`는 `after` 뒤를 오름차순으로만 준다. 그래서 세션 상세의 `last_seq`로
+  `after = max(first_seq - 1, last_seq - 200)`을 정해 최근 구간을 읽고, 위로 올리면 그 앞 구간을 같은 방식
+  (`after`를 200씩 앞으로, `limit` 200)으로 읽어 앞에 붙인다. 이어 받기 커서는 **실제로 받은 마지막 `seq`**
+  (응답의 `next`)이고 `last_seq`가 아니다. 긴 기록은 가상 스크롤로 그린다.
 
 ### 4.3 입력창
 
@@ -136,8 +145,13 @@ HIMARI 대화와 에이전트 세션이 **같은 기록 컴포넌트**를 쓴다
 
 ### 4.5 작업 현황(관리자 화면)
 
-열린 세션 전부를 카드 격자로: 프로젝트, 에이전트@실행기, 상태, 지금 도는 작업의 글 앞부분, 마지막 활동,
-대기 글, 승인 대기. 프로젝트·상태로 거른다. 목록 스트림(`sessions`·`changed`)으로 실시간이다. 홈 화면의
+열린 세션 전부를 카드 격자로: 프로젝트, 에이전트@실행기, 상태, 대기 글 수, 컨텍스트 사용량은 목록
+스트림(`sessions`·`changed`)에서 바로 온다. 그 밖은 따로 얻는다.
+- 지금 도는 작업의 글 앞부분: 세션의 `task` id로 `task`(H1)를 읽는다.
+- 승인 대기 수: `pending`의 `task_id`를 세션의 `task`와 맞춰 센다.
+- 마지막 활동 시각: 세션에 `updated_at`(H7)이 생길 때까지 보이지 않는다.
+
+프로젝트·상태로 거른다. 홈 화면의
 입력창 아래에도 이 카드의 요약(돌고 있는 것과 기다리는 것)을 보인다.
 
 ### 4.6 받은 승인
@@ -164,14 +178,17 @@ HIMARI 대화와 에이전트 세션이 **같은 기록 컴포넌트**를 쓴다
   이름 추측이 아니라 그 서버의 Tool id(`<source>/hub_delegate` 등)로 판단한다.
 - `hub_delegate`의 결과(작업 id)와 `hub_task`의 결과(상태, 작업이 실제로 돈 `session`)를 **맡긴 작업 카드**로
   그린다: 프로젝트·에이전트·상태·진행 요약, "세션 열기".
-- 카드는 결과 글만 믿지 않고 중계로 실시간 상태를 받는다: 작업 id → 세션은 hub의 `task` op(§8 H1)로 얻고,
-  그 뒤로는 목록 스트림의 그 세션 상태를 따른다.
+- 카드는 **작업 id로 끝까지** 따라간다: hub의 `task` op(§8 H1)로 상태·세션을 읽고, 작업이 끝날
+  (`done`·`failed`) 때까지 다시 읽는다. 세션 상태는 작업 상태를 대신하지 않는다(성공과 실패가 모두 `idle`로
+  보이고, 같은 세션의 다음 작업이 이전 카드에 붙으며, 세션을 잃으면 작업이 다른 세션에서 돈다). 목록
+  스트림에서 그 세션이 바뀐 것은 "다시 읽을 때"라는 신호로만 쓴다. 신호가 없어도 실행 중에는 15초마다 읽는다.
 - 사이드바에서 그 대화 아래에 맡긴 세션을 붙이고, 오른쪽 **맡긴 작업** 탭에 그 대화의 작업을 모은다.
 - HIMARI의 승인 원칙은 그대로다: 모델은 승인에 답하지 못하고, 승인 카드의 답은 사용자 경로로만 간다.
 
 ### 5.2 user 경로: 사용자가 직접
 
-세션 열기·보기·보내기·새 대화·닫기·중지·승인을 Web이 직접 한다. 사용자가 직접 보낸 글도 hub 원장에
+세션 열기·보기·보내기·새 대화·닫기·중지·승인을 Web이 직접 한다. `new`의 응답에는 세션 id가 없으므로,
+새 대화를 연 뒤 그 작업을 `task`(H1)로 읽어 세션을 알아내고 그 세션 화면으로 옮긴다(H1은 W3 전에 필요). 사용자가 직접 보낸 글도 hub 원장에
 작업으로 남으므로, HIMARI는 `hub_sessions`·`hub_task`로 그 일을 볼 수 있다(연속성은 hub 프로젝트가 쥔다).
 
 ## 6. 서버 중계 (`/api/hub/…`)
@@ -195,10 +212,21 @@ HIMARI 대화와 에이전트 세션이 **같은 기록 컴포넌트**를 쓴다
 
 - **필드 다시 만들기:** 지금의 원칙(V3-P95)대로 종류마다 아는 칸만 크기 한도와 함께 옮긴다. 모르는 이벤트
   종류는 `seq`·`kind`·`at`만 넘겨 화면이 "알 수 없는 항목"으로 그린다(커서가 끊기지 않게).
-- **SSE 중계:** httpx 비동기 스트림으로 받는다. 목록 스트림은 서버에 **하나만** 열어 모든 브라우저 연결에
-  나눠 준다. 세션 스트림은 보고 있는 세션마다 하나를 열고 같은 세션을 보는 연결끼리 나눈다. hub의 동시
-  스트림 한도(32)를 넘지 않게 v3 쪽 상한을 16으로 둔다(넘으면 503, 화면은 폴링으로 내려감).
-  15초 ping을 브라우저까지 잇고, hub가 끊기면 브라우저 스트림에 `hub_unavailable`을 보내고 닫는다.
+- **목록 스트림(나눠 줌):** v3 서버가 hub에 **하나만** 연다. 서버는 마지막 전체 목록을 들고 있는다
+  (`sessions`면 통째로 바꾸고, `changed`면 id로 합침). 브라우저가 붙으면 먼저 그 전체 목록을 `sessions`로
+  보내고 그 뒤 `changed`를 나눈다. hub에 다시 붙어 새 `sessions`가 오면 서버 목록을 바꾸고 브라우저에도
+  `sessions`로 보내 **바꾸게** 한다(합치지 않음). 마지막 브라우저가 떠나면 30초 뒤 upstream을 닫는다.
+- **세션 스트림(나누지 않음):** 브라우저 연결마다 hub 스트림을 하나 열고, 그 브라우저의 `after`·
+  `Last-Event-ID`를 그대로 넘긴다. 커서가 브라우저마다 달라 하나의 upstream으로 나눌 수 없기 때문이다.
+  첫 `state`의 `reset: true`와 `reset` 이벤트를 모두 브라우저에 넘긴다. 브라우저가 끊으면 upstream도 닫는다.
+- **상한:** hub의 동시 스트림 한도(32) 안에서 v3는 목록 1 + 세션 16까지 연다. 넘으면 503
+  `hub_stream_limit`이고, 화면은 그 세션을 `events` 폴링(5초)으로 내려 보인다.
+- **역압:** 브라우저 연결마다 큐를 둔다(이벤트 256개 또는 4 MiB). 넘치면 그 연결만 닫는다. 브라우저는
+  `Last-Event-ID`로 다시 붙어 빠진 것을 받는다. 느린 브라우저가 공유 목록 reader를 막지 않는다.
+- **인증 수명:** 브라우저 스트림은 열 때 운영자 세션 쿠키를 확인하고, 15초 ping마다 다시 확인한다. 로그아웃
+  하거나 세션이 끝나면 다음 ping 때 닫는다. 지금의 `/api/events`는 열 때만 확인하므로 이 규칙은 새로 만든다.
+- **끊김:** httpx 읽기 시간 제한은 30초(hub ping 15초의 두 배)다. 그동안 아무것도 없거나 hub가 끊으면 브라우저
+  스트림에 `hub_unavailable`을 보내고 닫는다. 목록 upstream은 서버가 지수 백오프로 다시 붙는다.
 - **오류:** hub 400 → 409 `hub_refused`(사람용 문구 그대로, 500자), 연결 실패 → 503 `hub_unavailable`,
   401·403 → 503 `hub_misconfigured`(로그에 원인). 계약대로 판단은 상태 코드로만 한다.
 - **설정:** 이미 있는 `HIMARI_HUB_URL`·`HIMARI_HUB_USER_TOKEN_FILE`에 `HIMARI_HUB_MCP_SOURCE`만 더한다.
@@ -219,6 +247,7 @@ HIMARI 대화와 에이전트 세션이 **같은 기록 컴포넌트**를 쓴다
   느낌을 빠르게 내고, 부품 코드가 우리 것이 된다.
 - **스타일:** Tailwind CSS v4 + CSS 변수 토큰. 지금의 **Classic·Warm** 두 테마와 밝음·어둠을 토큰으로 옮긴다.
 - **라우팅:** React Router. 경로: `/`, `/c/{대화}`, `/s/{세션}`, `/inbox`, `/agents`, `/settings/…`.
+  전환 기간에는 Router `basename`과 Vite `base`를 `/next/`로 둔다(§7.2).
 - **서버 상태:** TanStack Query(REST 스냅샷, 캐시, 재시도). **실시간 상태:** 작은 저장소(Zustand)에 스트림을
   리듀서로 쌓는다(§7.3).
 - **가상 스크롤:** TanStack Virtual. **diff:** jsdiff로 줄 차이를 구하고 우리 렌더러로 그림. **아이콘:** lucide.
@@ -229,19 +258,38 @@ HIMARI 대화와 에이전트 세션이 **같은 기록 컴포넌트**를 쓴다
 
 - 소스는 `web/`(최상위)에 둔다: `web/src/{app,routes,components,features/{himari,hub,settings},lib,api}`.
 - `npm run build`가 `src/himari/interfaces/web/dist/`로 낸다. 빌드 결과는 커밋하지 않는다(`.gitignore`).
-  패키지 데이터에 `dist/**`를 넣고, 릴리스 단계에서 빌드한다. Node는 빌드하는 곳에만 필요하다.
+  Node는 빌드하는 곳에만 필요하다.
+- **릴리스 순서(W1에서 스크립트로 고정):** `npm ci` → `npm run build` → `python -m build`(sdist·wheel) →
+  wheel에 `dist/index.html`과 `dist/assets/`가 있는지 검사 → 설치해 서빙 확인. `package-data`에 `dist/**`를
+  넣는 것만으로는 빌드가 돌지 않으므로, `dist`가 없으면 **릴리스가 실패**한다. 개발 중 `dist`가 없으면 서버는
+  시작 로그에 알리고 `/next/`를 404로 둔다(옛 화면은 그대로).
+- **KaTeX:** 지금 `/assets/katex/…`에서 서빙하는 KaTeX와 글꼴을 `web/public/katex/`로 옮겨 빌드 결과에
+  함께 넣고(`<base>katex/…`), 옮긴 렌더러는 base 경로로 불러온다. 옛 `static/katex`는 W6에서 옛 화면과 함께 지운다.
+- **경로(전환 기간):** Vite `base: "/next/"`, Router `basename: "/next"`. 서버는 `/next/assets/{이름}`을
+  `dist/assets`의 **목록에 있는 이름만**(빌드 manifest로 만든 허용 목록) 주고, 그 밖의 `/next/` 아래 GET은
+  `index.html`을 준다(SPA fallback, `/api`·`/next/assets`는 제외). 새 화면 안의 링크는 모두 basename 아래라
+  옛 `/c/{id}`로 새지 않는다. **W6 전환:** base를 `/`로 바꾸고 `/assets/`는 새 빌드 것만, `/c/{id}`는 새 화면의
+  같은 경로라 링크가 그대로 산다. `/next/…`는 같은 경로의 `/…`로 308 이동한다.
 - 개발: `npm run dev`(Vite)가 `/api`를 로컬 v3 서버로 넘긴다.
-- 서버는 `dist/`가 없으면 시작 로그에 알리고 옛 화면을 준다(전환 기간, §9).
-- **CSP는 그대로** `default-src 'self'`다. Vite 결과에 인라인 스크립트가 없게 하고, 스타일은 파일과
-  CSSOM으로만 준다(HTML `style` 속성을 쓰지 않음). 외부 글꼴·CDN 없음.
+- **CSP:** 스크립트는 그대로 `script-src 'self'`(인라인 없음)다. 다만 Radix의 대화상자·팝오버는 스크롤 잠금
+  (`react-remove-scroll` → `react-style-singleton`)이 실행 중에 `<style>` 요소를 넣는다. 그래서 새 화면의
+  HTML에만 `style-src 'self' 'nonce-{요청마다}'`를 더한다: 서버가 `index.html`을 줄 때마다 nonce를 만들어
+  `<meta name="csp-nonce">`와 CSP 머리에 넣고, 앱은 그리기 전에 `get-nonce`의 `setNonce`로 그 값을 준다.
+  스타일 nonce만이고 스크립트는 넓히지 않는다. 나머지 스타일은 파일과 CSSOM으로만 준다(HTML `style`
+  속성을 쓰지 않음). 외부 글꼴·CDN 없음. **W1의 완료 조건:** Playwright로 대화상자·메뉴·팝오버를 열어도
+  `securitypolicyviolation`이 0개다. 안 되면 그 부품을 CSSOM만 쓰는 것으로 바꾼다(예: React Aria).
 
 ### 7.3 상태 모델
 
 - 스트림 하나 = 리듀서 하나. 세션 저장소는 `seq` 순의 이벤트 배열과, 그것을 접은 항목 목록(도구 카드는
   `id`로 합침, 계획은 최신 값)을 가진다. 화면은 항목 목록만 읽는다.
-- 처음: `events`로 스냅샷 → 마지막 `seq`부터 스트림. `reset`이면 저장소를 비우고 다시 그린다.
-  끊기면 지수 백오프로 다시 붙고 `Last-Event-ID`로 이어 받는다.
-- 목록 저장소는 `sessions`로 시작해 `changed`로 합친다. `activity`가 `waiting`으로 바뀌면 `pending`을 다시 읽는다.
+- 처음: `events`로 최근 구간(§4.2) → 받은 마지막 `seq`부터 스트림. 첫 `state`의 `reset: true`나 `reset`
+  이벤트면 저장소를 비우고 `first_seq`부터 다시 그린다. 끊기면 지수 백오프로 다시 붙고 `Last-Event-ID`
+  (받은 마지막 `seq`)로 이어 받는다.
+- 목록 저장소는 `sessions`가 오면 **통째로 바꾸고**(처음이든 다시 붙었든), `changed`면 id로 합친다.
+- **`pending` 다시 읽기:** (다시) 붙었을 때, 세션 스트림에 `request`·`answer`·`turn_end`가 왔을 때, 목록에서
+  어떤 세션의 `activity`나 `task`가 바뀌었을 때, 내가 답한 뒤(성공이든 409 거절이든), 그리고 대기 중인 것이
+  하나라도 보이는 동안 30초마다. 다른 브라우저의 답, 만료, 이미 `waiting`인 작업에 더해진 요청을 이렇게 잡는다.
 - HIMARI 대화도 같은 방식으로 옮긴다(지금의 `/api/conversations/{id}/events`·`live`).
 
 ### 7.4 공통 항목 모델
@@ -261,7 +309,8 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
 
 | id | 무엇 | 크기 | 언제 |
 | --- | --- | --- | --- |
-| H1 | `/user/task {id}`: §3.1 작업에 `session`, 결과 글 앞부분 | 작음, v1 더하기 | W4 전 |
+| H1 | `/user/task {id}`: §3.1 작업에 `session`, 결과 글 앞부분 | 작음, v1 더하기 | **W3 전** |
+| H7 | 세션에 `updated_at`(마지막 이벤트나 상태 변화 시각) | 작음, v1 더하기 | W2와 함께, 없으면 표시 생략 |
 | H2 | 세션 이름(`rename`), 닫힌 세션 다시 열기 | 작음~중간 | 나중 |
 | H3 | 슬래시 명령 목록과 실행 | 중간 | 나중 |
 | H4 | 에이전트에 이미지·파일 첨부(ACP 리소스) | 중간 | 나중 |
@@ -277,15 +326,15 @@ hub PR #25(diff·모드·`projects`)는 아직 운영에 없다. W2 전에 서�
 
 | 단계 | 내용 | 확인 |
 | --- | --- | --- |
-| W0 | `PresenceHub` 이름 나누기(`application.presence`). 중계 전체(§6)와 SSE 나눠 주기, 가짜 hub 시험 | pytest(web·bootstrap), mypy |
-| W1 | `web/` 뼈대, 빌드·CI·`/next/` 서빙, 로그인, 틀(사이드바·머리줄·패널), 테마 토큰, HIMARI 대화 읽기·보내기·스트리밍 | Vitest, Playwright, 운영에서 `/next/` |
-| W2 | 프로젝트·세션 목록(실시간), 세션 기록(읽기 전용), 재연결·`reset`, 작업 현황 화면 | 실제 Claude 세션을 실시간으로 봄 |
-| W3 | 보내기·새 대화·닫기·대기 줄·중지·모델/강도/모드, 대화 안 승인 카드, 받은 승인 | 운영의 승인·질문·중지 |
-| W4 | MCP 경로: 맡긴 작업 카드, 대화 아래 세션, 맡긴 작업 탭(H1 필요) | HIMARI 위임 → 세션 열기 |
+| W0 | `PresenceHub` 이름 나누기(`application.presence`). 중계 전체(§6): 목록 나눠 주기, 세션별 스트림, 상한·역압·인증 수명, 가짜 hub 시험 | pytest(web·bootstrap), mypy |
+| W1 | `web/` 뼈대, 릴리스 빌드 순서와 wheel 검사, CI, `/next/` 서빙(base·basename·자산 허용 목록·fallback), 스타일 nonce CSP, 로그인, 틀(사이드바·머리줄·패널), 테마 토큰, HIMARI 대화 읽기·보내기·스트리밍 | Vitest, Playwright(CSP 위반 0), 운영에서 `/next/` |
+| W2 | 프로젝트·세션 목록(실시간), 세션 기록(읽기 전용, 최근 구간과 앞 구간), 재연결·`reset`, 작업 현황 화면 | 실제 Claude 세션을 실시간으로 봄 |
+| W3 | 보내기·새 대화(H1로 세션 찾기)·닫기·대기 줄·중지·모델/강도/모드, 대화 안 승인 카드, 받은 승인, `pending` 다시 읽기 규칙 | 운영의 승인·질문·중지, 두 브라우저에서 답 |
+| W4 | MCP 경로: 맡긴 작업 카드(작업 id로 끝까지), 대화 아래 세션, 맡긴 작업 탭 | HIMARI 위임 → 세션 열기, 실패한 작업이 실패로 보임 |
 | W5 | 오른쪽 패널: 변경(diff), 계획, 정보; HIMARI 파일 패널 | 다른 기기 diff 포함 |
 | W6 | 나머지 화면 옮기기(설정·지침·메모리·기기·Tool 서버·휴지통·`/` 프롬프트·초안·붙여넣기·첨부·폴더), 좁은 화면 다듬기, `/`를 새 화면으로 바꾸고 옛 정적 파일·스모크 지우기 | 전체 pytest, Playwright, 휴대폰 실기 |
 
-W0은 Python만 바꾸므로 W1과 따로 진행할 수 있다.
+W0은 Python만 바꾸므로 W1과 따로 진행할 수 있다. hub 쪽은 H1이 W3 전, hub PR #25 배포가 W2 전이다.
 
 ## 10. 바꾸지 않는 것과 따로 할 것
 
