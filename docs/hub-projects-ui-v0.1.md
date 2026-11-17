@@ -1,6 +1,6 @@
 # Web에서 hub 프로젝트와 기기 폴더 다루기 (V3-P103 설계 초안 v0.1)
 
-> 2026-11-18 · rev. 4(Codex 설계 검수 3차 NOT_READY 반영, §12) · **설계 초안** · 대상: v3 `cb56a53`(V3-P102 작업 콘솔 운영 중), hub `f1f5119`(프로젝트 요청 구현, 운영 배포 전)
+> 2026-11-18 · rev. 5(Codex 설계 검수 4차 NOT_READY 반영, §12) · **설계 초안** · 대상: v3 `cb56a53`(V3-P102 작업 콘솔 운영 중), hub `f1f5119`(프로젝트 요청 구현, 운영 배포 전)
 > 앞 문서: [작업 콘솔](web-console-v0.1.md)(V3-P102), hub [프로젝트 요청 설계](https://github.com/jihunmoon04/himari-hub/blob/main/docs/projects-v0.1.md), hub [user 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md) §4.6·§5.2
 
 ## 1. 목표와 범위
@@ -26,10 +26,10 @@
 | id | 무엇 | 왜 |
 | --- | --- | --- |
 | H8 | user `projects`의 `runners[]`에 `held`(그 기기가 알렸지만 예약 때문에 보류된 이름) | 보류된 폴더를 화면이 늘 찾을 수 있어야 함(요청 카드가 사라진 뒤에도) |
-| H11 | **MCP 응답에서 기기 경로와 짝 코드를 뺀다.** 모델에 가는 뷰를 user 뷰와 따로 둔다. 요청(`hub_project_request`·`hub_project_requests`): `result_path`·`code`를 빼고, `path`는 모델이 준 것만(`origin = model`). `hub_projects`: `runners[].approve.roots`를 빼고(`mode`만 남김), `approve.why`와 요청의 `reason`은 알려진 코드만(그 밖은 `other`). MCP 오류 문구에도 경로를 넣지 않는다 | hub 설계는 기기 경로를 모델에 보이지 않기로 했는데 지금 hub의 MCP 응답은 user 뷰를 그대로 돌려줌(`projects.py` `view`, `remote.py` `runners.view`의 `roots`). **hub 버그로 고친다** |
+| H11 | **MCP 응답에서 기기 경로와 짝 코드를 뺀다.** 모델에 가는 뷰를 user 뷰와 따로 둔다. 요청(`hub_project_request`·`hub_project_requests`): `result_path`·`code`를 빼고, `path`는 모델이 준 것만(`origin = model`). `hub_projects`: `projects[].path`(hub `mcp.py` `_project`)와 `runners[].approve.roots`를 빼고(`approve`는 `mode`만 남김), `approve.why`와 요청의 `reason`은 알려진 코드만(그 밖은 `other`). MCP 오류 문구에도 경로를 넣지 않는다 | hub 설계는 기기 경로를 모델에 보이지 않기로 했는데 지금 hub의 MCP 응답은 user 뷰를 그대로 돌려줌(`projects.py` `view`, `mcp.py` `_project`의 `path`, `remote.py` `runners.view`의 `roots`). **hub 버그로 고친다** |
 | H12 | user `project_requests`에 `ids`(최대 50, 그 이상은 v3가 나눠 보냄): 답은 `{"requests": [...], "missing": [id…]}`. `requests`는 상태와 상관없이, `missing`은 hub에 그 id가 없음(30일이 지나 지워짐)을 확인한 것 | 응답을 받지 못한 동작과 끊긴 동안 끝난 요청의 결과를 확인(§5) |
-| H13 | `project_request`·`project_folder_remove`에 `client_key`(1~64자). hub는 키를 요청 행의 칸(유일 색인)으로 둔다. **키를 먼저 찾는다:** 받은 입력을 정규화해 키로 찾고, 있으면 같은 op·같은 정규화한 입력일 때 그 요청을 그대로 돌려준다(끝났어도, 기기가 지금 끊겼거나 폴더가 이미 빠졌어도: 기기 상태 검사와 기기로 다시 보내기를 하지 않음). 다르면 400 `client_key_reused`. 없을 때만 지금의 검사를 하고 같은 트랜잭션에서 만든다. 동시에 같은 키 둘이면 유일 색인에서 진 쪽이 이긴 쪽의 요청을 다시 읽어 돌려준다. **키는 요청을 만든 뒤 적어도 30일 남는다**(요청 행과 함께, 끝난 뒤 30일에 지워짐) | `hub_unknown` 뒤 다시 보내도 요청이 둘 생기지 않음 |
-| H17 | `project_request_resolve`를 요청 id마다 한 줄로: 정리를 시작할 때 원장의 요청 행에 `resolving = 1`을 조건부 갱신(`WHERE resolving = 0 AND state = 'lost'`)으로 쓰고 `rev`를 올려 `project_request` 이벤트를 낸다. 그동안 온 `resolve`(force 포함)는 409 `resolving`. 펜스가 끝나면(성공·실패·시간 초과) 결과와 함께 `resolving = 0`으로 쓰고 다시 `rev`를 올려 이벤트를 낸다. hub가 다시 켜지면 남은 `resolving = 1`을 모두 0으로 쓰고 `rev`를 올린다(펜스는 프로세스와 함께 끝났으므로). user 뷰의 요청 레코드에 `resolving`을 더한다 | `hub_unknown` 뒤나 다른 탭에서 다시 정리해도 펜스가 겹치지 않음 |
+| H13 | `project_request`·`project_folder_remove`에 `client_key`(1~64자). hub는 키를 요청 행의 칸(유일 색인)으로 둔다. **키를 먼저 찾는다:** 받은 입력을 정규화해 키로 찾고, 있으면 같은 op·같은 정규화한 입력일 때 그 요청을 그대로 돌려준다(끝났어도, 기기가 지금 끊겼거나 폴더가 이미 빠졌어도: 기기 상태 검사와 기기로 다시 보내기를 하지 않음). 다르면 400 `client_key_reused`. 없을 때만 지금의 검사를 하고 같은 트랜잭션에서 만든다. **검사가 실패하거나 유일 색인에서 지면 키를 한 번 더 찾고**, 그 사이 다른 호출이 만든 같은 키의 요청이 있으면 그것을 돌려준다(검사 실패를 돌려주지 않음). **키에는 v3 서버가 정한 발급 시각(`key_time`)이 붙는다:** 키가 없을 때 `key_time`이 hub 시계로 24시간보다 오래면 만들지 않고 400 `client_key_expired`. 키는 요청 행과 함께 끝난 뒤 30일에 지워지므로, 지워진 키로 늦게 다시 보내도 새 요청이 생기지 않는다 | `hub_unknown` 뒤 다시 보내도 요청이 둘 생기지 않음 |
+| H17 | `project_request_resolve`를 요청 id마다 한 줄로: 정리를 시작할 때 원장의 요청 행에 `resolving = 1`을 조건부 갱신(`WHERE resolving = 0 AND state = 'lost'`)으로 쓰고 `rev`를 올려 `project_request` 이벤트를 낸다. 그동안 온 `resolve`(force 포함)는 409 `resolving`. **끝내는 쓰기는 모두 같은 규칙:** 펜스의 결과와 기기의 늦은 완료 보고 모두 `WHERE state = 'lost'`인 조건부 갱신으로 상태를 끝내면서 `resolving = 0`도 함께 쓰고 `rev`를 올려 이벤트를 낸다. 먼저 온 쪽이 끝내고, 늦은 쪽은 상태를 바꾸지 않는다: 펜스가 늦었으면 `resolving = 0`만 쓰고(`rev`·이벤트) 이미 끝난 실제 상태를 `resolve`의 답으로 돌려준다. 펜스가 실패·시간 초과로 끝나면 상태는 `lost`로 두고 `resolving = 0`. hub가 다시 켜지면 남은 `resolving = 1`을 모두 0으로 쓰고 `rev`를 올린다(펜스는 프로세스와 함께 끝났으므로). user 뷰의 요청 레코드에 `resolving`을 더한다 | `hub_unknown` 뒤나 다른 탭에서 다시 정리해도 펜스가 겹치지 않음 |
 
 없는 hub에서의 동작: H8 없음 → 보류 채택 화면을 보이지 않음. H12 없음 → 끊긴 동안 끝난 요청은 "결과 확인 불가". H13 없음 → `hub_unknown` 뒤 "다시 보내기"를 막고 목록을 다시 읽게만 함. H17 없음 → `hub_unknown` 뒤 정리 단추를 60초 막음(§4.1). H11은 v3와 상관없이 hub에서 고친다.
 
@@ -42,12 +42,13 @@
 | v3 경로 | hub op | 비고 |
 | --- | --- | --- |
 | `GET /api/hub/project-requests` | `project_requests` | `open`(bool), `limit`, `ids`(쉼표, H12) |
-| `POST /api/hub/project-requests` | `project_request` | `kind`, `project`, `runner`, `path`?, `create_dir`?, `agent`?, `client_key`(H13) |
+| `POST /api/hub/project-requests` | `project_request` | `kind`, `project`, `runner`, `path`?, `create_dir`?, `agent`?, `client_key`·`key_time`(H13) |
 | `POST /api/hub/project-requests/{id}/answer` | `project_request_answer` | `approve` |
 | `POST /api/hub/project-requests/{id}/cancel` | `project_request_cancel` | |
 | `POST /api/hub/project-requests/{id}/resolve` | `project_request_resolve` | `force`?, `outcome`?. 시간 제한 40초(펜스는 기기 답을 30초 기다림) |
 | `POST /api/hub/projects/settings` | `project_set` | `project`, `agent`?, `profile`?, `preset`?(준 것만, null은 지움). 지금의 `PUT …/{project}/preset`은 그대로 둠 |
-| `POST /api/hub/projects/remove-folder` | `project_folder_remove` | `project`, `runner`, `client_key`(H13) |
+| `POST /api/hub/projects/remove-folder` | `project_folder_remove` | `project`, `runner`, `client_key`·`key_time`(H13) |
+| `POST /api/hub/client-key` | — | v3 서버가 `{client_key(임의 128비트), key_time(서버 시계)}`을 만들어 줌. hub에 가지 않음 |
 | `POST /api/hub/projects/adopt` | `project_adopt` | `project`, `runner` |
 | `POST /api/hub/runner-dirs` | `runner_dirs` | 본문 `runner`, `path`?(경로가 접근 기록·프록시 기록의 URL에 남지 않게 POST 본문으로). 읽기지만 Origin 검사를 거침. 시간 제한 15초 |
 
@@ -64,7 +65,7 @@
 | 정리(`resolve`) | `ids`로 다시 읽는다. `lost`가 아니면 그 결과를 보인다. `resolving: true`(H17)면 "기기에 묻는 중"으로 두고 다음 이벤트를 기다린다. `lost`이고 `resolving`이 아니면 다시 누를 수 있다. H17이 없는 hub면 첫 요청의 펜스가 아직 돌 수 있으므로 60초(펜스 30초 + 여유) 동안 단추와 `force`를 막는다 |
 | 설정 바꾸기, 채택 | `projects`를 다시 읽어 바뀌었는지 보인다 |
 
-**확인되지 않은 만들기·빼기는 새로고침을 넘어 남긴다.** 요청을 보내기 전에 `{client_key, 경로, 본문, 만든 시각}`을 그 브라우저의 `sessionStorage`에 적고, 답(요청 id)을 받으면 지운다. 화면이 다시 열리면 남은 것을 "확인되지 않은 요청"으로 보인다. 만든 지 24시간 안이면 같은 키·본문으로 다시 보낼 수 있다(H13: 키는 적어도 30일 남으므로 그 요청이 있었다면 그것이 돌아옴). 24시간이 지났으면 다시 보내기를 막고 열린 요청과 프로젝트를 다시 읽어 보인 뒤 버리게만 한다(시계가 틀렸을 수도 있으므로 넉넉히 짧게). 저장소를 쓸 수 없으면(사생활 보호 창 등) 이 회복 없이 위 표대로만 한다. 이 값에는 경로가 들어가므로 `localStorage`가 아니라 탭이 닫히면 지워지는 `sessionStorage`를 쓴다.
+**확인되지 않은 만들기·빼기는 새로고침을 넘어 남긴다.** 대화상자를 열 때 `POST /api/hub/client-key`로 v3 서버에서 `{client_key, key_time}`(서버 시계)을 받는다. 요청을 보내기 전에 `{client_key, key_time, 경로, 본문}`을 그 브라우저의 `sessionStorage`에 적고, 답(요청 id)을 받으면 지운다. 화면이 다시 열리면 남은 것을 "확인되지 않은 요청"으로 보이고 같은 키·`key_time`·본문으로 다시 보낼 수 있다. 너무 늦었는지는 브라우저 시계가 아니라 hub가 `key_time`으로 판단한다(H13: 24시간이 지났으면 그 요청이 있었을 때만 돌려주고, 없으면 `client_key_expired`). 그 답이면 다시 보내기를 막고 열린 요청과 프로젝트를 다시 읽어 보인 뒤 버리게만 한다. 저장소를 쓸 수 없으면(사생활 보호 창 등) 이 회복 없이 위 표대로만 한다. 이 값에는 경로가 들어가므로 `localStorage`가 아니라 탭이 닫히면 지워지는 `sessionStorage`를 쓴다.
 
 ### 4.2 목록 스트림
 
@@ -163,7 +164,7 @@ HIMARI의 `<hub source>/hub_project_request` Tool 호출을 맡긴 작업 카드
 
 ## 8. 검사
 
-- hub pytest(H 단계): MCP의 `hub_project_request`·`hub_project_requests`·`hub_projects`와 MCP 오류에 경로·roots·짝 코드가 없음(H11), `ids`의 `requests`·`missing`(H12), 같은 키 동시 둘 → 하나, 같은 키 다른 본문 → 거절, 끝난 요청의 키 → 그 요청(H13), 정리 중의 두 번째 `resolve`·`force` → 409 `resolving`, 시작·끝에 `rev`가 오르고 이벤트가 나감, hub 재시작 뒤 `resolving`이 풀림(H17), 원 요청 뒤 기기가 끊기거나 폴더가 빠져도 같은 키가 그 요청을 돌려줌(H13).
+- hub pytest(H 단계): MCP의 `hub_project_request`·`hub_project_requests`·`hub_projects`와 MCP 오류에 경로·roots·짝 코드가 없음(H11), `ids`의 `requests`·`missing`(H12), 같은 키 동시 둘 → 하나, 같은 키 다른 본문 → 거절, 끝난 요청의 키 → 그 요청(H13), 정리 중의 두 번째 `resolve`·`force` → 409 `resolving`, 시작·끝에 `rev`가 오르고 이벤트가 나감, hub 재시작 뒤 `resolving`이 풀림(H17), 원 요청 뒤 기기가 끊기거나 폴더가 빠져도 같은 키가 그 요청을 돌려줌, 같은 키 둘이 동시에 오고 그 사이 기기가 끊겨도 둘 다 같은 요청을 받음, 오래된 `key_time`의 새 키 → `client_key_expired`(H13), 정리 중 기기의 늦은 완료와 펜스 결과가 어느 순서로 와도 실제 최종 상태와 `resolving = 0`(H17), MCP `hub_projects`에 `path`가 없음(H11).
 - 중계 pytest(가짜 hub):
   - 새 REST 경로 모두 운영자만(비운영자·기기 토큰 거절), 쿠키 요청의 Origin 검사, 응답과 로그에 토큰이 없고 경로·코드는 운영자 응답에만, hub 오류 문구가 로그에 없음, `runner-dirs`의 경로가 접근 기록(URL)에 없음.
   - op마다 필드 다시 만들기·크기 한도, 오류 매핑(409/503 종류), `resolve`의 긴 시간 제한, `client_key`·`ids` 전달.
@@ -224,3 +225,10 @@ hub를 먼저 올리고 v3를 올린다. hub만 올라간 동안 v3는 지금처
 - P1 `resolving`이 중계 레코드에 없고 `rev`가 오르지 않아 병합에서 버려짐 → `REQUEST`에 `resolving`, 시작·끝 모두 원장에 조건부로 쓰고 `rev`와 이벤트, hub 재시작 때 풂(§3 H17, §4).
 - P1 hub는 저장 전에 기기를 검사하므로 원 요청 뒤 기기가 끊기면 같은 키가 그 요청을 돌려주지 못함 → 키를 먼저 찾고, 있으면 기기 검사 없이 그대로 돌려줌(§3 H13).
 - P1 `sessionStorage`의 키가 hub의 키보다 오래 살 수 있음 → hub는 키를 적어도 30일 남기고, 화면은 24시간 안에서만 다시 보냄(§3 H13, §4.1).
+
+### 4차 (rev. 4 → rev. 5): NOT_READY, P1 셋, P2 하나
+
+- P1 MCP `hub_projects`가 `projects[].path`도 줌 → H11에 더함(§3).
+- P1 정리 중 기기의 늦은 완료와 펜스가 겹침 → 끝내는 쓰기는 모두 `WHERE state = 'lost'` 조건부로 `resolving`을 함께 풀고, 늦은 쪽은 실제 상태를 돌려줌(§3 H17).
+- P1 브라우저 시계로 24시간을 재면 지워진 키로 새 요청이 생길 수 있음 → v3 서버가 `key_time`을 주고 hub가 자기 시계로 판단(§3 H13, §4, §4.1).
+- P2 동시 재시도에서 검사 실패가 먼저 돌아갈 수 있음 → 검사 실패·색인 충돌 뒤 키를 다시 찾음(§3 H13).
