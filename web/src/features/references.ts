@@ -23,7 +23,10 @@ function set(next: Map<string, Pointed[]>) {
 /** False when the message points at as many files as it may already. */
 export function pointAt(conversation: string, file: Pointed): boolean {
   const now = byConversation.get(conversation) ?? [];
-  if (now.some((p) => p.path === file.path)) return true;
+  if (now.some((p) => p.path === file.path)) { // chosen again: as the file is now (its identity may have changed)
+    set(new Map(byConversation).set(conversation, now.map((p) => (p.path === file.path ? file : p))));
+    return true;
+  }
   if (now.length >= MAX_REFERENCES) return false;
   set(new Map(byConversation).set(conversation, [...now, file]));
   return true;

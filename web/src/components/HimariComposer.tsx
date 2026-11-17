@@ -72,7 +72,8 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
   latest.current = text;
   const [highlight, setHighlight] = useState(0);
   const [asking, setAsking] = useState<PromptInfo | null>(null);
-  const slash = /^\/(\S*)$/.exec(text);
+  const [dismissed, setDismissed] = useState<string | null>(null); // Esc closed the picker over this draft
+  const slash = text !== dismissed ? /^\/(\S*)$/.exec(text) : null;
   const prompts = useQuery({ queryKey: ["conversation", conversation, "prompts"], queryFn: () => listPrompts(conversation),
     enabled: slash !== null, staleTime: 60_000 });
   const offered = slash ? matchPrompts(prompts.data?.prompts ?? [], slash[1] ?? "") : [];
@@ -135,9 +136,9 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
       void choose(offered[highlight] ?? offered[0]!);
       return true;
     }
-    if (event.key === "Escape") {
+    if (event.key === "Escape") { // the picker goes, the draft stays (it may be meant as it is)
       event.preventDefault();
-      composer.current?.setText("");
+      setDismissed(text);
       return true;
     }
     return false;
@@ -193,7 +194,8 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
       {!prompts.isLoading && offered.length === 0 && <p className="px-2 py-1 text-xs text-faint">No prompts match.</p>}
       {offered.map((p, index) => (
         <button key={`${p.source}/${p.name}`} type="button" role="option" aria-selected={index === highlight}
-          onMouseDown={(event) => { event.preventDefault(); void choose(p); }}
+          onMouseDown={(event) => event.preventDefault() /* the composer keeps its focus */}
+          onClick={() => void choose(p)}
           className={cn("flex w-full items-baseline gap-2 rounded-md px-2 py-1 text-left", index === highlight && "bg-raised")}>
           <span className="font-mono">/{p.name}</span>
           <span className="min-w-0 flex-1 truncate text-xs text-faint">{p.title || p.description}</span>
