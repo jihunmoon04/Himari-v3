@@ -47,7 +47,7 @@ public sealed class SettingsTests : IDisposable
         var store = new SettingsStore(folder);
         store.Load();
         var hub = new HubCommand(@"C:\Program Files\uv\uv.exe", ["run", "--project", @"D:\00_프로젝트\Himari v4", "himari-hub"], @"D:\00_프로젝트\Himari v4");
-        store.Update(s => s with { Server = "https://himari.example", Hub = hub, HubHome = @"C:\Users\사용자 이름\.himari-hub", OwnedInstance = "7.1.ab" });
+        store.Update(s => s with { Server = "https://himari.example", Hub = hub, HubHome = @"C:\Users\사용자 이름\.himari-hub", OwnedInstance = "7.1.ab000000000000000000000000000000" });
         store.Update(s => s with { Linked = false });
         Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
         var reloaded = new SettingsStore(folder).Load();
@@ -56,7 +56,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal("https://himari.example", value.Server);
         Assert.True(hub.SameAs(value.Hub));
         Assert.Equal(@"C:\Users\사용자 이름\.himari-hub", value.HubHome);
-        Assert.Equal("7.1.ab", value.OwnedInstance);
+        Assert.Equal("7.1.ab000000000000000000000000000000", value.OwnedInstance);
         Assert.False(value.Linked);
         string text = File.ReadAllText(Path.Combine(folder, SettingsStore.FileName));
         Assert.Contains("\"owned_instance\"", text);

@@ -48,8 +48,9 @@ public readonly record struct InstanceId(long BootId, long DeadlineMs, string Gu
         id = default;
         if (string.IsNullOrEmpty(text) || text.Length > 128) return false;
         string[] parts = text.Split('.');
-        if (parts.Length != 3 || !Digits(parts[0]) || !Digits(parts[1]) || parts[2].Length == 0
-            || !parts[2].All(c => char.IsAsciiHexDigit(c) || c == '-')) return false;
+        // The GUID part is a GUID: 32 hex digits, or the hub's uuid4 text with hyphens (H10).
+        if (parts.Length != 3 || !Digits(parts[0]) || !Digits(parts[1])
+            || !(System.Guid.TryParseExact(parts[2], "N", out _) || System.Guid.TryParseExact(parts[2], "D", out _))) return false;
         if (!long.TryParse(parts[0], out long boot) || !long.TryParse(parts[1], out long deadline)) return false;
         id = new InstanceId(boot, deadline, parts[2]);
         return true;

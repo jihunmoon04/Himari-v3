@@ -72,13 +72,13 @@ public sealed class SupervisorTests : IDisposable
     public async Task StatusFailureMeansUnverifiableAndNoAutomaticAction()
     {
         hub.StatusFails = true; hub.StatusStdErr = "noise\nhttpx.HTTPError: 401 Authorization: Bearer abc.def";
-        store.Update(s => s with { OwnedInstance = "7.1.aa" });
+        store.Update(s => s with { OwnedInstance = "7.1.aa000000000000000000000000000000" });
         var supervisor = New();
         await supervisor.InitializeAsync();
         Assert.Empty(hub.CallsOf("start"));
         Assert.Equal(RunnerPhase.Unverifiable, supervisor.View.Phase);
         Assert.Equal("실행기: 확인 불가 · httpx.HTTPError: 401 Authorization: …", supervisor.View.Text);
-        Assert.Equal("7.1.aa", store.Current.OwnedInstance);
+        Assert.Equal("7.1.aa000000000000000000000000000000", store.Current.OwnedInstance);
         // Once the hub answers, the start happens (the app-start decision was only postponed).
         hub.StatusFails = false;
         await supervisor.RefreshAsync();
@@ -237,6 +237,17 @@ public sealed class SupervisorTests : IDisposable
         Assert.Null(store.Current.OwnedInstance);
         Assert.Equal(RunnerPhase.Error, supervisor.View.Phase);
         Assert.Equal(message, supervisor.View.Detail);
+    }
+
+    [Fact]
+    public async Task ASuccessShapedReplyFromAFailedStartKeepsPending()
+    {
+        hub.StartReply = id => $"{{\"instance\": \"{id}\", \"pid\": 1, \"started_at\": \"t\"}}";
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        string id = hub.CallsOf("start").Single().Split(' ')[3];
+        Assert.Equal(id, store.Current.PendingInstance);
+        Assert.Null(store.Current.OwnedInstance);
     }
 
     [Fact]

@@ -47,16 +47,20 @@ public partial class App : System.Windows.Application
         }
         // §3: a second launch in this session shows this app, the first-run wizard included, so listen before it opens.
         instance.Listen(() => Dispatcher.BeginInvoke(ShowFromSecondLaunch));
-        if (!store.Current.IsComplete && !RunWizard(store, null, null)) { Quit(); return; }
-
+        // The supervisor and the logoff handlers exist before the wizard: a settings file may already hold an owned or
+        // pending instance, and logoff during the wizard still writes their stop requests (§5.5). Nothing runs against
+        // the hub until InitializeAsync, apart from the wizard's own check and save, which go through its queue.
         var log = WorkbenchLog.Default();
         supervisor = new RunnerSupervisor(store, s => s.Hub is { } hub ? new ProcessHubCommandRunner(hub, s.EffectiveHubHome) : null,
             new WindowsSystemInfo(), log);
-        window = new MainWindow(store, supervisor, log, ExitFromTray, RunWizard);
-        MainWindow = window;
         // WPF's event comes on this thread; the SystemEvents one may come on its own thread (StopForSessionEnd handles both).
         SessionEnding += (_, _) => StopForSessionEnd();
         Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => StopForSessionEnd();
+        if (!store.Current.IsComplete && !RunWizard(store, null, null)) { Quit(); return; }
+        if (exiting) return;
+
+        window = new MainWindow(store, supervisor, log, ExitFromTray, RunWizard);
+        MainWindow = window;
         window.Show();
         await supervisor.InitializeAsync();
         window.AfterFirstCheck();
@@ -64,16 +68,10 @@ public partial class App : System.Windows.Application
 
     private bool RunWizard(SettingsStore store, Window? owner, string? problem)
     {
-        // Before the supervisor exists nothing runs against the hub, so the first run saves directly.
-        Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save = supervisor is { } running ? running.ChangeSettingsAsync : change =>
-        {
-            try { store.Update(change); return Task.FromResult<string?>(null); }
-            catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { return Task.FromResult<string?>($"설정을 저장하지 못했습니다: {ex.Message}"); }
-        };
-        Func<HubCommand, string, Task<HubResult?>> probe = supervisor is { } queue
-            ? (command, home) => queue.ProbeAsync(command, home, HubSetup.FirstCheckTimeout)
-            : async (command, home) => await new ProcessHubCommandRunner(command, home).RunAsync(["runner", "status", "--json"], HubSetup.FirstCheckTimeout);
-        var wizard = new SetupWizard(store, () => supervisor?.HoldsRunner ?? false, save, probe, problem) { Owner = owner };
+        RunnerSupervisor running = supervisor!;
+        Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save = running.ChangeSettingsAsync;
+        Func<HubCommand, string, Task<HubResult?>> probe = (command, home) => running.ProbeAsync(command, home, HubSetup.FirstCheckTimeout);
+        var wizard = new SetupWizard(store, () => running.HoldsRunner, save, probe, problem) { Owner = owner };
         if (owner is null) wizard.WindowStartupLocation = WindowStartupLocation.CenterScreen;
         wizardShown = wizard;
         try { return wizard.ShowDialog() == true; }

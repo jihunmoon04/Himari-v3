@@ -415,7 +415,9 @@ public sealed class RunnerSupervisor
         try { result = await hub.RunAsync(["runner", "start", "--instance", id, "--json"], StartTimeout).ConfigureAwait(false); }
         finally { SetOperation(null); }
         LogCommand("start", result);
+        // A success counts only from a clean exit (§5.3); a failed exit with an error object still says which error.
         StartReply? reply = result.Outcome == HubOutcome.Exited ? RunnerProtocol.ParseStart(result.StdOut) : null;
+        if (reply is { Error: StartError.None } && result.ExitCode != 0) reply = reply with { Error = StartError.Unreadable };
         if (reply is { Error: StartError.None } && reply.Instance == id)
         {
             // Even when the app is exiting by now, this only records the result: the runner has its stop request already.

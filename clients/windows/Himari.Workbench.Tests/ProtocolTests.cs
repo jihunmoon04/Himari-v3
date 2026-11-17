@@ -28,15 +28,17 @@ public sealed class ProtocolTests
     [InlineData("1.-2.abc")]
     [InlineData("1.2.ab/c")]
     [InlineData("1.2.")]
+    [InlineData("1.2.abc")]
+    [InlineData("1.2.0123456789abcdef0123456789abcdeg")]
     public void MalformedIdsAreRejected(string text) => Assert.False(InstanceId.TryParse(text, out _));
 
     [Fact]
     public void StatusIsParsed()
     {
-        var reply = RunnerProtocol.ParseStatus("""{"running": true, "instance": "7.5.abc", "pid": 12, "started_at": "x", "registration": "ok", "why": null}""");
+        var reply = RunnerProtocol.ParseStatus("""{"running": true, "instance": "7.5.abc00000000000000000000000000000", "pid": 12, "started_at": "x", "registration": "ok", "why": null}""");
         Assert.NotNull(reply);
         Assert.True(reply.Running);
-        Assert.Equal("7.5.abc", reply.Instance);
+        Assert.Equal("7.5.abc00000000000000000000000000000", reply.Instance);
         Assert.Equal(12, reply.Pid);
         Assert.Equal(Registration.Ok, reply.Registration);
         var broken = RunnerProtocol.ParseStatus("""{"running": false, "instance": null, "pid": null, "started_at": null, "registration": "broken", "why": "토큰 파일이 비었음"}""");
@@ -74,18 +76,18 @@ public sealed class ProtocolTests
     [Fact]
     public void StartRepliesAreParsed()
     {
-        Assert.Equal(StartError.None, RunnerProtocol.ParseStart("""{"instance": "7.5.abc", "pid": 3, "started_at": "t"}""").Error);
-        var running = RunnerProtocol.ParseStart("""{"error": "running", "instance": "7.9.def"}""");
+        Assert.Equal(StartError.None, RunnerProtocol.ParseStart("""{"instance": "7.5.abc00000000000000000000000000000", "pid": 3, "started_at": "t"}""").Error);
+        var running = RunnerProtocol.ParseStart("""{"error": "running", "instance": "7.9.def00000000000000000000000000000"}""");
         Assert.Equal(StartError.Running, running.Error);
-        Assert.Equal("7.9.def", running.Instance);
+        Assert.Equal("7.9.def00000000000000000000000000000", running.Instance);
         Assert.Equal(3, RunnerProtocol.ParseStart("""{"error": "failed", "exit_code": 3}""").ExitCode);
         Assert.Equal(StartError.Cancelled, RunnerProtocol.ParseStart("""{"error": "cancelled"}""").Error);
         Assert.Equal(StartError.Unconfirmed, RunnerProtocol.ParseStart("""{"error": "unconfirmed"}""").Error);
         Assert.Equal(StartError.Failed, RunnerProtocol.ParseStart("""{"error": "something new"}""").Error);
         Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("nope").Error);
         // Success needs the whole result (§5.3): an instance alone does not move pending to owned.
-        Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("""{"instance": "7.5.abc"}""").Error);
-        Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("""{"instance": "7.5.abc", "pid": 3}""").Error);
+        Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("""{"instance": "7.5.abc00000000000000000000000000000"}""").Error);
+        Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("""{"instance": "7.5.abc00000000000000000000000000000", "pid": 3}""").Error);
     }
 
     [Theory]
@@ -111,10 +113,13 @@ public sealed class ProtocolTests
         Assert.Equal(StateFileKind.Broken, RunnerProtocol.ReadStateFile(temp.Path).Kind);
         File.WriteAllText(path, "{\"instance\": \"7.1.a\"}");
         Assert.Equal(StateFileKind.Broken, RunnerProtocol.ReadStateFile(temp.Path).Kind);
-        new ScriptedHub(temp.Path).WriteState("7.1.a", "connected", "7.1.a.ff", DateTimeOffset.Now.AddSeconds(-20));
+        // Fresh, the right instance and "connected", but without the other H9 keys: broken, never "연결됨" (§5.2).
+        File.WriteAllText(path, $"{{\"instance\": \"7.1.{new string('a', 32)}\", \"updated_at\": \"{DateTimeOffset.Now:o}\", \"state\": \"connected\"}}");
+        Assert.Equal(StateFileKind.Broken, RunnerProtocol.ReadStateFile(temp.Path).Kind);
+        new ScriptedHub(temp.Path).WriteState("7.1.a0000000000000000000000000000000", "connected", "7.1.a0000000000000000000000000000000.ff", DateTimeOffset.Now.AddSeconds(-20));
         var read = RunnerProtocol.ReadStateFile(temp.Path);
         Assert.Equal(StateFileKind.Ok, read.Kind);
-        Assert.Equal("7.1.a.ff", read.File!.StopAck);
+        Assert.Equal("7.1.a0000000000000000000000000000000.ff", read.File!.StopAck);
         Assert.False(read.File.IsFresh(DateTimeOffset.Now));
         Assert.True(read.File.IsFresh(DateTimeOffset.Now.AddSeconds(-10)));
     }
@@ -142,10 +147,10 @@ public sealed class ProtocolTests
     public void StopRequestsAreNewFilesEachTime()
     {
         using var temp = new TempFolder();
-        string a = StopRequests.Write(temp.Path, "7.100.abc");
-        string b = StopRequests.Write(temp.Path, "7.100.abc");
+        string a = StopRequests.Write(temp.Path, "7.100.abc00000000000000000000000000000");
+        string b = StopRequests.Write(temp.Path, "7.100.abc00000000000000000000000000000");
         Assert.NotEqual(a, b);
-        Assert.Matches("^7\\.100\\.abc\\.[0-9a-f]{32}$", a);
+        Assert.Matches("^7\\.100\\.abc00000000000000000000000000000\\.[0-9a-f]{32}$", a);
         Assert.Equal(2, Directory.GetFiles(StopRequests.Folder(temp.Path)).Length);
         Assert.Throws<ArgumentException>(() => StopRequests.Write(temp.Path, "..\\evil"));
     }

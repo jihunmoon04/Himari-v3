@@ -284,10 +284,19 @@ void WriteState(string id, string state, string? stopAck)
     File.Move(temp, StatePath(), overwrite: true);
 }
 
+// H15: "<instance id>.<random>", the random part 1-64 of [0-9A-Za-z_-] (as the hub reads it); anything else is malformed.
+string? RequestTarget(string name)
+{
+    int last = name.LastIndexOf('.');
+    if (last <= 0 || last == name.Length - 1 || name.Length - last - 1 > 64) return null;
+    if (!name[(last + 1)..].All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')) return null;
+    return InstanceId.TryParse(name[..last], out _) ? name[..last] : null;
+}
+
 string? OwnRequest(string id)
 {
     if (!Directory.Exists(StopFolder())) return null;
-    return Directory.EnumerateFiles(StopFolder()).Select(Path.GetFileName).FirstOrDefault(name => name!.StartsWith(id + ".", StringComparison.Ordinal));
+    return Directory.EnumerateFiles(StopFolder()).Select(path => Path.GetFileName(path)).FirstOrDefault(name => RequestTarget(name) == id);
 }
 
 // H15: drop requests whose target can never come up, and malformed ones; keep requests for ids still before their deadline.
@@ -297,8 +306,7 @@ void CleanStopFolder(string own)
     foreach (string path in Directory.EnumerateFiles(StopFolder()))
     {
         string name = Path.GetFileName(path);
-        int last = name.LastIndexOf('.');
-        bool keep = last > 0 && InstanceId.TryParse(name[..last], out var target) && (name[..last] == own || !target.CannotStart(system));
+        bool keep = RequestTarget(name) is { } target && InstanceId.TryParse(target, out var parsed) && (target == own || !parsed.CannotStart(system));
         if (!keep) try { File.Delete(path); } catch (IOException) { }
     }
 }

@@ -111,8 +111,14 @@ public static class RunnerProtocol
         var root = json.RootElement;
         DateTimeOffset? updated = String(root, "updated_at") is { } at && DateTimeOffset.TryParse(at, System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed) ? parsed : null;
+        // H9 names nine keys: a file without one of them, with a value of the wrong kind, or an unknown state is broken
+        // (shown as "연결 모름", §5.2), even when its instance matches.
         string? instance = String(root, "instance");
-        if (instance is null || updated is null) return new StateFileRead(StateFileKind.Broken, null);
+        if (instance is null || !InstanceId.TryParse(instance, out _) || updated is null || Int(root, "pid") is null || String(root, "started_at") is null
+            || String(root, "state") is not ("starting" or "connected" or "disconnected" or "stopping")
+            || !Has(root, "stop_ack", JsonValueKind.String) || !Has(root, "name", JsonValueKind.String)
+            || !Has(root, "server", JsonValueKind.String) || !Has(root, "error", JsonValueKind.String))
+            return new StateFileRead(StateFileKind.Broken, null);
         return new StateFileRead(StateFileKind.Ok, new RunnerStateFile(instance, Int(root, "pid"), String(root, "started_at"), updated,
             String(root, "state"), String(root, "stop_ack"), String(root, "name"), String(root, "server"), String(root, "error")));
     }
