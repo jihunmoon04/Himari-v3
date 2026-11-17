@@ -144,7 +144,7 @@ def test_without_a_hub_and_signed_out(tmp_path: Path, monkeypatch: pytest.Monkey
         assert client.get("/api/hub/pending").json() == {"enabled": False, "reachable": False, "pending": []}
         assert client.post("/api/hub/pending/7/answer", json={"refuse": True}, headers=SEND).status_code == 404
         assert client.post("/api/hub/tasks/3/cancel", headers=SEND).status_code == 404
-        assert client.get("/assets/hub.js").status_code == 200
+        assert client.get("/assets/hub.js").status_code == 404  # the classic page's hub tray is gone (V3-P102 W6d)
         client.delete("/api/session", headers=SEND)
         assert client.get("/api/hub/pending").status_code == 401
     finally:

@@ -658,3 +658,34 @@ test("settings: a device added shows its pairing code once, is renamed and revok
   await expect(quiet).toContainText("Not quiet.");
   await done();
 });
+
+// -- W6d: drafts across the switch ---------------------------------------------------------------------------------
+
+test("a draft the classic page kept comes into the new page; the user's own sign-out wipes drafts", async ({ page, isMobile }) => {
+  test.skip(isMobile, "drafts are checked once, on desktop");
+  const done = await watch(page);
+  await page.goto("/");
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open("himari-local", 1); // as the classic page's local_store.js made it
+    request.onupgradeneeded = () => { request.result.createObjectStore("drafts"); request.result.createObjectStore("unsaved"); };
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const tx = request.result.transaction("drafts", "readwrite");
+      tx.objectStore("drafts").put({ text: "From the classic page", references: [], writer: "w1" }, "home");
+      tx.oncomplete = () => { request.result.close(); resolve(); };
+    };
+  }));
+  await page.getByLabel("Operator token").fill(token());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  const message = page.getByLabel("Message", { exact: true });
+  await expect(message).toHaveValue("From the classic page");
+  await expect.poll(() => page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name)))
+    .not.toContain("himari-local"); // moved, and the old store deleted
+  await message.fill("A secret draft");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Operator token").fill(token());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
+  await done();
+});

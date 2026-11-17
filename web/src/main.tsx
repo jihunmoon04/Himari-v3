@@ -1,12 +1,14 @@
 import "./styles.css";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { setNonce } from "get-nonce";
-import { StrictMode, useEffect } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import { queryClient, useSession } from "@/app/queries";
 import { Shell } from "@/components/Shell";
 import { resetFollowed } from "@/features/hub/follow";
+import { resetPointed } from "@/features/references";
+import { moveLegacyDrafts } from "@/lib/drafts";
 import { applyAppearance, watchAppearance } from "@/lib/appearance";
 import { Agents } from "@/routes/Agents";
 import { Approvals } from "@/routes/Approvals";
@@ -27,12 +29,24 @@ watchAppearance();
 
 function Root() {
   const session = useSession();
+  const known = session.data !== undefined; // asked and answered: before that nothing is decided
   const signedIn = session.data?.authenticated === true;
+  const [drafted, setDrafted] = useState(false); // the classic page's drafts moved in (or none to move)
   useEffect(() => {
-    if (!signedIn) resetFollowed(); // signed out (here or in another tab): nothing of the last sign-in stays
-  }, [signedIn]);
+    if (!known) return;
+    if (signedIn) {
+      void moveLegacyDrafts().finally(() => setDrafted(true));
+      return;
+    }
+    // signed out or the sign-in ended: what it was following goes (the drafts stay for the same person signing
+    // back in; the user's own Sign out wipes them, lib/drafts.ts)
+    resetFollowed();
+    resetPointed();
+    setDrafted(false);
+  }, [known, signedIn]);
   if (session.isLoading) return null;
   if (!session.data?.authenticated) return <Login />;
+  if (!drafted) return null; // a moment: the composers read their drafts as they open
   return <Shell />;
 }
 

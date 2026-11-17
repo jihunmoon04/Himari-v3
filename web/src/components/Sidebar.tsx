@@ -3,6 +3,7 @@ import { ChevronRight, FolderGit2, Inbox, LayoutGrid, LogOut, Monitor, Moon, Pan
 import { useState } from "react";
 import { NavLink, useMatch, useNavigate } from "react-router";
 import { signOut } from "@/api/himari";
+import { wipeDrafts } from "@/lib/drafts";
 import { keys, useActivity, useConversations, useEvents, useHubPending, useHubProjects, useHubTask, useServer } from "@/app/queries";
 import { toItems } from "@/features/himari/items";
 import type { Delegation } from "@/features/timeline";
@@ -193,6 +194,7 @@ function SettingsMenu() {
   const navigate = useNavigate();
   const leave = async () => {
     await signOut().catch(() => undefined);
+    wipeDrafts(); // at once, before anything re-renders with them
     await client.invalidateQueries({ queryKey: keys.session });
     navigate("/");
   };
