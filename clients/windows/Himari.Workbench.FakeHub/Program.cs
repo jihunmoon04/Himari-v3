@@ -142,7 +142,8 @@ async Task<int> Start()
 async Task<int> Stop(string id)
 {
     if (!InstanceId.TryParse(id, out _)) { Console.Error.WriteLine("himari-hub: bad --instance"); return 2; }
-    if (Status() is not { } now) { Console.Error.WriteLine("himari-hub: runner.transition.lock is busy"); return 1; }
+    // §5.4: always one result; a target that cannot be checked now is "unconfirmed".
+    if (Status() is not { } now) { Console.Error.WriteLine("himari-hub: runner.transition.lock is busy"); Print(new { result = "unconfirmed" }); return 1; }
     var node = JsonNode.Parse(JsonSerializer.Serialize(now))!;
     if (!node["running"]!.GetValue<bool>()) { Print(new { result = "not_running" }); return 0; }
     string? running = node["instance"]?.GetValue<string?>();

@@ -177,7 +177,14 @@ public sealed class RunnerSupervisor
             case StopResult.Stopped or StopResult.Killed or StopResult.NotRunning or StopResult.RunnerKilled:
                 SafeUpdate(s => s.OwnedInstance == instance ? s with { OwnedInstance = null } : s);
                 if (!exiting) await CheckCore(); else Publish();
-                return (outcome, outcome == StopResult.Killed ? "실행기가 제시간에 끝나지 않아 강제로 껐습니다" : null);
+                // §5.4: the result is shown as it is, success included.
+                return (outcome, outcome switch
+                {
+                    StopResult.Killed => "실행기가 제시간에 끝나지 않아 강제로 껐습니다",
+                    StopResult.RunnerKilled => "실행기를 강제로 껐습니다(에이전트 세션이나 터널이 남았을 수 있음)",
+                    StopResult.NotRunning => "실행기가 이미 꺼져 있었습니다",
+                    _ => "실행기를 껐습니다",
+                });
             case StopResult.OtherInstance:
                 if (!exiting) await CheckCore();
                 return (outcome, "그 사이 다른 실행기로 바뀌어 끄지 않았습니다");

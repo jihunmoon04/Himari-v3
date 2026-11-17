@@ -460,8 +460,9 @@ public sealed class SupervisorTests : IDisposable
         Assert.Equal(owned, target!.Instance);
         Assert.True(target.Owned);
         Assert.Equal(4242, target.Pid);
-        var (result, _) = await supervisor.StopAsync(target.Instance);
+        var (result, message) = await supervisor.StopAsync(target.Instance);
         Assert.Equal(StopResult.Stopped, result);
+        Assert.Equal("실행기를 껐습니다", message);
         Assert.Equal($"runner stop --instance {owned} --json", Assert.Single(hub.CallsOf("stop")));
         Assert.Null(store.Current.OwnedInstance);
         Assert.Equal(RunnerPhase.Off, supervisor.View.Phase);
