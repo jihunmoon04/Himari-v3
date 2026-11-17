@@ -81,13 +81,13 @@ export function openList() {
 
   const read = async () => {
     const asked = epoch;
+    projectSignals.polled?.(); // the projects and requests are read on the same tick, not after the list
     try {
       const sessions = (await listHubSessions()).sessions;
       if (!ended && asked === epoch) replace(sessions);
     } catch {
       if (!ended && asked === epoch) set({ reachable: false });
     }
-    if (!ended && asked === epoch) projectSignals.polled?.();
   };
 
   const connect = () => {

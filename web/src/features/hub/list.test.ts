@@ -87,4 +87,15 @@ describe("the list stream and its polling fallback", () => {
     expect(signals.connected).toHaveBeenCalledTimes(2);
     stop();
   });
+
+  it("reads the projects and requests on each tick even while the list read hangs", async () => {
+    vi.mocked(api.listHubSessions).mockImplementation(() => new Promise(() => undefined)); // never answers
+    const stop = openList();
+    const first = FakeSource.made[0]!;
+    first.readyState = FakeSource.CLOSED;
+    first.fire("error");
+    await vi.advanceTimersByTimeAsync(20_500);
+    expect(signals.polled).toHaveBeenCalledTimes(3); // at once, then every 10 s
+    stop();
+  });
 });
