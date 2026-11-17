@@ -59,6 +59,14 @@ public sealed class ProtocolTests
     public void UnreadableStatusIsAFailure(string stdout) => Assert.Null(RunnerProtocol.ParseStatus(stdout));
 
     [Fact]
+    public void OutputEndingInABrokenObjectIsUnreadableEvenAfterAGoodOne()
+    {
+        string good = "{\"running\": false, \"instance\": null, \"pid\": null, \"started_at\": null, \"registration\": \"ok\", \"why\": null}";
+        Assert.Null(RunnerProtocol.ParseStatus(good + "\n{\"running\": tr"));
+        Assert.Equal(StopResult.Unreadable, RunnerProtocol.ParseStop("{\"result\": \"stopped\"}\nTraceback (most recent call last):"));
+    }
+
+    [Fact]
     public void StatusAfterLauncherNoiseUsesTheLastObjectLine()
     {
         var reply = RunnerProtocol.ParseStatus("Resolved 12 packages\n{\"running\": false, \"instance\": null, \"pid\": null, \"started_at\": null, \"registration\": \"missing\", \"why\": null}\n");

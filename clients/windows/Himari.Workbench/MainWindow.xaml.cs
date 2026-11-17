@@ -15,7 +15,6 @@ public partial class MainWindow : Window
     private static readonly TimeSpan NotifyEvery = TimeSpan.FromMinutes(5);
     private readonly SettingsStore store;
     private readonly RunnerSupervisor supervisor;
-    private readonly WorkbenchLog log;
     private readonly Action exit;
     private readonly Func<SettingsStore, Window?, string?, bool> wizard;
     private readonly Forms.NotifyIcon tray;
@@ -28,9 +27,9 @@ public partial class MainWindow : Window
     private bool exiting;
     private bool busy;
 
-    internal MainWindow(SettingsStore store, RunnerSupervisor supervisor, WorkbenchLog log, Action exit, Func<SettingsStore, Window?, string?, bool> wizard)
+    internal MainWindow(SettingsStore store, RunnerSupervisor supervisor, Action exit, Func<SettingsStore, Window?, string?, bool> wizard)
     {
-        this.store = store; this.supervisor = supervisor; this.log = log; this.exit = exit; this.wizard = wizard;
+        this.store = store; this.supervisor = supervisor; this.exit = exit; this.wizard = wizard;
         InitializeComponent();
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("작업 콘솔 열기", null, (_, _) => ShowFromOutside());

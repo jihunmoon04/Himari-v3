@@ -164,6 +164,9 @@ public sealed class RunnerSupervisor
         finally { SetOperation(null); }
         LogCommand("stop", result);
         StopResult outcome = result.Outcome == HubOutcome.Exited ? RunnerProtocol.ParseStop(result.StdOut) : StopResult.Unreadable;
+        // A finished stop counts only from a clean exit (§5.4); other_instance and unconfirmed come with exit code 1.
+        if (outcome is StopResult.Stopped or StopResult.Killed or StopResult.NotRunning or StopResult.RunnerKilled && result.ExitCode != 0)
+            outcome = StopResult.Unreadable;
         switch (outcome)
         {
             case StopResult.Stopped or StopResult.Killed or StopResult.NotRunning or StopResult.RunnerKilled:

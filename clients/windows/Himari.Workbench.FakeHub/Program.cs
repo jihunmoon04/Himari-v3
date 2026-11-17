@@ -124,11 +124,10 @@ async Task<int> Start()
         { Print(new { instance = id, pid = (int?)seen["pid"], started_at = (string?)seen["started_at"] }); return 0; }
         if (child.HasExited)
         {
-            if (child.ExitCode == 3)
-            {
-                string? other = Status() is { } now ? JsonNode.Parse(JsonSerializer.Serialize(now))?["instance"]?.GetValue<string?>() : null;
-                Print(new { error = "running", instance = other });
-            }
+            // H10: "running" only when H14 confirms another runner is up (its instance, or null when unknown);
+            // otherwise the child simply failed.
+            JsonNode? other = child.ExitCode == 3 && Status() is { } now ? JsonNode.Parse(JsonSerializer.Serialize(now)) : null;
+            if (other is not null && (bool?)other["running"] == true) Print(new { error = "running", instance = (string?)other["instance"] });
             else Print(new { error = "failed", exit_code = child.ExitCode });
             return 1;
         }

@@ -59,7 +59,7 @@ public partial class App : System.Windows.Application
         if (!store.Current.IsComplete && !RunWizard(store, null, null)) { Quit(); return; }
         if (exiting) return;
 
-        window = new MainWindow(store, supervisor, log, ExitFromTray, RunWizard);
+        window = new MainWindow(store, supervisor, ExitFromTray, RunWizard);
         MainWindow = window;
         window.Show();
         await supervisor.InitializeAsync();

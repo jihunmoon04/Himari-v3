@@ -481,6 +481,18 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task AFinishedStopFromAFailedExitKeepsOwnership()
+    {
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        string owned = store.Current.OwnedInstance!;
+        hub.StopExitCode = 1;
+        var (result, _) = await supervisor.StopAsync(owned);
+        Assert.Equal(StopResult.Unreadable, result);
+        Assert.Equal(owned, store.Current.OwnedInstance);
+    }
+
+    [Fact]
     public async Task UnconfirmedStopIsAnError()
     {
         var supervisor = New();

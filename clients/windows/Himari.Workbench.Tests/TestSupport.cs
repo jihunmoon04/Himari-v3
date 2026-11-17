@@ -56,6 +56,7 @@ public sealed class ScriptedHub : IHubCommandRunner
     public Func<string, string>? StartReply { get; set; }
     public TaskCompletionSource? StartGate { get; set; }
     public string StopResult { get; set; } = "stopped";
+    public int StopExitCode { get; set; }
     public List<string[]> Calls { get; } = [];
     public int MaxConcurrent { get; private set; }
 
@@ -84,7 +85,7 @@ public sealed class ScriptedHub : IHubCommandRunner
                     return Ok(new { instance, pid = 4242, started_at = "2026-11-18T00:00:00Z" });
                 case "stop":
                     if (StopResult == "stopped" && Instance == instance) { Running = false; Instance = null; File.Delete(Path.Combine(home, RunnerProtocol.StateFileName)); }
-                    return Ok(new { result = StopResult });
+                    return Ok(StopExitCode, new { result = StopResult });
                 default:
                     return new HubResult(HubOutcome.Exited, 2, "", "unknown");
             }

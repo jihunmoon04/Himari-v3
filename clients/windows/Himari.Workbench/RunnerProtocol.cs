@@ -106,7 +106,8 @@ public static class RunnerProtocol
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return new StateFileRead(StateFileKind.Missing, null); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return new StateFileRead(StateFileKind.Broken, null); }
-        using var json = ParseObject(text);
+        // The hub writes the whole file as one object (H9): nothing else in it is read.
+        using var json = Object(text.Trim());
         if (json is null) return new StateFileRead(StateFileKind.Broken, null);
         var root = json.RootElement;
         DateTimeOffset? updated = String(root, "updated_at") is { } at && DateTimeOffset.TryParse(at, System.Globalization.CultureInfo.InvariantCulture,
@@ -123,20 +124,28 @@ public static class RunnerProtocol
             String(root, "state"), String(root, "stop_ack"), String(root, "name"), String(root, "server"), String(root, "error")));
     }
 
-    /// <summary>The whole output as one object, or else its last line that is one (a launcher may print before it).</summary>
+    /// <summary>
+    /// The whole output as one object, or else its last non-empty line as one (a launcher such as <c>uv</c> may print
+    /// before it). Never an earlier line: output that ends in a broken or cut-off object is unreadable (§5.2).
+    /// </summary>
     private static JsonDocument? ParseObject(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return null;
-        foreach (string candidate in new[] { text.Trim() }.Concat(text.Split('\n').Select(line => line.Trim()).Where(line => line.StartsWith('{')).Reverse()))
+        if (Object(text.Trim()) is { } whole) return whole;
+        string last = text.Split('\n').Select(line => line.Trim()).Last(line => line.Length > 0);
+        return Object(last);
+    }
+
+    /// <summary>The text as exactly one JSON object, or null.</summary>
+    private static JsonDocument? Object(string candidate)
+    {
+        try
         {
-            try
-            {
-                var json = JsonDocument.Parse(candidate);
-                if (json.RootElement.ValueKind == JsonValueKind.Object) return json;
-                json.Dispose();
-            }
-            catch (JsonException) { }
+            var json = JsonDocument.Parse(candidate);
+            if (json.RootElement.ValueKind == JsonValueKind.Object) return json;
+            json.Dispose();
         }
+        catch (JsonException) { }
         return null;
     }
 
