@@ -37,6 +37,16 @@ export function Home() {
   const agents = (hub.data?.agents ?? []).filter((a) => a.installed !== false && a.name).map((a) => a.name!);
   const chosenAgent = agent ?? project?.default_agent ?? agents[0];
 
+  // a project chosen while the hub answered, gone from the list (the hub went down): back to HIMARI, so what is
+  // shown is always where the message goes
+  useEffect(() => {
+    if (target !== HIMARI && hub.status !== "loading" && !project) {
+      setTarget(HIMARI);
+      setAgent(undefined);
+      setChoices({});
+    }
+  }, [target, hub.status, project]);
+
   useEffect(() => {
     for (const mine of fresh) {
       if (!startedHere.current.has(mine.task.id)) continue;
@@ -70,10 +80,10 @@ export function Home() {
   const start = async (text: string) => {
     setError(null);
     try {
-      if (target === HIMARI) await startHimari(text);
-      else await startAgent(target, text);
+      if (project?.name) await startAgent(project.name, text);
+      else await startHimari(text);
     } catch (failure) {
-      setError(target === HIMARI
+      setError(!project
         ? failure instanceof ApiError ? failure.message : "Could not start the conversation."
         : sendProblem(failure));
       throw failure; // the draft stays

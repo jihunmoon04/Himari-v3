@@ -220,6 +220,8 @@ def test_a_session_and_a_task_as_the_page_gets_them() -> None:
     assert followed is not None and TOKEN not in json.dumps(followed)
     assert followed["session"] is None and followed["project"] == "demo" and followed["result_truncated"] is True
     assert len(followed["result"]) == 4000 and [p["id"] for p in followed["pending"]] == [1]
+    cut_here = task_detail({**TASK, "result": "x" * 4001, "result_truncated": False})
+    assert cut_here is not None and cut_here["result_truncated"] is True  # the relay cut it: it says so
     bare = task_detail(TASK)  # an older hub's answer: no session yet, nothing waits
     assert bare is not None and bare["session"] is None and bare["result"] is None and bare["pending"] == []
 

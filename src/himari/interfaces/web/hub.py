@@ -244,7 +244,8 @@ def task_detail(raw: object) -> dict[str, Any] | None:
     shown["project"] = project[:MAX_TEXT] if isinstance(project, str) else None
     shown["session"] = shown.get("session")  # null (no session yet) is an answer of its own
     shown["result"] = result[:MAX_TEXT] if isinstance(result, str) else None
-    shown["result_truncated"] = raw.get("result_truncated") is True
+    # cut by the hub, or here
+    shown["result_truncated"] = raw.get("result_truncated") is True or (isinstance(result, str) and len(result) > MAX_TEXT)
     shown["pending"] = [view for view in map(request_view, (pending if isinstance(pending, list) else [])[:MAX_ITEMS])
                         if view is not None]
     return shown
