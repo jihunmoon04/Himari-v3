@@ -16,6 +16,8 @@ import { Composer } from "@/components/Composer";
 import { HubRequest } from "@/components/HubRequest";
 import { MessageOptions, chosen } from "@/components/MessageOptions";
 import { SessionBadge, sessionName } from "@/components/SessionBadge";
+import { sessionTabs } from "@/components/SessionPanel";
+import { SidePanel } from "@/components/SidePanel";
 import { PageHeader } from "@/components/Shell";
 import { PlanList, Timeline } from "@/components/Timeline";
 import { Button, IconButton } from "@/components/ui/button";
@@ -75,15 +77,6 @@ function useStickToBottom(dependency: unknown) {
   return { box, onScroll };
 }
 
-function Fact({ term, children }: { term: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <dt className="text-xs text-faint">{term}</dt>
-      <dd className="break-words">{children}</dd>
-    </div>
-  );
-}
-
 export function HubSession() {
   const id = Number(useParams().id);
   return <SessionPage key={id} id={id} />; // each session starts with its own choices and notices
@@ -105,6 +98,7 @@ function SessionPage({ id }: { id: number }) {
   const stream = useHubSessionEvents(id, onState);
   const { items, stats } = useMemo(() => toHubItems(stream.events), [stream.events]);
   const [panel, setPanel] = useState(false);
+  const closePanel = useCallback(() => setPanel(false), []);
   const { box, onScroll } = useStickToBottom(stream.events.length);
 
   const listed = list.sessions.find((s) => s.id === id);
@@ -216,7 +210,7 @@ function SessionPage({ id }: { id: number }) {
       <div className="flex min-w-0 flex-1 flex-col">
         <PageHeader
           actions={
-            <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)} className="max-md:hidden">
+            <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
               {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
             </IconButton>
           }
@@ -326,62 +320,16 @@ function SessionPage({ id }: { id: number }) {
           )}
         </div>
       </div>
-      <aside
-        aria-label="Details"
-        className={cn("w-80 shrink-0 overflow-y-auto border-l border-line bg-panel p-4 text-sm max-md:hidden", !panel && "hidden")}
-      >
-        <h2 className="mb-3 font-medium">Details</h2>
-        {session && (
-          <dl className="space-y-3 text-muted">
-            <Fact term="Project">{session.project}</Fact>
-            <Fact term="Agent">{session.agent}{session.profile ? ` · ${session.profile}` : ""}</Fact>
-            <Fact term="Device">
-              {session.runner} {session.runner_connected === false ? "(not connected)" : ""}
-            </Fact>
-            <Fact term="Model">{[session.model, session.effort].filter(Boolean).join(" · ") || "Default"}</Fact>
-            {(stats.context ?? session.context) && (() => {
-              const context = stats.context ?? session.context!;
-              const used = context.used ?? 0;
-              const size = context.size ?? 0;
-              return (
-                <Fact term="Context">
-                  {used.toLocaleString()} / {size.toLocaleString()} tokens
-                  {size > 0 && (
-                    <span className="mt-1 block h-1.5 overflow-hidden rounded bg-raised">
-                      <span ref={(node) => { if (node) node.style.width = `${Math.min(100, (used / size) * 100)}%`; }}
-                        className="block h-full bg-accent" />
-                    </span>
-                  )}
-                </Fact>
-              );
-            })()}
-            {detail.data && detail.data.queued.length > 0 && (
-              <Fact term="Queued">
-                <ul className="list-disc pl-4">{detail.data.queued.map((q) => <li key={q.id}>{q.prompt}</li>)}</ul>
-              </Fact>
-            )}
-            {detail.data && detail.data.attempts.length > 0 && (
-              <Fact term="Recent attempts">
-                <ul className="space-y-1">
-                  {detail.data.attempts.slice(0, 5).map((a) => (
-                    <li key={a.id} className="text-xs">
-                      #{a.task_id} {a.runner} · {a.outcome ?? "running"}
-                    </li>
-                  ))}
-                </ul>
-              </Fact>
-            )}
-            <Fact term="Session">#{session.id}{session.current ? " · current of its lane" : ""}</Fact>
-            {session.updated_at && <Fact term="Last activity">{new Date(session.updated_at).toLocaleString()}</Fact>}
-          </dl>
-        )}
-        {session && !closed && (
-          <Button variant="outline" className="mt-4 w-full" disabled={running || closing} onClick={() => void close()}
-            title={running ? "Stop the running turn first" : undefined}>
-            Close session
-          </Button>
-        )}
-      </aside>
+      <SidePanel
+        open={panel}
+        onClose={closePanel}
+        label="Details"
+        storageKey="session"
+        tabs={sessionTabs({
+          events: stream.events, earlier: stream.earlier, session, detail: detail.data,
+          context: stats.context ?? session?.context, running, closing, onClose: () => void close(),
+        })}
+      />
     </div>
   );
 }

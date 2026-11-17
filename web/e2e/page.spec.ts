@@ -374,3 +374,63 @@ test("a hand-over that fails shows as failed, and one the hub refuses says why",
   await expect(cards.nth(1).getByRole("link", { name: "Open session" })).toHaveCount(0);
   await done();
 });
+
+// -- W5: the right-hand panels ---------------------------------------------------------------------------------
+
+test("a session's panel: its changes by file in either view, its plan and how it changed, its details", async ({ page, isMobile }) => {
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/s/5");
+  await page.getByRole("button", { name: "Details" }).click();
+  const panel = page.getByRole("complementary", { name: "Details" });
+  await expect(panel.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true");
+  const files = panel.getByRole("list", { name: "Changed files" });
+  await expect(files).toContainText("src/app.py");
+  await expect(files).toContainText("+2");
+  await expect(files).toContainText("−1");
+  await panel.getByRole("button", { name: "Split" }).click();
+  await expect(panel.getByRole("table", { name: "src/app.py before and after" })).toContainText("y = 3");
+  await panel.getByRole("tab", { name: "Plan" }).click();
+  await expect(panel).toContainText("Latest plan · 1 of 2 done");
+  await expect(panel.getByRole("list", { name: "Plan" })).toContainText("Run the tests");
+  await panel.getByRole("tab", { name: "Info" }).click();
+  await expect(panel).toContainText("linux");
+  const box = await panel.boundingBox();
+  const viewport = page.viewportSize()!;
+  if (isMobile) {
+    // a sheet from the bottom, the page's whole width
+    expect(Math.round(box!.width)).toBe(viewport.width);
+    expect(Math.round(box!.y + box!.height)).toBe(viewport.height);
+  } else {
+    // dragged wider from its left edge, and kept
+    const edge = panel.getByRole("separator", { name: "Resize the panel" });
+    const at = (await edge.boundingBox())!;
+    await page.mouse.move(at.x + at.width / 2, at.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(at.x - 120, at.y + 200, { steps: 6 });
+    await page.mouse.up();
+    const wider = (await panel.boundingBox())!.width;
+    expect(wider).toBeGreaterThan(box!.width + 80);
+    expect(await page.evaluate(() => window.localStorage.getItem("himari.next.panel.width"))).toBe(String(Math.round(wider)));
+  }
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await done();
+});
+
+test("a conversation's panel: its folders, what it handed to the hub, its details", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the conversations list is a drawer there; the panel itself is checked above");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: "Plan a trip" }).click();
+  await page.getByRole("button", { name: "Details" }).click();
+  const panel = page.getByRole("complementary", { name: "Details" });
+  await panel.getByRole("tab", { name: "Files" }).click();
+  // this server has no machine: said so, nothing breaks
+  await expect(panel.getByRole("tabpanel")).toContainText(/no folders here|not available|machine/i);
+  await panel.getByRole("tab", { name: "Hub" }).click();
+  await expect(panel).toContainText("Nothing handed to the hub in this conversation.");
+  await panel.getByRole("tab", { name: "Info" }).click();
+  await expect(panel).toContainText(/conv_/);
+  await done();
+});
