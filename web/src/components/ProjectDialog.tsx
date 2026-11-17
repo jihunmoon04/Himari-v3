@@ -108,18 +108,27 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [checked, setChecked] = useState(!init.again);
+  const [checkFailed, setCheckFailed] = useState(false);
+  const [checks, setChecks] = useState(0);
 
   useEffect(() => { // the key for this request, from this server's clock (H13)
     let live = true;
     newClientKey().then((made) => live && setKey(made)).catch(() => live && setKey(null));
-    if (init.again) { // asked again: as things are now
-      void client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 })
-        .finally(() => live && setChecked(true));
-    }
     return () => {
       live = false;
     };
-  }, [client, init.again]);
+  }, []);
+
+  useEffect(() => { // asked again: only as things are now (a read that fails leaves nothing to send)
+    if (!init.again) return;
+    let live = true;
+    setCheckFailed(false);
+    client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 })
+      .then(() => live && setChecked(true), () => live && setCheckFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [client, init.again, checks]);
 
   const request = sent !== null ? store.entries.get(sent)?.request ?? null : null;
   useEffect(() => { // done: the project's page
@@ -248,6 +257,12 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
       )}
       {lost && <UnconfirmedItem entry={lost} onSent={setSent} />}
       {problem && <p role="alert" className="text-xs text-danger">{problem}</p>}
+      {checkFailed && !checked && (
+        <div role="alert" className="flex items-center gap-2 text-xs text-danger">
+          <span className="flex-1">The projects could not be read again; asking again waits for them.</span>
+          <Button className="text-xs" onClick={() => setChecks((n) => n + 1)}>Read again</Button>
+        </div>
+      )}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={onDone}>Close</Button>
         {!lost && <Button type="submit" variant="primary" disabled={!ready}>Ask the device</Button>}

@@ -1,7 +1,8 @@
 // Requests and removals whose answer was lost (V3-P103 §4.1): kept in this tab until known. With a hub that keeps
 // client keys (H13) one is sent again with the same key, time and body, which gives back the same request. Without
 // it, sending again is not offered: the open requests are read and the ones that look the same are shown. A key the
-// hub no longer takes (``client_key_expired`` …) ends the resending; the entry can then only be discarded.
+// hub no longer takes (``client_key_expired`` …) ends the resending; the entry can then only be discarded, and
+// (as without H13) only once the open requests and the projects were read again and shown.
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import type { ProjectRequestBody } from "@/api/hub";
@@ -23,10 +24,14 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
   const kind = entry.route === "remove" ? "remove_folder" : (entry.body as ProjectRequestBody).kind;
   const label = [KINDS[kind] ?? kind, entry.body.project, `on ${entry.body.runner}`].join(" · ");
 
-  const reread = async () => {
-    setLooked(true);
-    void client.invalidateQueries({ queryKey: hubKeys.projects });
-    await requests.refresh();
+  const reread = async () => { // shown once both are read again (a refused key may be discarded only then)
+    setBusy(true);
+    try {
+      await Promise.allSettled([client.invalidateQueries({ queryKey: hubKeys.projects }), requests.refresh()]);
+      setLooked(true);
+    } finally {
+      setBusy(false);
+    }
   };
   const again = async () => {
     setBusy(true);
@@ -38,7 +43,7 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
       return;
     }
     setProblem(answerLost(sent.error) ? "The hub did not answer again." : failureText(sent.error));
-    if (!answerLost(sent.error)) void reread();
+    if (!answerLost(sent.error)) await reread();
   };
 
   const alike = looked || entry.refused || !keys ? sameAs(entry, openRequests(store)) : [];
@@ -57,7 +62,8 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
         {(!keys || entry.refused) && (
           <Button disabled={busy} onClick={() => void reread()}>Read the open requests again</Button>
         )}
-        <Button variant="ghost" disabled={busy} onClick={() => unconfirmed.drop(entry.client_key)}>Discard</Button>
+        <Button variant="ghost" disabled={busy || ((!keys || !!entry.refused) && !looked)}
+          onClick={() => unconfirmed.drop(entry.client_key)}>Discard</Button>
       </div>
       {problem && <p role="alert" className="mt-2 text-xs text-danger">{problem}</p>}
       {alike.length > 0 && (

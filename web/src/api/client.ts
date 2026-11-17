@@ -38,7 +38,12 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     throw new ApiError(0, "offline", "The server could not be reached.");
   }
   if (response.status === 204) return undefined as T;
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch { // the connection broke while the answer came: the call may have been done
+    throw new ApiError(0, "offline", "The server's answer did not come through.");
+  }
   let parsed: unknown = null;
   try {
     parsed = text ? JSON.parse(text) : null;

@@ -138,8 +138,9 @@ export function Project() {
   const folders = foldersOf(hub.data, name);
   const held = heldFor(hub.data, name);
   const cards = [...store.entries.entries()]
+    // followed ones whatever became of them (one the hub no longer has says its result cannot be confirmed)
     .filter(([id, entry]) => entry.request?.project === name
-      && (isOpen(entry.request) || store.tracked.includes(id)) && !entry.unknown)
+      && (store.tracked.includes(id) || (isOpen(entry.request) && !entry.unknown)))
     .map(([id]) => id).sort((a, b) => b - a);
 
   return (

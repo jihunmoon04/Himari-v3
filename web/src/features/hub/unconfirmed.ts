@@ -37,9 +37,11 @@ export interface Unconfirmed extends ClientKey {
 export const keyRefusal = (error: unknown) =>
   error instanceof ApiError && error.code === "hub_refused" && /^client_key_\w+/.test(error.message);
 
-/** The answer was lost on the way: it may have been done. */
+/** The answer was lost on the way: it may have been done. Besides ``hub_unknown`` and a connection that broke, a
+ *  5xx that is not this server's own (no error code of its own: a proxy's or a crash's) says nothing either. */
 export const answerLost = (error: unknown) =>
-  error instanceof ApiError && (error.code === "hub_unknown" || error.status === 0);
+  error instanceof ApiError && (error.code === "hub_unknown" || error.status === 0
+    || (error.status >= 500 && error.code === `http_${error.status}`));
 
 export class UnconfirmedList {
   private items: Unconfirmed[];
