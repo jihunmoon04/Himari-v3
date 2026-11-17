@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -404,6 +404,23 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
   카드가 대기→완료까지 따라가고 결과를 보이며 사이드바에 세션이 붙고 "Open session"으로 간다. 실패한 작업은 실패와 그
   결과로, 모르는 프로젝트는 "Not handed over"와 hub의 이유로.
 - **아직:** 다른 대화의 맡긴 세션은 사이드바에 보이지 않는다(열린 대화만). 진행 요약(`hub_task`의 `progress`)은 쓰지 않는다.
+
+### 7.10 W5에서 만든 것 (2026-11-17)
+
+- **패널 틀(`components/SidePanel.tsx`):** 탭. 넓은 화면에서는 페이지 옆에 두고 왼쪽 가장자리를 끌어 너비를 바꾸며(280~760px,
+  화면의 65%까지) 이 브라우저에 기억한다(`himari.next.panel.width`). 768px 미만에서는 아래에서 올라오는 시트(화면 높이의
+  75%)이고 바깥을 누르거나 닫기로 닫는다. `Esc`로 닫는다. 마지막에 연 탭은 페이지 종류마다 기억한다. 너비는 CSSOM으로만 준다.
+- **세션 패널:** **Changes**: 도구 이벤트의 `diffs`를 턴별(턴은 `turn_start`부터)로, 다시 파일별로 모은다(같은 호출의 갱신은
+  마지막 것만). 턴 하나 또는 전체를 고르고, 파일 목록(새 파일, `+n −m`)과 파일마다의 변경을 **Unified**(한 열) 또는 **Split**
+  (전과 후 나란히, 바뀐 줄을 마주 놓고 긴 같은 줄은 줄임)로 보인다. 보기 방식은 이 브라우저에 기억한다. 아직 읽지 않은 앞
+  구간의 변경은 들어가지 않는다고 적는다. **Plan**: 최신 계획과 몇 개 끝났는지, 계획이 바뀐 때마다의 기록. **Info**: 전의
+  자세히(에이전트, 기기, 모델, 컨텍스트, 대기 글, 최근 시도, 마지막 활동, 세션 닫기).
+- **HIMARI 대화 패널:** **Files**: 대화의 폴더(자기 폴더 먼저, 붙인 폴더)를 옛 화면처럼 보기 전용으로(V3-P99) 연다. 폴더 목록,
+  글 파일은 글로, 그림은 서버의 그림 샌드박스가 만든 사본으로, 그 밖은 내려받기. 기계(runner)가 없으면 그렇다고 적는다.
+  **Hub**: 그 대화가 맡긴 작업 카드(W4). **Info**.
+- **검사:** Vitest(`changes.test.ts`: 턴별·파일별 묶기, 계획 기록, 나란히 보기 줄), Playwright: 세션 5의 패널(파일 목록과 `+2 −1`,
+  Split 표, 계획 1/2와 기록, 정보), 데스크톱에서 너비 끌기와 기억, 폰에서 화면 너비 시트, `Esc`로 닫기, 대화 패널의 세 탭.
+- **아직:** 타임라인의 diff에서 패널의 그 파일로 바로 가기, 붙인 폴더를 패널에서 붙이고 떼기(옛 화면에만), 파일 안 찾기.
 
 ## 8. hub에 필요한 것
 

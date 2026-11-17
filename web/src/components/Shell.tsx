@@ -10,7 +10,8 @@ import { IconButton } from "./ui/button";
 
 const NARROW = "(max-width: 767px)";
 
-function useNarrow() {
+/** Whether the screen is narrow (under 768 px): lists and panels become drawers and sheets. */
+export function useNarrow() {
   const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
   useEffect(() => {
     const query = window.matchMedia(NARROW);

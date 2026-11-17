@@ -115,3 +115,38 @@ export async function readAllEvents(id: string, after = 0): Promise<EventsPage> 
     cursor = page.last_sequence;
   }
 }
+
+// -- a conversation's folders, to look at (V3-P75, V3-P99: the explorer only shows) ---------------------------------
+
+export interface AttachedFolder {
+  binding_id?: string | null;
+  path: string;
+  label?: string | null;
+  note?: string | null;
+  working?: boolean;
+  own?: boolean;
+}
+
+export interface FolderListing {
+  path: string;
+  parent: string | null;
+  entries: { name: string; kind: string; size?: number | null; modified?: number | null }[];
+  next: string | null;
+}
+
+export interface ShownFile {
+  path: string;
+  size: number;
+  kind: string; // text | image | other
+  text: string | null;
+  truncated: boolean;
+}
+
+export const conversationFolders = (id: string) => get<{ items: AttachedFolder[] }>(`/api/conversations/${enc(id)}/workspaces`);
+export const browseFolder = (path: string, after?: string | null) =>
+  get<FolderListing>(`/api/machine/list?path=${enc(path)}${after ? `&after=${enc(after)}` : ""}`);
+/** Where a path leads (a link followed): its real path and kind. */
+export const statMachinePath = (path: string) => get<{ path: string; kind: string }>(`/api/machine/stat?path=${enc(path)}`);
+export const showMachineFile = (path: string) => get<ShownFile>(`/api/machine/file?path=${enc(path)}`);
+export const machineImageUrl = (path: string) => `/api/machine/image?path=${enc(path)}`;
+export const machineDownloadUrl = (path: string) => `/api/machine/download?path=${enc(path)}`;

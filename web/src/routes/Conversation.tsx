@@ -1,18 +1,19 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, PanelRight, PanelRightClose } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { ApiError } from "@/api/client";
 import { cancelJob, resumeTurn, sendMessage } from "@/api/himari";
 import { keys, useDetail, useEvents, useServer } from "@/app/queries";
 import { DelegationCard } from "@/components/DelegationCard";
+import { FilesPanel } from "@/components/FilesPanel";
+import { SidePanel } from "@/components/SidePanel";
 import { Composer } from "@/components/Composer";
 import { PageHeader } from "@/components/Shell";
 import { Timeline } from "@/components/Timeline";
 import { Button, IconButton } from "@/components/ui/button";
 import { toItems } from "@/features/himari/items";
 import { EMPTY_LIVE, reduceLive } from "@/features/himari/live";
-import { cn } from "@/lib/cn";
 import { openStream } from "@/lib/sse";
 
 /** The live output of the running job ``job`` (null: none runs). One stream per job: a job that starts right
@@ -67,6 +68,13 @@ export function Conversation() {
   const delegations = items.flatMap((item) => (item.kind === "delegation" ? [item] : []));
   const { box, onScroll } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
+  const closePanel = useCallback(() => setPanel(false), []);
+  // a turn ended: what it wrote may be in the folders open in the panel, read them again
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running) void client.invalidateQueries({ queryKey: ["machine"] });
+    wasRunning.current = running;
+  }, [client, running]);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => client.invalidateQueries({ queryKey: keys.detail(id) });
@@ -107,7 +115,7 @@ export function Conversation() {
       <div className="flex min-w-0 flex-1 flex-col">
         <PageHeader
           actions={
-            <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)} className="max-md:hidden">
+            <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
               {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
             </IconButton>
           }
@@ -141,26 +149,32 @@ export function Conversation() {
           />
         </div>
       </div>
-      <aside
-        aria-label="Details"
-        className={cn("w-80 shrink-0 overflow-y-auto border-l border-line bg-panel p-4 text-sm max-md:hidden",
-          !panel && "hidden")}
-      >
-        <h2 className="mb-3 font-medium">Details</h2>
-        <dl className="space-y-2 text-muted">
-          <div><dt className="text-xs text-faint">State</dt><dd>{running ? "Working" : waiting ? "Waiting for you" : job?.state ?? "Idle"}</dd></div>
-          <div><dt className="text-xs text-faint">Started</dt><dd>{conversation ? new Date(conversation.created_at).toLocaleString() : "—"}</dd></div>
-          <div><dt className="text-xs text-faint">Conversation</dt><dd className="break-all font-mono text-xs">{id}</dd></div>
-        </dl>
-        {delegations.length > 0 && (
-          <section className="mt-6" aria-label="Handed to the hub in this conversation">
-            <h3 className="mb-2 text-xs font-medium text-faint">Handed to the hub ({delegations.length})</h3>
-            <div className="space-y-2">
-              {delegations.map((item) => <DelegationCard key={item.key} delegation={item.delegation} compact />)}
-            </div>
-          </section>
-        )}
-      </aside>
+      <SidePanel
+        open={panel}
+        onClose={closePanel}
+        label="Details"
+        storageKey="conversation"
+        tabs={[
+          { id: "files", label: "Files", content: <FilesPanel key={id} conversation={id} /> },
+          {
+            id: "handed", label: delegations.length ? `Hub (${delegations.length})` : "Hub",
+            content: delegations.length ? (
+              <div className="space-y-2" aria-label="Handed to the hub in this conversation">
+                {delegations.map((item) => <DelegationCard key={item.key} delegation={item.delegation} />)}
+              </div>
+            ) : <p className="text-faint">Nothing handed to the hub in this conversation.</p>,
+          },
+          {
+            id: "info", label: "Info", content: (
+              <dl className="space-y-2 text-muted">
+                <div><dt className="text-xs text-faint">State</dt><dd>{running ? "Working" : waiting ? "Waiting for you" : job?.state ?? "Idle"}</dd></div>
+                <div><dt className="text-xs text-faint">Started</dt><dd>{conversation ? new Date(conversation.created_at).toLocaleString() : "—"}</dd></div>
+                <div><dt className="text-xs text-faint">Conversation</dt><dd className="break-all font-mono text-xs">{id}</dd></div>
+              </dl>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }

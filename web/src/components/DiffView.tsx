@@ -2,6 +2,7 @@
 // it is shown as text only.
 import { diffLines } from "diff";
 import { useMemo } from "react";
+import { splitRows } from "@/features/hub/changes";
 import type { Diff } from "@/features/timeline";
 import { cn } from "@/lib/cn";
 
@@ -17,8 +18,11 @@ export function diffStats(diff: Diff): { added: number; removed: number } {
   return { added, removed };
 }
 
-export function DiffView({ diff }: { diff: Diff }) {
-  const lines = useMemo(() => {
+/** ``split``: before and after side by side (the panel's choice); otherwise one column of added and removed lines. */
+export function DiffView({ diff, split, tall }: { diff: Diff; split?: boolean; tall?: boolean }) {
+  const { rows, more: splitMore } = useMemo(() => (split ? splitRows(diff, MAX_LINES) : { rows: [], more: false }),
+    [diff, split]);
+  const { lines, more: unifiedMore } = useMemo(() => {
     const out: { sign: "+" | "-" | " "; text: string }[] = [];
     for (const part of diffLines(diff.old ?? "", diff.new)) {
       const sign = part.added ? "+" : part.removed ? "-" : " ";
@@ -28,8 +32,9 @@ export function DiffView({ diff }: { diff: Diff }) {
       for (const text of shown) out.push({ sign, text });
       if (out.length > MAX_LINES) break;
     }
-    return out.slice(0, MAX_LINES);
+    return { lines: out.slice(0, MAX_LINES), more: out.length > MAX_LINES };
   }, [diff]);
+  const cutHere = split ? splitMore : unifiedMore;
   const stats = useMemo(() => diffStats(diff), [diff]);
   return (
     <figure className="overflow-hidden rounded-md border border-line">
@@ -39,7 +44,25 @@ export function DiffView({ diff }: { diff: Diff }) {
         <span className="text-ok">+{stats.added}</span>
         <span className="text-danger">−{stats.removed}</span>
       </figcaption>
-      <pre className="max-h-80 overflow-auto bg-code py-1 font-mono text-xs leading-5">
+      {split ? (
+        <div className={cn("grid grid-cols-2 overflow-auto bg-code py-1 font-mono text-xs leading-5", tall ? "max-h-[32rem]" : "max-h-80")}
+          role="table" aria-label={`${diff.path} before and after`}>
+          {rows.map((row, index) => (
+            <div key={index} role="row" className="contents">
+              {[row.left, row.right].map((text, side) => (
+                <div key={side} role="cell" className={cn("min-w-0 whitespace-pre px-2",
+                  side === 0 && "border-r border-line",
+                  row.kind === "gap" && "text-center text-faint",
+                  side === 0 && (row.kind === "removed" || (row.kind === "changed" && text !== null)) && "bg-danger/10 text-danger",
+                  side === 1 && (row.kind === "added" || (row.kind === "changed" && text !== null)) && "bg-ok/10 text-ok")}>
+                  {row.kind === "gap" ? "⋯" : text ?? ""}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : (
+      <pre className={cn("overflow-auto bg-code py-1 font-mono text-xs leading-5", tall ? "max-h-[32rem]" : "max-h-80")}>
         {lines.map((line, index) => (
           <div
             key={index}
@@ -50,8 +73,10 @@ export function DiffView({ diff }: { diff: Diff }) {
           </div>
         ))}
       </pre>
-      {(diff.cut || diff.more > 0) && (
+      )}
+      {(diff.cut || diff.more > 0 || cutHere) && (
         <p className="border-t border-line px-2 py-1 text-xs text-faint">
+          {cutHere && `Only the first ${MAX_LINES} lines are shown. `}
           {diff.cut && "Cut by the hub to fit. "}
           {diff.more > 0 && `${diff.more} more file${diff.more === 1 ? "" : "s"} not shown.`}
         </p>
