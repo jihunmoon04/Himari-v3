@@ -20,11 +20,11 @@ import {
   answerProjectRequest,
   cancelProjectRequest,
   newClientKey,
-  readHubProjects,
   resolveProjectRequest,
   type HubProjectRequest,
+  type HubProjects,
 } from "@/api/hub";
-import { hubKeys, useHubProjects } from "@/app/queries";
+import { hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { cardView, heldFor, hubHasRequestKeys, runnerOf, secondsLeft } from "@/features/hub/project_view";
 import { requests, sessionKeyValue, useHubRequests } from "@/features/hub/requests";
@@ -211,9 +211,11 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
     }
     setBusy(true);
     try { // a removal: only while the device still reports this project's folder
-      const now = await client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 });
-      const runner = runnerOf(now, request.runner);
-      if (!runner || runner.connected === false) {
+      const read = await readProjectsNow(client); // a read of its own: not one that began before
+      const runner = runnerOf(client.getQueryData<HubProjects>(hubKeys.projects), request.runner);
+      if (!read) {
+        setProblem("The projects could not be read again; try again.");
+      } else if (!runner || runner.connected === false) {
         setProblem("The device is not connected.");
       } else if (!request.project || runner.folders?.[request.project] === undefined) {
         setProblem("It is already removed.");

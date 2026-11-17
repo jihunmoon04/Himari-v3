@@ -304,7 +304,7 @@ class ListRelay:
                     attempt += 1
                     continue
                 except (HubUnavailable, HubRefused, HubNotFound) as error:
-                    log.warning("hub list stream: %s", error)
+                    log.warning("hub list stream: %s", type(error).__name__)  # never the hub's words (V3-P103 §4)
                     self._mark(False)
                     await self._pause(BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)])
                     attempt += 1

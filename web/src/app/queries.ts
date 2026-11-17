@@ -178,8 +178,34 @@ onListSignal(() => void queryClient.invalidateQueries({ queryKey: hubKeys.pendin
 
 // V3-P103 §5: a request that changed is merged by its rev; on ``projects``, a (re)connect and every tick of the
 // polling fallback the projects and the open and followed requests are read again
+let projectsReading: Promise<void> | null = null;
+let projectsAgain = false;
+
+/** The projects read again for a signal: never by joining a read already on its way (it may have begun before the
+ *  signal), and a signal that comes while it reads gives one more read after it (§5). */
+export function rereadProjectsQuery(client: QueryClient = queryClient): Promise<void> {
+  if (projectsReading) {
+    projectsAgain = true;
+    return projectsReading;
+  }
+  projectsReading = (async () => {
+    do {
+      projectsAgain = false;
+      try {
+        await client.cancelQueries({ queryKey: hubKeys.projects });
+        await client.invalidateQueries({ queryKey: hubKeys.projects });
+      } catch {
+        // the query reads again by itself (its retries); the next signal asks again
+      }
+    } while (projectsAgain);
+  })().finally(() => {
+    projectsReading = null;
+  });
+  return projectsReading;
+}
+
 const rereadProjects = () => {
-  void queryClient.invalidateQueries({ queryKey: hubKeys.projects });
+  void rereadProjectsQuery();
   void requests.refresh();
 };
 onProjectSignals({ request: (data) => requests.merge(data), projects: rereadProjects, connected: rereadProjects,

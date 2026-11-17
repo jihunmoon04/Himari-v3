@@ -10,8 +10,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, CornerLeftUp, Folder } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { newClientKey, readHubProjects, readRunnerDirs, type ClientKey, type ProjectRequestBody } from "@/api/hub";
-import { hubKeys, useHubProjects } from "@/app/queries";
+import { newClientKey, readRunnerDirs, type ClientKey, type ProjectRequestBody } from "@/api/hub";
+import { readProjectsNow, useHubProjects } from "@/app/queries";
 import { closeProjectDialog, useProjectDialog, type DialogInit } from "@/features/hub/dialog";
 import {
   cannotAdd,
@@ -123,8 +123,11 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
     if (!init.again) return;
     let live = true;
     setCheckFailed(false);
-    client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 })
-      .then(() => live && setChecked(true), () => live && setCheckFailed(true));
+    void readProjectsNow(client).then((read) => { // a read of its own: not one that began before
+      if (!live) return;
+      if (read) setChecked(true);
+      else setCheckFailed(true);
+    });
     return () => {
       live = false;
     };
