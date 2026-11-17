@@ -181,7 +181,8 @@ public static partial class Redaction
         return line.Length <= MaxLine ? line : line[..(MaxLine - 1)] + "…";
     }
 
-    [GeneratedRegex(@"(?i)(authorization[""']?\s*[:=]\s*[""']?)(?:(?:bearer|basic|token)\s+)?[^\s""',;]+")]
+    // "Authorization: x", "Authorization=x", "'Authorization': 'x'" and "Authorization x" all hide x (§5.1).
+    [GeneratedRegex(@"(?i)(authorization[""']?(?:\s*[:=]\s*|\s+)[""']?)(?:(?:bearer|basic|token)\s+)?[^\s""',;]+")]
     private static partial Regex AuthorizationValue();
     [GeneratedRegex(@"(?i)(bearer\s+)(?!…)[^\s""',;]+")]
     private static partial Regex BearerValue();

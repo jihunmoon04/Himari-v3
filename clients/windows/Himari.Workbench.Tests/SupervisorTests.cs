@@ -39,6 +39,8 @@ public sealed class SupervisorTests : IDisposable
         Assert.Equal("runner start --instance " + id + " --json", start);
         Assert.Equal(id, store.Current.OwnedInstance);
         Assert.Null(store.Current.PendingInstance);
+        // The status bar comes from a runner status asked after the start, not from the start's reply (§5.2).
+        Assert.Equal(new[] { "status", "start", "status" }, hub.Calls.Select(call => call[1]));
         supervisor.PollStateFile();
         Assert.Equal(RunnerPhase.Running, supervisor.View.Phase);
         Assert.Equal(RunnerConnection.Connected, supervisor.View.Connection);
@@ -332,8 +334,9 @@ public sealed class SupervisorTests : IDisposable
         await Wait.Until(() => StopFiles().Length == 1);
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var second = supervisor.RequestStopForExit(TimeSpan.FromSeconds(2));
-        Assert.True(first.IsCompleted);
+        // The second returned once the first had written and waited (its task completes right after).
         Assert.InRange(watch.Elapsed.TotalSeconds, 1, 3);
+        Assert.True(first.Wait(1000));
         Assert.Equal(1, second.RequestsWritten);
         Assert.Single(StopFiles());
     }

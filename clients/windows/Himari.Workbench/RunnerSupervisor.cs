@@ -83,6 +83,7 @@ public sealed class RunnerSupervisor
     private readonly WorkbenchLog log;
     private readonly SemaphoreSlim queue = new(1, 1);
     private readonly object gate = new();
+    private readonly object launchGate = new();
     private volatile bool exiting;
     private int exitRequested;
     private readonly ManualResetEventSlim exitDone = new(false);
@@ -160,7 +161,11 @@ public sealed class RunnerSupervisor
         if (hubFor(store.Current) is not { } hub) return (StopResult.Unreadable, "hub 명령이 설정되지 않았습니다");
         SetOperation(RunnerPhase.Stopping);
         HubResult result;
-        try { result = await hub.RunAsync(["runner", "stop", "--instance", instance, "--json"], StopTimeout); }
+        try
+        {
+            if (Launch(hub, ["runner", "stop", "--instance", instance, "--json"], StopTimeout) is not { } running) return (StopResult.Unreadable, "앱을 끝내는 중입니다");
+            result = await running;
+        }
         finally { SetOperation(null); }
         LogCommand("stop", result);
         StopResult outcome = result.Outcome == HubOutcome.Exited ? RunnerProtocol.ParseStop(result.StdOut) : StopResult.Unreadable;
@@ -232,7 +237,7 @@ public sealed class RunnerSupervisor
     public Task<HubResult?> ProbeAsync(HubCommand command, string home, TimeSpan timeout) => Queue<HubResult?>(async () =>
     {
         if (hubFor(store.Current with { Hub = command, HubHome = home }) is not { } candidate) return null;
-        return await candidate.RunAsync(["runner", "status", "--json"], timeout).ConfigureAwait(false);
+        return Launch(candidate, ["runner", "status", "--json"], timeout) is { } running ? await running.ConfigureAwait(false) : null;
     }, null);
 
     /// <summary>The last <c>runner status</c> run, for explaining a failure (the wizard, §5.6).</summary>
@@ -270,7 +275,8 @@ public sealed class RunnerSupervisor
     /// </summary>
     public ExitStopOutcome RequestStopForExit(TimeSpan ackWait)
     {
-        exiting = true;
+        // Under the launch gate: a hub command either started before this, or never starts (§5.3).
+        lock (launchGate) exiting = true;
         if (Interlocked.Exchange(ref exitRequested, 1) == 1)
         {
             // Another caller (tray exit, WPF's or SystemEvents' SessionEnding) is writing the requests and waiting
@@ -324,6 +330,15 @@ public sealed class RunnerSupervisor
         return new ExitStopOutcome(requests.Count, false);
     }
 
+    /// <summary>
+    /// Starts a hub command unless exit has begun. The check and the process start happen under one lock that exit also
+    /// takes, so no command can begin after the exit's stop requests are written.
+    /// </summary>
+    private Task<HubResult>? Launch(IHubCommandRunner hub, string[] arguments, TimeSpan timeout)
+    {
+        lock (launchGate) return exiting ? null : hub.RunAsync(arguments, timeout);
+    }
+
     private async Task<T> Queue<T>(Func<Task<T>> work, T whenExiting)
     {
         if (exiting) return whenExiting;
@@ -344,7 +359,8 @@ public sealed class RunnerSupervisor
         }
         // The time before asking: the reply can only be said to come from after a pending deadline if it was asked after it.
         long asked = system.UptimeMs;
-        HubResult result = await hub.RunAsync(["runner", "status", "--json"], StatusTimeout).ConfigureAwait(false);
+        if (Launch(hub, ["runner", "status", "--json"], StatusTimeout) is not { } running) return;
+        HubResult result = await running.ConfigureAwait(false);
         // Only a clean exit with a complete reply counts (§5.2): anything else is "확인 불가", never "off".
         StatusReply? reply = result is { Outcome: HubOutcome.Exited, ExitCode: 0 } ? RunnerProtocol.ParseStatus(result.StdOut) : null;
         lock (gate) { lastCheckMs = system.UptimeMs; lastStatusResult = result; }
@@ -416,7 +432,12 @@ public sealed class RunnerSupervisor
         if (exiting) return "앱을 끝내는 중입니다";
         SetOperation(RunnerPhase.Starting);
         HubResult result;
-        try { result = await hub.RunAsync(["runner", "start", "--instance", id, "--json"], StartTimeout).ConfigureAwait(false); }
+        try
+        {
+            // Exit has written a stop request for this pending id if it began after the id was saved (see RequestStopForExit).
+            if (Launch(hub, ["runner", "start", "--instance", id, "--json"], StartTimeout) is not { } running) return "앱을 끝내는 중입니다";
+            result = await running.ConfigureAwait(false);
+        }
         finally { SetOperation(null); }
         LogCommand("start", result);
         // A success counts only from a clean exit (§5.3); a failed exit with an error object still says which error.
@@ -426,8 +447,9 @@ public sealed class RunnerSupervisor
         {
             // Even when the app is exiting by now, this only records the result: the runner has its stop request already.
             SafeUpdate(s => s with { OwnedInstance = id, PendingInstance = s.PendingInstance == id ? null : s.PendingInstance });
-            lock (gate) { status = new StatusReply(true, id, reply.Pid, reply.StartedAt, status?.Registration ?? Registration.Ok, null); operationError = null; }
-            Publish();
+            lock (gate) operationError = null;
+            // What the status bar shows comes from runner status (§5.2), not from the start's own reply.
+            if (!exiting) await CheckCore(); else Publish();
             return null;
         }
         // Anything else leaves pending_instance: a launcher may still bring the real runner up before the deadline.

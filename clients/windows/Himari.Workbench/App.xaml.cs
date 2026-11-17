@@ -56,7 +56,14 @@ public partial class App : System.Windows.Application
         // WPF's event comes on this thread; the SystemEvents one may come on its own thread (StopForSessionEnd handles both).
         SessionEnding += (_, _) => StopForSessionEnd();
         Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => StopForSessionEnd();
-        if (!store.Current.IsComplete && !RunWizard(store, null, null)) { Quit(); return; }
+        if (!store.Current.IsComplete && !RunWizard(store, null, null))
+        {
+            // Closing the wizard is a normal exit: a settings file may still hold an owned or pending instance (§5.3).
+            exiting = true;
+            await Task.Run(() => supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait));
+            Quit();
+            return;
+        }
         if (exiting) return;
 
         window = new MainWindow(store, supervisor, ExitFromTray, RunWizard);

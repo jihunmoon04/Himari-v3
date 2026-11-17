@@ -134,6 +134,8 @@ public sealed class ProtocolTests
 
     [Theory]
     [InlineData("error: Authorization: Bearer abc.def.ghi", "error: Authorization: …")]
+    [InlineData("bad header Authorization secret-value", "bad header Authorization …")]
+    [InlineData("Authorization Basic dXNlcjpwYXNz", "Authorization …")]
     [InlineData("header {'Authorization': 'Bearer abc'}", "header {'Authorization': '…'}")]
     [InlineData("GET /x?token=s3cr3t&y=1 failed", "GET /x?token=…&y=1 failed")]
     [InlineData("using bearer XYZ for now", "using bearer … for now")]
