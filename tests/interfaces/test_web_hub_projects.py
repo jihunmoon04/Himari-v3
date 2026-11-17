@@ -5,9 +5,11 @@ mapping, the long ``resolve``, what the log keeps, and the two list-stream event
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import queue
+import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -234,6 +236,10 @@ def test_a_hub_without_ids_says_nothing_of_missing(client: TestClient, hub: Hub)
     hub.replies["project_requests"] = (200, {"requests": [REQUEST]})  # no H12: the page cannot tell gone from old
     assert client.get("/api/hub/project-requests", params={"ids": "7"}).json() == {"requests": [REQUEST],
                                                                                     "missing": None}
+    for odd in ({}, {"requests": None, "missing": [7]}, {"requests": "x"}):  # not an answer: a failed read
+        hub.replies["project_requests"] = (200, odd)
+        failed = client.get("/api/hub/project-requests", params={"ids": "7"})
+        assert failed.status_code == 503 and failed.json()["error"]["code"] == "hub_unknown", odd
 
 
 def test_names_never_go_in_a_path_and_the_routes_take_their_limits(client: TestClient, hub: Hub) -> None:
@@ -270,15 +276,54 @@ def test_names_never_go_in_a_path_and_the_routes_take_their_limits(client: TestC
     assert hub.calls == []  # nothing reached the hub
 
 
+# Every V3-P103 route, with a body it would take.
+ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
+    ("GET", "/api/hub/project-requests?open=true", None),
+    ("GET", "/api/hub/project-requests?ids=7", None),
+    ("POST", "/api/hub/project-requests", {"kind": "create", "project": "p", "runner": "linux"}),
+    ("POST", "/api/hub/project-requests/7/answer", {"approve": True}),
+    ("POST", "/api/hub/project-requests/7/cancel", {}),
+    ("POST", "/api/hub/project-requests/7/resolve", {}),
+    ("POST", "/api/hub/projects/settings", {"project": "p", "agent": None}),
+    ("POST", "/api/hub/projects/remove-folder", {"project": "p", "runner": "linux"}),
+    ("POST", "/api/hub/client-key", {}),
+    ("POST", "/api/hub/projects/adopt", {"project": "p", "runner": "linux"}),
+    ("POST", "/api/hub/runner-dirs", {"runner": "linux"}),
+]
+
+
+def without_cookie(client: TestClient, method: str, path: str, **kwargs: Any) -> Any:
+    """The same client with no Web session (one event loop: SQLite stays on its thread)."""
+    saved = dict(client.cookies)
+    client.cookies.clear()
+    try:
+        return client.request(method, path, **kwargs)
+    finally:
+        for name, value in saved.items():
+            client.cookies.set(name, value)
+
+
 def test_only_the_operator_and_only_from_the_page(client: TestClient, hub: Hub) -> None:
-    for path in ("/api/hub/project-requests", "/api/hub/projects/settings", "/api/hub/client-key",
-                 "/api/hub/runner-dirs"):
-        refused = client.post(path, json={"runner": "linux"})  # a cookie and no Origin
-        assert refused.status_code == 403 and refused.json()["error"]["code"] == "origin_forbidden", path
+    # a paired device, with its own token: refused on every route (V3-P83: a device may not use the rest)
+    code = client.post("/api/devices", json={"name": "phone"}, headers=SEND).json()["code"]
+    device_token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+    paired = without_cookie(client, "POST", "/api/devices/pair", json={"token": device_token},
+                            headers={"authorization": f"Pairing {code}"})
+    assert paired.status_code == 200, paired.text
+    for method, path, body in ROUTES:
+        sent = {"json": body} if body is not None else {}
+        as_device = without_cookie(client, method, path, headers={"authorization": f"Bearer {device_token}", **SEND},
+                                   **sent)
+        assert (as_device.status_code, as_device.json()["error"]["code"]) == (403, "device_scope"), path
+        nobody = without_cookie(client, method, path, headers=SEND, **sent)
+        assert (nobody.status_code, nobody.json()["error"]["code"]) == (401, "unauthenticated"), path
+        if method == "POST":  # a change (or a path in a body) from the page only
+            refused = client.post(path, json=body)  # a cookie and no Origin
+            assert refused.status_code == 403 and refused.json()["error"]["code"] == "origin_forbidden", path
     client.delete("/api/session", headers=SEND)
-    assert client.get("/api/hub/project-requests").status_code == 401
-    assert client.post("/api/hub/client-key", headers=SEND).status_code == 401
-    assert client.post("/api/hub/runner-dirs", json={"runner": "linux"}, headers=SEND).status_code == 401
+    for method, path, body in ROUTES:  # signed out
+        assert client.request(method, path, headers=SEND, **({"json": body} if body is not None else {})
+                              ).status_code == 401, path
     assert hub.calls == []
 
 

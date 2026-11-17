@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router";
 import { listClosedHubSessions } from "@/api/hub";
-import { useHubPending, useHubProjects } from "@/app/queries";
+import { hubSetUp, useHubPending, useHubProjects } from "@/app/queries";
 import { SessionBadge, activityOf, sessionLane, sessionName } from "@/components/SessionBadge";
 import { PageHeader } from "@/components/Shell";
 import { useHubList } from "@/features/hub/list";
@@ -13,7 +13,7 @@ import { cn } from "@/lib/cn";
 
 export function Agents() {
   const hub = useHubProjects();
-  const list = useHubList(hub.status === "on");
+  const list = useHubList(hubSetUp(hub.status));
   const pending = useHubPending(hub.status === "on");
   const waitingByTask = new Map<number, number>();
   for (const p of pending.data?.pending ?? []) waitingByTask.set(p.task_id, (waitingByTask.get(p.task_id) ?? 0) + 1);

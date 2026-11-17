@@ -11,7 +11,7 @@ import { ApiError } from "@/api/client";
 import {
   cancelHubTask, closeHubSession, reopenHubSession, sendToHubSession, type HubSession as Session, type MessageChoices,
 } from "@/api/hub";
-import { hubKeys, useHubPending, useHubProjects, useHubSessionDetail } from "@/app/queries";
+import { hubKeys, hubSetUp, useHubPending, useHubProjects, useHubSessionDetail } from "@/app/queries";
 import { Composer } from "@/components/Composer";
 import { JumpToLatest } from "@/components/JumpToLatest";
 import { HubRequest } from "@/components/HubRequest";
@@ -83,7 +83,7 @@ function SessionPage({ id }: { id: number }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const hub = useHubProjects();
-  const list = useHubList(hub.status === "on");
+  const list = useHubList(hubSetUp(hub.status));
   const detail = useHubSessionDetail(id);
   const pending = useHubPending(hub.status === "on");
   const [streamed, setStreamed] = useState<Session | null>(null); // the session stream's latest listing of it

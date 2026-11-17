@@ -143,6 +143,10 @@ export async function readProjectsNow(client: QueryClient): Promise<boolean> {
   return true;
 }
 
+/** The hub is set up here, whether or not its projects could be read just now: the list stream (and its polling
+ *  fallback, V3-P103 §5) keeps going while they cannot. */
+export const hubSetUp = (status: string) => status === "on" || status === "down";
+
 /** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on".
  *  ``doubted``: a change of them may have been done and they were not read since (§4.1). */
 export function useHubProjects() {

@@ -4,7 +4,7 @@
 // Above it (V3-P103 §6.7): HIMARI's project requests waiting to be allowed, and requests lost on a device to settle,
 // with the requests of this tab whose answer was lost.
 import { useEffect, useState } from "react";
-import { useHubPending, useHubProjects } from "@/app/queries";
+import { hubSetUp, useHubPending, useHubProjects } from "@/app/queries";
 import { HubRequest } from "@/components/HubRequest";
 import { ProjectRequestCard } from "@/components/ProjectRequestCard";
 import { UnconfirmedRequests } from "@/components/UnconfirmedRequests";
@@ -38,7 +38,7 @@ function ProjectRequests() {
 
 export function Approvals() {
   const hub = useHubProjects();
-  const list = useHubList(hub.status === "on");
+  const list = useHubList(hubSetUp(hub.status));
   const pending = useHubPending(hub.status === "on");
   const items = [...(pending.data?.pending ?? [])].sort((a, b) => a.id - b.id);
   const sessionOf = (task: number) => list.sessions.find((s) => s.task === task)?.id ?? null;

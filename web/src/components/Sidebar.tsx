@@ -4,7 +4,7 @@ import { useState } from "react";
 import { NavLink, useMatch, useNavigate } from "react-router";
 import { signOut } from "@/api/himari";
 import { wipeDrafts } from "@/lib/drafts";
-import { clearProjectsDoubt, keys, useActivity, useConversations, useEvents, useHubPending, useHubProjects, useHubTask, useServer } from "@/app/queries";
+import { clearProjectsDoubt, hubSetUp, keys, useActivity, useConversations, useEvents, useHubPending, useHubProjects, useHubTask, useServer } from "@/app/queries";
 import { toItems } from "@/features/himari/items";
 import type { Delegation } from "@/features/timeline";
 import { byProject, useHubList } from "@/features/hub/list";
@@ -173,7 +173,7 @@ function Project({ name, sessions, waits }: {
 /** The hub's projects and their open sessions (V3-P102 §4.1); nothing when the hub is not set up here. */
 function HubSection() {
   const hub = useHubProjects();
-  const list = useHubList(hub.status === "on");
+  const list = useHubList(hubSetUp(hub.status));
   const pending = useHubPending(hub.status === "on");
   const asked = openRequests(useHubRequests()).filter((r) => r.state === "waiting_user").length;
   if (hub.status === "off" || hub.status === "loading") return null;

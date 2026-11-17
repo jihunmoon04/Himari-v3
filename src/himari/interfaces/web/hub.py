@@ -506,6 +506,8 @@ class HubClient:
         when the hub did not say (a hub without H12)."""
         body = {"ids": ids} if ids is not None else _options(open=open_only or None, limit=limit)
         reply = await self._call("project_requests", body)
+        if not isinstance(reply.get("requests"), list):  # not an answer: the page must not take ids for gone
+            raise HubUnknown("the hub's answer was not readable")
         missing = reply.get("missing")
         return {"requests": project_requests_of(reply.get("requests"), MAX_SESSIONS),
                 "missing": [item for item in missing[:MAX_SESSIONS] if isinstance(item, int)
