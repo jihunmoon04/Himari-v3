@@ -117,7 +117,8 @@ describe("a project request's card", () => {
     cleanup(); // left the page and came back
     show(waiting, withH({}));
     expect((screen.getByRole("button", { name: "Allow" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByRole("button", { name: "Read it again" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Read it again" })).toBeTruthy();    requests.merge({ ...waiting, rev: 2, state: "cancelled" }); // an event says it ended: still in doubt
+    expect((await screen.findByRole("button", { name: "Ask again" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("without H17, rests the settle button for a minute after a lost answer", async () => {

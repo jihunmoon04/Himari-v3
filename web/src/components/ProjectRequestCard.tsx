@@ -307,7 +307,7 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
             </Button>
           )}
           {view.actions.includes("retry") && (
-            <Button disabled={busy} onClick={() => void askAgain()}>Ask again</Button>
+            <Button disabled={stopped} onClick={() => void askAgain()}>Ask again</Button>
           )}
           {view.actions.includes("reread") && <Button onClick={rereadProjects}>Read the projects again</Button>}
         </div>
