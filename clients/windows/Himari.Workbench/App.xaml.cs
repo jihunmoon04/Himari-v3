@@ -68,7 +68,10 @@ public partial class App : System.Windows.Application
             try { store.Update(change); return Task.FromResult<string?>(null); }
             catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { return Task.FromResult<string?>($"설정을 저장하지 못했습니다: {ex.Message}"); }
         };
-        var wizard = new SetupWizard(store, () => supervisor?.HoldsRunner ?? false, save, problem) { Owner = owner };
+        Func<HubCommand, string, Task<HubResult?>> probe = supervisor is { } queue
+            ? (command, home) => queue.ProbeAsync(command, home, HubSetup.FirstCheckTimeout)
+            : async (command, home) => await new ProcessHubCommandRunner(command, home).RunAsync(["runner", "status", "--json"], HubSetup.FirstCheckTimeout);
+        var wizard = new SetupWizard(store, () => supervisor?.HoldsRunner ?? false, save, probe, problem) { Owner = owner };
         if (owner is null) wizard.WindowStartupLocation = WindowStartupLocation.CenterScreen;
         return wizard.ShowDialog() == true;
     }

@@ -12,15 +12,19 @@ public partial class SetupWizard : Window
     private readonly SettingsStore store;
     private readonly Func<bool> holdsRunner;
     private readonly Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save;
+    private readonly Func<HubCommand, string, Task<HubResult?>> probe;
     private HubCommand? checkedCommand;
     private string? checkedHome;
     private bool saving;
 
     /// <param name="save">Saves the settings: through the supervisor's queue once it exists (§5.1); returns null or why not.</param>
+    /// <param name="probe">Runs <c>runner status --json</c> with a candidate command and home: through the same queue once
+    /// the supervisor exists (§5.3); null when the app is exiting.</param>
     /// <param name="problem">Why the wizard opened again: the configured hub command does not work (§5.6 step 3).</param>
-    internal SetupWizard(SettingsStore store, Func<bool> holdsRunner, Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save, string? problem = null)
+    internal SetupWizard(SettingsStore store, Func<bool> holdsRunner, Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save,
+        Func<HubCommand, string, Task<HubResult?>> probe, string? problem = null)
     {
-        this.store = store; this.holdsRunner = holdsRunner; this.save = save;
+        this.store = store; this.holdsRunner = holdsRunner; this.save = save; this.probe = probe;
         InitializeComponent();
         Closing += (_, e) => e.Cancel = saving;
         WorkbenchSettings settings = store.Current;
@@ -61,7 +65,7 @@ public partial class SetupWizard : Window
         try
         {
             Directory.CreateDirectory(home!);
-            HubResult result = await new ProcessHubCommandRunner(command!, home!).RunAsync(["runner", "status", "--json"], HubSetup.FirstCheckTimeout);
+            if (await probe(command!, home!) is not { } result) { Say(HubResult, "앱을 끝내는 중입니다", false); return; }
             HubCheck check = HubSetup.Classify(command!, result);
             Say(HubResult, check.Message, check.Stage == HubCheckStage.Ok);
             if (check.Status is { } status)

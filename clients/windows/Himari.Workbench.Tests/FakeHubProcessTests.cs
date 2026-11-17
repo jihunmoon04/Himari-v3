@@ -121,6 +121,16 @@ public sealed class FakeHubProcessTests : IDisposable
     }
 
     [Fact]
+    public async Task AStopWithoutATargetFindsTheRunningInstance()
+    {
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        Assert.Equal(StopResult.NotRunning, RunnerProtocol.ParseStop((await runner.RunAsync(["runner", "stop", "--json"], TimeSpan.FromSeconds(30))).StdOut));
+        var started = RunnerProtocol.ParseStart((await runner.RunAsync(["runner", "start", "--json"], TimeSpan.FromSeconds(30))).StdOut);
+        Assert.Equal(StartError.None, started.Error);
+        Assert.Equal(StopResult.Stopped, RunnerProtocol.ParseStop((await runner.RunAsync(["runner", "stop", "--json"], TimeSpan.FromSeconds(30))).StdOut));
+    }
+
+    [Fact]
     public async Task ABusyTransitionLockFailsTheStatusInsteadOfGuessing()
     {
         var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);

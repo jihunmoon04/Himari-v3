@@ -71,7 +71,8 @@ public partial class MainWindow : Window
     {
         if (exiting || supervisor.View.Phase != RunnerPhase.Unverifiable || store.Current.Hub is not { } hub || supervisor.LastStatusResult is not { } result) return;
         HubCheck check = HubSetup.Classify(hub, result);
-        if (check.Stage == HubCheckStage.Ok) return;
+        // A busy hub (a runner starting or stopping just then) is a working command: the next check settles it.
+        if (check.Stage is HubCheckStage.Ok or HubCheckStage.Busy) return;
         ShowFromOutside();
         if (!wizard(store, this, check.Message)) return;
         _ = ReloadBrowserAsync();

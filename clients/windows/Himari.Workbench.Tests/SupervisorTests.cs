@@ -497,6 +497,36 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task TheWizardsCheckWaitsInTheQueueAndNeverRunsAfterExit()
+    {
+        hub.StartGate = new TaskCompletionSource();
+        var supervisor = New();
+        Task init = supervisor.InitializeAsync();
+        await Wait.Until(() => hub.CallsOf("start").Length == 1);
+        Task<HubResult?> probe = supervisor.ProbeAsync(new HubCommand(@"C:\uv.exe", ["run"], temp.Path), temp.Sub("새 홈"), TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        Assert.False(probe.IsCompleted);
+        hub.StartGate.SetResult();
+        await init;
+        Assert.Equal(0, (await probe)!.ExitCode);
+        Assert.Equal(1, hub.MaxConcurrent);
+        supervisor.RequestStopForExit(TimeSpan.Zero);
+        int calls = hub.Calls.Count;
+        Assert.Null(await supervisor.ProbeAsync(new HubCommand(@"C:\uv.exe", ["run"], temp.Path), home, TimeSpan.FromSeconds(5)));
+        Assert.Equal(calls, hub.Calls.Count);
+    }
+
+    [Fact]
+    public async Task ABusyHubIsShownWithItsReason()
+    {
+        hub.StatusFails = true; hub.StatusStdErr = ""; hub.StatusStdOut = "{\"error\": \"busy\", \"why\": \"전이 잠금이 2초 넘게 잡혀 있음\"}";
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.Equal("실행기: 확인 불가 · 전이 잠금이 2초 넘게 잡혀 있음", supervisor.View.Text);
+        Assert.Empty(hub.CallsOf("start"));
+    }
+
+    [Fact]
     public async Task ChangingTheHubHomeAsksTheHubAgain()
     {
         store.Update(s => s with { Linked = false });

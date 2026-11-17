@@ -42,10 +42,11 @@ public sealed class HubSetupTests : IDisposable
         Assert.Contains("의존성 설치 실패", failed.Message);
         Assert.Contains("token=…", failed.Message);
         Assert.DoesNotContain("abc", failed.Message);
+        Assert.Equal(HubCheckStage.Busy, HubSetup.Classify(uv, new HubResult(HubOutcome.Exited, 1, "{\"error\": \"busy\", \"why\": \"전이 잠금이 2초 넘게 잡혀 있음\"}", "")).Stage);
         // A complete reply from a command that failed is still a failure (§5.2).
         Assert.NotEqual(HubCheckStage.Ok, HubSetup.Classify(uv, new HubResult(HubOutcome.Exited, 1, "{\"running\": false, \"registration\": \"ok\"}", "boom")).Stage);
         Assert.Equal(HubCheckStage.TimedOut, HubSetup.Classify(uv, new HubResult(HubOutcome.TimedOut, null, "", "")).Stage);
-        var ok = HubSetup.Classify(uv, new HubResult(HubOutcome.Exited, 0, "{\"running\": false, \"registration\": \"missing\"}", ""));
+        var ok = HubSetup.Classify(uv, new HubResult(HubOutcome.Exited, 0, "{\"running\": false, \"instance\": null, \"pid\": null, \"started_at\": null, \"registration\": \"missing\", \"why\": null}", ""));
         Assert.Equal(HubCheckStage.Ok, ok.Stage);
         Assert.Contains("runner setup", HubSetup.RegistrationMessage(ok.Status!));
         Assert.Null(HubSetup.RegistrationMessage(ok.Status! with { Registration = Registration.Ok }));

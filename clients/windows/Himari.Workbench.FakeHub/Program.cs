@@ -43,6 +43,10 @@ switch (verb)
         return await Start();
     case "stop" when json && instanceArg is not null:
         return await Stop(instanceArg);
+    case "stop" when json && args.Contains("--legacy"):
+        return await StopLegacy();
+    case "stop" when json:
+        return await StopWhoever();
     case "" or "run":
         return await RunRunner();
     default:
@@ -154,24 +158,57 @@ async Task<int> Stop(string id)
     using var transition = Transition();
     if (transition is null) { Print(new { result = "unconfirmed" }); return 0; }
     using (var probe = TryLock(LockPath(), TimeSpan.Zero)) if (probe is not null) { Print(new { result = "stopped" }); return 0; }
+    // §5.4: another instance in the state file → other_instance (the target ended); no state, no process to open or
+    // another creation time → the target cannot be confirmed: unconfirmed, nothing is killed.
     var read = RunnerProtocol.ReadStateFile(home);
-    if (read.File is not { } state || state.Instance != id) { Print(new { result = "other_instance" }); return 0; }
-    bool gone = false;
+    if (read.File is not { Instance: { } shown } state) { Print(new { result = "unconfirmed" }); return 0; }
+    if (shown != id) { Print(new { result = "other_instance" }); return 0; }
     try
     {
         using var process = Process.GetProcessById(state.Pid ?? -1);
-        if (StartedAt(process) != state.StartedAt) { Print(new { result = "other_instance" }); return 0; }
+        if (StartedAt(process) != state.StartedAt) { Print(new { result = "unconfirmed" }); return 0; }
         process.Kill(entireProcessTree: true);
         if (!process.WaitForExit(5000)) { Print(new { result = "unconfirmed" }); return 0; }
     }
-    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { gone = true; }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { Print(new { result = "unconfirmed" }); return 0; }
     // The OS releases the dead runner's lock; "killed" only once that is seen.
     using (var released = TryLock(LockPath(), TimeSpan.FromSeconds(5)))
     {
         if (released is null) { Print(new { result = "unconfirmed" }); return 0; }
         if (RunnerProtocol.ReadStateFile(home).File?.Instance == id) try { File.Delete(StatePath()); } catch (IOException) { }
     }
-    Print(new { result = gone ? "stopped" : "killed" });
+    Print(new { result = "killed" });
+    return 0;
+}
+
+// §5.4, a stop without a target: find the running instance by H14, asking again every 1 s for 10 s while it is unknown.
+async Task<int> StopWhoever()
+{
+    for (int attempt = 0; attempt < 10; attempt++)
+    {
+        if (Status() is { } now)
+        {
+            var node = JsonNode.Parse(JsonSerializer.Serialize(now))!;
+            if (!node["running"]!.GetValue<bool>()) { Print(new { result = "not_running" }); return 0; }
+            if (node["instance"]?.GetValue<string?>() is { } running) return await Stop(running);
+        }
+        await Task.Delay(1000);
+    }
+    Print(new { result = "unconfirmed" });
+    return 0;
+}
+
+// §5.4 --legacy: only the old runner.stop file. New runners never follow it, so this never stops one of them.
+async Task<int> StopLegacy()
+{
+    File.WriteAllText(Path.Combine(home, "runner.stop"), "");
+    var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(config.StopTimeoutMs);
+    while (DateTime.UtcNow < until)
+    {
+        if (RunnerLockFree() is true) { Print(new { result = "stopped" }); return 0; }
+        await Task.Delay(100);
+    }
+    Print(new { result = "unconfirmed" });
     return 0;
 }
 
@@ -271,7 +308,8 @@ sealed record FakeConfig
     public int StartDelayMs { get; init; }
     public string? StartReply { get; init; }
     public int RunnerDelayMs { get; init; }
-    public int StopTimeoutMs { get; init; } = 20000;
+    // §5.4: RUNNER_STOP (90 s) + 15 s before the forced stop.
+    public int StopTimeoutMs { get; init; } = 105_000;
     public int StopWorkMs { get; init; } = 500;
     public bool IgnoreStop { get; init; }
     public string Name { get; init; } = "laptop";

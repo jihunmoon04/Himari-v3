@@ -220,6 +220,16 @@ public sealed class RunnerSupervisor
         !(after.Hub?.SameAs(before.Hub) ?? before.Hub is null)
         || !string.Equals(Path.GetFullPath(after.EffectiveHubHome), Path.GetFullPath(before.EffectiveHubHome), StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The wizard's check of a hub command it has not saved yet (§5.6 step 3), in the operation queue like every hub
+    /// command the app runs (§5.3). Null when the app is exiting.
+    /// </summary>
+    public Task<HubResult?> ProbeAsync(HubCommand command, string home, TimeSpan timeout) => Queue<HubResult?>(async () =>
+    {
+        if (hubFor(store.Current with { Hub = command, HubHome = home }) is not { } candidate) return null;
+        return await candidate.RunAsync(["runner", "status", "--json"], timeout).ConfigureAwait(false);
+    }, null);
+
     /// <summary>The last <c>runner status</c> run, for explaining a failure (the wizard, §5.6).</summary>
     public HubResult? LastStatusResult { get { lock (gate) return lastStatusResult; } }
 
@@ -304,6 +314,8 @@ public sealed class RunnerSupervisor
 
     private async Task CheckCore()
     {
+        // Exit may begin while an operation is already running: from then on no new hub command starts (§5.3).
+        if (exiting) return;
         if (hubFor(store.Current) is not { } hub)
         {
             lock (gate) { status = null; statusFailure = null; lastCheckMs = system.UptimeMs; }
@@ -317,8 +329,9 @@ public sealed class RunnerSupervisor
         if (reply is null)
         {
             LogCommand("status", result);
-            string line = result.Outcome == HubOutcome.Exited && Redaction.LastLine(result.StdErr).Length == 0
-                ? "hub가 실행기 상태를 알려 주지 않았습니다(runner status --json이 없는 옛 hub일 수 있음)" : result.Describe();
+            string line = result.Outcome != HubOutcome.Exited || Redaction.LastLine(result.StdErr).Length > 0 ? result.Describe()
+                : RunnerProtocol.StatusError(result.StdOut) is { } failure ? Redaction.LastLine(failure.Why ?? $"hub가 상태 대신 오류를 돌려주었습니다: {failure.Error}")
+                : "hub가 실행기 상태를 알려 주지 않았습니다(runner status --json이 없는 옛 hub일 수 있음)";
             lock (gate) { status = null; statusFailure = line; }
             Publish();
             return;

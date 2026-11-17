@@ -39,7 +39,7 @@ public sealed class ProtocolTests
         Assert.Equal("7.5.abc", reply.Instance);
         Assert.Equal(12, reply.Pid);
         Assert.Equal(Registration.Ok, reply.Registration);
-        var broken = RunnerProtocol.ParseStatus("""{"running": false, "instance": null, "registration": "broken", "why": "토큰 파일이 비었음"}""");
+        var broken = RunnerProtocol.ParseStatus("""{"running": false, "instance": null, "pid": null, "started_at": null, "registration": "broken", "why": "토큰 파일이 비었음"}""");
         Assert.Equal(Registration.Broken, broken!.Registration);
         Assert.Equal("토큰 파일이 비었음", broken.Why);
     }
@@ -51,13 +51,15 @@ public sealed class ProtocolTests
     [InlineData("[1, 2]")]
     [InlineData("{\"running\": \"yes\"}")]
     [InlineData("{\"running\": false}")]
-    [InlineData("{\"running\": false, \"instance\": null, \"registration\": \"later\"}")]
+    [InlineData("{\"running\": false, \"instance\": null, \"pid\": null, \"started_at\": null, \"registration\": \"later\", \"why\": null}")]
+    [InlineData("{\"running\": false, \"registration\": \"ok\"}")]
+    [InlineData("{\"running\": true, \"instance\": \"7.5.abc\", \"pid\": \"12\", \"started_at\": \"x\", \"registration\": \"ok\", \"why\": null}")]
     public void UnreadableStatusIsAFailure(string stdout) => Assert.Null(RunnerProtocol.ParseStatus(stdout));
 
     [Fact]
     public void StatusAfterLauncherNoiseUsesTheLastObjectLine()
     {
-        var reply = RunnerProtocol.ParseStatus("Resolved 12 packages\n{\"running\": false, \"instance\": null, \"registration\": \"missing\"}\n");
+        var reply = RunnerProtocol.ParseStatus("Resolved 12 packages\n{\"running\": false, \"instance\": null, \"pid\": null, \"started_at\": null, \"registration\": \"missing\", \"why\": null}\n");
         Assert.NotNull(reply);
         Assert.Equal(Registration.Missing, reply.Registration);
     }
@@ -65,7 +67,7 @@ public sealed class ProtocolTests
     [Fact]
     public void AnInstanceThatIsNotAnIdIsTreatedAsUnknown()
     {
-        var reply = RunnerProtocol.ParseStatus("""{"running": true, "instance": "../../x", "registration": "ok"}""");
+        var reply = RunnerProtocol.ParseStatus("""{"running": true, "instance": "../../x", "pid": 12, "started_at": "x", "registration": "ok", "why": null}""");
         Assert.Null(reply!.Instance);
     }
 
@@ -81,6 +83,9 @@ public sealed class ProtocolTests
         Assert.Equal(StartError.Unconfirmed, RunnerProtocol.ParseStart("""{"error": "unconfirmed"}""").Error);
         Assert.Equal(StartError.Failed, RunnerProtocol.ParseStart("""{"error": "something new"}""").Error);
         Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("nope").Error);
+        // Success needs the whole result (§5.3): an instance alone does not move pending to owned.
+        Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("""{"instance": "7.5.abc"}""").Error);
+        Assert.Equal(StartError.Unreadable, RunnerProtocol.ParseStart("""{"instance": "7.5.abc", "pid": 3}""").Error);
     }
 
     [Theory]

@@ -42,11 +42,23 @@ public static class RunnerProtocol
         {
             "ok" => Registration.Ok, "missing" => Registration.Missing, "broken" => Registration.Broken, _ => Registration.Unknown,
         };
-        // A reply without a known registration is incomplete: a failed status, never "off".
-        if (registration == Registration.Unknown) return null;
+        // H14 names six keys; a reply missing one, or with a value of the wrong kind, or without a known registration
+        // is incomplete: a failed status, never "off" (§5.2).
+        if (registration == Registration.Unknown || !Has(root, "instance", JsonValueKind.String) || !Has(root, "pid", JsonValueKind.Number)
+            || !Has(root, "started_at", JsonValueKind.String) || !Has(root, "why", JsonValueKind.String)) return null;
         string? instance = String(root, "instance");
         if (instance is not null && !InstanceId.TryParse(instance, out _)) instance = null;
         return new StatusReply(running.GetBoolean(), running.GetBoolean() ? instance : null, Int(root, "pid"), String(root, "started_at"), registration, String(root, "why"));
+    }
+
+    /// <summary>
+    /// A status the hub answered with an error object instead (hub B1: <c>{"error": "busy", "why": …}</c> when
+    /// runner.transition.lock stays taken, exit code 1): the error and its reason, or null.
+    /// </summary>
+    public static (string Error, string? Why)? StatusError(string stdout)
+    {
+        using var json = ParseObject(stdout);
+        return json is not null && String(json.RootElement, "error") is { } error ? (error, String(json.RootElement, "why")) : null;
     }
 
     public static StartReply ParseStart(string stdout)
@@ -59,9 +71,12 @@ public static class RunnerProtocol
             {
                 "running" => StartError.Running, "cancelled" => StartError.Cancelled, "unconfirmed" => StartError.Unconfirmed, _ => StartError.Failed,
             }, String(root, "instance"), Int(root, "pid"), null, Int(root, "exit_code"));
+        // Success is the whole H10 result: the instance, its pid and its started_at (§5.3); anything less is unreadable.
         string? instance = String(root, "instance");
-        return instance is null ? new StartReply(StartError.Unreadable, null, null, null, null)
-            : new StartReply(StartError.None, instance, Int(root, "pid"), String(root, "started_at"), null);
+        int? pid = Int(root, "pid");
+        string? startedAt = String(root, "started_at");
+        return instance is null || pid is null || startedAt is null ? new StartReply(StartError.Unreadable, null, null, null, null)
+            : new StartReply(StartError.None, instance, pid, startedAt, null);
     }
 
     public static StopResult ParseStop(string stdout)
@@ -121,6 +136,10 @@ public static class RunnerProtocol
 
     private static string? String(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    /// <summary>The key is there, with a value of this kind or null.</summary>
+    private static bool Has(JsonElement root, string name, JsonValueKind kind) =>
+        root.TryGetProperty(name, out var value) && (value.ValueKind == kind || value.ValueKind == JsonValueKind.Null);
 
     private static int? Int(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int number) ? number : null;

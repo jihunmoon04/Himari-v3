@@ -2,7 +2,7 @@ using System.IO;
 
 namespace Himari.Workbench;
 
-public enum HubCheckStage { Ok, ExecutableMissing, NotHubFolder, OldHub, CommandFailed, TimedOut }
+public enum HubCheckStage { Ok, ExecutableMissing, NotHubFolder, OldHub, CommandFailed, TimedOut, Busy }
 
 /// <summary>What the first-run wizard found when it ran <c>runner status --json</c> (§5.6 step 3).</summary>
 public sealed record HubCheck(HubCheckStage Stage, string Message, StatusReply? Status = null);
@@ -44,6 +44,9 @@ public static class HubSetup
         if (result.Outcome == HubOutcome.TimedOut) return new(HubCheckStage.TimedOut, "hub 명령이 제시간에 끝나지 않았습니다");
         if (result is { Outcome: HubOutcome.Exited, ExitCode: 0 } && RunnerProtocol.ParseStatus(result.StdOut) is { } status)
             return new(HubCheckStage.Ok, "hub 명령이 동작합니다", status);
+        // The hub works but a runner was starting or stopping just then: try again, the command is fine.
+        if (result.Outcome == HubOutcome.Exited && RunnerProtocol.StatusError(result.StdOut) is ("busy", var why))
+            return new(HubCheckStage.Busy, "실행기가 켜지거나 꺼지는 중이라 지금은 확인하지 못했습니다. 잠시 뒤 다시 하세요" + (why is { Length: > 0 } ? $" ({Redaction.LastLine(why)})" : ""));
         string line = Redaction.LastLine(result.StdErr);
         string all = result.StdErr + "\n" + result.StdOut;
         if (all.Contains("unrecognized arguments", StringComparison.OrdinalIgnoreCase) || all.Contains("invalid choice", StringComparison.OrdinalIgnoreCase)

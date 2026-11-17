@@ -49,6 +49,7 @@ public sealed class ScriptedHub : IHubCommandRunner
     /// <summary>The exit code of a status that still prints a complete reply (a nonzero one must not count).</summary>
     public int StatusExitCode { get; set; }
     public string StatusStdErr { get; set; } = "Traceback: boom";
+    public string StatusStdOut { get; set; } = "";
     /// <summary>The next start's reply; null = start succeeds with the id it was given.</summary>
     public Func<string, string>? StartReply { get; set; }
     public TaskCompletionSource? StartGate { get; set; }
@@ -70,7 +71,7 @@ public sealed class ScriptedHub : IHubCommandRunner
             switch (verb)
             {
                 case "status":
-                    if (StatusFails) return new HubResult(HubOutcome.Exited, 1, "", StatusStdErr);
+                    if (StatusFails) return new HubResult(HubOutcome.Exited, 1, StatusStdOut, StatusStdErr);
                     return Ok(StatusExitCode, new { running = Running, instance = Running && !HideInstance ? Instance : null, pid = Running ? 4242 : (int?)null,
                         started_at = Running ? "2026-11-18T00:00:00Z" : null, registration = Registration, why = Why });
                 case "start":
