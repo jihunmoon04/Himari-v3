@@ -489,6 +489,8 @@ W6은 넷으로 나눈다: **W6a** 대화 도구, **W6b** 입력(첨부·붙여�
 
 ### 7.15 H2: 세션 이름과 다시 열기 (2026-11-17)
 
+운영 배포(2026-11-17, v3 `358d4f6`, hub `52514f3`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-h2.md)): 실제 Claude 세션을 이 중계로 이름 붙이고 닫고 다시 연 뒤 보내 앞 대화가 이어지는 것을 확인했다. 화면은 Playwright로만 확인했다.
+
 hub의 `rename`·`reopen`·`sessions {state: "closed"}`(hub [설계](https://github.com/jihunmoon04/himari-hub/blob/main/docs/sessions-h2-v0.1.md))를 중계하고 화면에 붙였다.
 
 - **중계:** 세션 레코드에 `title`(200자로 자름). `PUT /api/hub/sessions/{id}/title` `{"title"}`(빈 글·null은 지움, 검사는 hub), `POST /api/hub/sessions/{id}/reopen`, `GET /api/hub/sessions?state=closed`(그 밖의 `state`는 400). hub의 거절 문구는 그대로 보인다(`hub_refused`).
