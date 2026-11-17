@@ -5,7 +5,7 @@
 // message really went on in.
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, PanelRight, PanelRightClose, Radio, X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ApiError } from "@/api/client";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@/api/hub";
 import { hubKeys, useHubPending, useHubProjects, useHubSessionDetail } from "@/app/queries";
 import { Composer } from "@/components/Composer";
+import { JumpToLatest } from "@/components/JumpToLatest";
 import { HubRequest } from "@/components/HubRequest";
 import { MessageOptions, chosen } from "@/components/MessageOptions";
 import { SessionBadge, sessionName } from "@/components/SessionBadge";
@@ -26,6 +27,7 @@ import { toHubItems } from "@/features/hub/items";
 import { useHubList } from "@/features/hub/list";
 import { useHubSessionEvents } from "@/features/hub/session";
 import { cn } from "@/lib/cn";
+import { useStickToBottom } from "@/lib/stick";
 
 // tasks whose move to another session this page has already followed (it moves once, not on every render)
 const movedAlready = new Set<number>();
@@ -63,19 +65,6 @@ function Notice({ children, onClose, tone = "muted" }: {
   );
 }
 
-function useStickToBottom(dependency: unknown) {
-  const box = useRef<HTMLDivElement>(null);
-  const stuck = useRef(true);
-  useLayoutEffect(() => {
-    const node = box.current;
-    if (node && stuck.current) node.scrollTop = node.scrollHeight;
-  }, [dependency]);
-  const onScroll = () => {
-    const node = box.current;
-    if (node) stuck.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
-  };
-  return { box, onScroll };
-}
 
 export function HubSession() {
   const id = Number(useParams().id);
@@ -99,7 +88,7 @@ function SessionPage({ id }: { id: number }) {
   const { items, stats } = useMemo(() => toHubItems(stream.events), [stream.events]);
   const [panel, setPanel] = useState(false);
   const closePanel = useCallback(() => setPanel(false), []);
-  const { box, onScroll } = useStickToBottom(stream.events.length);
+  const { box, onScroll, atBottom, jump } = useStickToBottom(stream.events.length);
 
   const listed = list.sessions.find((s) => s.id === id);
   // the freshest listing of this session: its own live stream's, else the shared list's while that one is live,
@@ -254,7 +243,8 @@ function SessionPage({ id }: { id: number }) {
             )}
           </div>
         </div>
-        <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+        <div className="relative mx-auto w-full max-w-3xl px-4 pb-4">
+          {!atBottom && <JumpToLatest onClick={jump} />}
           {running && stats.plan && stats.plan.length > 0 && (
             <div className="mb-2 rounded-xl border border-line bg-panel px-4 py-3">
               <PlanList entries={stats.plan} />

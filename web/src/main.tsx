@@ -14,6 +14,7 @@ import { Conversation } from "@/routes/Conversation";
 import { Home } from "@/routes/Home";
 import { HubSession } from "@/routes/HubSession";
 import { Login } from "@/routes/Login";
+import { Trash } from "@/routes/Trash";
 
 // V3-P102 §7.2: the server gave this page a style nonce (its CSP allows <style> elements carrying it). Radix's
 // scroll lock inserts such an element; get-nonce hands it the nonce. Before anything renders.
@@ -45,6 +46,7 @@ const router = createBrowserRouter(
         { path: "s/:id", element: <HubSession /> },
         { path: "agents", element: <Agents /> },
         { path: "approvals", element: <Approvals /> },
+        { path: "trash", element: <Trash /> },
         { path: "*", element: <Navigate to="/" replace /> },
       ],
     },

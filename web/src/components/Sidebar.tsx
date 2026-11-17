@@ -220,6 +220,7 @@ function SettingsMenu() {
           <MenuRadioItem value="dark"><Moon className="size-3.5" /> Dark</MenuRadioItem>
         </MenuRadioGroup>
         <MenuSeparator />
+        <MenuItem onSelect={() => navigate("/trash")}>Trash</MenuItem>
         <MenuItem onSelect={() => window.location.assign("/")}>Open the classic page</MenuItem>
         <MenuItem onSelect={() => void leave()} className="text-danger">
           <LogOut className="size-3.5" /> Sign out

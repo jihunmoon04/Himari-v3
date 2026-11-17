@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, PanelRight, PanelRightClose } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { ApiError } from "@/api/client";
 import { cancelJob, resumeTurn, sendMessage } from "@/api/himari";
@@ -9,6 +9,9 @@ import { DelegationCard } from "@/components/DelegationCard";
 import { FilesPanel } from "@/components/FilesPanel";
 import { SidePanel } from "@/components/SidePanel";
 import { Composer } from "@/components/Composer";
+import { ConversationMenu } from "@/components/ConversationMenu";
+import { JumpToLatest } from "@/components/JumpToLatest";
+import { ModelPicker } from "@/components/ModelPicker";
 import { PageHeader } from "@/components/Shell";
 import { Timeline } from "@/components/Timeline";
 import { Button, IconButton } from "@/components/ui/button";
@@ -41,20 +44,7 @@ function useLive(id: string, job: string | null) {
   return live;
 }
 
-/** Keeps the view at the bottom while new content comes, unless the reader scrolled up. */
-function useStickToBottom(dependency: unknown) {
-  const box = useRef<HTMLDivElement>(null);
-  const stuck = useRef(true);
-  useLayoutEffect(() => {
-    const node = box.current;
-    if (node && stuck.current) node.scrollTop = node.scrollHeight;
-  }, [dependency]);
-  const onScroll = () => {
-    const node = box.current;
-    if (node) stuck.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
-  };
-  return { box, onScroll };
-}
+import { useStickToBottom } from "@/lib/stick";
 
 export function Conversation() {
   const id = useParams().id ?? "";
@@ -66,7 +56,7 @@ export function Conversation() {
   const hubSource = useServer(true).data?.hub_source ?? null;
   const items = useMemo(() => toItems(events.data?.items ?? [], hubSource), [events.data, hubSource]);
   const delegations = items.flatMap((item) => (item.kind === "delegation" ? [item] : []));
-  const { box, onScroll } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
+  const { box, onScroll, atBottom, jump } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
   const closePanel = useCallback(() => setPanel(false), []);
   // a turn ended: what it wrote may be in the folders open in the panel, read them again
@@ -115,9 +105,13 @@ export function Conversation() {
       <div className="flex min-w-0 flex-1 flex-col">
         <PageHeader
           actions={
-            <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
-              {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
-            </IconButton>
+            <>
+              <ConversationMenu id={id} title={conversation?.title || conversation?.preview || ""} waiting={Boolean(waiting)}
+                running={running} />
+              <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
+                {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
+              </IconButton>
+            </>
           }
         >
           <h1 className="truncate text-sm font-medium">{conversation?.title || conversation?.preview || "Conversation"}</h1>
@@ -136,7 +130,8 @@ export function Conversation() {
             )}
           </div>
         </div>
-        <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+        <div className="relative mx-auto w-full max-w-3xl px-4 pb-4">
+          {!atBottom && <JumpToLatest onClick={jump} />}
           {error && <p role="alert" className="mb-2 text-sm text-danger">{error}</p>}
           <Composer
             key={id}
@@ -146,6 +141,7 @@ export function Conversation() {
             placeholder={waiting ? "Answer HIMARI" : undefined}
             onStop={() => void act(() => cancelJob(id)).catch(() => undefined)}
             onSend={(text) => act(() => sendMessage(id, text))}
+            tools={<ModelPicker conversation={id} />}
           />
         </div>
       </div>
