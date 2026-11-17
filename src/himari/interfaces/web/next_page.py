@@ -32,7 +32,22 @@ BASE = "/"
 NONCE_PLACEHOLDER = "__HIMARI_CSP_NONCE__"
 MEDIA_TYPES = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2", ".woff": "font/woff",
                ".png": "image/png", ".ico": "image/x-icon"}
-ASSET_CACHE = "public, max-age=31536000, immutable"
+ASSET_CACHE = "public, max-age=31536000, immutable"  # Vite's own files: their names carry their content hash
+STABLE_CACHE = "public, max-age=86400"  # a file whose name stays when it changes (KaTeX in assets/katex/): a day
+# Without a build: what / says instead of a page that is not there (no script, nothing from elsewhere).
+NOT_BUILT = (
+    "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>HIMARI</title>"
+    "<body>"  # no style attribute: the page's CSP allows none
+    "<h1>HIMARI</h1><p>This server runs, but its Web page is not built.</p>"
+    "<p>Build it once, then start the server again:</p>"
+    "<pre>cd web\nnpm ci\nnpm run build</pre>"
+    "<p>The API works without it.</p></body></html>"
+)
+
+
+def cache_of(name: str) -> str:
+    """A built file's cache: a year for the hashed files at the top of assets/, a day for the rest."""
+    return ASSET_CACHE if "/" not in name else STABLE_CACHE
 
 
 @dataclass(frozen=True)

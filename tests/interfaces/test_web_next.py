@@ -99,10 +99,12 @@ def test_the_page_has_one_csp_with_a_fresh_style_nonce(client: TestClient) -> No
 def test_only_built_assets_of_known_kinds_are_served(client: TestClient) -> None:
     script = client.get("/assets/index-1.js")
     assert script.status_code == 200 and script.headers["content-type"] == "text/javascript; charset=utf-8"
-    assert script.headers["cache-control"] == next_page.ASSET_CACHE
+    assert script.headers["cache-control"] == next_page.ASSET_CACHE  # hashed: kept a year
     assert client.get("/assets/deep/font.woff2").headers["content-type"] == "font/woff2"
     # KaTeX, where the renderer loads it on the first formula
-    assert client.get("/assets/katex/katex.min.js").headers["content-type"] == "text/javascript; charset=utf-8"
+    katex_script = client.get("/assets/katex/katex.min.js")
+    assert katex_script.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert katex_script.headers["cache-control"] == next_page.STABLE_CACHE  # its name stays when KaTeX changes
     assert client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
     font = client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
     assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
@@ -126,8 +128,9 @@ def test_the_old_next_addresses_move_to_the_same_place(client: TestClient) -> No
 def test_without_a_build_only_the_api_is_served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = serve(tmp_path, monkeypatch, None)
     try:
-        assert started.get("/").status_code == 404
-        assert started.get("/c/abc").status_code == 404
+        for path in ("/", "/c/abc"):  # says how to build it, instead of a bare 404
+            page = started.get(path)
+            assert page.status_code == 503 and "npm run build" in page.text and "<script" not in page.text
         assert started.get("/assets/index-1.js").status_code == 404
         assert started.get("/api/session").status_code == 200
     finally:

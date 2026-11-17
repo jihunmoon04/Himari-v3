@@ -2685,7 +2685,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         item, media = found
         charset = "; charset=utf-8" if media.startswith("text/") else ""
         return Response(item.read_bytes(), media_type=f"{media}{charset}",
-                        headers={"Cache-Control": next_page.ASSET_CACHE})
+                        headers={"Cache-Control": next_page.cache_of(name)})
 
     @app.get("/", include_in_schema=False)
     @app.get("/{rest:path}", include_in_schema=False)
@@ -2694,7 +2694,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         Registered last, so every route of the server comes first."""
         if rest == "api" or rest.startswith(("api/", "assets/")):
             raise ApiError(404, "not_found", "Not available.")
-        html, nonce = page_built().page()
+        if built is None:  # installed without `npm run build` in web/: say so instead of a bare 404
+            return Response(next_page.NOT_BUILT, status_code=503, media_type="text/html; charset=utf-8",
+                            headers={"Cache-Control": "no-store"})
+        html, nonce = built.page()
         setattr(request.state, STYLE_NONCE_STATE, nonce)  # the security middleware writes the CSP with it
         return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
