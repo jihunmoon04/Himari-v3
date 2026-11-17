@@ -87,8 +87,13 @@ public sealed class ProcessHubCommandRunner(HubCommand command, string hubHome) 
         try
         {
             int read;
+            // Keeps the last ~1 MB, not the first: the failure line the app shows is the last one (§5.1).
             while ((read = await reader.ReadAsync(buffer).ConfigureAwait(false)) > 0)
-                lock (into) { if (into.Length < 1_000_000) into.Append(buffer, 0, read); }
+                lock (into)
+                {
+                    into.Append(buffer, 0, read);
+                    if (into.Length > 1_000_000) into.Remove(0, into.Length - 1_000_000);
+                }
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
     }

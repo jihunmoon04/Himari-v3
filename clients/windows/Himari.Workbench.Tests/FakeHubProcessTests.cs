@@ -39,6 +39,14 @@ public sealed class FakeHubProcessTests : IDisposable
     }
 
     [Fact]
+    public async Task TheLastStderrLineSurvivesLongOutput()
+    {
+        var result = await new ProcessHubCommandRunner(new HubCommand(FakeHubExe.PathName, ["stderr-flood"], work), home).RunAsync([], TimeSpan.FromSeconds(30));
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("the real failure", Redaction.LastLine(result.StdErr));
+    }
+
+    [Fact]
     public async Task MissingExecutableIsReported()
     {
         var result = await new ProcessHubCommandRunner(new HubCommand(Path.Combine(work, "없음.exe"), [], work), home).RunAsync(["runner"], TimeSpan.FromSeconds(5));

@@ -8,6 +8,7 @@
 //   runner                      (the runner itself; the instance id comes from HIMARI_RUNNER_INSTANCE)
 //   echo-args                   (prints its arguments, folder and hub home as JSON, for the no-shell test)
 //   new-id                      (prints a fresh instance id, for trying it by hand)
+//   stderr-flood                (over 1 MB of stderr, then a last line, for the output test)
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -23,6 +24,14 @@ if (args.Length > 0 && args[0] == "echo-args")
 {
     Console.WriteLine(JsonSerializer.Serialize(new { args = args[1..], cwd = Environment.CurrentDirectory, home }));
     return 0;
+}
+// stderr-flood: over 1 MB of stderr, then one last line, exit 1 (the app must show that last line).
+if (args.Length > 0 && args[0] == "stderr-flood")
+{
+    string filler = new('x', 199);
+    for (int i = 0; i < 8000; i++) Console.Error.WriteLine(filler);
+    Console.Error.WriteLine("the real failure");
+    return 1;
 }
 if (args.Length > 0 && args[0] == "new-id") { Console.WriteLine(InstanceId.Create(system)); return 0; }
 if (args.Length == 0 || args[0] != "runner") { Console.Error.WriteLine("usage: runner status|start|stop --json"); return 2; }
@@ -267,7 +276,13 @@ async Task<int> RunRunner()
             ack = request;
             WriteState(id, "stopping", ack);
             try { File.Delete(Path.Combine(StopFolder(), request)); } catch (IOException) { }
-            await Task.Delay(config.StopWorkMs);
+            // H9: updated_at every 5 s also while finishing its work.
+            var workUntil = DateTime.UtcNow.AddMilliseconds(config.StopWorkMs);
+            while (DateTime.UtcNow < workUntil)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(5000, Math.Max(0, (workUntil - DateTime.UtcNow).TotalMilliseconds))));
+                if (DateTime.UtcNow < workUntil) WriteState(id, "stopping", ack);
+            }
             break;
         }
         if (DateTime.UtcNow >= nextBeat) { WriteState(id, "connected", ack); nextBeat = DateTime.UtcNow.AddSeconds(5); }
