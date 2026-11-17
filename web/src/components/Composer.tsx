@@ -28,6 +28,7 @@ export function Composer({
   onFiles,
   onTextChange,
   onKeyFirst,
+  allowEmpty,
   ref,
 }: {
   onSend: (text: string) => Promise<unknown> | void;
@@ -44,6 +45,7 @@ export function Composer({
   onTextChange?: (text: string) => void;
   onKeyFirst?: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean; // true: handled (a picker's keys)
   ref?: Ref<ComposerHandle>;
+  allowEmpty?: boolean; // the message may go without text (it carries files)
 }) {
   const storageKey = `himari.next.draft.${draftKey}`;
   const [text, setText] = useState(() => {
@@ -86,7 +88,7 @@ export function Composer({
 
   const send = async () => {
     const message = text.trim();
-    if (!message || sending || disabled) return;
+    if ((!message && !allowEmpty) || sending || disabled) return;
     setSending(true);
     const sent = text;
     try {
@@ -177,7 +179,7 @@ export function Composer({
             onClick={() => void send()}
             aria-label="Send"
             title={running && queues ? "Send (it waits for the running turn)" : "Send"}
-            disabled={!text.trim() || sending || disabled}
+            disabled={(!text.trim() && !allowEmpty) || sending || disabled}
             className={cn(
               "inline-flex size-8 items-center justify-center rounded-full bg-accent text-accent-ink",
               "disabled:opacity-30",

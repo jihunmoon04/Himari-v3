@@ -65,8 +65,11 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
   const composer = useRef<ComposerHandle>(null);
   const input = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<Upload[]>([]);
+  const live = useRef(new Set<AbortController>()); // uploads under way, aborted directly when the composer goes
   const pointed = usePointed(conversation);
   const [text, setText] = useState("");
+  const latest = useRef("");
+  latest.current = text;
   const [highlight, setHighlight] = useState(0);
   const [asking, setAsking] = useState<PromptInfo | null>(null);
   const slash = /^\/(\S*)$/.exec(text);
@@ -74,8 +77,14 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
     enabled: slash !== null, staleTime: 60_000 });
   const offered = slash ? matchPrompts(prompts.data?.prompts ?? [], slash[1] ?? "") : [];
   useEffect(() => setHighlight(0), [slash?.[1]]);
-  // leaving the conversation drops what was still uploading for it
-  useEffect(() => () => setUploads((now) => { for (const u of now) u.abort.abort(); return []; }), [conversation]);
+  // leaving the conversation stops what was still uploading for it
+  useEffect(() => {
+    const running = live.current;
+    return () => {
+      for (const controller of running) controller.abort();
+      running.clear();
+    };
+  }, [conversation]);
 
   const change = (key: number, patch: Partial<Upload>) =>
     setUploads((now) => now.map((u) => (u.key === key ? { ...u, ...patch } : u)));
@@ -84,12 +93,14 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
       const entry: Upload = { key: nextKey++, name: file.name || "pasted", size: file.size, state: "uploading", progress: 0,
         fileId: null, note: "", abort: new AbortController() };
       setUploads((now) => [...now, entry]);
+      live.current.add(entry.abort);
       uploadFile(conversation, file, (share) => change(entry.key, { progress: share }), entry.abort.signal)
         .then((done) => change(entry.key, { state: "ready", fileId: done.file_id, size: done.size, progress: 1 }))
         .catch((failure: unknown) => {
           if (failure instanceof DOMException && failure.name === "AbortError") return;
           change(entry.key, { state: "failed", note: failure instanceof Error ? failure.message : "The upload failed." });
-        });
+        })
+        .finally(() => live.current.delete(entry.abort));
     }
   }, [conversation]);
   const drop = (key: number) => setUploads((now) => {
@@ -100,8 +111,13 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
   /** ``args`` undefined: not asked yet (a prompt with arguments asks for them first). */
   const choose = async (prompt: PromptInfo, args?: Record<string, string>) => {
     if (args === undefined && prompt.arguments.length) return setAsking(prompt);
+    const from = latest.current;
     try {
       const { text: expanded } = await expandPrompt(conversation, prompt.source, prompt.name, args ?? {});
+      if (latest.current !== from) { // written on meanwhile: that stays
+        toast("The draft changed while the prompt was prepared; it was not put in.", "info");
+        return;
+      }
       composer.current?.setText(expanded);
     } catch (failure) {
       toast(failure instanceof ApiError ? failure.message : "Could not use that prompt.", "error");
@@ -196,6 +212,7 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
         autoFocus
         running={running}
         disabled={uploading}
+        allowEmpty={uploads.some((u) => u.state === "ready") || pointed.length > 0}
         placeholder={waiting ? "Answer HIMARI" : "Message HIMARI (/ for prompts)"}
         onStop={onStop}
         onSend={send}

@@ -1,5 +1,5 @@
 // HIMARI's own conversations (the server's /api/conversations…), as the old page uses them.
-import { api, del, enc, get, post, put } from "./client";
+import { api, del, enc, get, post, put, signInRefused } from "./client";
 
 export interface Session {
   authenticated: boolean;
@@ -271,6 +271,7 @@ export function uploadFile(conversation: string, file: File, onProgress: (share:
         data = null;
       }
       if (xhr.status === 201 && data && typeof data === "object") return resolve(data as Uploaded);
+      if (xhr.status === 401) signInRefused(); // signed out (here or in another tab): the page asks again
       const error = (data as { error?: { message?: string } } | null)?.error;
       reject(new Error(error?.message ?? `The upload failed (HTTP ${xhr.status}).`));
     });
