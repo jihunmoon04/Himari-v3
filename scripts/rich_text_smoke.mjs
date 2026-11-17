@@ -3,9 +3,9 @@
  * what it was given, and the vendored KaTeX itself for its options.
  * Usage: node scripts/rich_text_smoke.mjs */
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 
-const { renderAssistantText, assistantTextLine } = await import("../src/himari/interfaces/web/static/rich_text.js");
+const { renderAssistantText, assistantTextLine } = await import("../web/src/lib/rich_text.js");
 
 class FakeNode {
   constructor(tag, text = null) {
@@ -160,7 +160,11 @@ for (const math of formulas("$x$ \\(y\\) $$z$$")) assert.deepEqual(math.attribut
 // The vendored KaTeX with these options: no links or HTML from TeX, Korean
 // text accepted, a bad formula refused.
 {
-  const katex = createRequire(import.meta.url)("../src/himari/interfaces/web/static/katex/katex.min.js");
+  const katex = ((source) => {
+  const module = { exports: {} };
+  new Function("module", "exports", source)(module, module.exports); // the UMD bundle, as a script
+  return module.exports;
+})(readFileSync(new URL("../web/public/assets/katex/katex.min.js", import.meta.url), "utf8"));
   const options = { throwOnError: true, trust: false, strict: "ignore", maxSize: 20, maxExpand: 500 };
   const html = katex.renderToString("\\href{javascript:alert(1)}{x} \\url{https://a.example}", options);
   assert.ok(!html.includes("<a ") && !html.includes("href=")); // shown as unsupported commands, in red

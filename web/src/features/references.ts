@@ -37,6 +37,11 @@ export function unpoint(conversation: string, paths: string[]) {
   set(new Map(byConversation).set(conversation, now.filter((p) => !paths.includes(p.path))));
 }
 
+/** Signed out: no file stays pointed at. */
+export function resetPointed() {
+  set(new Map());
+}
+
 const subscribe = (listener: () => void) => {
   listeners.add(listener);
   return () => listeners.delete(listener);

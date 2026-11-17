@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
-// The new Web page (V3-P102 §7). Built into the Python package's dist/ and served at /next/ beside the old page
-// until W6. The assistant-text renderer is the old page's audited rich_text.js, imported as it is (one copy).
+// HIMARI's Web page (V3-P102 §7). Built into the Python package's dist/ and served at /. The assistant-text renderer
+// is the audited lib/rich_text.js (the Windows companion builds the same file in); KaTeX is public/assets/katex, as
+// the renderer loads it (/assets/katex/…).
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -10,12 +11,11 @@ const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 const server = process.env.HIMARI_DEV_SERVER ?? "http://127.0.0.1:8765";
 
 export default defineConfig({
-  base: "/next/",
+  base: "/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       "@": here("./src"),
-      "@static": here("../src/himari/interfaces/web/static"),
     },
   },
   build: {
@@ -31,7 +31,6 @@ export default defineConfig({
     proxy: {
       // the dev server is another origin: the API's Origin check sees the real server's own
       "/api": { target: server, changeOrigin: true, headers: { origin: server } },
-      "/assets/katex": { target: server, changeOrigin: true },
     },
   },
   test: {

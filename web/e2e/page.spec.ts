@@ -1,4 +1,4 @@
-// V3-P102 W1: the new page at /next/ on a real server. Each check also collects CSP violations and page errors;
+// V3-P102: the Web page on a real server (at / since W6). Each check also collects CSP violations and page errors;
 // there must be none (§7.2: scripts 'self' only, <style> only with the page's nonce).
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
@@ -27,7 +27,7 @@ async function watch(page: Page) {
 }
 
 async function signIn(page: Page) {
-  await page.goto("/next/");
+  await page.goto("/");
   await page.getByLabel("Operator token").fill(token());
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "What should we work on?" })).toBeVisible();
@@ -37,12 +37,12 @@ test.describe.configure({ mode: "serial" });
 
 test("signs in, refuses a wrong token, and serves the page with one CSP and a fresh nonce", async ({ page }) => {
   const done = await watch(page);
-  const response = await page.goto("/next/");
+  const response = await page.goto("/");
   const csp = response?.headers()["content-security-policy"] ?? "";
   expect(csp).toMatch(/^default-src 'self';.*; style-src 'self' 'nonce-[A-Za-z0-9_-]{16,64}'$/);
   const meta = await page.locator('meta[name="csp-nonce"]').getAttribute("content");
   expect(csp).toContain(`'nonce-${meta}'`);
-  const again = await page.request.get("/next/c/anything");
+  const again = await page.request.get("/c/anything");
   expect(again.headers()["content-security-policy"]).not.toContain(`'nonce-${meta}'`); // a new one each time
   await page.getByLabel("Operator token").fill("wrong");
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -57,7 +57,7 @@ test("a task: tool steps, a question, its answer, and safe rich text", async ({ 
   await signIn(page);
   await page.getByLabel("Message", { exact: true }).fill("Plan a trip");
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
+  await expect(page).toHaveURL(/\/c\/[A-Za-z0-9_-]+$/);
   await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Plan a trip");
   await expect(page.getByText("HIMARI asks")).toBeVisible();
   await expect(page.getByText("Which city?")).toBeVisible();
@@ -148,11 +148,21 @@ test("the narrow layout has no horizontal scroll and opens the list as a drawer"
   await done();
 });
 
-test("an unknown asset is 404, never the page", async ({ request }) => {
-  expect((await request.get("/next/assets/nope.js")).status()).toBe(404);
-  expect((await request.get("/next/assets/..%2Findex.html")).status()).toBe(404);
-  const redirect = await request.get("/next", { maxRedirects: 0 });
-  expect(redirect.status()).toBe(308);
+test("an unknown asset is 404, never the page; the old /next/ addresses move to the same place", async ({ request, page }) => {
+  expect((await request.get("/assets/nope.js")).status()).toBe(404);
+  expect((await request.get("/assets/..%2Findex.html")).status()).toBe(404);
+  expect((await request.get("/assets/app.js")).status()).toBe(404); // the classic page is gone
+  const moved = await request.get("/next/s/5?x=1", { maxRedirects: 0 });
+  expect(moved.status()).toBe(308);
+  expect(moved.headers()["location"]).toBe("/s/5?x=1");
+  const katex = await request.get("/assets/katex/katex.min.js");
+  expect(katex.status()).toBe(200); // where the renderer loads it on the first formula
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/agents"); // an old bookmark
+  await expect(page).toHaveURL(/:\d+\/agents$/);
+  await expect(page.getByRole("heading", { name: "Work overview" })).toBeVisible();
+  await done();
 });
 
 // -- the hub's sessions (V3-P102 W2), against the scripted hub of scripts/web_next_hub.py -----------------------
@@ -176,7 +186,7 @@ test("the sidebar lists the hub's projects and their open sessions", async ({ pa
 test("a session: its turn, thought, edit with its diff, plan, request and text, then a live line", async ({ page }) => {
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/s/5");
+  await page.goto("/s/5");
   await expect(page.getByRole("heading", { level: 1 })).toContainText("demo › claude@linux");
   await expect(page.getByText("Waiting for you").first()).toBeVisible();
   await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Fix the failing test");
@@ -200,7 +210,7 @@ test("a session: its turn, thought, edit with its diff, plan, request and text, 
 test("the overview shows every open session and follows the list as it changes", async ({ page }) => {
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/agents");
+  await page.goto("/agents");
   const cards = page.getByRole("list", { name: "Open sessions" }).getByRole("listitem");
   await expect(cards.filter({ hasText: "archive" })).toHaveCount(1);
   await expect(cards.filter({ hasText: "demo" })).toHaveCount(2);
@@ -216,7 +226,7 @@ test("the overview shows every open session and follows the list as it changes",
 test("a long session shows its latest events and reads the earlier ones on request", async ({ page }) => {
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/s/7");
+  await page.goto("/s/7");
   await expect(page.getByText("Prompt 225", { exact: true })).toBeVisible();
   await expect(page.getByText("Prompt 125", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Earlier" }).click();
@@ -233,7 +243,7 @@ test("a message runs in an idle session; one sent meanwhile waits its turn and c
   test.skip(isMobile, "the scripted hub's sessions change once, on desktop");
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/s/8");
+  await page.goto("/s/8");
   await expect(page.getByRole("heading", { level: 1 })).toContainText("work › claude@linux");
   await page.getByLabel("Model").selectOption("sonnet"); // the hub offers it for claude
   await page.getByLabel("Message", { exact: true }).fill("First job");
@@ -256,7 +266,7 @@ test("a permission is answered in its session, and the agent goes on", async ({ 
   test.skip(isMobile, "the scripted hub's requests are answered once, on desktop");
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/s/9");
+  await page.goto("/s/9");
   const card = page.getByRole("group", { name: "Permission request" });
   await expect(card).toContainText("Write notes.md");
   await expect(card.getByRole("button", { name: "Refuse" })).toHaveCount(0); // the agent's own Reject says it
@@ -271,7 +281,7 @@ test("approvals lists what waits; a question is answered there; the tab title co
   test.skip(isMobile, "the scripted hub's requests are answered once, on desktop");
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/approvals");
+  await page.goto("/approvals");
   const question = page.getByRole("group", { name: "Question" });
   await expect(question).toContainText("Which color?");
   await expect(question).toContainText("work · codex · on linux");
@@ -281,7 +291,7 @@ test("approvals lists what waits; a question is answered there; the tab title co
   await question.getByRole("button", { name: "Answer" }).click();
   await expect(page.getByRole("group", { name: "Question" })).toHaveCount(0);
   await expect(page).toHaveTitle("(1) HIMARI");
-  await page.goto("/next/s/10");
+  await page.goto("/s/10");
   await expect(page.locator(".answer").filter({ hasText: "You chose blue." })).toBeVisible();
   await done();
 });
@@ -295,7 +305,7 @@ test("a new agent session from the home page opens once its task runs", async ({
   await page.getByLabel("Message", { exact: true }).fill("Start fresh");
   await page.keyboard.press("Enter");
   await expect(page.getByRole("status").filter({ hasText: "Starting the agent" })).toBeVisible();
-  await expect(page).toHaveURL(/\/next\/s\/\d+$/, { timeout: 10_000 });
+  await expect(page).toHaveURL(/\/s\/\d+$/, { timeout: 10_000 });
   await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Start fresh");
   await expect(page.locator(".answer").filter({ hasText: "Done: Start fresh" })).toBeVisible({ timeout: 10_000 });
   await done();
@@ -309,11 +319,11 @@ test("a session started before leaving home is told on coming back", async ({ pa
   await page.getByLabel("Message", { exact: true }).fill("Start and leave");
   await page.keyboard.press("Enter");
   await page.getByRole("link", { name: "Approvals" }).click(); // within the page: what it follows stays
-  await expect(page).toHaveURL(/\/next\/approvals$/);
+  await expect(page).toHaveURL(/\/approvals$/);
   await page.getByRole("button", { name: "New task" }).click();
   const told = page.getByRole("status").filter({ hasText: "The claude session in work started." });
   await expect(told).toBeVisible({ timeout: 10_000 });
-  await expect(page).toHaveURL(/\/next\/?$/); // told, not moved
+  await expect(page).toHaveURL(/:\d+\/?$/); // told, not moved
   await told.getByRole("link", { name: "Open it" }).click();
   await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Start and leave");
   await done();
@@ -323,13 +333,13 @@ test("a message to a session the agent lost follows its task to the new session"
   test.skip(isMobile, "the scripted hub loses this session once, on desktop");
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/s/12");
+  await page.goto("/s/12");
   await page.getByLabel("Message", { exact: true }).fill("Carry on");
   await page.keyboard.press("Enter");
-  await expect(page).not.toHaveURL(/\/next\/s\/12$/, { timeout: 10_000 });
+  await expect(page).not.toHaveURL(/\/s\/12$/, { timeout: 10_000 });
   await expect(page.getByRole("status").filter({ hasText: "The agent had lost session #12" })).toBeVisible();
   await expect(page.locator(".answer").filter({ hasText: "Done: Carry on" })).toBeVisible({ timeout: 10_000 });
-  await page.goto("/next/s/12");
+  await page.goto("/s/12");
   await expect(page.getByText(/This session is closed/)).toBeVisible();
   await done();
 });
@@ -342,7 +352,7 @@ test("HIMARI hands work to the hub: its card follows the task to the end and ope
   await signIn(page);
   await page.getByLabel("Message", { exact: true }).fill("Please hand this over: W4-HAND-OVER");
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
+  await expect(page).toHaveURL(/\/c\/[A-Za-z0-9_-]+$/);
   const card = page.getByRole("group", { name: "Handed to the hub" });
   await expect(card).toContainText("work");
   await expect(card).toContainText("Write the release notes");
@@ -351,7 +361,7 @@ test("HIMARI hands work to the hub: its card follows the task to the end and ope
   await expect(page.getByRole("list", { name: "Handed to the hub" }).getByRole("link", { name: /work · claude/ }))
     .toBeVisible(); // under the conversation in the sidebar
   await card.getByRole("link", { name: "Open session" }).click();
-  await expect(page).toHaveURL(/\/next\/s\/\d+$/);
+  await expect(page).toHaveURL(/\/s\/\d+$/);
   await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Write the release notes");
   await done();
 });
@@ -362,7 +372,7 @@ test("a hand-over that fails shows as failed, and one the hub refuses says why",
   await signIn(page);
   await page.getByLabel("Message", { exact: true }).fill("This one breaks: W4-FAILS");
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
+  await expect(page).toHaveURL(/\/c\/[A-Za-z0-9_-]+$/);
   const cards = page.getByRole("group", { name: "Handed to the hub" });
   await expect(cards.first()).toContainText("Failed", { timeout: 20_000 });
   await expect(cards.first()).toContainText("The tests did not pass.");
@@ -381,7 +391,7 @@ test("a hand-over that fails shows as failed, and one the hub refuses says why",
 test("a session's panel: its changes by file in either view, its plan and how it changed, its details", async ({ page, isMobile }) => {
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/s/5");
+  await page.goto("/s/5");
   await page.getByRole("button", { name: "Details" }).click();
   const panel = page.getByRole("complementary", { name: "Details" });
   await expect(panel.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true");
@@ -466,7 +476,7 @@ test("a conversation's menu: rename, its Tool servers, the trash with Undo, rest
   await page.getByRole("menuitem", { name: "Move to trash…" }).click();
   await expect(page.getByRole("dialog")).toContainText("It moves to the trash");
   await page.getByRole("dialog").getByRole("button", { name: "Move to trash" }).click();
-  await expect(page).toHaveURL(/\/next\/?$/);
+  await expect(page).toHaveURL(/:\d+\/?$/);
   const moved = page.getByRole("status").filter({ hasText: "Moved “Trip plans” to the trash" });
   await moved.getByRole("button", { name: "Undo" }).click();
   await expect(page.locator("header h1")).toHaveText("Trip plans");
@@ -485,7 +495,7 @@ test("a conversation's menu: rename, its Tool servers, the trash with Undo, rest
   await menu();
   await page.getByRole("menuitem", { name: "Move to trash…" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Move to trash" }).click();
-  await page.goto("/next/trash");
+  await page.goto("/trash");
   await page.getByRole("list", { name: "Trashed conversations" }).getByRole("listitem").filter({ hasText: "Trip plans" })
     .getByRole("button", { name: "Delete for good" }).click();
   await expect(page.getByRole("dialog")).toContainText("This cannot be undone.");
@@ -550,7 +560,7 @@ test("a / prompt with an argument comes into the composer as text", async ({ pag
   await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: /W4-FAILS/ }).click();
   // the conversation's own composer, not the home page's still on screen while it opens
   const message = page.getByPlaceholder("Message HIMARI (/ for prompts)");
-  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
+  await expect(page).toHaveURL(/\/c\/[A-Za-z0-9_-]+$/);
   await message.fill("/rev");
   const picker = page.getByRole("listbox", { name: "Prompts" });
   await expect(picker.getByRole("option", { name: /\/review/ })).toBeVisible();
@@ -626,7 +636,7 @@ test("settings: a device added shows its pairing code once, is renamed and revok
   test.skip(isMobile, "settings change once, on desktop");
   const done = await watch(page);
   await signIn(page);
-  await page.goto("/next/settings/devices");
+  await page.goto("/settings/devices");
   await page.getByLabel("New device name").fill("Test phone");
   await page.getByRole("button", { name: "Add device" }).click();
   await expect(page.getByLabel("Pairing code")).toHaveText(/\S{4,}/);
@@ -646,5 +656,36 @@ test("settings: a device added shows its pairing code once, is renamed and revok
   await expect(quiet).toContainText("Quiet until");
   await quiet.getByRole("button", { name: "End quiet" }).click();
   await expect(quiet).toContainText("Not quiet.");
+  await done();
+});
+
+// -- W6d: drafts across the switch ---------------------------------------------------------------------------------
+
+test("a draft the classic page kept comes into the new page; the user's own sign-out wipes drafts", async ({ page, isMobile }) => {
+  test.skip(isMobile, "drafts are checked once, on desktop");
+  const done = await watch(page);
+  await page.goto("/");
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open("himari-local", 1); // as the classic page's local_store.js made it
+    request.onupgradeneeded = () => { request.result.createObjectStore("drafts"); request.result.createObjectStore("unsaved"); };
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const tx = request.result.transaction("drafts", "readwrite");
+      tx.objectStore("drafts").put({ text: "From the classic page", references: [], writer: "w1" }, "home");
+      tx.oncomplete = () => { request.result.close(); resolve(); };
+    };
+  }));
+  await page.getByLabel("Operator token").fill(token());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  const message = page.getByLabel("Message", { exact: true });
+  await expect(message).toHaveValue("From the classic page");
+  await expect.poll(() => page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name)))
+    .not.toContain("himari-local"); // moved, and the old store deleted
+  await message.fill("A secret draft");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Operator token").fill(token());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
   await done();
 });

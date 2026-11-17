@@ -1,4 +1,4 @@
-# The new Web page (V3-P102 §7.5): type check, unit tests, the build, the wheel carrying it, and browser checks
+# The Web page (V3-P102 §7.5): type check, unit tests, the build, the wheel carrying it, and browser checks
 # against a real HIMARI server with a scripted model. On changes to the page, the server parts it relies on, or
 # this gate.
 name: web

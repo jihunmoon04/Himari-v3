@@ -75,6 +75,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 
 ```bash
 uv pip install -e ".[web]"                      # FastAPI·uvicorn (선택 설치)
+(cd web && npm ci && npm run build)              # Web 화면(V3-P102)을 패키지의 dist/로 빌드: 없으면 /는 빌드 안내만
 mkdir -m 700 -p ~/.himari                       # 실행 사용자 전용 데이터 폴더
 HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 ```

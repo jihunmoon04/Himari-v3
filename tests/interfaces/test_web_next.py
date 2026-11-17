@@ -1,4 +1,5 @@
-"""The new Web page at /next/ beside the old one (V3-P102 §7.2, W1): what is served, and the one CSP header."""
+"""The Web page (V3-P102 §7.2; at / since W6, after it grew at /next/): what is served, the one CSP header, the
+build's files and KaTeX, and the old /next/ addresses moved."""
 
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from himari.provider.scripted import ScriptedAdapter  # noqa: E402
 
 REAL_LOAD = next_page.load
 INDEX = ('<!doctype html><meta name="csp-nonce" content="__HIMARI_CSP_NONCE__">'
-         '<script type="module" src="/next/assets/index-1.js"></script>')
+         '<script type="module" src="/assets/index-1.js"></script>')
 
 
 def built(root: Path, index: str = INDEX) -> Path:
@@ -34,6 +35,13 @@ def built(root: Path, index: str = INDEX) -> Path:
     (dist / "assets" / "deep" / "font.woff2").write_bytes(b"\0font")
     (dist / "assets" / "logo.svg").write_text("<svg onload='x()'/>", encoding="utf-8")  # a kind never served
     (dist / "secret.txt").write_text("no", encoding="utf-8")
+    katex = dist / "assets" / "katex"  # as web/public puts it in the build
+    (katex / "fonts").mkdir(parents=True)
+    (katex / "katex.min.js").write_text("window.katex={}", encoding="utf-8")
+    (katex / "katex.min.css").write_text(".katex{}", encoding="utf-8")
+    (katex / "fonts" / "KaTeX_Main-Regular.woff2").write_bytes(b"wOF2font")
+    (katex / "fonts" / "KaTeX_Main-Regular.ttf").write_bytes(b"ttf")
+    (katex / "LICENSE").write_text("MIT", encoding="utf-8")
     return dist
 
 
@@ -67,40 +75,64 @@ def csp_headers(response: object) -> list[str]:
 
 
 def test_the_page_has_one_csp_with_a_fresh_style_nonce(client: TestClient) -> None:
-    first, second = client.get("/next/"), client.get("/next/c/abc")  # any address: the same page
+    # any address that is not the API or a file is the same page, which reads the address itself
+    pages = [client.get(path) for path in ("/", "/c/abc", "/s/5", "/settings/memory", "/trash", "/anything/else")]
     nonces = []
-    for page in (first, second):
+    for page in pages:
         assert page.status_code == 200 and page.headers["cache-control"] == "no-store"
+        assert page.headers["x-frame-options"] == "DENY" and page.headers["x-content-type-options"] == "nosniff"
         [csp] = csp_headers(page)  # one header: two policies would both apply
         nonce = re.search(r'name="csp-nonce" content="([A-Za-z0-9_-]+)"', page.text)
         assert nonce is not None and csp == style_nonce_csp(page_csp(), nonce.group(1))
         assert "script-src" not in csp  # scripts stay 'self' (default-src)
         nonces.append(nonce.group(1))
-    assert nonces[0] != nonces[1] and "__HIMARI_CSP_NONCE__" not in first.text
-    old = client.get("/")  # the old page keeps its policy, no nonce
-    assert csp_headers(old) == [page_csp()]
+    assert len(set(nonces)) == len(nonces) and "__HIMARI_CSP_NONCE__" not in pages[0].text
     api = client.get("/api/session")
-    assert csp_headers(api) == [page_csp()]
+    assert csp_headers(api) == [page_csp()] and api.headers["cache-control"] == "no-store"
+    assert api.json()["authenticated"] is False
+    for not_a_page in ("/api", "/api/nope", "/api/conversations/x/nope"):  # the API's misses are never the page
+        missing = client.get(not_a_page)
+        assert missing.status_code in (401, 404) and "text/html" not in missing.headers["content-type"], not_a_page
+    assert client.post("/", headers=SEND).status_code == 405  # a page to read only
 
 
 def test_only_built_assets_of_known_kinds_are_served(client: TestClient) -> None:
-    script = client.get("/next/assets/index-1.js")
+    script = client.get("/assets/index-1.js")
     assert script.status_code == 200 and script.headers["content-type"] == "text/javascript; charset=utf-8"
-    assert script.headers["cache-control"] == next_page.ASSET_CACHE
-    assert client.get("/next/assets/deep/font.woff2").headers["content-type"] == "font/woff2"
-    for missing in ("/next/assets/logo.svg", "/next/assets/nope.js", "/next/assets/..%2Fsecret.txt",
-                    "/next/assets/..%2Findex.html", "/next/assets/deep"):
-        assert client.get(missing).status_code == 404, missing
-    assert client.get("/next", follow_redirects=False).headers["location"] == "/next/"
-    assert client.post("/next/", headers=SEND).status_code == 405
+    assert script.headers["cache-control"] == next_page.ASSET_CACHE  # hashed: kept a year
+    assert client.get("/assets/deep/font.woff2").headers["content-type"] == "font/woff2"
+    # KaTeX, where the renderer loads it on the first formula
+    katex_script = client.get("/assets/katex/katex.min.js")
+    assert katex_script.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert katex_script.headers["cache-control"] == next_page.STABLE_CACHE  # its name stays when KaTeX changes
+    assert client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
+    font = client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
+    assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
+    for missing in ("/assets/logo.svg", "/assets/nope.js", "/assets/..%2Fsecret.txt", "/assets/..%2Findex.html",
+                    "/assets/deep", "/assets/katex/LICENSE", "/assets/katex/fonts/KaTeX_Main-Regular.ttf",
+                    "/assets/katex%2F..%2F..%2Fsecret.txt", "/assets/app.js"):  # the old page's files are gone
+        response = client.get(missing)
+        assert response.status_code == 404 and "text/html" not in response.headers["content-type"], missing
 
 
-def test_without_a_build_next_is_404_and_the_old_page_stays(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_old_next_addresses_move_to_the_same_place(client: TestClient) -> None:
+    moved = {"/next": "/", "/next/": "/", "/next/s/5": "/s/5", "/next/c/abc?x=1": "/c/abc?x=1",
+             "/next/settings/memory": "/settings/memory",
+             "/next//evil.example/x": "/evil.example/x",  # never another site's address
+             "/next/%5Cevil.example": "/evil.example"}
+    for old, new in moved.items():
+        response = client.get(old, follow_redirects=False)
+        assert response.status_code == 308 and response.headers["location"] == new, old
+
+
+def test_without_a_build_only_the_api_is_served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = serve(tmp_path, monkeypatch, None)
     try:
-        assert started.get("/next/").status_code == 404
-        assert started.get("/next/assets/index-1.js").status_code == 404
-        assert started.get("/").status_code == 200
+        for path in ("/", "/c/abc"):  # says how to build it, instead of a bare 404
+            page = started.get(path)
+            assert page.status_code == 503 and "npm run build" in page.text and "<script" not in page.text
+        assert started.get("/assets/index-1.js").status_code == 404
+        assert started.get("/api/session").status_code == 200
     finally:
         started.__exit__(None, None, None)
 

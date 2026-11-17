@@ -1,6 +1,6 @@
-// The assistant's text through the old page's audited renderer (rich_text.js): it builds DOM nodes itself and
-// never parses HTML; React only hands it a container.
-import { renderAssistantText } from "@static/rich_text.js";
+// The assistant's text through the audited renderer (lib/rich_text.js, also the Windows companion's): it builds DOM
+// nodes itself and never parses HTML; React only hands it a container.
+import { renderAssistantText } from "@/lib/rich_text.js";
 import { useLayoutEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 

@@ -16,7 +16,7 @@
     <Resource Include="Assets\character.json;Assets\character.png" />
     <Resource Include="Assets\himari.json" />
     <Content Include="Reader\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\..\..\src\himari\interfaces\web\static\rich_text.js" Link="Reader\assets\rich_text.js" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\..\..\src\himari\interfaces\web\static\katex\**\*" Link="Reader\assets\katex\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\..\web\src\lib\rich_text.js" Link="Reader\assets\rich_text.js" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\..\web\public\assets\katex\**\*" Link="Reader\assets\katex\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
