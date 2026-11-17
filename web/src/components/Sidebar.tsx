@@ -26,7 +26,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function DelegatedRow({ delegation }: { delegation: Delegation }) {
   const hub = useHubProjects();
   const task = useHubTask(delegation.taskId, hub.status === "on").data?.task;
-  const session = task?.session ?? delegation.session;
+  const session = task ? task.session ?? null : delegation.session; // the task's own answer once read
   const label = `${delegation.project} · ${task?.agent ?? delegation.agent ?? "agent"}`;
   const tone = task?.status === "running" || task?.status === "queued" ? "run" : task?.status === "waiting" ? "wait"
     : "idle";

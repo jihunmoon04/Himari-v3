@@ -24,7 +24,9 @@ export function DelegationCard({ delegation, compact }: { delegation: Delegation
   const task = useHubTask(delegation.taskId, on);
   const list = useHubList(on);
   const now = task.data?.task;
-  const session = now?.session ?? delegation.session;
+  // once the task is read, its session is the answer, null too (a send whose session was lost runs nowhere yet);
+  // before that, the session the call named
+  const session = now ? now.session ?? null : delegation.session;
   const listed = session != null ? list.sessions.find((s) => s.id === session) : undefined;
 
   // the session it runs in changed (it started, stopped, asked something): read the task again now
