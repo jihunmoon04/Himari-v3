@@ -35,7 +35,9 @@ export function Home() {
   const projects = hub.status === "on" ? (hub.data?.projects ?? []).filter((p) => p.name) : [];
   const project = projects.find((p) => p.name === target);
   const agents = (hub.data?.agents ?? []).filter((a) => a.installed !== false && a.name).map((a) => a.name!);
-  const chosenAgent = agent ?? project?.default_agent ?? agents[0];
+  // only an agent the hub has installed: the project's default when it is one of them, else the first
+  const usable = (name: string | null | undefined) => (name && agents.includes(name) ? name : undefined);
+  const chosenAgent = usable(agent) ?? usable(project?.default_agent) ?? agents[0];
   // a project chosen while the hub answered, gone from the list (the hub went down): it stays chosen and nothing
   // is sent until it is back; only the user changes where a message goes
   const unavailable = target !== HIMARI && !project;
