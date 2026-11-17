@@ -8,7 +8,8 @@ import type { HubEvent } from "@/api/hub";
 import type { Diff } from "@/features/timeline";
 
 export interface TurnChanges {
-  turn: number; // 1, 2, … in the events held (earlier turns not read yet are not counted)
+  id: number; // the seq of its turn_start (or of its first change): stays when earlier events are read
+  turn: number; // 1, 2, … in the events held (earlier turns not read yet are not counted): for its label only
   prompt: string;
   diffs: Diff[];
 }
@@ -26,24 +27,24 @@ function diffsOf(value: unknown): Diff[] {
 
 /** The diffs of ``events`` by turn; turns without any change are left out. */
 export function changesByTurn(events: readonly HubEvent[]): TurnChanges[] {
-  const turns: { turn: number; prompt: string; calls: Map<string, Diff[]> }[] = [];
+  const turns: { id: number; turn: number; prompt: string; calls: Map<string, Diff[]> }[] = [];
   let current: (typeof turns)[number] | null = null;
   for (const event of events) {
     const body = event.body ?? {};
     if (event.kind === "turn_start") {
-      current = { turn: turns.length + 1, prompt: str(body.prompt), calls: new Map() };
+      current = { id: event.seq, turn: turns.length + 1, prompt: str(body.prompt), calls: new Map() };
       turns.push(current);
       continue;
     }
     if (event.kind !== "tool" || !("diffs" in body)) continue;
     if (current === null) { // changes before the first turn held: a turn of their own
-      current = { turn: 1, prompt: "", calls: new Map() };
+      current = { id: event.seq, turn: 1, prompt: "", calls: new Map() };
       turns.push(current);
     }
     current.calls.set(`${event.attempt ?? ""}/${str(body.id) || String(event.seq)}`, diffsOf(body.diffs));
   }
   return turns
-    .map((t) => ({ turn: t.turn, prompt: t.prompt, diffs: [...t.calls.values()].flat() }))
+    .map((t) => ({ id: t.id, turn: t.turn, prompt: t.prompt, diffs: [...t.calls.values()].flat() }))
     .filter((t) => t.diffs.length > 0);
 }
 
@@ -111,12 +112,12 @@ export interface SplitRow {
 }
 
 /** A diff as side-by-side rows: a removed run beside the added run that replaced it; long unchanged runs keep
- *  their first and last two lines around a gap. At most ``limit`` rows. */
-export function splitRows(diff: Diff, limit = 400): SplitRow[] {
+ *  their first and last two lines around a gap. At most ``limit`` rows; ``more`` says some were left out. */
+export function splitRows(diff: Diff, limit = 400): { rows: SplitRow[]; more: boolean } {
   const rows: SplitRow[] = [];
   const parts = diffLines(diff.old ?? "", diff.new);
   const lines = (value: string) => value.replace(/\n$/, "").split("\n");
-  for (let index = 0; index < parts.length && rows.length < limit; index += 1) {
+  for (let index = 0; index < parts.length && rows.length <= limit; index += 1) { // one past: is there more?
     const part = parts[index]!;
     if (!part.added && !part.removed) {
       const same = lines(part.value);
@@ -137,5 +138,6 @@ export function splitRows(diff: Diff, limit = 400): SplitRow[] {
       rows.push(part.added ? { left: null, right: line, kind: "added" } : { left: line, right: null, kind: "removed" });
     }
   }
-  return rows.slice(0, limit);
+  const more = rows.length > limit;
+  return { rows: rows.slice(0, limit), more };
 }

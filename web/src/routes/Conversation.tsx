@@ -69,6 +69,12 @@ export function Conversation() {
   const { box, onScroll } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
   const closePanel = useCallback(() => setPanel(false), []);
+  // a turn ended: what it wrote may be in the folders open in the panel, read them again
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running) void client.invalidateQueries({ queryKey: ["machine"] });
+    wasRunning.current = running;
+  }, [client, running]);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => client.invalidateQueries({ queryKey: keys.detail(id) });
@@ -149,7 +155,7 @@ export function Conversation() {
         label="Details"
         storageKey="conversation"
         tabs={[
-          { id: "files", label: "Files", content: <FilesPanel conversation={id} /> },
+          { id: "files", label: "Files", content: <FilesPanel key={id} conversation={id} /> },
           {
             id: "handed", label: delegations.length ? `Hub (${delegations.length})` : "Hub",
             content: delegations.length ? (

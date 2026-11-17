@@ -24,7 +24,7 @@ function Changes({ events, earlier }: { events: HubEvent[]; earlier: boolean }) 
   const turns = useMemo(() => changesByTurn(events), [events]);
   const [turn, setTurn] = useState<number | "all">("all");
   const [split, setSplit] = useState(loadSplit);
-  const chosen = turn === "all" ? turns : turns.filter((t) => t.turn === turn);
+  const chosen = turn === "all" ? turns : turns.filter((t) => t.id === turn);
   const files = useMemo(() => byFile(chosen), [chosen]);
   const flip = (value: boolean) => {
     setSplit(value);
@@ -45,7 +45,7 @@ function Changes({ events, earlier }: { events: HubEvent[]; earlier: boolean }) 
           className="min-w-0 max-w-full truncate rounded-md border border-line bg-transparent px-1.5 py-1 text-xs">
           <option value="all">All turns ({turns.length})</option>
           {turns.map((t) => (
-            <option key={t.turn} value={t.turn}>Turn {t.turn}{t.prompt ? `: ${t.prompt.slice(0, 40)}` : ""}</option>
+            <option key={t.id} value={t.id}>Turn {t.turn}{t.prompt ? `: ${t.prompt.slice(0, 40)}` : ""}</option>
           ))}
         </select>
         <div className="ml-auto inline-flex overflow-hidden rounded-md border border-line text-xs" role="group" aria-label="Diff view">

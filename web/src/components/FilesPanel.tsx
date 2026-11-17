@@ -1,7 +1,7 @@
 // A HIMARI conversation's folders, to look at (V3-P102 §4.4; the classic page's file panel, V3-P75, V3-P99): its own
 // folder first, then the folders attached to it. It only shows: a text file as text, an image as the copy the
 // server's image sandbox made, anything else as a download. Names, paths and texts are shown as text only.
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ChevronLeft, File, Folder } from "lucide-react";
 import { useState } from "react";
 import { ApiError } from "@/api/client";
@@ -51,10 +51,17 @@ function FileView({ path, onBack }: { path: string; onBack: () => void }) {
 }
 
 function FolderView({ path, onOpen }: { path: string; onOpen: (path: string, kind: string) => void }) {
-  const listing = useQuery({ queryKey: ["machine", "list", path], queryFn: () => browseFolder(path), retry: false });
-  if (listing.isLoading) return <p className="text-faint">Loading…</p>;
-  if (listing.error) return <p role="alert" className="text-danger">{why(listing.error)}</p>;
-  const entries = listing.data?.entries ?? [];
+  const pages = useInfiniteQuery({
+    queryKey: ["machine", "list", path],
+    queryFn: ({ pageParam }) => browseFolder(path, pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next ?? undefined,
+    retry: false,
+  });
+  if (pages.isLoading) return <p className="text-faint">Loading…</p>;
+  if (pages.error) return <p role="alert" className="text-danger">{why(pages.error)}</p>;
+  const listing = { data: pages.data?.pages[0] };
+  const entries = pages.data?.pages.flatMap((page) => page.entries) ?? [];
   return (
     <div className="space-y-2">
       {listing.data?.parent && (
@@ -82,7 +89,12 @@ function FolderView({ path, onOpen }: { path: string; onOpen: (path: string, kin
           );
         })}
       </ul>
-      {listing.data?.next && <p className="text-xs text-faint">More entries are not shown.</p>}
+      {pages.hasNextPage && (
+        <button type="button" disabled={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}
+          className="text-xs text-muted underline hover:text-ink">
+          {pages.isFetchingNextPage ? "Loading…" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }

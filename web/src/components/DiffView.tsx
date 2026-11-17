@@ -20,8 +20,9 @@ export function diffStats(diff: Diff): { added: number; removed: number } {
 
 /** ``split``: before and after side by side (the panel's choice); otherwise one column of added and removed lines. */
 export function DiffView({ diff, split, tall }: { diff: Diff; split?: boolean; tall?: boolean }) {
-  const rows = useMemo(() => (split ? splitRows(diff, MAX_LINES) : []), [diff, split]);
-  const lines = useMemo(() => {
+  const { rows, more: splitMore } = useMemo(() => (split ? splitRows(diff, MAX_LINES) : { rows: [], more: false }),
+    [diff, split]);
+  const { lines, more: unifiedMore } = useMemo(() => {
     const out: { sign: "+" | "-" | " "; text: string }[] = [];
     for (const part of diffLines(diff.old ?? "", diff.new)) {
       const sign = part.added ? "+" : part.removed ? "-" : " ";
@@ -31,8 +32,9 @@ export function DiffView({ diff, split, tall }: { diff: Diff; split?: boolean; t
       for (const text of shown) out.push({ sign, text });
       if (out.length > MAX_LINES) break;
     }
-    return out.slice(0, MAX_LINES);
+    return { lines: out.slice(0, MAX_LINES), more: out.length > MAX_LINES };
   }, [diff]);
+  const cutHere = split ? splitMore : unifiedMore;
   const stats = useMemo(() => diffStats(diff), [diff]);
   return (
     <figure className="overflow-hidden rounded-md border border-line">
@@ -72,8 +74,9 @@ export function DiffView({ diff, split, tall }: { diff: Diff; split?: boolean; t
         ))}
       </pre>
       )}
-      {(diff.cut || diff.more > 0) && (
+      {(diff.cut || diff.more > 0 || cutHere) && (
         <p className="border-t border-line px-2 py-1 text-xs text-faint">
+          {cutHere && `Only the first ${MAX_LINES} lines are shown. `}
           {diff.cut && "Cut by the hub to fit. "}
           {diff.more > 0 && `${diff.more} more file${diff.more === 1 ? "" : "s"} not shown.`}
         </p>

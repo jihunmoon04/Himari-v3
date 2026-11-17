@@ -143,7 +143,8 @@ export interface ShownFile {
 }
 
 export const conversationFolders = (id: string) => get<{ items: AttachedFolder[] }>(`/api/conversations/${enc(id)}/workspaces`);
-export const browseFolder = (path: string) => get<FolderListing>(`/api/machine/list?path=${enc(path)}`);
+export const browseFolder = (path: string, after?: string | null) =>
+  get<FolderListing>(`/api/machine/list?path=${enc(path)}${after ? `&after=${enc(after)}` : ""}`);
 export const showMachineFile = (path: string) => get<ShownFile>(`/api/machine/file?path=${enc(path)}`);
 export const machineImageUrl = (path: string) => `/api/machine/image?path=${enc(path)}`;
 export const machineDownloadUrl = (path: string) => `/api/machine/download?path=${enc(path)}`;
