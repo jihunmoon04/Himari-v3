@@ -197,7 +197,16 @@ describe("the project requests' store", () => {
     expect(await store.readIds([1])).toBe(true);
     expect(store.getSnapshot().doubted.has(1)).toBe(false); // as the hub has it now
     store.doubt(1);
-    store.merge(req(1, 2, "applying")); // a newer record from the stream says it too
+    store.merge(req(1, 2, "applying")); // an event may tell of the request before the action: not enough
+    expect(store.getSnapshot().doubted.has(1)).toBe(true);
+    let answer: (read: Read) => void = () => undefined;
+    hub.ids.mockImplementationOnce(() => new Promise<Read>((resolve) => { answer = resolve; }));
+    const early = store.readIds([1]); // on its way before the next lost answer
+    store.doubt(1);
+    answer({ requests: [req(1, 2, "applying")], missing: [] });
+    await early;
+    expect(store.getSnapshot().doubted.has(1)).toBe(true); // it started before: it says nothing of the action
+    await store.readIds([1]);
     expect(store.getSnapshot().doubted.has(1)).toBe(false);
   });
 });

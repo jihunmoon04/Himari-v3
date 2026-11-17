@@ -71,4 +71,20 @@ describe("the list stream and its polling fallback", () => {
     expect(signals.polled.mock.calls.length).toBe(polls); // the timer stopped: one reader at a time
     stop();
   });
+
+  it("reads by asking while a stream that broke off is connected again, and stops when it is back", async () => {
+    const stop = openList();
+    const source = FakeSource.made[0]!;
+    source.fire("open");
+    source.fire("error"); // broke off: the browser connects it again by itself (CONNECTING)
+    source.fire("error");
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(signals.polled).toHaveBeenCalledTimes(2); // every 10 s, on one timer
+    expect(FakeSource.made).toHaveLength(1); // no stream of its own: the browser's comes back
+    source.fire("open");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(signals.polled).toHaveBeenCalledTimes(2);
+    expect(signals.connected).toHaveBeenCalledTimes(2);
+    stop();
+  });
 });

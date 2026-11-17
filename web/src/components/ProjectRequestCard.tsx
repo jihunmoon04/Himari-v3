@@ -27,13 +27,41 @@ import {
 import { hubKeys, useHubProjects } from "@/app/queries";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { cardView, heldFor, hubHasRequestKeys, runnerOf, secondsLeft } from "@/features/hub/project_view";
-import { requests, useHubRequests } from "@/features/hub/requests";
+import { requests, sessionKeyValue, useHubRequests } from "@/features/hub/requests";
 import { answerLost, requestOf, sendKeyed } from "@/features/hub/unconfirmed";
 import { cn } from "@/lib/cn";
 import { Button, IconButton } from "./ui/button";
 
 export const SETTLE_REST_MS = 60_000; // a fence's 30 s and some (a hub without H17)
-const resting = new Map<number, number>(); // request id: until when its settle button rests (shared by its cards)
+export const RESTING_KEY = "himari.hub.resting";
+
+/** Request id: until when its settle button rests. Shared by its cards and kept in this tab over a reload (ids and
+ *  times only), since the first fence may still run whatever the page does. */
+const resting = {
+  read(): Record<string, number> {
+    try {
+      const raw: unknown = JSON.parse(sessionKeyValue()?.getItem(RESTING_KEY) ?? "{}");
+      return raw && typeof raw === "object" ? raw as Record<string, number> : {};
+    } catch {
+      return {};
+    }
+  },
+  memory: {} as Record<string, number>,
+  get(id: number): number | undefined {
+    const until = this.read()[id] ?? this.memory[id];
+    return typeof until === "number" && until > Date.now() ? until : undefined;
+  },
+  set(id: number, until: number) {
+    this.memory[id] = until;
+    try {
+      const now = Date.now();
+      const kept = Object.fromEntries(Object.entries({ ...this.read(), [id]: until }).filter(([, t]) => typeof t === "number" && t > now));
+      sessionKeyValue()?.setItem(RESTING_KEY, JSON.stringify(kept));
+    } catch {
+      // no storage: for this page only
+    }
+  },
+};
 
 /** The words of a failure, by what it means for the user. */
 export function failureText(error: unknown): string {

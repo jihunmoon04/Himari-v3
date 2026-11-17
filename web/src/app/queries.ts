@@ -1,7 +1,7 @@
 // Server state through TanStack Query (V3-P102 §7.1). The principal's event stream (/api/events) tells when to
 // read again: a job started or ended, a conversation changed. Nothing here polls while that stream is open.
 import { QueryClient, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { ApiError, onUnauthorized } from "@/api/client";
 import {
   conversationActivity,
@@ -110,17 +110,41 @@ export const useHubTask = (id: number | null, enabled: boolean) =>
     },
   });
 
-/** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
-/** The projects read now (not from the cache); true when the read went through. */
+// V3-P103 §4.1: after a lost answer to a settings change or an adoption, the projects are in doubt for the whole page
+// (every control of them, and over leaving a page) until a read of them that started after that moment comes in.
+let projectReads = 0; // reads started by readProjectsNow
+let projectsDoubtedSince: number | null = null; // the read count when the answer was lost
+const doubtListeners = new Set<() => void>();
+const tellDoubt = () => { for (const listener of doubtListeners) listener(); };
+
+/** A lost answer to a change of the projects: their controls stop until the projects are read again. */
+export function doubtProjects() {
+  projectsDoubtedSince = projectReads;
+  tellDoubt();
+}
+
+/** Signed out: nothing of it stays. */
+export function clearProjectsDoubt() {
+  projectsDoubtedSince = null;
+  tellDoubt();
+}
+
+/** The projects read now: a read of its own (one on its way may have started before a change), not the cache.
+ *  True when it went through; it then ends a doubt that began before it started. */
 export async function readProjectsNow(client: QueryClient): Promise<boolean> {
+  const started = ++projectReads;
   try {
+    await client.cancelQueries({ queryKey: hubKeys.projects });
     await client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 });
-    return true;
   } catch {
     return false;
   }
+  if (projectsDoubtedSince !== null && started > projectsDoubtedSince) clearProjectsDoubt();
+  return true;
 }
 
+/** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on".
+ *  ``doubted``: a change of them may have been done and they were not read since (§4.1). */
 export function useHubProjects() {
   const notSetUp = (error: unknown) => error instanceof ApiError && error.status === 404;
   const query = useQuery({
@@ -132,10 +156,14 @@ export function useHubProjects() {
     retryDelay: (count) => Math.min(30_000, 2_000 * 2 ** count),
     refetchInterval: (q) => (q.state.error && !notSetUp(q.state.error) ? 30_000 : false),
   });
+  const doubted = useSyncExternalStore((listener) => {
+    doubtListeners.add(listener);
+    return () => doubtListeners.delete(listener);
+  }, () => projectsDoubtedSince !== null);
   const status = query.isLoading ? "loading"
     : query.error instanceof ApiError && query.error.status === 404 ? "off"
     : query.error ? "down" : "on";
-  return { ...query, status } as const;
+  return { ...query, status, doubted } as const;
 }
 
 export const useHubSessionDetail = (id: number) =>

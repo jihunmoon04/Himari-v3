@@ -10,7 +10,7 @@ import type { HubProjectRequest, HubProjects } from "@/api/hub";
 import { closeProjectDialog, useProjectDialog } from "@/features/hub/dialog";
 import { requests } from "@/features/hub/requests";
 import { unconfirmed } from "@/features/hub/unconfirmed";
-import { ProjectRequestCard } from "./ProjectRequestCard";
+import { ProjectRequestCard, RESTING_KEY } from "./ProjectRequestCard";
 
 const withH = (folders: Record<string, string>, held = true): HubProjects => ({
   projects: [{ name: "site" }],
@@ -125,6 +125,8 @@ describe("a project request's card", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Settle" }));
     const resting = await screen.findByRole("button", { name: "Wait a minute" });
     expect((resting as HTMLButtonElement).disabled).toBe(true);
+    expect(Object.keys(JSON.parse(sessionStorage.getItem(RESTING_KEY)!))).toEqual(["5"]); // over a reload too
+    sessionStorage.removeItem(RESTING_KEY);
   });
 
   it("when the device cannot be asked, lets the user say what happened on it", async () => {

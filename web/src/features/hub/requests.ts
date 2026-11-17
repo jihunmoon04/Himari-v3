@@ -15,8 +15,9 @@
 //   followed id is read at once unless its record is known and ended.
 // - **What it keeps.** Open records, followed ids' records, and records that ended less than KEEP_ENDED_MS ago.
 // - **Followed ids outlive a reload** in this tab's sessionStorage (ids only, the newest MAX_TRACKED).
-// - **In doubt.** After a lost answer to an action on a request (§4.1) its id is in doubt until the hub's record of
-//   it is read again (or a newer one arrives): every card of it offers nothing to press meanwhile.
+// - **In doubt.** After a lost answer to an action on a request (§4.1) its id is in doubt until a read that started
+//   after the answer was lost gives the hub's record of it: every card of it offers nothing to press meanwhile. A
+//   read already on its way, or a stream event, may tell of the request before the action: neither clears it.
 import { useSyncExternalStore } from "react";
 import { readProjectRequests, readProjectRequestsByIds, type HubProjectRequest } from "@/api/hub";
 
@@ -63,7 +64,8 @@ const valid = (raw: unknown): raw is HubProjectRequest => {
 export class RequestStore {
   private entries = new Map<number, Entry>();
   private tracked: number[];
-  private doubted = new Set<number>();
+  private doubted = new Map<number, number>(); // id: the read count when its answer was lost
+  private reads = 0; // reads started so far
   private listeners = new Set<() => void>();
   private snapshot: Snapshot;
   private reading: Promise<boolean> | null = null;
@@ -85,7 +87,7 @@ export class RequestStore {
   getSnapshot = () => this.snapshot;
 
   private emit() {
-    this.snapshot = { entries: new Map(this.entries), tracked: [...this.tracked], doubted: new Set(this.doubted) };
+    this.snapshot = { entries: new Map(this.entries), tracked: [...this.tracked], doubted: new Set(this.doubted.keys()) };
     for (const listener of this.listeners) listener();
   }
 
@@ -96,7 +98,6 @@ export class RequestStore {
     if (!valid(raw)) return false;
     const before = this.entries.get(raw.id);
     if (before?.request && before.request.rev >= raw.rev) return false;
-    this.doubted.delete(raw.id); // a newer record than any before: what happened is known
     const request = strip(raw);
     this.entries.set(raw.id, {
       request,
@@ -109,8 +110,14 @@ export class RequestStore {
 
   /** A lost answer to an action on ``id``: in doubt until its record is read again. */
   doubt(id: number) {
-    this.doubted.add(id);
+    this.doubted.set(id, this.reads);
     this.emit();
+  }
+
+  /** ``id`` was read by a read that started as read number ``started``: its doubt goes if it began before. */
+  private settled(id: number, started: number) {
+    const since = this.doubted.get(id);
+    if (since !== undefined && started > since) this.doubted.delete(id);
   }
 
   private markUnknown(id: number) {
@@ -143,6 +150,7 @@ export class RequestStore {
 
   private async readOnce(): Promise<boolean> {
     let listed: Set<number> | null = null;
+    const started = ++this.reads;
     try {
       const got = await this.reader.open();
       listed = new Set();
@@ -150,7 +158,7 @@ export class RequestStore {
         this.merge(request, true);
         if (valid(request)) listed.add(request.id);
       }
-      for (const id of listed) this.doubted.delete(id); // read again: as the hub has it now
+      for (const id of listed) this.settled(id, started); // read again: as the hub has it now
     } catch {
       // the open list could not be read: the records stay as they are, and followed ids are still asked
     }
@@ -176,6 +184,7 @@ export class RequestStore {
     let whole = true;
     for (let start = 0; start < ids.length; start += BATCH) {
       const chunk = ids.slice(start, start + BATCH);
+      const started = ++this.reads;
       try {
         const got = await this.reader.ids(chunk);
         const given = new Set<number>();
@@ -186,7 +195,7 @@ export class RequestStore {
         // H12 names the ids it no longer has; a hub without it cannot tell, so what it did not give back is unknown
         const missing = Array.isArray(got.missing) ? got.missing : chunk.filter((id) => !given.has(id));
         for (const id of missing) if (chunk.includes(id)) this.markUnknown(id);
-        for (const id of chunk) this.doubted.delete(id); // read again: as the hub has it now
+        for (const id of chunk) this.settled(id, started); // read again: as the hub has it now
       } catch {
         whole = false; // asked again on the next read
       }

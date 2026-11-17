@@ -4,7 +4,7 @@ import { setNonce } from "get-nonce";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
-import { queryClient, useSession } from "@/app/queries";
+import { clearProjectsDoubt, queryClient, useSession } from "@/app/queries";
 import { Shell } from "@/components/Shell";
 import { resetFollowed } from "@/features/hub/follow";
 import { requests } from "@/features/hub/requests";
@@ -45,6 +45,7 @@ function Root() {
     resetFollowed();
     resetPointed();
     requests.reset(false); // the followed ids stay in this tab, as the drafts do
+    clearProjectsDoubt();
     setDrafted(false);
   }, [known, signedIn]);
   if (session.isLoading) return null;

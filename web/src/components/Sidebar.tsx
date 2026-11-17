@@ -4,7 +4,7 @@ import { useState } from "react";
 import { NavLink, useMatch, useNavigate } from "react-router";
 import { signOut } from "@/api/himari";
 import { wipeDrafts } from "@/lib/drafts";
-import { keys, useActivity, useConversations, useEvents, useHubPending, useHubProjects, useHubTask, useServer } from "@/app/queries";
+import { clearProjectsDoubt, keys, useActivity, useConversations, useEvents, useHubPending, useHubProjects, useHubTask, useServer } from "@/app/queries";
 import { toItems } from "@/features/himari/items";
 import type { Delegation } from "@/features/timeline";
 import { byProject, useHubList } from "@/features/hub/list";
@@ -235,6 +235,7 @@ function SettingsMenu() {
     await signOut().catch(() => undefined);
     wipeDrafts(); // at once, before anything re-renders with them
     requests.reset(true); // V3-P103: what this tab followed, and what it sent with a key (it holds paths)
+    clearProjectsDoubt();
     unconfirmed.reset();
     await client.invalidateQueries({ queryKey: keys.session });
     navigate("/");

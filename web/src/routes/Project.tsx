@@ -7,7 +7,7 @@ import { FolderMinus, FolderPlus } from "lucide-react";
 import { useState } from "react";
 import { useSearchParams } from "react-router";
 import { newClientKey, setProjectSettings, type HubProject } from "@/api/hub";
-import { hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
+import { doubtProjects, hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
 import { AdoptButton } from "@/components/HeldFolders";
 import { failureText, ProjectRequestCard } from "@/components/ProjectRequestCard";
 import { PageHeader } from "@/components/Shell";
@@ -31,7 +31,6 @@ function Settings({ project }: { project: HubProject }) {
   const [preset, setPreset] = useState(project.preset ?? "");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [unsure, setUnsure] = useState(false); // a lost answer, and the projects not read since
   const changed: { agent?: string | null; profile?: string | null; preset?: string | null } = {};
   if (agent !== (project.default_agent ?? "")) changed.agent = agent || null;
   if (profile !== (project.profile ?? "")) changed.profile = profile || null;
@@ -52,6 +51,7 @@ function Settings({ project }: { project: HubProject }) {
     } catch (error) {
       if (answerLost(error)) { // it may have changed: the settings as the hub has them, before anything else
         setProblem("The hub did not answer; the projects are read again to show whether it changed.");
+        doubtProjects();
         await readAgain();
       } else {
         setProblem(failureText(error));
@@ -63,12 +63,11 @@ function Settings({ project }: { project: HubProject }) {
 
   const readAgain = async () => {
     setBusy(true);
-    const read = await readProjectsNow(client);
-    setUnsure(!read);
-    if (read) setProblem(null); // what is shown is the hub's now (changed: this form is drawn again)
+    if (await readProjectsNow(client)) setProblem(null); // what is shown is the hub's now (changed: drawn again)
     setBusy(false);
   };
 
+  const unsure = hub.doubted;
   const profiles = (hub.data?.profiles ?? []).filter((p) => p.name);
   return (
     <section aria-label="Settings" className="space-y-3">

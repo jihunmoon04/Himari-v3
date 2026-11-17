@@ -1,7 +1,8 @@
 // The hub's open sessions for the whole page (V3-P102 §6, §7.3): one /api/hub/stream for every view that needs
 // the list. ``sessions`` replaces the list, ``changed`` merges by id, ``hub`` says whether the hub is reachable.
 // When the stream cannot open (the hub has no stream left, or the server refused), the list is read every
-// POLL_MS and the stream is tried again after RETRY_MS.
+// POLL_MS and the stream is tried again after RETRY_MS. While a stream that broke off is being connected again by
+// the browser, the list is read every POLL_MS too, until it is back.
 //
 // V3-P103 §4.2, §5: the same stream carries the hub's project requests (``project_request``, one changed request)
 // and ``projects`` (read the projects again). Whoever listens for them (onProjectSignals) is also told when the
@@ -108,9 +109,19 @@ export function openList() {
     on("hub", (data) => set({ reachable: data.reachable === true }));
     on("project_request", (data) => projectSignals.request?.(data));
     on("projects", () => projectSignals.projects?.());
-    source.addEventListener("open", () => projectSignals.connected?.());
+    source.addEventListener("open", () => {
+      if (poll !== undefined) { // back after a break: the reads by asking stop (never two at once)
+        epoch += 1;
+        window.clearInterval(poll);
+        poll = undefined;
+      }
+      projectSignals.connected?.();
+    });
     source.addEventListener("error", () => {
-      if (source?.readyState !== EventSource.CLOSED) return; // the browser reconnects by itself
+      if (source?.readyState !== EventSource.CLOSED) { // broke off: the browser connects it again by itself
+        if (poll === undefined) poll = window.setInterval(() => void read(), POLL_MS); // ask meanwhile
+        return;
+      }
       // refused before it started (no stream left, signed out, not set up): read by asking, try again later
       source = null;
       void read();
