@@ -267,7 +267,9 @@ public sealed class RunnerSupervisor
                 string? key = DisagreementKey();
                 if (key is null) recheckKey = null;
                 else if (key != recheckKey) { recheckKey = key; recheck = true; }
-                if (!recheck && Unsettled() && system.UptimeMs - lastCheckMs >= RecheckEveryMs) recheck = true;
+                // A disagreement that stays (say the file is gone and stays gone) is asked about again every 15 s too:
+                // the runner may have ended since the last status (§5.2).
+                if (!recheck && (Unsettled() || key is not null) && system.UptimeMs - lastCheckMs >= RecheckEveryMs) recheck = true;
                 if (recheck) checkQueued = true;
             }
         }

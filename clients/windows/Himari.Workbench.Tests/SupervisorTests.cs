@@ -138,6 +138,26 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task AStateFileThatStaysMissingIsAskedAboutAgainEvery15Seconds()
+    {
+        string other = Id();
+        hub.Running = true; hub.Instance = other;
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        supervisor.PollStateFile();
+        await Wait.Until(() => hub.CallsOf("status").Length == 2);
+        await Task.Delay(100);
+        supervisor.PollStateFile();
+        Assert.Equal(2, hub.CallsOf("status").Length);
+        Assert.Equal(RunnerPhase.Running, supervisor.View.Phase);
+        // The runner ends while the file stays missing: 15 s later the status is asked again and shows it off.
+        hub.Running = false; hub.Instance = null;
+        system.Offset += 16_000;
+        supervisor.PollStateFile();
+        await Wait.Until(() => supervisor.View.Phase == RunnerPhase.Off);
+    }
+
+    [Fact]
     public async Task ARunnerThatGoesAwayIsNoticedFromTheStateFile()
     {
         var supervisor = New();
