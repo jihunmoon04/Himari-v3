@@ -209,7 +209,8 @@ export function Project() {
           {hub.status === "on" && !project && (
             <p className="text-sm text-muted">The hub has no project named {name ? `“${name}”` : "this"}.</p>
           )}
-          {project && <Settings key={`${project.default_agent}|${project.profile}|${project.preset}`} project={project} />}
+          {project && <Settings key={JSON.stringify([project.name, project.default_agent, project.profile, project.preset])}
+            project={project} />}
           {project && (
             <section aria-label="Folders on devices" className="space-y-2">
               <div className="flex items-center gap-2">

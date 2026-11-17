@@ -1,8 +1,8 @@
 // V3-P103 §4.1, §6.2: a settings change whose answer was lost: the projects are read again, and the form then shows
 // the settings as the hub has them (the change it did not make is not left standing in the form).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import * as api from "@/api/hub";
@@ -63,5 +63,27 @@ describe("a project's settings after a lost answer", () => {
     expect(await readProjectsNow(client)).toBe(true); // say, an unconfirmed request's "Read again"
     await waitFor(() => expect(agent.value).toBe(""));
     expect(read).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a project's settings", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("start over on another project's page: a draft never moves to another project", async () => {
+    const two: HubProjects = { ...hub, projects: [{ name: "site" }, { name: "docs" }] };
+    vi.spyOn(api, "readHubProjects").mockResolvedValue(two);
+    vi.spyOn(api, "readProjectRequests").mockResolvedValue({ requests: [], missing: null });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(hubKeys.projects, two);
+    const router = createMemoryRouter([{ path: "/project", element: <Project /> }],
+      { initialEntries: ["/project?name=site"] });
+    render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
+    fireEvent.change(screen.getByLabelText("Default agent"), { target: { value: "codex" } });
+    await act(() => router.navigate("/project?name=docs"));
+    expect(await screen.findByRole("heading", { level: 1, name: "docs" })).toBeTruthy();
+    expect((screen.getByLabelText("Default agent") as HTMLSelectElement).value).toBe("");
   });
 });
