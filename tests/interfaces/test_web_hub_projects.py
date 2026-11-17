@@ -236,7 +236,8 @@ def test_a_hub_without_ids_says_nothing_of_missing(client: TestClient, hub: Hub)
     hub.replies["project_requests"] = (200, {"requests": [REQUEST]})  # no H12: the page cannot tell gone from old
     assert client.get("/api/hub/project-requests", params={"ids": "7"}).json() == {"requests": [REQUEST],
                                                                                     "missing": None}
-    for odd in ({}, {"requests": None, "missing": [7]}, {"requests": "x"}):  # not an answer: a failed read
+    for odd in ({}, {"requests": None, "missing": [7]}, {"requests": "x"},  # not an answer: a failed read
+                {"requests": [{"id": 7}], "missing": []}, {"requests": [REQUEST, "x"]}):
         hub.replies["project_requests"] = (200, odd)
         failed = client.get("/api/hub/project-requests", params={"ids": "7"})
         assert failed.status_code == 503 and failed.json()["error"]["code"] == "hub_unknown", odd

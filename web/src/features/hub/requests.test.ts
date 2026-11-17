@@ -206,6 +206,9 @@ describe("the project requests' store", () => {
     answer({ requests: [req(1, 2, "applying")], missing: [] });
     await early;
     expect(store.getSnapshot().doubted.has(1)).toBe(true); // it started before: it says nothing of the action
+    hub.ids.mockResolvedValueOnce({ requests: [], missing: [] }); // says nothing of it: no answer for it
+    await store.readIds([1]);
+    expect(store.getSnapshot().doubted.has(1)).toBe(true);
     await store.readIds([1]);
     expect(store.getSnapshot().doubted.has(1)).toBe(false);
   });

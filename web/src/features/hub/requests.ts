@@ -195,7 +195,9 @@ export class RequestStore {
         // H12 names the ids it no longer has; a hub without it cannot tell, so what it did not give back is unknown
         const missing = Array.isArray(got.missing) ? got.missing : chunk.filter((id) => !given.has(id));
         for (const id of missing) if (chunk.includes(id)) this.markUnknown(id);
-        for (const id of chunk) this.settled(id, started); // read again: as the hub has it now
+        for (const id of chunk) { // read again: as the hub has it now (an id it said nothing of stays in doubt)
+          if (given.has(id) || missing.includes(id)) this.settled(id, started);
+        }
       } catch {
         whole = false; // asked again on the next read
       }

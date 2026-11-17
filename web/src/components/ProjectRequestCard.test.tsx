@@ -79,9 +79,10 @@ describe("a project request's card", () => {
   it("allows HIMARI's request, and after a lost answer reads it again", async () => {
     const answer = vi.spyOn(api, "answerProjectRequest")
       .mockRejectedValueOnce(new ApiError(503, "hub_unknown", "lost"));
-    const read = vi.mocked(api.readProjectRequestsByIds);
-    show({ id: 4, rev: 1, state: "waiting_user", kind: "create", project: "site", runner: "linux", origin: "model",
-      why: "for the docs" }, withH({}));
+    const waiting = { id: 4, rev: 1, state: "waiting_user", kind: "create", project: "site", runner: "linux",
+      origin: "model", why: "for the docs" } as const;
+    const read = vi.mocked(api.readProjectRequestsByIds).mockResolvedValue({ requests: [waiting], missing: [] });
+    show(waiting, withH({}));
     fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
     expect(await screen.findByText(/did not answer; it is read again/)).toBeTruthy();
     expect(answer).toHaveBeenCalledWith(4, true);
