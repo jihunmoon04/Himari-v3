@@ -1,9 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, FolderGit2, Inbox, LayoutGrid, LogOut, Monitor, Moon, PanelLeftClose, Settings, SquarePen, Sun } from "lucide-react";
 import { useState } from "react";
-import { NavLink, useNavigate } from "react-router";
+import { NavLink, useMatch, useNavigate } from "react-router";
 import { signOut } from "@/api/himari";
-import { keys, useActivity, useConversations, useHubPending, useHubProjects } from "@/app/queries";
+import { keys, useActivity, useConversations, useEvents, useHubPending, useHubProjects, useHubTask, useServer } from "@/app/queries";
+import { toItems } from "@/features/himari/items";
+import type { Delegation } from "@/features/timeline";
 import { byProject, useHubList } from "@/features/hub/list";
 import { StatusDot, activityOf, sessionName } from "./SessionBadge";
 import { setLook, setMode, useAppearance, type Look, type Mode } from "@/lib/appearance";
@@ -20,7 +22,45 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+/** One task the open conversation handed to the hub, as a link to the session it runs in (once it has one). */
+function DelegatedRow({ delegation }: { delegation: Delegation }) {
+  const hub = useHubProjects();
+  const task = useHubTask(delegation.taskId, hub.status === "on").data?.task;
+  const session = task?.session ?? delegation.session;
+  const label = `${delegation.project} · ${task?.agent ?? delegation.agent ?? "agent"}`;
+  const tone = task?.status === "running" || task?.status === "queued" ? "run" : task?.status === "waiting" ? "wait"
+    : "idle";
+  if (session == null) return <li className="px-3 py-1 text-xs text-faint">{label} · starting</li>;
+  return (
+    <li>
+      <NavLink to={`/s/${session}`} className={({ isActive }) => cn(
+        "flex items-center gap-2 rounded-lg px-3 py-1 text-xs text-muted hover:bg-raised hover:text-ink",
+        isActive && "bg-raised text-ink")}>
+        <StatusDot tone={tone} />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+      </NavLink>
+    </li>
+  );
+}
+
+/** Under the open conversation: the sessions its work was handed to (V3-P102 §5.1). Read from that conversation's
+ *  events, which its page has already read. */
+function DelegatedSessions({ conversation }: { conversation: string }) {
+  const events = useEvents(conversation);
+  const hubSource = useServer(true).data?.hub_source ?? null;
+  if (!hubSource) return null;
+  const handed = toItems(events.data?.items ?? [], hubSource)
+    .flatMap((item) => (item.kind === "delegation" && item.delegation.taskId !== null ? [item] : []));
+  if (!handed.length) return null;
+  return (
+    <ul className="ml-4 space-y-0.5 border-l border-line pl-1" aria-label="Handed to the hub">
+      {handed.map((item) => <DelegatedRow key={item.key} delegation={item.delegation} />)}
+    </ul>
+  );
+}
+
 function ConversationList() {
+  const open = useMatch("/c/:id")?.params.id ?? null;
   const { data, isLoading, error, hasNextPage, fetchNextPage, isFetching, isFetchingNextPage } = useConversations();
   const activity = useActivity().data;
   // Offset pages can shift while new conversations arrive: one row per conversation, and the next page is read
@@ -51,6 +91,7 @@ function ConversationList() {
               {working && <span className="pulse size-1.5 shrink-0 rounded-full bg-accent" aria-label="Working" />}
               {!working && waiting && <span className="size-1.5 shrink-0 rounded-full bg-wait" aria-label="Waiting for you" />}
             </NavLink>
+            {open === item.id && <DelegatedSessions conversation={item.id} />}
           </li>
         );
       })}

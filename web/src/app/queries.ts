@@ -11,7 +11,7 @@ import {
   readServer,
   readSession,
 } from "@/api/himari";
-import { readHubPending, readHubProjects, readHubSession } from "@/api/hub";
+import { readHubPending, readHubProjects, readHubSession, readHubTask } from "@/api/hub";
 import { onListSignal } from "@/features/hub/list";
 import { openStream } from "@/lib/sse";
 
@@ -88,7 +88,26 @@ export const hubKeys = {
   projects: ["hub", "projects"] as const,
   pending: ["hub", "pending"] as const,
   session: (id: number) => ["hub", "session", id] as const,
+  task: (id: number) => ["hub", "task", id] as const,
 };
+
+const TASK_POLL_MS = 15_000; // V3-P102 §5.1: a running task is read this often even without a hint
+
+/** A task followed to its end (H1): read every 15 s until done or failed; ``null``: nothing to read. */
+export const useHubTask = (id: number | null, enabled: boolean) =>
+  useQuery({
+    queryKey: hubKeys.task(id ?? 0),
+    queryFn: () => readHubTask(id!),
+    enabled: enabled && id !== null,
+    staleTime: 5_000,
+    retry: (count, error) => !(error instanceof ApiError && error.code === "hub_refused") && count < 2,
+    refetchInterval: (query) => {
+      const status = query.state.data?.task.status;
+      if (status === "done" || status === "failed") return false;
+      if (query.state.error instanceof ApiError && query.state.error.code === "hub_refused") return false;
+      return TASK_POLL_MS;
+    },
+  });
 
 /** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
 export function useHubProjects() {

@@ -4,7 +4,8 @@ import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } fro
 import { useParams } from "react-router";
 import { ApiError } from "@/api/client";
 import { cancelJob, resumeTurn, sendMessage } from "@/api/himari";
-import { keys, useDetail, useEvents } from "@/app/queries";
+import { keys, useDetail, useEvents, useServer } from "@/app/queries";
+import { DelegationCard } from "@/components/DelegationCard";
 import { Composer } from "@/components/Composer";
 import { PageHeader } from "@/components/Shell";
 import { Timeline } from "@/components/Timeline";
@@ -61,7 +62,9 @@ export function Conversation() {
   const events = useEvents(id);
   const running = detail.data?.job.running ?? false;
   const live = useLive(id, running ? (detail.data?.job.job_id ?? "") : null);
-  const items = useMemo(() => toItems(events.data?.items ?? []), [events.data]);
+  const hubSource = useServer(true).data?.hub_source ?? null;
+  const items = useMemo(() => toItems(events.data?.items ?? [], hubSource), [events.data, hubSource]);
+  const delegations = items.flatMap((item) => (item.kind === "delegation" ? [item] : []));
   const { box, onScroll } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -140,7 +143,8 @@ export function Conversation() {
       </div>
       <aside
         aria-label="Details"
-        className={cn("w-80 shrink-0 border-l border-line bg-panel p-4 text-sm max-md:hidden", !panel && "hidden")}
+        className={cn("w-80 shrink-0 overflow-y-auto border-l border-line bg-panel p-4 text-sm max-md:hidden",
+          !panel && "hidden")}
       >
         <h2 className="mb-3 font-medium">Details</h2>
         <dl className="space-y-2 text-muted">
@@ -148,6 +152,14 @@ export function Conversation() {
           <div><dt className="text-xs text-faint">Started</dt><dd>{conversation ? new Date(conversation.created_at).toLocaleString() : "—"}</dd></div>
           <div><dt className="text-xs text-faint">Conversation</dt><dd className="break-all font-mono text-xs">{id}</dd></div>
         </dl>
+        {delegations.length > 0 && (
+          <section className="mt-6" aria-label="Handed to the hub in this conversation">
+            <h3 className="mb-2 text-xs font-medium text-faint">Handed to the hub ({delegations.length})</h3>
+            <div className="space-y-2">
+              {delegations.map((item) => <DelegationCard key={item.key} delegation={item.delegation} compact />)}
+            </div>
+          </section>
+        )}
       </aside>
     </div>
   );

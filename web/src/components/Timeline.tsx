@@ -8,6 +8,7 @@ import type { LiveState } from "@/features/himari/live";
 import type { Item, ToolStep, Turn } from "@/features/timeline";
 import { cn } from "@/lib/cn";
 import { AssistantText } from "./AssistantText";
+import { DelegationCard } from "./DelegationCard";
 import { DiffView, diffStats } from "./DiffView";
 
 function UserBubble({ text, meta }: { text: string; meta?: string[] }) {
@@ -256,6 +257,8 @@ export function Timeline({ items, live, running, working, renderRequest }: {
           }
           case "turn":
             return <TurnLine key={item.key} turn={item.turn} />;
+          case "delegation":
+            return <DelegationCard key={item.key} delegation={item.delegation} />;
           case "notice":
             return (
               <p key={item.key} className="text-center text-xs text-faint">

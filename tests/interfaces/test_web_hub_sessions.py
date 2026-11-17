@@ -228,6 +228,17 @@ def test_a_session_and_a_task_as_the_page_gets_them() -> None:
 
 # -- the calls ----------------------------------------------------------------------------------
 
+def test_the_page_is_told_which_mcp_server_is_the_hub(client: TestClient, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    assert client.get("/api/server").json()["hub_source"] == "hub"
+    (tmp_path / "alone").mkdir()
+    alone = client_for(tmp_path / "alone", monkeypatch)  # no hub here: nothing to draw as its cards
+    try:
+        assert alone.get("/api/server").json()["hub_source"] is None
+    finally:
+        alone.__exit__(None, None, None)
+
+
 def test_the_reads_reach_the_hub_and_come_back_as_views(client: TestClient, hub: Hub) -> None:
     hub.replies = {"projects": (200, {"projects": [{"name": "demo", "path": "/p", "default_agent": "claude",
                                                     "preset": None, "profile": None}],

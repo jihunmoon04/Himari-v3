@@ -332,3 +332,45 @@ test("a message to a session the agent lost follows its task to the new session"
   await expect(page.getByText(/This session is closed/)).toBeVisible();
   await done();
 });
+
+// -- W4: work HIMARI hands to the hub (the scripted model hands over when a message carries a mark) --------------
+
+test("HIMARI hands work to the hub: its card follows the task to the end and opens the session", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted model hands each mark over once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Message", { exact: true }).fill("Please hand this over: W4-HAND-OVER");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
+  const card = page.getByRole("group", { name: "Handed to the hub" });
+  await expect(card).toContainText("work");
+  await expect(card).toContainText("Write the release notes");
+  await expect(card).toContainText("Done", { timeout: 20_000 }); // queued, working, done: followed by its task
+  await expect(card).toContainText("Done: Write the release notes");
+  await expect(page.getByRole("list", { name: "Handed to the hub" }).getByRole("link", { name: /work · claude/ }))
+    .toBeVisible(); // under the conversation in the sidebar
+  await card.getByRole("link", { name: "Open session" }).click();
+  await expect(page).toHaveURL(/\/next\/s\/\d+$/);
+  await expect(page.getByRole("article", { name: "Your message" })).toHaveText("Write the release notes");
+  await done();
+});
+
+test("a hand-over that fails shows as failed, and one the hub refuses says why", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted model hands each mark over once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Message", { exact: true }).fill("This one breaks: W4-FAILS");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
+  const cards = page.getByRole("group", { name: "Handed to the hub" });
+  await expect(cards.first()).toContainText("Failed", { timeout: 20_000 });
+  await expect(cards.first()).toContainText("The tests did not pass.");
+  await expect(page.getByText("I handed it to the hub (W4-FAILS).")).toBeVisible();
+  await page.getByLabel("Message", { exact: true }).fill("And this: W4-NOWHERE");
+  await page.keyboard.press("Enter");
+  await expect(cards).toHaveCount(2, { timeout: 15_000 });
+  await expect(cards.nth(1)).toContainText("Not handed over");
+  await expect(cards.nth(1)).toContainText("모르는 프로젝트: nowhere");
+  await expect(cards.nth(1).getByRole("link", { name: "Open session" })).toHaveCount(0);
+  await done();
+});

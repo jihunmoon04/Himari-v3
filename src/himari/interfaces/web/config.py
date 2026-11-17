@@ -63,11 +63,15 @@ Hub (V3-P95): ``HIMARI_HUB_URL`` (``http://127.0.0.1:8791``) and
 ``HIMARI_HUB_USER_TOKEN_FILE`` (the hub's ``user.token``, readable by this
 service only) let the signed-in operator answer the approvals and
 questions of the hub's coding agents on the Web. Both or neither.
+``HIMARI_HUB_MCP_SOURCE`` (default ``hub``) names the server in
+``mcp.json`` that is the hub: the page draws HIMARI's calls of its
+``hub_delegate`` as cards that follow the task (V3-P102 §5.1).
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -109,6 +113,8 @@ MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; uns
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 HUB_URL_VAR = "HIMARI_HUB_URL"  # V3-P95: the hub server; unset: its requests are not shown here
 HUB_USER_TOKEN_FILE_VAR = "HIMARI_HUB_USER_TOKEN_FILE"  # V3-P95: the hub's user.token
+HUB_MCP_SOURCE_VAR = "HIMARI_HUB_MCP_SOURCE"  # V3-P102 §5.1: which mcp.json server is the hub
+DEFAULT_HUB_MCP_SOURCE = "hub"
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
@@ -181,6 +187,7 @@ class WebConfig:
     machine_principals: tuple[str, ...] = ("operator",)
     hub_url: str | None = None  # V3-P95
     hub_user_token_file: str | None = None
+    hub_mcp_source: str = DEFAULT_HUB_MCP_SOURCE  # V3-P102 §5.1
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
     @classmethod
@@ -253,6 +260,9 @@ class WebConfig:
             raise WebConfigError(f"{HUB_URL_VAR} must be an http(s) URL")
         if hub_user_token_file is not None and not os.path.isabs(hub_user_token_file):
             raise WebConfigError(f"{HUB_USER_TOKEN_FILE_VAR} must be an absolute path")
+        hub_mcp_source = source.get(HUB_MCP_SOURCE_VAR, "").strip() or DEFAULT_HUB_MCP_SOURCE
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", hub_mcp_source):
+            raise WebConfigError(f"{HUB_MCP_SOURCE_VAR} must be an mcp.json server name (letters, digits, - and _)")
         return cls(
             host=host,
             port=port,
@@ -288,6 +298,7 @@ class WebConfig:
             machine_principals=machine_principals,
             hub_url=hub_url,
             hub_user_token_file=hub_user_token_file,
+            hub_mcp_source=hub_mcp_source,
             proactive=_proactive(source),
         )
 

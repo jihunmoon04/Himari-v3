@@ -18,6 +18,7 @@ export interface ServerInfo {
   sandbox: string;
   models: ModelOption[];
   streaming: boolean;
+  hub_source?: string | null; // V3-P102 §5.1: the mcp.json server that is the hub (null: none here)
 }
 
 export interface ConversationSummary {
