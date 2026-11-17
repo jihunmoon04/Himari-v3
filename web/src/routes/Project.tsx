@@ -4,7 +4,7 @@
 // ends), adding a device's folder, the folders held for its name (adopt), and its requests' cards.
 import { useQueryClient } from "@tanstack/react-query";
 import { FolderMinus, FolderPlus } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { newClientKey, setProjectSettings, type HubProject, type HubProjects } from "@/api/hub";
 import { doubtProjects, hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
@@ -65,29 +65,37 @@ function Settings({ project }: { project: HubProject }) {
     setBusy(false);
   };
 
-  /** The projects read again: the form shows the settings as the hub has them now, and says whether a change whose
-   *  answer was lost was made (§4.1). */
+  /** The projects were read again (here or by any other control): the form shows the settings as the hub has them
+   *  now, and says whether a change whose answer was lost was made (§4.1). */
+  const shown = (now: HubProject | undefined) => {
+    if (now) {
+      setAgent(now.default_agent ?? "");
+      setProfile(now.profile ?? "");
+      setPreset(now.preset ?? "");
+      const attempt = tried.current;
+      if (attempt) {
+        const has = { agent: now.default_agent, profile: now.profile, preset: now.preset };
+        const made = (Object.keys(attempt) as (keyof Changes)[]).every((name) => (attempt[name] ?? null) === (has[name] ?? null));
+        toast(made ? "The hub had saved it." : "It was not saved: the settings are as the hub has them.",
+          made ? undefined : "error");
+      }
+    }
+    tried.current = null;
+    setProblem(null);
+  };
+
   const readAgain = async () => {
     setBusy(true);
     if (await readProjectsNow(client)) {
-      const now = client.getQueryData<HubProjects>(hubKeys.projects)?.projects?.find((p) => p.name === project.name);
-      if (now) {
-        setAgent(now.default_agent ?? "");
-        setProfile(now.profile ?? "");
-        setPreset(now.preset ?? "");
-        const attempt = tried.current;
-        if (attempt) {
-          const has = { agent: now.default_agent, profile: now.profile, preset: now.preset };
-          const made = (Object.keys(attempt) as (keyof Changes)[]).every((name) => (attempt[name] ?? null) === (has[name] ?? null));
-          toast(made ? "The hub had saved it." : "It was not saved: the settings are as the hub has them.",
-            made ? undefined : "error");
-        }
-      }
-      tried.current = null;
-      setProblem(null);
+      shown(client.getQueryData<HubProjects>(hubKeys.projects)?.projects?.find((p) => p.name === project.name));
     }
     setBusy(false);
   };
+
+  const unsureNow = hub.doubted;
+  useEffect(() => { // the doubt ended by a read elsewhere (an unconfirmed request's, a held folder's): the same
+    if (!unsureNow && tried.current) shown(hub.data?.projects?.find((p) => p.name === project.name));
+  });
 
   const unsure = hub.doubted;
   const profiles = (hub.data?.profiles ?? []).filter((p) => p.name);

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import * as api from "@/api/hub";
 import type { HubProjects } from "@/api/hub";
-import { clearProjectsDoubt, hubKeys } from "@/app/queries";
+import { clearProjectsDoubt, hubKeys, readProjectsNow } from "@/app/queries";
 import { Project } from "./Project";
 
 const hub: HubProjects = {
@@ -41,5 +41,27 @@ describe("a project's settings after a lost answer", () => {
     await waitFor(() => expect(set).toHaveBeenCalledWith("site", { agent: "codex" }));
     await waitFor(() => expect(agent.value).toBe("")); // the hub's, not the attempted one
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("show them too when the projects are read again by another control after this one's read failed", async () => {
+    const read = vi.spyOn(api, "readHubProjects").mockRejectedValueOnce(new ApiError(503, "hub_unavailable", ""))
+      .mockResolvedValue(hub);
+    vi.spyOn(api, "readProjectRequests").mockResolvedValue({ requests: [], missing: null });
+    vi.spyOn(api, "setProjectSettings").mockRejectedValue(new ApiError(503, "hub_unknown", "lost"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(hubKeys.projects, hub);
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/project?name=site"]}><Project /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const agent = screen.getByLabelText("Default agent") as HTMLSelectElement;
+    fireEvent.change(agent, { target: { value: "codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/whether it changed is not known yet/)).toBeTruthy();
+    expect(agent.value).toBe("codex");
+    expect(await readProjectsNow(client)).toBe(true); // say, an unconfirmed request's "Read again"
+    await waitFor(() => expect(agent.value).toBe(""));
+    expect(read).toHaveBeenCalledTimes(2);
   });
 });
