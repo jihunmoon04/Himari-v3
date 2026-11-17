@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
