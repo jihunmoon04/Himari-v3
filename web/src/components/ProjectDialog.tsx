@@ -82,7 +82,10 @@ export function FolderPicker({ runner, picked, onPick }: {
         ))}
       </ul>
       <div className="flex items-center gap-2 border-t border-line px-2 py-1.5">
-        <Button className="text-xs" disabled={here === null} onClick={() => onPick(here)}>Choose this folder</Button>
+        {/* only a folder the device has just listed: one it could not read (gone, roots changed) is not confirmed */}
+        <Button className="text-xs" disabled={here === null || dirs === null || !!problem} onClick={() => onPick(here)}>
+          Choose this folder
+        </Button>
         {picked && <span className="min-w-0 truncate text-xs text-ok" title={picked}>Chosen: {picked}</span>}
       </div>
     </div>

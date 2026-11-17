@@ -29,6 +29,12 @@ function mount(children: React.ReactNode, known?: HubProjects) {
 }
 
 const askButton = () => screen.getByRole("button", { name: "Ask the device" }) as HTMLButtonElement;
+/** "Choose this folder", once the device has listed the folder entered. */
+async function choose() {
+  const button = screen.getByRole("button", { name: "Choose this folder" }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  fireEvent.click(button);
+}
 
 describe("asking a device again", () => {
   beforeEach(() => {
@@ -56,7 +62,7 @@ describe("asking a device again", () => {
     expect(askButton().disabled).toBe(true); // nothing picked yet
     fireEvent.click(await screen.findByRole("button", { name: "/r" }));
     fireEvent.click(await screen.findByRole("button", { name: "site" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose this folder" }));
+    await choose();
     await waitFor(() => expect(askButton().disabled).toBe(false));
     fireEvent.click(askButton());
     await waitFor(() => expect(make).toHaveBeenCalledWith({ kind: "add_folder", project: "site", runner: "linux",
@@ -74,7 +80,7 @@ describe("asking a device again", () => {
     expect(await screen.findByText(/could not be read again/)).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "/r" }));
     fireEvent.click(await screen.findByRole("button", { name: "site" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose this folder" }));
+    await choose();
     expect(askButton().disabled).toBe(true); // a folder, but not the projects as they are now
     down = false;
     fireEvent.click(screen.getByRole("button", { name: "Read again" }));
@@ -104,7 +110,7 @@ describe("a new project whose answer was lost", () => {
     fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "new" } });
     fireEvent.click(screen.getByRole("radio", { name: /^linux/ }));
     fireEvent.click(await screen.findByRole("button", { name: "/r" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose this folder" }));
+    await choose();
     await waitFor(() => expect(askButton().disabled).toBe(false));
     fireEvent.click(askButton());
     expect(await screen.findByText("Not confirmed: the hub's answer was lost")).toBeTruthy();
@@ -147,9 +153,31 @@ describe("what the dialog will not send", () => {
     mount(<ProjectDialogHost />, hub);
     openProjectDialog({ kind: "add_folder", project: "site", runner: "linux" });
     fireEvent.click(await screen.findByRole("button", { name: "/r" }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose this folder" }));
+    await choose();
     expect(await screen.findByText(/its answer was lost: send it again or discard it first/)).toBeTruthy();
     expect(askButton().disabled).toBe(true);
+  });
+});
+
+describe("a user device's folder", () => {
+  afterEach(() => {
+    cleanup();
+    closeProjectDialog();
+    vi.restoreAllMocks();
+  });
+
+  it("is chosen only once the device has listed it: not while it reads, nor when it cannot", async () => {
+    vi.spyOn(api, "readHubProjects").mockResolvedValue(hub);
+    vi.spyOn(api, "newClientKey").mockResolvedValue({ client_key: "k", key_time: "2026-11-18T10:00:00Z" });
+    vi.spyOn(api, "readRunnerDirs").mockImplementation(async (_runner, path) => {
+      if (path === null) return { path: null, dirs: ["/r"] };
+      throw new ApiError(409, "hub_refused", "not under the roots");
+    });
+    mount(<ProjectDialogHost />, hub);
+    openProjectDialog({ kind: "add_folder", project: "site", runner: "linux" });
+    fireEvent.click(await screen.findByRole("button", { name: "/r" }));
+    expect(await screen.findByText("not under the roots")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Choose this folder" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
