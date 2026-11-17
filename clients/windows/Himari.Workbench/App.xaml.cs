@@ -117,7 +117,7 @@ public partial class App : System.Windows.Application
         exiting = true;
         if (Dispatcher.CheckAccess()) window?.PrepareExit();
         else Dispatcher.BeginInvoke(() => window?.PrepareExit());
-        running.RequestStopForExit(RunnerSupervisor.ExitAckWait);
+        running.RequestStopForExit(RunnerSupervisor.ExitAckWait, sessionEnding: true);
     }
 
     protected override void OnExit(ExitEventArgs e)

@@ -419,6 +419,16 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public void LogoffAsksTheOwnedRunnerToStopEvenWhenNotLinked()
+    {
+        string owned = Id();
+        store.Update(s => s with { Linked = false, OwnedInstance = owned });
+        var outcome = New().RequestStopForExit(TimeSpan.Zero, sessionEnding: true);
+        Assert.Equal(1, outcome.RequestsWritten);
+        Assert.StartsWith(owned + ".", Assert.Single(StopFiles()));
+    }
+
+    [Fact]
     public void ExitNeverTouchesARunnerItDoesNotOwn()
     {
         hub.WriteState(Id(), "connected");

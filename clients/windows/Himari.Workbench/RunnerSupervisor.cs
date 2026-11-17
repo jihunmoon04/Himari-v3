@@ -282,7 +282,12 @@ public sealed class RunnerSupervisor
     /// stop request file goes to the owned instance and to the pending one, then this waits up to <paramref name="ackWait"/>
     /// for the runner to acknowledge. A start still running finishes on its own and only records its result.
     /// </summary>
-    public ExitStopOutcome RequestStopForExit(TimeSpan ackWait)
+    /// <param name="sessionEnding">
+    /// Logoff or Windows shutdown: the requests are written whatever the linkage (§5.5 has no linkage condition there,
+    /// and Windows ends the runner with the session anyway; the request lets it finish its work first). Tray exit
+    /// writes them only when linked (§5.3).
+    /// </param>
+    public ExitStopOutcome RequestStopForExit(TimeSpan ackWait, bool sessionEnding = false)
     {
         // Under the launch gate: a hub command either started before this, or never starts (§5.3).
         lock (launchGate) exiting = true;
@@ -293,18 +298,18 @@ public sealed class RunnerSupervisor
             exitDone.Wait(ackWait + TimeSpan.FromSeconds(1));
             return exitOutcome ?? new ExitStopOutcome(0, false);
         }
-        try { return exitOutcome = ExitCore(ackWait); }
+        try { return exitOutcome = ExitCore(ackWait, sessionEnding); }
         finally { exitDone.Set(); }
     }
 
-    private ExitStopOutcome ExitCore(TimeSpan ackWait)
+    private ExitStopOutcome ExitCore(TimeSpan ackWait, bool sessionEnding)
     {
         Publish();
         string? owned = null, pending = null; bool linked = false; string home = "";
         // Read under the settings lock: a start either sees "exiting" and stops before writing its pending id,
         // or has written it already and gets a stop request here.
         store.TryUpdate(s => { owned = s.OwnedInstance; pending = s.PendingInstance; linked = s.Linked; home = s.EffectiveHubHome; return s; });
-        if (!linked) return new ExitStopOutcome(0, false);
+        if (!linked && !sessionEnding) return new ExitStopOutcome(0, false);
         var requests = new Dictionary<string, string>();
         foreach (string target in new[] { owned, pending }.OfType<string>().Distinct())
         {
