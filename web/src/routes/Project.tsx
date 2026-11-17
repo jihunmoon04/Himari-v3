@@ -4,9 +4,9 @@
 // ends), adding a device's folder, the folders held for its name (adopt), and its requests' cards.
 import { useQueryClient } from "@tanstack/react-query";
 import { FolderMinus, FolderPlus } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { newClientKey, setProjectSettings, type HubProject } from "@/api/hub";
+import { newClientKey, setProjectSettings, type HubProject, type HubProjects } from "@/api/hub";
 import { doubtProjects, hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
 import { AdoptButton } from "@/components/HeldFolders";
 import { failureText, ProjectRequestCard } from "@/components/ProjectRequestCard";
@@ -23,6 +23,8 @@ import { cn } from "@/lib/cn";
 
 const field = "w-full rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-faint";
 
+type Changes = { agent?: string | null; profile?: string | null; preset?: string | null };
+
 function Settings({ project }: { project: HubProject }) {
   const hub = useHubProjects();
   const client = useQueryClient();
@@ -31,7 +33,8 @@ function Settings({ project }: { project: HubProject }) {
   const [preset, setPreset] = useState(project.preset ?? "");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const changed: { agent?: string | null; profile?: string | null; preset?: string | null } = {};
+  const tried = useRef<Changes | null>(null); // a change whose answer was lost, until the projects say what became of it
+  const changed: Changes = {};
   if (agent !== (project.default_agent ?? "")) changed.agent = agent || null;
   if (profile !== (project.profile ?? "")) changed.profile = profile || null;
   if (preset !== (project.preset ?? "")) changed.preset = preset || null;
@@ -51,6 +54,7 @@ function Settings({ project }: { project: HubProject }) {
     } catch (error) {
       if (answerLost(error)) { // it may have changed: the settings as the hub has them, before anything else
         setProblem("The hub did not answer; the projects are read again to show whether it changed.");
+        tried.current = changed;
         doubtProjects();
         await readAgain();
       } else {
@@ -61,9 +65,27 @@ function Settings({ project }: { project: HubProject }) {
     setBusy(false);
   };
 
+  /** The projects read again: the form shows the settings as the hub has them now, and says whether a change whose
+   *  answer was lost was made (§4.1). */
   const readAgain = async () => {
     setBusy(true);
-    if (await readProjectsNow(client)) setProblem(null); // what is shown is the hub's now (changed: drawn again)
+    if (await readProjectsNow(client)) {
+      const now = client.getQueryData<HubProjects>(hubKeys.projects)?.projects?.find((p) => p.name === project.name);
+      if (now) {
+        setAgent(now.default_agent ?? "");
+        setProfile(now.profile ?? "");
+        setPreset(now.preset ?? "");
+        const attempt = tried.current;
+        if (attempt) {
+          const has = { agent: now.default_agent, profile: now.profile, preset: now.preset };
+          const made = (Object.keys(attempt) as (keyof Changes)[]).every((name) => (attempt[name] ?? null) === (has[name] ?? null));
+          toast(made ? "The hub had saved it." : "It was not saved: the settings are as the hub has them.",
+            made ? undefined : "error");
+        }
+      }
+      tried.current = null;
+      setProblem(null);
+    }
     setBusy(false);
   };
 
