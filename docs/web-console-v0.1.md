@@ -487,13 +487,23 @@ W6은 넷으로 나눈다: **W6a** 대화 도구, **W6b** 입력(첨부·붙여�
   Playwright(모든 시험을 `/`에서, 옛 주소의 이동과 KaTeX).
 - **아직:** 휴대폰 실기 확인(소유자), 좁은 화면 다듬기, 메인 영역의 파일 탐색 화면, 백그라운드 알림(옛 화면에만 있던 것).
 
+### 7.15 H2: 세션 이름과 다시 열기 (2026-11-17)
+
+hub의 `rename`·`reopen`·`sessions {state: "closed"}`(hub [설계](https://github.com/jihunmoon04/himari-hub/blob/main/docs/sessions-h2-v0.1.md))를 중계하고 화면에 붙였다.
+
+- **중계:** 세션 레코드에 `title`(200자로 자름). `PUT /api/hub/sessions/{id}/title` `{"title"}`(빈 글·null은 지움, 검사는 hub), `POST /api/hub/sessions/{id}/reopen`, `GET /api/hub/sessions?state=closed`(그 밖의 `state`는 400). hub의 거절 문구는 그대로 보인다(`hub_refused`).
+- **이름:** 세션을 부르는 곳(사이드바, 작업 현황, 머리줄, 입력창 안내)은 `sessionName`: 이름이 있으면 이름, 없으면 에이전트@기기. 이름이 있으면 머리줄과 닫힌 목록에 에이전트@기기를 옅게 함께 보인다. 세션 패널 Info 탭의 Name 칸에서 저장하고 지운다(80자).
+- **닫힌 세션:** 작업 현황 아래 "Closed sessions"(접혀 있고, 펼칠 때 최근 닫힌 50개를 읽음; 목록 스트림에서 세션이 닫히거나 열리면 다시 읽음). 닫힌 세션 화면의 안내에 Reopen 단추(`user`·`fresh`로 닫혔을 때). `forgot`·`not_started`·`limited`면 이유를 보인다. 기기가 끊겨 있으면 그것도 함께 말한다.
+- 다시 열린 세션은 목록 스트림의 `changed`(열림)로 사이드바에 돌아온다(지금의 병합 그대로).
+- 검사: 중계 pytest(이름·닫힌 목록·다시 열기·거절), Playwright(이름 붙이기 → 사이드바 → 닫기 → 닫힌 목록에서 찾기 → 다시 열기 → 이름 지우기; 가짜 hub에 세 op).
+
 ## 8. hub에 필요한 것
 
 | id | 무엇 | 크기 | 언제 |
 | --- | --- | --- | --- |
 | H1 | `/user/task {id}`: §3.1 작업에 `session`, 결과 글 앞부분 | 작음, v1 더하기 | **W3 전** — hub #27로 만듦, 운영 `e79bb0f`(2026-11-17) |
 | H7 | 세션에 `updated_at`(마지막 이벤트나 상태 변화 시각) | 작음, v1 더하기 | W2와 함께, 없으면 표시 생략 — hub #27로 만듦, 운영 `e79bb0f` |
-| H2 | 세션 이름(`rename`), 닫힌 세션 다시 열기 | 작음~중간 | 나중 |
+| H2 | 세션 이름(`rename`), 닫힌 세션 다시 열기 | 작음~중간 | 2026-11-17 만듦: hub [설계](https://github.com/jihunmoon04/himari-hub/blob/main/docs/sessions-h2-v0.1.md), 화면 §7.15 |
 | H3 | 슬래시 명령 목록과 실행 | 중간 | 나중 |
 | H4 | 에이전트에 이미지·파일 첨부(ACP 리소스) | 중간 | 나중 |
 | H5 | 프로젝트 파일·git 상태 읽기(실행기 연산) | 중간 | 나중 |

@@ -9,14 +9,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ApiError } from "@/api/client";
 import {
-  cancelHubTask, closeHubSession, sendToHubSession, type HubSession as Session, type MessageChoices,
+  cancelHubTask, closeHubSession, reopenHubSession, sendToHubSession, type HubSession as Session, type MessageChoices,
 } from "@/api/hub";
 import { hubKeys, useHubPending, useHubProjects, useHubSessionDetail } from "@/app/queries";
 import { Composer } from "@/components/Composer";
 import { JumpToLatest } from "@/components/JumpToLatest";
 import { HubRequest } from "@/components/HubRequest";
 import { MessageOptions, chosen } from "@/components/MessageOptions";
-import { SessionBadge, sessionName } from "@/components/SessionBadge";
+import { SessionBadge, sessionLane, sessionName } from "@/components/SessionBadge";
 import { sessionTabs } from "@/components/SessionPanel";
 import { SidePanel } from "@/components/SidePanel";
 import { PageHeader } from "@/components/Shell";
@@ -35,6 +35,14 @@ const movedAlready = new Set<number>();
 /** Why a send, a stop or a close did not go through, in words. The answer lost on the way (``hub_unknown`` from the
  *  hub, or the connection to this server broke after the request left: ``offline``) means it may have been done:
  *  nothing is retried, and the user is told to check first (the hub keeps no key to drop a duplicate). */
+/** H2 (hub docs/sessions-h2-v0.1.md §3): what a closed session can be opened again from, and why not otherwise. */
+const REOPENABLE = new Set(["user", "fresh"]);
+const NOT_REOPENED: Record<string, string> = {
+  forgot: "its agent no longer has the conversation",
+  not_started: "the conversation never started",
+  limited: "its agent hit its limit and the work moved on",
+};
+
 export function sendProblem(failure: unknown): string {
   if (failure instanceof ApiError) {
     if (failure.code === "hub_unknown" || failure.code === "offline") {
@@ -118,6 +126,7 @@ function SessionPage({ id }: { id: number }) {
   const [choices, setChoices] = useState<MessageChoices>({});
   const [problem, setProblem] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
+  const [reopening, setReopening] = useState(false);
 
   // what this page sent, followed to the session it really runs in (§5.2)
   const followed = useFollowed();
@@ -185,6 +194,19 @@ function SessionPage({ id }: { id: number }) {
     }
   };
 
+  const reopen = async () => {
+    setReopening(true);
+    setProblem(null);
+    try {
+      await reopenHubSession(id);
+    } catch (failure) {
+      setProblem(sendProblem(failure));
+    } finally {
+      setReopening(false);
+      refresh();
+    }
+  };
+
   if (!Number.isInteger(id) || id < 1 || (detail.error instanceof ApiError && detail.error.status === 404)) {
     return (
       <>
@@ -210,6 +232,7 @@ function SessionPage({ id }: { id: number }) {
                 <>
                   <span className="text-muted">{session.project} › </span>
                   {sessionName(session)}
+                  {session.title && <span className="font-normal text-faint"> · {sessionLane(session)}</span>}
                 </>
               ) : (
                 "Session"
@@ -283,10 +306,24 @@ function SessionPage({ id }: { id: number }) {
           )}
           {problem && <Notice tone="danger" onClose={() => setProblem(null)}>{problem}</Notice>}
           {closed ? (
-            <p className="rounded-xl border border-dashed border-line px-4 py-3 text-sm text-faint">
-              This session is closed{session?.closed_reason ? ` (${session.closed_reason})` : ""}. Start a new one
-              from New task.
-            </p>
+            <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-line px-4 py-3 text-sm text-faint">
+              {session && REOPENABLE.has(session.closed_reason ?? "") ? (
+                <>
+                  <span className="min-w-0 flex-1">
+                    This session is closed{session.closed_reason ? ` (${session.closed_reason})` : ""}. Open it again
+                    to go on in the same conversation.
+                    {session.runner_connected === false && ` Its device (${session.runner}) is not connected now.`}
+                  </span>
+                  <Button variant="outline" disabled={reopening} onClick={() => void reopen()}>Reopen</Button>
+                </>
+              ) : (
+                <span>
+                  This session is closed{session?.closed_reason ? ` (${session.closed_reason})` : ""}
+                  {session?.closed_reason && session.closed_reason in NOT_REOPENED
+                    ? `: ${NOT_REOPENED[session.closed_reason]}` : ""}. Start a new one from New task.
+                </span>
+              )}
+            </div>
           ) : (
             <Composer
               draftKey={`hub-session-${id}`}

@@ -184,6 +184,7 @@ SESSION = _record({
     "effort": _short, "context": _record({"used": _int, "size": _int}), "created_at": _short, "migrated": _bool,
     "closed_at": _short, "first_seq": _int, "last_seq": _int, "live": _bool, "queued": _int, "current": _bool,
     "updated_at": _short,  # H7 (V3-P102 §8), once the hub has it
+    "title": _name,  # H2: the name the user gave it (hub docs/sessions-h2-v0.1.md)
 })
 _ATTEMPT = _record({"id": _int, "task_id": _int, "agent": _short, "runner": _short, "live": _bool,
                     "started_at": _short, "stop_requested_at": _short, "prompted": _bool, "ended_at": _short,
@@ -368,9 +369,10 @@ class HubClient:
         return projects_view(await self._call("projects", {}))
 
     async def sessions(self, *, project: str | None = None, runner: str | None = None, closed: bool = False,
-                       limit: int | None = None) -> list[dict[str, Any]]:
+                       state: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        """``state`` "closed": the closed ones only, the latest closed first (H2)."""
         reply = await self._call("sessions", _options(project=project, runner=runner, closed=closed or None,
-                                                      limit=limit))
+                                                      state=state, limit=limit))
         return sessions_of(reply.get("sessions"))
 
     async def session(self, session_id: int) -> dict[str, Any]:
@@ -422,6 +424,17 @@ class HubClient:
         cancelled = reply.get("cancelled")
         return {"closed": session_id, "cancelled": [task for task in (cancelled if isinstance(cancelled, list) else [])
                                                     if isinstance(task, int) and not isinstance(task, bool)]}
+
+    async def rename(self, session_id: int, title: str | None) -> dict[str, Any]:
+        """H2: name the session; an empty or null title clears its name."""
+        reply = await self._call("rename", {"session": session_id, "title": title})
+        shown = reply.get("title")
+        return {"session": session_id, "title": shown[:200] if isinstance(shown, str) else None}
+
+    async def reopen(self, session_id: int) -> dict[str, Any]:
+        """H2: open a closed session again; the next message sent to it goes on in its conversation."""
+        await self._call("reopen", {"session": session_id})
+        return {"reopened": session_id}
 
     async def preset(self, project: str, preset: str) -> dict[str, Any]:
         """The project's permission preset; an empty name clears it."""

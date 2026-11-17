@@ -1,8 +1,12 @@
 // Every open hub session at a glance (V3-P102 §4.5): project, agent and device, state, queue, context. Live from
-// the shared list stream; what waits for the user from the pending list.
+// the shared list stream; what waits for the user from the pending list. Below, the latest closed ones (H2), to open
+// one again.
+import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router";
+import { listClosedHubSessions } from "@/api/hub";
 import { useHubPending, useHubProjects } from "@/app/queries";
-import { SessionBadge, activityOf, sessionName } from "@/components/SessionBadge";
+import { SessionBadge, activityOf, sessionLane, sessionName } from "@/components/SessionBadge";
 import { PageHeader } from "@/components/Shell";
 import { useHubList } from "@/features/hub/list";
 import { cn } from "@/lib/cn";
@@ -64,8 +68,49 @@ export function Agents() {
               );
             })}
           </ul>
+          {hub.status === "on" && <ClosedSessions changed={list.sessions.map((s) => `${s.id}:${s.state}`).join()} />}
         </div>
       </div>
     </>
+  );
+}
+
+/** H2: the latest closed sessions, read when the list is opened and again when a session closes or opens. */
+function ClosedSessions({ changed }: { changed: string }) {
+  const [open, setOpen] = useState(false);
+  const closed = useQuery({
+    queryKey: ["hub", "closed", changed],
+    queryFn: () => listClosedHubSessions(50),
+    enabled: open,
+    placeholderData: (previous) => previous,
+  });
+  return (
+    <details className="mt-8" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer text-sm text-muted">Closed sessions</summary>
+      {closed.isLoading ? (
+        <p className="mt-2 text-sm text-faint">Loading…</p>
+      ) : closed.error ? (
+        <p role="alert" className="mt-2 text-sm text-danger">Could not read the closed sessions.</p>
+      ) : (closed.data?.sessions.length ?? 0) === 0 ? (
+        <p className="mt-2 text-sm text-faint">No closed sessions.</p>
+      ) : (
+        <ul className="mt-2 divide-y divide-line rounded-xl border border-line" aria-label="Closed sessions">
+          {closed.data?.sessions.map((session) => (
+            <li key={session.id}>
+              <Link to={`/s/${session.id}`} className="flex items-baseline gap-3 px-4 py-2 text-sm hover:bg-raised">
+                <span className="min-w-0 flex-1 truncate">
+                  <span className="text-faint">{session.project} › </span>{sessionName(session)}
+                  {session.title && <span className="text-faint"> · {sessionLane(session)}</span>}
+                </span>
+                <span className="shrink-0 text-xs text-faint">
+                  {session.closed_reason ?? "closed"}
+                  {session.closed_at ? ` · ${new Date(session.closed_at).toLocaleString()}` : ""}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
   );
 }

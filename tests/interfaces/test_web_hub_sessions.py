@@ -288,6 +288,30 @@ def test_the_users_own_work_on_a_session(client: TestClient, hub: Hub) -> None:
     assert client.get("/api/hub/tasks/99").json()["error"]["code"] == "hub_refused"
 
 
+def test_a_session_is_named_found_among_the_closed_and_opened_again(client: TestClient, hub: Hub) -> None:
+    """H2 (hub docs/sessions-h2-v0.1.md): the name, the closed list and reopening reach the hub as its ops."""
+    closed = {**SESSION, "state": "closed", "closed_reason": "user", "activity": "closed", "title": "릴리스 노트"}
+    hub.replies = {"rename": (200, {"session": 5, "title": "릴리스 노트"}), "reopen": (200, {"reopened": 5}),
+                   "sessions": (200, {"sessions": [closed]})}
+    named = client.put("/api/hub/sessions/5/title", json={"title": "  릴리스 노트 "}, headers=SEND)
+    assert named.json() == {"session": 5, "title": "릴리스 노트"}
+    hub.replies["rename"] = (200, {"session": 5, "title": None})
+    assert client.put("/api/hub/sessions/5/title", json={"title": None}, headers=SEND).json()["title"] is None
+    listed = client.get("/api/hub/sessions", params={"state": "closed", "limit": 50}).json()["sessions"]
+    assert listed == [closed] and listed[0]["title"] == "릴리스 노트"
+    assert client.post("/api/hub/sessions/5/reopen", headers=SEND).json() == {"reopened": 5}
+    assert hub.calls == [("rename", {"session": 5, "title": "  릴리스 노트 "}),  # the hub trims and checks it
+                         ("rename", {"session": 5, "title": None}),
+                         ("sessions", {"state": "closed", "limit": 50}), ("reopen", {"session": 5})]
+    for bad in ({}, {"title": 3}, {"title": "x", "other": 1}):
+        assert client.put("/api/hub/sessions/5/title", json=bad, headers=SEND).status_code == 400, bad
+    assert client.get("/api/hub/sessions", params={"state": "open"}).status_code == 400
+    assert len(hub.calls) == 4  # nothing more reached the hub
+    hub.replies["reopen"] = (400, {"error": "에이전트가 잃은 세션은 다시 열 수 없습니다. 새 대화를 여세요"})
+    refused = client.post("/api/hub/sessions/5/reopen", headers=SEND).json()["error"]
+    assert refused["code"] == "hub_refused" and "다시 열 수 없습니다" in refused["message"]
+
+
 def test_the_hubs_refusals_are_told_apart(client: TestClient, hub: Hub, tmp_path: Path) -> None:
     hub.replies = {"events": (400, {"error": "bad_cursor: after 9 > last_seq 2"}),
                    "send": (400, {"error": "열린 세션이 아님"})}

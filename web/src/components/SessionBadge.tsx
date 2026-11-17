@@ -38,5 +38,9 @@ export function SessionBadge({ session, pending }: { session: HubSession; pendin
   );
 }
 
-export const sessionName = (session: HubSession) =>
+/** Where the session runs: its agent, device and profile. */
+export const sessionLane = (session: HubSession) =>
   `${session.agent ?? "agent"}@${session.runner ?? "?"}${session.profile ? ` · ${session.profile}` : ""}`;
+
+/** What the session is called: the name the user gave it (H2), else where it runs. */
+export const sessionName = (session: HubSession) => session.title || sessionLane(session);

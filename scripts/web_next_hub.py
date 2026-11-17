@@ -55,7 +55,7 @@ def _session(sid: int, project: str, agent: str, runner: str, activity: str, tas
             "profile": None, "state": "open", "closed_reason": None, "activity": activity, "task": task,
             "last_task": task, "model": "opus", "effort": None, "context": {"used": 42_000, "size": 200_000},
             "created_at": AT, "migrated": False, "closed_at": None, "first_seq": 1, "last_seq": last, "live": True,
-            "queued": 0, "current": True, "updated_at": AT, **more}
+            "queued": 0, "current": True, "updated_at": AT, "title": None, **more}
 
 
 def _numbered(bodies: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -275,6 +275,10 @@ class FakeHub:
                                         {"name": "codex", "installed": True, "resting_until": None, "modes": []}],
                              "profiles": [], "models": {"claude": ["opus", "sonnet"]}, "efforts": {}, "runners": []}
             if op == "sessions":
+                if body.get("state") == "closed":  # H2: the closed ones, the latest closed first
+                    closed = [s for s in self.sessions.values() if s["state"] == "closed"]
+                    return 200, {"sessions": sorted(closed, key=lambda s: (s["closed_at"] or "", s["id"]),
+                                                    reverse=True)[:int(body.get("limit", 100))]}
                 return 200, {"sessions": sorted(self.sessions.values(), key=lambda s: -s["id"])}
             if op == "session":
                 found = self.sessions.get(body.get("id"))
@@ -310,6 +314,10 @@ class FakeHub:
                 return self._answer(body)
             if op == "close":
                 return self._close(body)
+            if op == "reopen":
+                return self._reopen(body)
+            if op == "rename":
+                return self._rename(body)
             return 400, {"error": f"op {op}"}
 
     def _send(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -430,8 +438,38 @@ class FakeHub:
         cancelled = [t["id"] for t in self._queued(sid)]
         for tid in cancelled:
             self.tasks[tid].update(status="failed", result="세션이 닫혔습니다")
-        self._touch(sid, state="closed", closed_reason="user", activity="closed", queued=0, closed_at=AT)
+        self._touch(sid, state="closed", closed_reason="user", activity="closed", queued=0,
+                    closed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"))
         return 200, {"closed": sid, "cancelled": cancelled}
+
+    def _reopen(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """H2 (hub docs/sessions-h2-v0.1.md §3): a closed session, open again, unless nothing is left to resume."""
+        sid = body.get("session")
+        found = self.sessions.get(sid) if isinstance(sid, int) else None
+        if found is None:
+            return 400, {"error": f"없는 세션: {sid}"}
+        if found["state"] == "closed":
+            if found["closed_reason"] in ("forgot", "not_started", "limited"):
+                return 400, {"error": "에이전트가 잃은 세션은 다시 열 수 없습니다. 새 대화를 여세요"}
+            self._touch(sid, state="open", closed_reason=None, closed_at=None, activity="idle")
+        return 200, {"reopened": sid}
+
+    def _rename(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """H2 (§2): one line of up to 80 characters; empty or null clears the name."""
+        sid = body.get("session")
+        if not isinstance(sid, int) or sid not in self.sessions:
+            return 400, {"error": f"없는 세션: {sid}"}
+        if "title" not in body:
+            return 400, {"error": "title을 주세요(지우려면 null이나 빈 글)"}
+        title = (body["title"] or "").strip() or None
+        if title is not None and len(title) > 80:
+            return 400, {"error": "세션 이름은 80자까지입니다"}
+        title_before = self.sessions[sid].get("title")
+        self.sessions[sid] = {**self.sessions[sid], "title": title}  # a name is not activity: updated_at stays
+        if title != title_before:
+            self.generation += 1
+            self.changed[sid] = self.generation
+        return 200, {"session": sid, "title": title}
 
     # -- the streams -----------------------------------------------------------------------------------------------
 

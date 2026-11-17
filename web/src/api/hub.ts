@@ -1,6 +1,6 @@
 // The hub's user path as this server relays it (/api/hub/…, V3-P102 §6; the hub's contract user-api-v1). Every
 // field may be missing: the server keeps only the contract's fields of the right type, and the hub only adds.
-import { enc, get, post } from "./client";
+import { enc, get, post, put } from "./client";
 
 export interface HubProject {
   name?: string;
@@ -58,6 +58,7 @@ export interface HubSession {
   queued?: number;
   current?: boolean;
   updated_at?: string; // H7, once the hub has it
+  title?: string | null; // H2: the name the user gave it
 }
 
 export interface HubChoice {
@@ -160,6 +161,14 @@ export const sendToHubSession = (id: number, prompt: string, choices: MessageCho
 export const startHubSession = (project: string, prompt: string, choices: MessageChoices & { agent?: string } = {}) =>
   post<{ task: HubTask }>("/api/hub/sessions", { project, prompt, ...choices });
 export const closeHubSession = (id: number) => post<{ closed: number; cancelled: number[] }>(`/api/hub/sessions/${id}/close`);
+/** H2: open a closed session again (the hub says why when it cannot). */
+export const reopenHubSession = (id: number) => post<{ reopened: number }>(`/api/hub/sessions/${id}/reopen`);
+/** H2: the session's name; empty or null clears it. */
+export const renameHubSession = (id: number, title: string | null) =>
+  put<{ session: number; title: string | null }>(`/api/hub/sessions/${id}/title`, { title });
+/** H2: the closed sessions, the latest closed first. */
+export const listClosedHubSessions = (limit = 50) =>
+  get<{ sessions: HubSession[] }>(`/api/hub/sessions?state=closed&limit=${limit}`);
 export const cancelHubTask = (id: number) => post<void>(`/api/hub/tasks/${id}/cancel`);
 /** Exactly one of: a permission's option, a question's content, or a refusal. */
 export type HubAnswer = { option_id: string } | { content: Record<string, unknown> } | { refuse: true };
