@@ -88,6 +88,23 @@ describe("the list stream and its polling fallback", () => {
     stop();
   });
 
+  it("keeps one timer when a stream that broke off is then refused", async () => {
+    const stop = openList();
+    const first = FakeSource.made[0]!;
+    first.fire("open");
+    first.fire("error"); // broke off: polling while the browser connects it again
+    first.readyState = FakeSource.CLOSED;
+    first.fire("error"); // and then refused
+    await vi.advanceTimersByTimeAsync(25_000);
+    const polls = signals.polled.mock.calls.length;
+    expect(polls).toBe(3); // at once on the refusal, then every 10 s: one timer
+    await vi.advanceTimersByTimeAsync(5_000); // the stream is tried again, and is back
+    FakeSource.made[1]!.fire("open");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(signals.polled.mock.calls.length).toBe(polls);
+    stop();
+  });
+
   it("reads the projects and requests on each tick even while the list read hangs", async () => {
     vi.mocked(api.listHubSessions).mockImplementation(() => new Promise(() => undefined)); // never answers
     const stop = openList();

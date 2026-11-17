@@ -124,6 +124,7 @@ export function openList() {
       }
       // refused before it started (no stream left, signed out, not set up): read by asking, try again later
       source = null;
+      window.clearInterval(poll); // one timer only (a break before may have started one)
       void read();
       poll = window.setInterval(() => void read(), POLL_MS);
       retry = window.setTimeout(connect, RETRY_MS);
