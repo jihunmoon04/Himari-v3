@@ -68,14 +68,15 @@ export function Agents() {
               );
             })}
           </ul>
-          {hub.status === "on" && <ClosedSessions changed={list.sessions.map((s) => `${s.id}:${s.state}`).join()} />}
+          {hub.status === "on" && <ClosedSessions changed={list.sessions.map((s) => `${s.id}:${s.state}:${s.title ?? ""}`).join()} />}
         </div>
       </div>
     </>
   );
 }
 
-/** H2: the latest closed sessions, read when the list is opened and again when a session closes or opens. */
+/** H2: the latest closed sessions, read when the list is opened and again when a session closes, opens or is
+ *  renamed (``changed``: what the list stream says of each session). */
 function ClosedSessions({ changed }: { changed: string }) {
   const [open, setOpen] = useState(false);
   const closed = useQuery({
