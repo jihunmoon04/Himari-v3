@@ -721,3 +721,46 @@ test("a draft the classic page kept comes into the new page; the user's own sign
   await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
   await done();
 });
+
+// -- H2: a session's name, and a closed session opened again (hub docs/sessions-h2-v0.1.md) ------------------------
+
+test("a session is named, closed, found among the closed ones and opened again, and its name cleared", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub's sessions change once, on desktop; it leaves session 7 as it found it");
+  const done = await watch(page);
+  page.on("dialog", (dialog) => void dialog.accept()); // "Close this session?"
+  await signIn(page);
+  await page.goto("/s/7");
+  const heading = page.getByRole("heading", { level: 1 });
+  await expect(heading).toContainText("archive › claude@linux");
+  await page.getByRole("button", { name: "Details" }).click();
+  const panel = page.getByRole("complementary", { name: "Details" });
+  await panel.getByRole("tab", { name: "Info" }).click();
+  await panel.getByLabel("Name").fill("  Release notes ");
+  await panel.getByRole("button", { name: "Save" }).click();
+  await expect(heading).toContainText("archive › Release notes · claude@linux");
+  await expect(page.getByRole("list", { name: "Sessions of archive" }).getByRole("link", { name: /Release notes/ }))
+    .toBeVisible(); // the list stream carries the name
+  await panel.getByLabel("Name").fill("x".repeat(80));
+  await expect(panel.getByLabel("Name")).toHaveValue("x".repeat(80)); // 80 characters at most
+  await panel.getByLabel("Name").fill("Release notes");
+  await panel.getByRole("button", { name: "Close session" }).click();
+  await expect(page.getByText("This session is closed (user)")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Sessions of archive" })).toContainText("No open sessions");
+  await page.goto("/agents");
+  await page.getByText("Closed sessions", { exact: true }).click();
+  const closed = page.getByRole("list", { name: "Closed sessions" });
+  await expect(closed).toContainText("archive › Release notes");
+  await closed.getByRole("link", { name: /Release notes/ }).click();
+  await expect(page).toHaveURL(/\/s\/7$/);
+  await page.getByRole("button", { name: "Reopen" }).click();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible(); // the composer is back
+  await expect(page.getByText("This session is closed")).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "Sessions of archive" }).getByRole("link", { name: /Release notes/ }))
+    .toBeVisible();
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Details" }).click();
+  await panel.getByRole("tab", { name: "Info" }).click();
+  await panel.getByRole("button", { name: "Clear" }).click();
+  await expect(heading).toContainText("archive › claude@linux");
+  await expect(panel.getByLabel("Name")).toHaveValue("");
+  await done();
+});

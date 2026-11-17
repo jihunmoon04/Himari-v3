@@ -1,8 +1,11 @@
 // A hub session's right-hand panel (V3-P102 §4.4): what it changed (by file, one turn or all, as one column or side
 // by side), what it planned (the latest plan and every earlier one), and what it is (agent, device, model, context,
 // queue, attempts, closing it). Every text here came from an agent: shown as text only.
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import type { HubEvent, HubSession, HubSessionDetail } from "@/api/hub";
+import { ApiError } from "@/api/client";
+import { renameHubSession, type HubEvent, type HubSession, type HubSessionDetail } from "@/api/hub";
+import { hubKeys } from "@/app/queries";
 import { byFile, changesByTurn, planHistory } from "@/features/hub/changes";
 import { cn } from "@/lib/cn";
 import { DiffView } from "./DiffView";
@@ -114,6 +117,43 @@ function Fact({ term, children }: { term: string; children: React.ReactNode }) {
   );
 }
 
+/** H2: the session's name, given, changed or cleared here (one line, 80 characters; the hub checks it). */
+function NameField({ session }: { session: HubSession }) {
+  const client = useQueryClient();
+  const [value, setValue] = useState(session.title ?? "");
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const save = async (title: string | null) => {
+    setSaving(true);
+    setProblem(null);
+    try {
+      const saved = await renameHubSession(session.id, title);
+      setValue(saved.title ?? "");
+    } catch (failure) {
+      setProblem(failure instanceof ApiError ? failure.message : "Could not rename it.");
+    } finally {
+      setSaving(false);
+      void client.invalidateQueries({ queryKey: hubKeys.session(session.id) });
+    }
+  };
+  const changed = value.trim() !== (session.title ?? "");
+  return (
+    <form className="space-y-1" onSubmit={(event) => { event.preventDefault(); void save(value); }}>
+      <label className="text-xs text-faint" htmlFor={`session-name-${session.id}`}>Name</label>
+      <div className="flex gap-1.5">
+        <input id={`session-name-${session.id}`} value={value} maxLength={80} placeholder="No name"
+          onChange={(event) => setValue(event.target.value)}
+          className="min-w-0 flex-1 rounded-md border border-line bg-transparent px-2 py-1 text-sm text-ink" />
+        <Button type="submit" variant="outline" disabled={saving || !changed}>Save</Button>
+        {session.title && (
+          <Button type="button" variant="ghost" disabled={saving} onClick={() => void save(null)}>Clear</Button>
+        )}
+      </div>
+      {problem && <p role="alert" className="text-xs text-danger">{problem}</p>}
+    </form>
+  );
+}
+
 function Info({ session, detail, context, running, closing, onClose }: {
   session: HubSession | undefined;
   detail: HubSessionDetail | undefined;
@@ -127,7 +167,8 @@ function Info({ session, detail, context, running, closing, onClose }: {
   const size = context?.size ?? 0;
   return (
     <>
-      <dl className="space-y-3 text-muted">
+      <NameField key={`${session.id}:${session.title ?? ""}`} session={session} />
+      <dl className="mt-4 space-y-3 text-muted">
         <Fact term="Project">{session.project}</Fact>
         <Fact term="Agent">{session.agent}{session.profile ? ` · ${session.profile}` : ""}</Fact>
         <Fact term="Device">{session.runner} {session.runner_connected === false ? "(not connected)" : ""}</Fact>

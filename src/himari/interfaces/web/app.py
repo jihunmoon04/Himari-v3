@@ -532,6 +532,12 @@ class HubPresetBody(_Body):
     preset: str = Field(max_length=200)  # empty: none
 
 
+class HubRenameBody(_Body):
+    """H2: a session's name; the hub checks it (one line, 80 characters). Empty or null clears it."""
+
+    title: str | None = Field(max_length=400)
+
+
 class McpDefaultBody(_Body):
     enabled: StrictBool
     revision: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -2572,10 +2578,12 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     @app.get("/api/hub/sessions")
     async def hub_sessions(project: str | None = Query(default=None, min_length=1, max_length=200),
                            runner: str | None = Query(default=None, min_length=1, max_length=200),
-                           closed: bool = False, limit: int = Query(default=100, ge=1, le=500),
+                           closed: bool = False, state: Literal["closed"] | None = None,
+                           limit: int = Query(default=100, ge=1, le=500),
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """``state=closed``: the closed ones only, the latest closed first (H2: where a closed one is found)."""
         sessions_now = await hub_call(hub_for(who).sessions(project=project, runner=runner, closed=closed,
-                                                            limit=limit))
+                                                            state=state, limit=limit))
         return {"sessions": sessions_now}
 
     @app.get("/api/hub/sessions/{session_id}")
@@ -2610,6 +2618,18 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def hub_session_close(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
                                 ) -> dict[str, Any]:
         return await hub_call(hub_for(who).close(session_id))
+
+    @app.post("/api/hub/sessions/{session_id}/reopen")
+    async def hub_session_reopen(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
+                                 ) -> dict[str, Any]:
+        """H2: a closed session, open again; the hub says why when it cannot be (its agent lost it, …)."""
+        return await hub_call(hub_for(who).reopen(session_id))
+
+    @app.put("/api/hub/sessions/{session_id}/title")
+    async def hub_session_rename(body: HubRenameBody, session_id: int = Path(ge=1, le=2**53),
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """H2: the session's name, open or closed; empty or null clears it."""
+        return await hub_call(hub_for(who).rename(session_id, body.title))
 
     @app.put("/api/hub/projects/{project}/preset")
     async def hub_preset(body: HubPresetBody, project: str = Path(min_length=1, max_length=200),
