@@ -15,6 +15,8 @@
 //   followed id is read at once unless its record is known and ended.
 // - **What it keeps.** Open records, followed ids' records, and records that ended less than KEEP_ENDED_MS ago.
 // - **Followed ids outlive a reload** in this tab's sessionStorage (ids only, the newest MAX_TRACKED).
+// - **In doubt.** After a lost answer to an action on a request (§4.1) its id is in doubt until the hub's record of
+//   it is read again (or a newer one arrives): every card of it offers nothing to press meanwhile.
 import { useSyncExternalStore } from "react";
 import { readProjectRequests, readProjectRequestsByIds, type HubProjectRequest } from "@/api/hub";
 
@@ -34,6 +36,7 @@ export interface Entry {
 export interface Snapshot {
   entries: ReadonlyMap<number, Entry>;
   tracked: readonly number[];
+  doubted: ReadonlySet<number>;
 }
 
 type Read = { requests: HubProjectRequest[]; missing: number[] | null };
@@ -60,6 +63,7 @@ const valid = (raw: unknown): raw is HubProjectRequest => {
 export class RequestStore {
   private entries = new Map<number, Entry>();
   private tracked: number[];
+  private doubted = new Set<number>();
   private listeners = new Set<() => void>();
   private snapshot: Snapshot;
   private reading: Promise<boolean> | null = null;
@@ -68,7 +72,7 @@ export class RequestStore {
   constructor(private readonly reader: Reader, private readonly storage: () => KeyValue | null,
               private readonly now: () => number = Date.now) {
     this.tracked = this.load();
-    this.snapshot = { entries: new Map(), tracked: [...this.tracked] };
+    this.snapshot = { entries: new Map(), tracked: [...this.tracked], doubted: new Set() };
   }
 
   // -- reading the state ------------------------------------------------------------------------
@@ -81,7 +85,7 @@ export class RequestStore {
   getSnapshot = () => this.snapshot;
 
   private emit() {
-    this.snapshot = { entries: new Map(this.entries), tracked: [...this.tracked] };
+    this.snapshot = { entries: new Map(this.entries), tracked: [...this.tracked], doubted: new Set(this.doubted) };
     for (const listener of this.listeners) listener();
   }
 
@@ -92,6 +96,7 @@ export class RequestStore {
     if (!valid(raw)) return false;
     const before = this.entries.get(raw.id);
     if (before?.request && before.request.rev >= raw.rev) return false;
+    this.doubted.delete(raw.id); // a newer record than any before: what happened is known
     const request = strip(raw);
     this.entries.set(raw.id, {
       request,
@@ -100,6 +105,12 @@ export class RequestStore {
     });
     if (!quiet) this.emit();
     return true;
+  }
+
+  /** A lost answer to an action on ``id``: in doubt until its record is read again. */
+  doubt(id: number) {
+    this.doubted.add(id);
+    this.emit();
   }
 
   private markUnknown(id: number) {
@@ -139,6 +150,7 @@ export class RequestStore {
         this.merge(request, true);
         if (valid(request)) listed.add(request.id);
       }
+      for (const id of listed) this.doubted.delete(id); // read again: as the hub has it now
     } catch {
       // the open list could not be read: the records stay as they are, and followed ids are still asked
     }
@@ -174,6 +186,7 @@ export class RequestStore {
         // H12 names the ids it no longer has; a hub without it cannot tell, so what it did not give back is unknown
         const missing = Array.isArray(got.missing) ? got.missing : chunk.filter((id) => !given.has(id));
         for (const id of missing) if (chunk.includes(id)) this.markUnknown(id);
+        for (const id of chunk) this.doubted.delete(id); // read again: as the hub has it now
       } catch {
         whole = false; // asked again on the next read
       }
@@ -227,6 +240,7 @@ export class RequestStore {
   /** Signed out: nothing of it stays in this page; ``wipe`` (the user's own sign-out): nor in this tab. */
   reset(wipe: boolean) {
     this.entries.clear();
+    this.doubted.clear();
     if (wipe) {
       this.tracked = [];
       this.save();

@@ -109,7 +109,6 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
   const [asking, setAsking] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [settleFailed, setSettleFailed] = useState(false);
-  const [unsure, setUnsure] = useState(false); // a lost answer, and the request not read again since
   const [, setTick] = useState(0);
   const restUntil = resting.get(id) ?? 0;
   useEffect(() => {
@@ -122,15 +121,16 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
   }, [entry.request, entry.unknown, id]);
 
   const view = cardView(entry, asking);
+  const unsure = store.doubted.has(id);
   const stopped = busy || unsure;
   const keys = hubHasRequestKeys(hub.data);
   const rests = restUntil > Date.now();
 
-  /** The request as the hub has it now; until that read goes through nothing on the card can be pressed. */
+  /** The request as the hub has it now; until that read goes through no card of it can be pressed (the store keeps
+   *  it in doubt, for every card and over leaving the page). */
   const readAgain = async () => {
     setBusy(true);
-    const whole = await requests.readIds([id]);
-    setUnsure(!whole);
+    await requests.readIds([id]);
     setBusy(false);
   };
 
@@ -145,6 +145,7 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
       if (answerLost(error)) { // it may have been done: read it first, then try again only if it still waits
         setProblem("The hub did not answer; it is read again. Try again if it still waits.");
         lostAnswer?.();
+        requests.doubt(id);
         await readAgain();
       } else {
         setProblem(failureText(error));

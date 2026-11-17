@@ -111,6 +111,16 @@ export const useHubTask = (id: number | null, enabled: boolean) =>
   });
 
 /** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
+/** The projects read now (not from the cache); true when the read went through. */
+export async function readProjectsNow(client: QueryClient): Promise<boolean> {
+  try {
+    await client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function useHubProjects() {
   const notSetUp = (error: unknown) => error instanceof ApiError && error.status === 404;
   const query = useQuery({

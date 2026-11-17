@@ -147,6 +147,12 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
   const nameWrong = creating ? nameProblem(name, (data?.projects ?? []).map((p) => p.name)) : null;
   const folderWrong = mode === "user" ? folderNameProblem(newFolder) : null;
   const lost = pendingKeys.find((u) => u.client_key === lostKey);
+  useEffect(() => { // the unconfirmed one was discarded: its key is done with; the next try is a request of its own
+    if (lostKey === null || lost) return;
+    setLostKey(null);
+    setKey(null);
+    newClientKey().then(setKey).catch(() => setKey(null));
+  }, [lost, lostKey]);
   const ready = !!key && checked && !busy && !nameWrong && !!chosen && !blocked && !folderWrong
     && (mode !== "user" || picked !== null) && sent === null && !lost;
 
@@ -236,6 +242,9 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
         <div className="space-y-2">
           {init.again && init.path && <p className="text-xs text-faint">Before: {init.path} (pick it again)</p>}
           <FolderPicker key={chosen.name} runner={chosen.name!} picked={picked} onPick={setPicked} />
+          {init.again && init.path && picked !== null && (newFolder ? joinPath(picked, newFolder) : picked) !== init.path && (
+            <p className="text-xs text-wait">Not the folder asked for before: this asks for another one.</p>
+          )}
           <div>
             <label htmlFor="project-new-folder" className="block text-xs font-medium text-muted">
               New folder in it (optional)

@@ -181,4 +181,23 @@ describe("the project requests' store", () => {
     await first;
     expect(hub.open).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps a request in doubt after a lost answer until it is read again, and says whether a read went through", async () => {
+    const hub = new FakeHub();
+    hub.set(req(1, 1, "waiting_user"));
+    const store = new RequestStore(hub, () => null);
+    expect(await store.refresh()).toBe(true);
+    store.doubt(1);
+    hub.failIds = true;
+    expect(await store.readIds([1])).toBe(false);
+    expect(store.getSnapshot().doubted.has(1)).toBe(true); // nothing learnt
+    hub.failOpen = true;
+    expect(await store.refresh()).toBe(false);
+    hub.failIds = false;
+    expect(await store.readIds([1])).toBe(true);
+    expect(store.getSnapshot().doubted.has(1)).toBe(false); // as the hub has it now
+    store.doubt(1);
+    store.merge(req(1, 2, "applying")); // a newer record from the stream says it too
+    expect(store.getSnapshot().doubted.has(1)).toBe(false);
+  });
 });

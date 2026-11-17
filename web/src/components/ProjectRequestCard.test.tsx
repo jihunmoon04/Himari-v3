@@ -105,6 +105,20 @@ describe("a project request's card", () => {
     expect(await screen.findByText("The device is registering it")).toBeTruthy(); // the first one went through
   });
 
+  it("stays in doubt for every card of it, and when the card is drawn again", async () => {
+    vi.spyOn(api, "answerProjectRequest").mockRejectedValueOnce(new ApiError(503, "hub_unknown", "lost"));
+    vi.mocked(api.readProjectRequestsByIds).mockRejectedValue(new ApiError(503, "hub_unavailable", ""));
+    const waiting = { id: 12, rev: 1, state: "waiting_user", kind: "create", project: "site", runner: "linux",
+      origin: "model" } as const;
+    show(waiting, withH({}));
+    fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
+    expect(await screen.findByText(/could not be read again/)).toBeTruthy();
+    cleanup(); // left the page and came back
+    show(waiting, withH({}));
+    expect((screen.getByRole("button", { name: "Allow" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Read it again" })).toBeTruthy();
+  });
+
   it("without H17, rests the settle button for a minute after a lost answer", async () => {
     vi.spyOn(api, "resolveProjectRequest").mockRejectedValue(new ApiError(503, "hub_unknown", "lost"));
     show({ id: 5, rev: 1, state: "lost", kind: "add_folder", project: "site", runner: "linux" }, withH({}, false));

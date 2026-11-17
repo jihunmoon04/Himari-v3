@@ -4,7 +4,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { adoptHeldFolder } from "@/api/hub";
-import { hubKeys } from "@/app/queries";
+import { hubKeys, readProjectsNow } from "@/app/queries";
 import { answerLost } from "@/features/hub/unconfirmed";
 import { toast } from "@/features/toast";
 import { failureText } from "./ProjectRequestCard";
@@ -15,19 +15,39 @@ export function AdoptButton({ project, runner, connected, className }: {
 }) {
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
+  const [unsure, setUnsure] = useState(false); // a lost answer, and the projects not read since
+  const readAgain = async () => {
+    setBusy(true);
+    const read = await readProjectsNow(client);
+    setUnsure(!read);
+    if (!read) toast("The projects could not be read: whether it happened is not known yet.", "error");
+    setBusy(false);
+  };
   const adopt = async () => {
     setBusy(true);
     try {
       await adoptHeldFolder(project, runner);
       toast(`${runner}'s folder joined ${project}.`);
+      void client.invalidateQueries({ queryKey: hubKeys.projects });
     } catch (error) {
-      toast(answerLost(error) ? "The hub did not answer; the projects are read again to show whether it happened."
-        : failureText(error), "error");
-    } finally {
-      setBusy(false);
+      if (answerLost(error)) { // it may have happened: the projects first (adopted, this button goes)
+        toast("The hub did not answer; the projects are read again to show whether it happened.", "error");
+        await readAgain();
+        return;
+      }
+      toast(failureText(error), "error");
       void client.invalidateQueries({ queryKey: hubKeys.projects });
     }
+    setBusy(false);
   };
+  if (unsure) {
+    return (
+      <Button className={className} disabled={busy} aria-label={`Read the projects again (${project} from ${runner})`}
+        onClick={() => void readAgain()}>
+        Read again
+      </Button>
+    );
+  }
   return (
     <Button className={className} disabled={busy || !connected} title={connected ? undefined : "The device is not connected."}
       aria-label={`Adopt ${project} from ${runner}`} onClick={() => void adopt()}>

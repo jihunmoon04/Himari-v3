@@ -12,6 +12,7 @@ import type { HubProjects } from "@/api/hub";
 import { closeProjectDialog, openProjectDialog } from "@/features/hub/dialog";
 import { requests } from "@/features/hub/requests";
 import { answerLost, unconfirmed } from "@/features/hub/unconfirmed";
+import { AdoptButton } from "./HeldFolders";
 import { ProjectDialogHost } from "./ProjectDialog";
 import { UnconfirmedItem } from "./UnconfirmedRequests";
 
@@ -78,6 +79,60 @@ describe("asking a device again", () => {
     down = false;
     fireEvent.click(screen.getByRole("button", { name: "Read again" }));
     await waitFor(() => expect(askButton().disabled).toBe(false));
+  });
+});
+
+describe("a new project whose answer was lost", () => {
+  afterEach(() => {
+    cleanup();
+    closeProjectDialog();
+    requests.reset(true);
+    unconfirmed.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("once discarded, is never sent again with its key: the next try has a key of its own", async () => {
+    vi.spyOn(api, "readHubProjects").mockResolvedValue(hub);
+    vi.spyOn(api, "readProjectRequests").mockResolvedValue({ requests: [], missing: null });
+    vi.spyOn(api, "readRunnerDirs").mockResolvedValue({ path: null, dirs: ["/r"] });
+    vi.spyOn(api, "newClientKey").mockResolvedValueOnce({ client_key: "first", key_time: "2026-11-18T10:00:00Z" })
+      .mockResolvedValue({ client_key: "second", key_time: "2026-11-18T10:01:00Z" });
+    const make = vi.spyOn(api, "makeProjectRequest").mockRejectedValueOnce(new ApiError(503, "hub_unknown", "lost"))
+      .mockResolvedValue({ request: { id: 3, rev: 1, state: "applying", kind: "create", project: "new", runner: "linux" } });
+    mount(<ProjectDialogHost />, hub);
+    openProjectDialog({ kind: "create" });
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "new" } });
+    fireEvent.click(screen.getByRole("radio", { name: /^linux/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "/r" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose this folder" }));
+    await waitFor(() => expect(askButton().disabled).toBe(false));
+    fireEvent.click(askButton());
+    expect(await screen.findByText("Not confirmed: the hub's answer was lost")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(askButton().disabled).toBe(false));
+    fireEvent.click(askButton());
+    await waitFor(() => expect(make).toHaveBeenCalledTimes(2));
+    expect(make.mock.calls[0]![0].client_key).toBe("first");
+    expect(make.mock.calls[1]![0].client_key).toBe("second");
+  });
+});
+
+describe("adopting a held folder", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("after a lost answer offers only reading the projects again until they are read", async () => {
+    vi.spyOn(api, "adoptHeldFolder").mockRejectedValueOnce(new ApiError(503, "hub_unknown", "lost"));
+    const read = vi.spyOn(api, "readHubProjects").mockRejectedValueOnce(new ApiError(503, "hub_unavailable", ""))
+      .mockResolvedValue(hub);
+    mount(<AdoptButton project="ghost" runner="linux" connected />, hub);
+    fireEvent.click(screen.getByRole("button", { name: "Adopt ghost from linux" }));
+    const again = await screen.findByRole("button", { name: "Read the projects again (ghost from linux)" });
+    fireEvent.click(again);
+    expect(await screen.findByRole("button", { name: "Adopt ghost from linux" })).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(2);
   });
 });
 
