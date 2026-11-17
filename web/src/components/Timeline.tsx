@@ -5,11 +5,12 @@ import {
 import { useState, type ReactNode } from "react";
 import { stepTitle } from "@/features/himari/items";
 import type { LiveState } from "@/features/himari/live";
-import type { Item, ToolStep, Turn } from "@/features/timeline";
+import type { Item, Shown, ToolStep, Turn } from "@/features/timeline";
 import { cn } from "@/lib/cn";
 import { AssistantText } from "./AssistantText";
 import { DelegationCard } from "./DelegationCard";
 import { DiffView, diffStats } from "./DiffView";
+import { Files, MemoryLine, References } from "./TimelineFiles";
 
 /** Copies an answer's text (as written, Markdown and all). */
 function CopyButton({ text }: { text: string }) {
@@ -32,9 +33,13 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function UserBubble({ text, meta }: { text: string; meta?: string[] }) {
+function UserBubble({ text, meta, files, references }: {
+  text: string; meta?: string[]; files?: Shown[]; references?: string[];
+}) {
   return (
     <div className="flex flex-col items-end gap-1">
+      {files && files.length > 0 && <Files files={files} align="end" />}
+      {references && references.length > 0 && <References labels={references} />}
       <div
         role="article"
         aria-label="Your message"
@@ -214,13 +219,14 @@ function TurnLine({ turn }: { turn: Turn }) {
   );
 }
 
-export function Timeline({ items, live, running, working, renderRequest }: {
+export function Timeline({ items, live, running, working, renderRequest, conversation }: {
   items: Item[];
   live?: LiveState;
   running: boolean;
   working?: string; // a hub session at work: the line shown while nothing new comes
   // a request that can still be answered, drawn by the page (it knows the pending list); null: drawn as a record
   renderRequest?: (item: Extract<Item, { kind: "request" }>) => ReactNode | null;
+  conversation?: string; // a HIMARI conversation's id: what its memory lines undo through
 }) {
   const lastWork = [...items].reverse().find((item) => item.kind === "work")?.key;
   return (
@@ -228,7 +234,7 @@ export function Timeline({ items, live, running, working, renderRequest }: {
       {items.map((item) => {
         switch (item.kind) {
           case "user":
-            return <UserBubble key={item.key} text={item.text} meta={item.meta} />;
+            return <UserBubble key={item.key} text={item.text} meta={item.meta} files={item.files} references={item.references} />;
           case "answer":
             return (
               <div key={item.key} className="group">
@@ -285,6 +291,11 @@ export function Timeline({ items, live, running, working, renderRequest }: {
             return <TurnLine key={item.key} turn={item.turn} />;
           case "delegation":
             return <DelegationCard key={item.key} delegation={item.delegation} />;
+          case "files":
+            return <Files key={item.key} files={item.files} />;
+          case "memory":
+            return <MemoryLine key={item.key} conversation={conversation} run={item.run} call={item.call}
+              action={item.action} text={item.text} undo={item.undo} />;
           case "notice":
             return (
               <p key={item.key} className="text-center text-xs text-faint">

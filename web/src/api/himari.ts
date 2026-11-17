@@ -1,5 +1,5 @@
 // HIMARI's own conversations (the server's /api/conversations…), as the old page uses them.
-import { api, del, enc, get, post, put } from "./client";
+import { api, del, enc, get, post, put, signInRefused } from "./client";
 
 export interface Session {
   authenticated: boolean;
@@ -63,6 +63,33 @@ export interface ToolCallView {
   display?: Display;
 }
 
+/** A file of a conversation (an upload, or one a Tool presented), V3-P66. */
+export interface FileView {
+  file_id: string;
+  version: number;
+  name: string | null;
+  media_type?: string | null;
+  size?: number | null;
+  expired?: boolean;
+  image?: { state?: string; width?: number | null; height?: number | null; preview?: { width: number; height: number } | null } | null;
+  screen?: boolean;
+}
+
+export interface ReferenceView {
+  path: string;
+  name: string;
+  whole: boolean;
+  start_line?: number | null;
+  end_line?: number | null;
+}
+
+export interface MemoryView {
+  action: string; // saved | updated | forgot | already
+  id: string | null;
+  text: string | null;
+  undo: boolean;
+}
+
 export interface EventView {
   sequence: number;
   kind: string; // user_message | assistant_final | assistant_tool_calls | tool_result | wake | …
@@ -76,6 +103,11 @@ export interface EventView {
   calls?: ToolCallView[];
   answers_call?: string | null;
   answers_run?: string | null;
+  attachments?: FileView[]; // a user message's files
+  references?: ReferenceView[]; // and what it pointed at
+  presented_files?: FileView[]; // a Tool result's files given to the user
+  images?: FileView[]; // and its images
+  memory?: MemoryView | null; // what a memory call changed
 }
 
 export interface EventsPage {
@@ -95,8 +127,16 @@ export const createConversation = () => post<ConversationSummary>("/api/conversa
 export const readConversation = (id: string) => get<ConversationDetail>(`/api/conversations/${enc(id)}`);
 export const readEvents = (id: string, after: number, limit = 500) =>
   get<EventsPage>(`/api/conversations/${enc(id)}/events?after=${after}&limit=${limit}`);
-export const sendMessage = (id: string, text: string) =>
-  post<Job>(`/api/conversations/${enc(id)}/messages`, { text });
+/** A whole file (``identity`` from the explorer) the message points at; the server reads it, never the page. */
+export interface ReferenceOut {
+  path: string;
+  identity: string[];
+}
+
+export const sendMessage = (id: string, text: string, attachments: string[] = [], references: ReferenceOut[] = []) =>
+  post<Job>(`/api/conversations/${enc(id)}/messages`, {
+    text, ...(attachments.length ? { attachments } : {}), ...(references.length ? { references } : {}),
+  });
 export const cancelJob = (id: string) => post<Job>(`/api/conversations/${enc(id)}/cancel`);
 export const resumeTurn = (id: string) => post<Job>(`/api/conversations/${enc(id)}/resume`);
 export const renameConversation = (id: string, title: string | null) =>
@@ -135,6 +175,7 @@ export interface FolderListing {
 }
 
 export interface ShownFile {
+  identity?: string[];
   path: string;
   size: number;
   kind: string; // text | image | other
@@ -202,3 +243,58 @@ export const dismissWaiting = (id: string) => post<Job>(`/api/conversations/${en
 /** The notes a conversation saved, counted from the memory list (what a deletion for good takes with it). */
 export const listMemories = () =>
   get<{ memories: { id: string; source?: { conversation?: string | null } | null }[] }>("/api/memories");
+
+// -- what the composer sends besides text (V3-P102 W6b): uploads, MCP prompts; and a memory call undone ------------
+
+export interface Uploaded {
+  file_id: string;
+  size: number;
+  image?: { state?: string } | null;
+  commands?: boolean; // false: this server runs no commands (only text files are read)
+}
+
+/** The body is the file (an XHR, for its progress). ``onProgress``: 0..1. */
+export function uploadFile(conversation: string, file: File, onProgress: (share: number) => void,
+                           signal: AbortSignal): Promise<Uploaded> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/conversations/${enc(conversation)}/uploads?name=${enc(file.name)}`);
+    xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) onProgress(Math.min(0.99, event.loaded / event.total));
+    });
+    xhr.addEventListener("load", () => {
+      let data: unknown = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        data = null;
+      }
+      if (xhr.status === 201 && data && typeof data === "object") return resolve(data as Uploaded);
+      if (xhr.status === 401) signInRefused(); // signed out (here or in another tab): the page asks again
+      const error = (data as { error?: { message?: string } } | null)?.error;
+      reject(new Error(error?.message ?? `The upload failed (HTTP ${xhr.status}).`));
+    });
+    xhr.addEventListener("error", () => reject(new Error("The upload did not finish.")));
+    xhr.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    signal.addEventListener("abort", () => xhr.abort());
+    xhr.send(file);
+  });
+}
+
+export const fileUrl = (conversation: string, file: { file_id: string; version: number }) =>
+  `/api/conversations/${enc(conversation)}/files/${enc(file.file_id)}/${enc(String(file.version))}`;
+
+export interface PromptInfo {
+  source: string;
+  name: string;
+  title: string | null;
+  description: string | null;
+  arguments: { name: string; description: string | null; required: boolean }[];
+}
+
+export const listPrompts = (id: string) => get<{ prompts: PromptInfo[] }>(`/api/conversations/${enc(id)}/prompts`);
+export const expandPrompt = (id: string, source: string, name: string, args: Record<string, string>) =>
+  post<{ text: string }>(`/api/conversations/${enc(id)}/prompts/expand`, { source, name, arguments: args });
+export const undoMemory = (id: string, run: string, call: string) =>
+  post<{ memory: unknown }>(`/api/conversations/${enc(id)}/calls/${enc(run)}/${enc(call)}/memory-undo`);

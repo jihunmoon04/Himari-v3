@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W6b 구현**(§7.12) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -434,6 +434,21 @@ W6은 넷으로 나눈다: **W6a** 대화 도구, **W6b** 입력(첨부·붙여�
 - **모델·강도:** 대화 입력창 왼쪽에서 고르면 바로 저장되어 다음 턴부터 쓴다(고를 것이 없으면 보이지 않음).
 - **그 밖:** 답 복사(마우스를 올리거나 폰에서는 늘), 위로 올려 읽는 동안 "Latest"로 맨 아래로, 페이지 전체의 알림(`features/toast.ts`).
 - **검사:** Playwright(이름 바꾸기와 사이드바, Tool 서버 끔·기본, 휴지통과 Undo, 휴지통 화면의 복원과 영구 삭제, 답 복사).
+
+### 7.12 W6b에서 만든 것: 입력 (2026-11-17)
+
+- **첨부(`components/HimariComposer.tsx`):** 클립 단추, 붙여넣기(파일이 있으면 글 대신 파일로), 끌어 놓기. 넣는 즉시 올리고
+  (`/uploads`, 진행률) 칩으로 보이며, 다 올라간 것만 글과 함께 보낸다(올리는 중에는 보내기를 막음). 서버가 받지 않으면 칩에
+  이유를 적고 보내지 않는다(기계가 없는 서버는 업로드를 받지 않는다, V3-P101). 대화를 떠나면 올리던 것은 멈춘다.
+- **`/` 프롬프트:** 글이 `/`로 시작하면 그 대화가 쓰는 Tool 서버의 프롬프트를 고른다(이름·제목으로 거름, 화살표·Enter·Tab·Esc).
+  인자가 있는 프롬프트는 양식으로 먼저 묻고, 서버가 펼친 글(어떤 프롬프트인지 머리줄 포함)이 입력창에 들어가 검토 뒤 보낸다.
+- **참조:** 파일 패널의 글 파일에서 **Ask about this file** → 다음 글의 칩(경로와 정체, 서버가 읽음). 한 글에 8개까지.
+- **타임라인:** 사용자 글의 첨부와 참조 칩, Tool이 사용자에게 준 파일과 그림(그림은 서버가 만든 사본, 누르면 크게, 사본이
+  안 되면 파일 링크), 메모리 줄("Remembered …")과 **Undo**(이미 바뀌었거나 없으면 그렇다고 알림).
+- **검사:** Vitest(파일·참조·메모리 항목, `/` 거르기), Playwright: 클립과 붙여넣기로 넣은 파일이 칩이 되고 서버가 거절한 이유가
+  보이며 글은 그것 없이 감, `/rev` → 양식 → 펼친 글, 대본 모델의 `memory_save` → 메모리 줄 → Undo. 가짜 hub의 MCP에 프롬프트 하나.
+- **확인 못 함(시험 서버):** 받아들여진 업로드와 그 파일·그림이 타임라인에 보이는 것, 참조 보내기(둘 다 기계가 있어야 함).
+  운영에서 확인한다. 홈 화면(새 대화)의 첨부는 아직 없다(대화가 생긴 뒤에 붙인다).
 
 ## 8. hub에 필요한 것
 

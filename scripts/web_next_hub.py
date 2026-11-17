@@ -14,7 +14,7 @@ hub's contract (user-api-v1) has them, over real HTTP and SSE, with scripted pro
 
 ``/mcp`` (W4) is the hub's MCP side for HIMARI, with ``MCP_TOKEN``: ``hub_delegate`` (a task opening a session of
 the project's lane, as ``new`` does; an unknown project is refused) and ``hub_task`` (the task as the hub's tool
-gives it).
+gives it). It also has one prompt (W6b): ``review``, whose argument ``topic`` it puts in ``Review <topic> carefully.``
 
 The streams follow every change: a session stream sends new events and a new ``state`` when the session's listing
 changes; the list stream sends ``changed`` for every session that changed.
@@ -338,7 +338,14 @@ class FakeHub:
             return None
         if method == "initialize":
             result: Any = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
-                           "capabilities": {"tools": {}}, "serverInfo": {"name": "fake-hub", "version": "0"}}
+                           "capabilities": {"tools": {}, "prompts": {}}, "serverInfo": {"name": "fake-hub", "version": "0"}}
+        elif method == "prompts/list":
+            result = {"prompts": [{"name": "review", "title": "Review something",
+                                   "description": "Ask for a careful review.",
+                                   "arguments": [{"name": "topic", "description": "What to review", "required": True}]}]}
+        elif method == "prompts/get":
+            topic = (params.get("arguments") or {}).get("topic", "")
+            result = {"messages": [{"role": "user", "content": {"type": "text", "text": f"Review {topic} carefully."}}]}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

@@ -39,8 +39,19 @@ export interface Delegation {
   error: string | null;
 }
 
+/** A file shown in the timeline: what a message attached, or what a Tool gave the user (V3-P66, V3-P67). */
+export interface Shown {
+  key: string;
+  name: string;
+  size: number | null;
+  url: string | null; // its download (null: no conversation to fetch it from, or it expired)
+  preview: string | null; // the image copy the server made (null: not an image, or no copy)
+  width: number | null; // the copy's box, kept before it loads
+  height: number | null;
+}
+
 export type Item =
-  | { kind: "user"; key: string; text: string; answers: boolean; meta?: string[] }
+  | { kind: "user"; key: string; text: string; answers: boolean; meta?: string[]; files?: Shown[]; references?: string[] }
   | { kind: "answer"; key: string; text: string; model: string | null }
   | { kind: "thought"; key: string; text: string }
   | { kind: "work"; key: string; notes: string[]; steps: ToolStep[]; model: string | null }
@@ -49,4 +60,6 @@ export type Item =
   | { kind: "request"; key: string; interaction: string; ask: string; options: string[]; outcome: string | null }
   | { kind: "turn"; key: string; turn: Turn }
   | { kind: "delegation"; key: string; delegation: Delegation }
+  | { kind: "files"; key: string; files: Shown[] }
+  | { kind: "memory"; key: string; run: string; call: string; action: string; text: string; undo: boolean }
   | { kind: "notice"; key: string; text: string };

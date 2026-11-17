@@ -62,6 +62,13 @@ class HandingOver(ScriptedAdapter):
     async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
                               capture: RawCapture | None = None) -> NativeInvocationOutcome:
         body = request.body.decode("utf-8", "replace")
+        if "W6B-REMEMBER" in body and "W6B-REMEMBER" not in self._handed:
+            self._handed.add("W6B-REMEMBER")
+            self._script[0:0] = [
+                NormalizedToolCalls((ToolCall(CallId("remember-1"), 0, ToolId("memory_save"),
+                                              {"category": "preference", "text": "The user likes green tea."}),)),
+                NormalizedFinal((TextBlock("I will remember that."),)),
+            ]
         for mark, args in HAND_OVERS.items():
             if mark in body and mark not in self._handed:
                 self._handed.add(mark)

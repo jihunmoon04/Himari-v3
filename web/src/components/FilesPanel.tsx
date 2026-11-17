@@ -8,6 +8,8 @@ import { ApiError } from "@/api/client";
 import {
   browseFolder, conversationFolders, machineDownloadUrl, machineImageUrl, showMachineFile, statMachinePath,
 } from "@/api/himari";
+import { pointAt } from "@/features/references";
+import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
 
 function size(bytes: number | null | undefined) {
@@ -20,7 +22,7 @@ function size(bytes: number | null | undefined) {
 const why = (error: unknown) => (error instanceof ApiError ? error.message : "Could not read it.");
 
 /** How a file is shown is the server's call (its ``kind``), never its name's. */
-function FileView({ path, onBack }: { path: string; onBack: () => void }) {
+function FileView({ path, onBack, conversation }: { path: string; onBack: () => void; conversation: string }) {
   const shown = useQuery({ queryKey: ["machine", "file", path], queryFn: () => showMachineFile(path), retry: false });
   return (
     <div className="space-y-2">
@@ -44,7 +46,17 @@ function FileView({ path, onBack }: { path: string; onBack: () => void }) {
       ) : (
         <p className="text-muted">This file is not text.</p>
       )}
-      <a href={machineDownloadUrl(path)} className="inline-block text-xs underline">Download</a>
+      <div className="flex gap-3 text-xs">
+        <a href={machineDownloadUrl(path)} className="underline">Download</a>
+        {shown.data?.identity && (
+          <button type="button" className="underline" onClick={() => {
+            const name = path.split("/").pop() || path;
+            toast(pointAt(conversation, { path: shown.data!.path, identity: shown.data!.identity!, name })
+              ? `The next message asks about ${name}.` : "The message points at as many files as it can.",
+            "info");
+          }}>Ask about this file</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -135,7 +147,7 @@ export function FilesPanel({ conversation }: { conversation: string }) {
       ) : at.kind === "directory" ? (
         <FolderView path={at.path} onOpen={open} />
       ) : (
-        <FileView path={at.path} onBack={() => setAt({ path: at.path.replace(/\/[^/]*$/, "") || "/", kind: "directory" })} />
+        <FileView conversation={conversation} path={at.path} onBack={() => setAt({ path: at.path.replace(/\/[^/]*$/, "") || "/", kind: "directory" })} />
       )}
     </div>
   );

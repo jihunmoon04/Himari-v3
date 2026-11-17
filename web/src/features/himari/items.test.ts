@@ -6,6 +6,33 @@ import { EMPTY_LIVE, reduceLive } from "./live";
 const at = "2026-11-16T10:00:00Z";
 const event = (sequence: number, kind: string, rest: Partial<EventView> = {}): EventView => ({ sequence, kind, created_at: at, ...rest });
 
+describe("files, references and memory (V3-P102 W6b)", () => {
+  it("gives a message its files and references, and a Tool result its files and memory line", () => {
+    const items = toItems([
+      event(1, "user_message", { text: "look", attachments: [
+        { file_id: "f1", version: 1, name: "a.png", size: 10, image: { state: "ready", preview: { width: 40, height: 20 } } },
+        { file_id: "f2", version: 2, name: "old.txt", size: 5, expired: true }],
+        references: [{ path: "/w/a.py", name: "a.py", whole: true }, { path: "/w/b.py", name: "b.py", whole: false, start_line: 3, end_line: 9 }] }),
+      event(2, "assistant_tool_calls", { run_id: "r", calls: [{ call_id: "c", tool_id: "memory_save", arguments: { text: "x" } }] }),
+      event(3, "tool_result", { run_id: "r", call_id: "c", text: "saved", memory: { action: "saved", id: "m1", text: "Likes tea.", undo: true },
+        presented_files: [{ file_id: "f3", version: 1, name: "report.pdf", size: 99 }] }),
+    ], null, "conv_1");
+    expect(items.map((i) => i.kind)).toEqual(["user", "work", "files", "memory"]);
+    const user = items[0];
+    if (user?.kind !== "user") throw new Error("user");
+    expect(user.files).toEqual([
+      { key: "f1/1", name: "a.png", size: 10, url: "/api/conversations/conv_1/files/f1/1",
+        preview: "/api/conversations/conv_1/files/f1/1/view", width: 40, height: 20 },
+      { key: "f2/2", name: "old.txt", size: 5, url: null, preview: null, width: null, height: null },
+    ]);
+    expect(user.references).toEqual(["a.py", "b.py:3-9"]);
+    expect(items[3]).toEqual({ kind: "memory", key: "3:memory", run: "r", call: "c", action: "saved", text: "Likes tea.", undo: true });
+    const files = items[2];
+    if (files?.kind !== "files") throw new Error("files");
+    expect(files.files[0]).toMatchObject({ name: "report.pdf", url: "/api/conversations/conv_1/files/f3/1", preview: null });
+  });
+});
+
 describe("work handed to the hub (V3-P102 §5.1)", () => {
   const calls = (id: string, args: Record<string, unknown>, tool = "hub/hub_delegate") =>
     event(Number(id.slice(1)) * 10, "assistant_tool_calls", { run_id: "r", calls: [{ call_id: id, tool_id: tool, arguments: args }] });

@@ -20,6 +20,11 @@ export function onUnauthorized(handler: () => void) {
   unauthorized = handler;
 }
 
+/** For a call made without ``api`` (an upload's XHR) that the server refused for the sign-in. */
+export function signInRefused() {
+  unauthorized?.();
+}
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const init: RequestInit = { method, credentials: "same-origin", headers: { Accept: "application/json" } };
   if (body !== undefined) {

@@ -1,7 +1,7 @@
 // V3-P102 §7.4: HIMARI's events as the timeline's items. The timeline knows only these kinds; hub sessions get
 // their own converter into the same kinds (W2). Pure functions, tested in items.test.ts.
-import type { EventView } from "@/api/himari";
-import type { Delegation, Item, ToolStep } from "@/features/timeline";
+import { fileUrl, type EventView, type FileView, type ReferenceView } from "@/api/himari";
+import type { Delegation, Item, Shown, ToolStep } from "@/features/timeline";
 
 export type { Item, ToolStep } from "@/features/timeline";
 
@@ -47,10 +47,29 @@ export function delegationOf(step: ToolStep): Delegation {
   return { ...asked, error: "The hub's answer could not be read." };
 }
 
+/** A file as the timeline shows it; ``conversation`` gives its links (none without it, or once it expired). */
+export function shownFile(file: FileView, conversation: string | null | undefined): Shown {
+  const url = conversation && !file.expired ? fileUrl(conversation, file) : null;
+  const ready = file.image?.state === "ready" && url !== null;
+  return {
+    key: `${file.file_id}/${file.version}`,
+    name: file.name ?? "file",
+    size: typeof file.size === "number" ? file.size : null,
+    url,
+    preview: ready ? `${url}/view` : null,
+    width: ready ? file.image?.preview?.width ?? null : null,
+    height: ready ? file.image?.preview?.height ?? null : null,
+  };
+}
+
+/** A reference chip's words: the file, and its lines when it points at a part. */
+export const referenceLabel = (ref: ReferenceView) =>
+  ref.whole || ref.start_line == null ? ref.name : `${ref.name}:${ref.start_line}-${ref.end_line ?? ref.start_line}`;
+
 /** The items for ``events`` (oldest first). Tool calls of consecutive steps fold into one work block, as the old
  *  page does (V3-P68); an ask_user call is a question, and the user's answer to it is a user item. ``hubSource``:
  *  the mcp.json server that is the hub; each result of its ``hub_delegate`` adds a card after its work block. */
-export function toItems(events: readonly EventView[], hubSource?: string | null): Item[] {
+export function toItems(events: readonly EventView[], hubSource?: string | null, conversation?: string | null): Item[] {
   const delegate = hubSource ? `${hubSource}/hub_delegate` : null;
   const items: Item[] = [];
   const steps = new Map<string, ToolStep>();
@@ -65,7 +84,11 @@ export function toItems(events: readonly EventView[], hubSource?: string | null)
     switch (event.kind) {
       case "user_message":
         closeWork();
-        items.push({ kind: "user", key, text: event.text ?? "", answers: Boolean(event.answers_call) });
+        items.push({
+          kind: "user", key, text: event.text ?? "", answers: Boolean(event.answers_call),
+          ...(event.attachments?.length ? { files: event.attachments.map((f) => shownFile(f, conversation)) } : {}),
+          ...(event.references?.length ? { references: event.references.map(referenceLabel) } : {}),
+        });
         break;
       case "assistant_final":
         closeWork();
@@ -101,6 +124,16 @@ export function toItems(events: readonly EventView[], hubSource?: string | null)
       case "tool_result": {
         const step = steps.get(callKey(event.run_id, event.call_id));
         if (step) step.result = { text: event.text ?? "", isError: Boolean(event.is_error) };
+        const given = [...(event.presented_files ?? []), ...(event.images ?? [])];
+        if (given.length) { // what the Tool gave the user, after the calls it came from
+          closeWork();
+          items.push({ kind: "files", key: `${key}:files`, files: given.map((f) => shownFile(f, conversation)) });
+        }
+        if (event.memory && event.run_id && event.call_id) {
+          closeWork();
+          items.push({ kind: "memory", key: `${key}:memory`, run: event.run_id, call: event.call_id,
+            action: event.memory.action, text: event.memory.text ?? "", undo: event.memory.undo });
+        }
         if (step && delegate !== null && step.toolId === delegate) {
           closeWork(); // the card comes after the calls it followed; later calls start a new block
           items.push({ kind: "delegation", key: `${key}:delegation`, delegation: delegationOf(step) });
