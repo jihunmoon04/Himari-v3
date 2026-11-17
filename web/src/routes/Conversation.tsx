@@ -11,7 +11,7 @@ import { SidePanel } from "@/components/SidePanel";
 import { Composer } from "@/components/Composer";
 import { ConversationMenu } from "@/components/ConversationMenu";
 import { JumpToLatest } from "@/components/JumpToLatest";
-import { ModelPicker } from "@/components/ModelPicker";
+import { ModelPicker, modelSettled } from "@/components/ModelPicker";
 import { PageHeader } from "@/components/Shell";
 import { Timeline } from "@/components/Timeline";
 import { Button, IconButton } from "@/components/ui/button";
@@ -140,7 +140,7 @@ export function Conversation() {
             running={running}
             placeholder={waiting ? "Answer HIMARI" : undefined}
             onStop={() => void act(() => cancelJob(id)).catch(() => undefined)}
-            onSend={(text) => act(() => sendMessage(id, text))}
+            onSend={(text) => act(async () => { await modelSettled(id); return sendMessage(id, text); })}
             tools={<ModelPicker conversation={id} />}
           />
         </div>

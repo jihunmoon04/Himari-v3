@@ -73,6 +73,7 @@ function RenameDialog({ id, title, open, onOpenChange }: {
 function ToolsDialog({ id, open, onOpenChange }: { id: string; open: boolean; onOpenChange: (open: boolean) => void }) {
   const [sources, setSources] = useState<ToolSource[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false); // one change at a time: each answer is the whole list as saved
   const load = () => {
     setProblem(null);
     readToolSources(id).then((answer) => setSources(answer.sources))
@@ -83,10 +84,13 @@ function ToolsDialog({ id, open, onOpenChange }: { id: string; open: boolean; on
   }, [open]); // load reads only what it is given
   const change = async (source: string, enabled: boolean | null) => {
     setProblem(null);
+    setBusy(true);
     try {
       setSources((await setToolSource(id, source, enabled)).sources);
     } catch (failure) {
       setProblem(message(failure, "Could not change it."));
+    } finally {
+      setBusy(false);
     }
   };
   return (
@@ -99,7 +103,7 @@ function ToolsDialog({ id, open, onOpenChange }: { id: string; open: boolean; on
           <li key={source.source} className="rounded-lg border border-line px-3 py-2 text-sm">
             <div className="flex items-center gap-2">
               <span className="min-w-0 flex-1 truncate font-medium">{source.source}</span>
-              <select aria-label={`Use ${source.source}`} value={source.choice === null ? "default" : source.choice ? "on" : "off"}
+              <select aria-label={`Use ${source.source}`} disabled={busy} value={source.choice === null ? "default" : source.choice ? "on" : "off"}
                 onChange={(event) => void change(source.source, event.target.value === "default" ? null : event.target.value === "on")}
                 className="rounded-md border border-line bg-transparent px-1.5 py-1 text-xs">
                 <option value="default">Default ({source.default ? "on" : "off"})</option>

@@ -7,6 +7,12 @@ import { readModelChoice, saveModelChoice } from "@/api/himari";
 import { useServer } from "@/app/queries";
 import { toast } from "@/features/toast";
 
+// a save under way, per conversation: a message sent meanwhile waits for it, so it runs with the choice just made
+const pending = new Map<string, Promise<unknown>>();
+
+/** Resolves once the conversation's model choice under way (if any) is saved or refused. */
+export const modelSettled = (conversation: string): Promise<unknown> => pending.get(conversation) ?? Promise.resolve();
+
 const pick = "max-w-44 truncate rounded-md border border-line bg-transparent px-1.5 py-1 text-xs text-muted outline-none focus:border-faint";
 
 export function ModelPicker({ conversation }: { conversation: string }) {
@@ -24,8 +30,12 @@ export function ModelPicker({ conversation }: { conversation: string }) {
   if (models.length < 2 && efforts.length === 0) return null; // nothing to choose
   const save = async (model: string | null, effort: string | null) => {
     setSaving(true);
+    const saved = saveModelChoice(conversation, model, effort);
+    const settled = saved.catch(() => undefined);
+    pending.set(conversation, settled);
+    void settled.then(() => { if (pending.get(conversation) === settled) pending.delete(conversation); });
     try {
-      client.setQueryData(key, await saveModelChoice(conversation, model, effort));
+      client.setQueryData(key, await saved);
     } catch (failure) {
       toast(failure instanceof ApiError ? failure.message : "Could not change the model.", "error");
     } finally {
