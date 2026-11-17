@@ -128,14 +128,21 @@ function Notes() {
 function Suggestions() {
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["settings", "proposals"], queryFn: readProposals });
+  const [stale, setStale] = useState<string | null>(null); // the suggestion whose dates have passed
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read the suggestions.</p>;
-  const decide = async (p: (typeof query.data.proposals)[number], decision: "keep" | "discard") => {
+  const decide = async (p: (typeof query.data.proposals)[number], decision: "keep" | "discard", withoutDates = false) => {
     try {
-      await decideProposal(p.pass_id, p.item, decision);
+      await decideProposal(p.pass_id, p.item, decision, withoutDates);
       toast(decision === "keep" ? "Kept as a note." : "Discarded.");
+      setStale(null);
     } catch (failure) {
-      toast(why(failure, "Could not decide it."), "error");
+      if (failure instanceof ApiError && failure.code === "stale_date") {
+        setStale(`${p.pass_id}/${p.item}`);
+        toast("Its date has passed: keep it without dates, or discard it.", "info");
+      } else {
+        toast(why(failure, "Could not decide it."), "error");
+      }
     } finally {
       void client.invalidateQueries({ queryKey: ["settings"] });
     }
@@ -149,7 +156,9 @@ function Suggestions() {
           <p className="mt-1 text-xs text-faint">{p.category} · {p.kind === "sensitive" ? "sensitive" : "from the past"} ·
             from {p.conversation.title || p.conversation.preview || "a conversation"}</p>
           <div className="mt-2 flex gap-2">
-            <Button variant="primary" onClick={() => void decide(p, "keep")}>Keep</Button>
+            {stale === `${p.pass_id}/${p.item}`
+              ? <Button variant="primary" onClick={() => void decide(p, "keep", true)}>Keep without dates</Button>
+              : <Button variant="primary" onClick={() => void decide(p, "keep")}>Keep</Button>}
             <Button variant="ghost" onClick={() => void decide(p, "discard")}>Discard</Button>
           </div>
         </li>
@@ -159,15 +168,16 @@ function Suggestions() {
 }
 
 function EpisodeRow({ episode, onChanged }: { episode: Episode; onChanged: () => void }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null); // the revision the draft was opened from
   const [text, setText] = useState(episode.text);
   const act = async (run: () => Promise<unknown>, done: string) => {
     try {
       await run();
       toast(done);
-      setEditing(false);
+      setEditing(null);
     } catch (failure) {
-      toast(why(failure, "Could not change it."), "error");
+      toast(failure instanceof ApiError && failure.status === 409
+        ? "It was changed elsewhere since you opened it; your text is still here." : why(failure, "Could not change it."), "error");
     } finally {
       onChanged();
     }
@@ -180,19 +190,19 @@ function EpisodeRow({ episode, onChanged }: { episode: Episode; onChanged: () =>
           {episode.conversation.title || episode.conversation.preview || "a conversation"}
         </Link>
       </p>
-      {editing ? (
+      {editing !== null ? (
         <>
           <textarea aria-label="Timeline entry" value={text} rows={3} onChange={(event) => setText(event.target.value)}
             className={cn(field, "mt-1 block w-full resize-y")} />
           <div className="mt-1 flex justify-end gap-2">
-            <Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
-            <Button variant="primary" onClick={() => void act(() => editEpisode(episode.id, text, episode.revision), "Saved.")}>Save</Button>
+            <Button variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+            <Button variant="primary" onClick={() => void act(() => editEpisode(episode.id, text, editing), "Saved.")}>Save</Button>
           </div>
         </>
       ) : (
         <div className="mt-1 flex items-start gap-2">
           <p className="min-w-0 flex-1 whitespace-pre-wrap break-words">{episode.text}</p>
-          <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={() => setEditing(true)}>Edit</Button>
+          <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={() => { setText(episode.text); setEditing(episode.revision); }}>Edit</Button>
           <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger"
             onClick={() => void act(() => deleteEpisode(episode.id, episode.revision), "Deleted.")}>Delete</Button>
         </div>
@@ -217,7 +227,7 @@ function Timeline() {
     <>
       <ul className="space-y-2" aria-label="Timeline">
         {episodes.map((e) => (
-          <EpisodeRow key={`${e.id}/${e.revision}`} episode={e} onChanged={() => void client.invalidateQueries({ queryKey: ["settings", "episodes"] })} />
+          <EpisodeRow key={e.id} episode={e} onChanged={() => void client.invalidateQueries({ queryKey: ["settings", "episodes"] })} />
         ))}
       </ul>
       {pages.hasNextPage && (

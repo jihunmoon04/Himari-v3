@@ -81,8 +81,11 @@ export const editNote = (id: number, revision: number, note: NoteInput) =>
   put<Note>(`/api/memories/${id}`, { ...note, revision, time_zone: zone() });
 export const deleteNote = (id: number, revision: number) => del<void>(`/api/memories/${id}?revision=${revision}`);
 export const readProposals = () => get<{ proposals: Proposal[] }>("/api/memories/proposals");
-export const decideProposal = (passId: string, item: number, decision: "keep" | "discard") =>
-  post<Note | undefined>(`/api/memories/proposals/${enc(passId)}/${item}`, { decision, time_zone: zone() });
+/** ``withoutDates``: keep it with no due or end date (when the suggested ones have passed: ``stale_date``). */
+export const decideProposal = (passId: string, item: number, decision: "keep" | "discard", withoutDates = false) =>
+  post<Note | undefined>(`/api/memories/proposals/${enc(passId)}/${item}`, {
+    decision, time_zone: zone(), ...(withoutDates ? { due: null, valid_until: null } : {}),
+  });
 export const readEpisodes = (cursor?: string | null) =>
   get<{ episodes: Episode[]; next: string | null }>(`/api/episodes?limit=30${cursor ? `&cursor=${enc(cursor)}` : ""}`);
 export const editEpisode = (id: number, text: string, revision: number) => put<Episode>(`/api/episodes/${id}`, { text, revision });

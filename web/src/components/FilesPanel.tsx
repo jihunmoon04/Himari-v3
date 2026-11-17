@@ -111,6 +111,12 @@ function FolderView({ path, onOpen }: { path: string; onOpen: (path: string, kin
   );
 }
 
+/** The attached folder ``path`` is in: itself, else the deepest one holding it (folders may be nested). */
+export function innermost(folders: string[], path: string): string | null {
+  return folders.filter((f) => path === f || path.startsWith(`${f.replace(/\/$/, "")}/`))
+    .sort((a, b) => b.length - a.length)[0] ?? null;
+}
+
 /** Attach a registered folder, and for the folder shown: make it the working one, or detach it. */
 function FolderControls({ conversation, items, shown }: {
   conversation: string; items: { binding_id?: string | null; path: string; own?: boolean; working?: boolean }[]; shown: string | null;
@@ -188,7 +194,7 @@ export function FilesPanel({ conversation }: { conversation: string }) {
         ))}
       </div>
       <FolderControls conversation={conversation} items={items}
-        shown={at === null ? items[0]!.path : items.find((i) => at.path === i.path || at.path.startsWith(`${i.path}/`))?.path ?? null} />
+        shown={at === null ? items[0]!.path : innermost(items.map((i) => i.path), at.path)} />
       {problem && <p role="alert" className="text-danger">{problem}</p>}
       {at === null ? (
         <FolderView path={items[0]!.path} onOpen={open} />
