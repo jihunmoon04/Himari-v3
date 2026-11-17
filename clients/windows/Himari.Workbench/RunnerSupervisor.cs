@@ -351,7 +351,8 @@ public sealed class RunnerSupervisor
             string line = result.Outcome != HubOutcome.Exited || Redaction.LastLine(result.StdErr).Length > 0 ? result.Describe()
                 : RunnerProtocol.StatusError(result.StdOut) is { } failure ? Redaction.LastLine(failure.Why ?? $"hub가 상태 대신 오류를 돌려주었습니다: {failure.Error}")
                 : "hub가 실행기 상태를 알려 주지 않았습니다(runner status --json이 없는 옛 hub일 수 있음)";
-            lock (gate) { status = null; statusFailure = line; }
+            // §5.2: a failed status is "확인 불가", also after an earlier start or stop error.
+            lock (gate) { status = null; statusFailure = line; operationError = null; }
             Publish();
             return;
         }

@@ -134,7 +134,8 @@ async Task<int> Start()
         }
         await Task.Delay(50);
     }
-    try { child.Kill(entireProcessTree: true); child.WaitForExit(5000); } catch (InvalidOperationException) { }
+    try { child.Kill(entireProcessTree: true); child.WaitForExit(5000); }
+    catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { }
     Print(child.HasExited ? new { error = "cancelled" } : (object)new { error = "unconfirmed" });
     return 1;
 }
@@ -234,14 +235,25 @@ async Task<int> RunRunner()
     catch (System.ComponentModel.Win32Exception ex) { jobFailure = ex; }
     if (jobFailure is not null) { Console.Error.WriteLine($"himari-hub runner: could not join a Job: {jobFailure.Message}"); return 6; }
     startedAt = StartedAt(Environment.ProcessId);
-    FileStream? runnerLock;
-    using (var transition = Transition())
+    // H14 ⓐ / H16: each attempt takes runner.lock under the transition lock, and the transition lock is let go between
+    // attempts (for 2 s), so a runner that is just ending can take it to remove its state and release runner.lock.
+    FileStream? runnerLock = null;
+    var lockUntil = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+    while (true)
     {
-        if (transition is null) return 5;
-        runnerLock = TryLock(LockPath(), TimeSpan.FromSeconds(2));
-        if (runnerLock is null) return 3;
-        if (!InstanceId.TryParse(id, out var parsed) || parsed.CannotStart(system)) { runnerLock.Dispose(); return 4; }
-        WriteState(id, "connected", null);
+        using (var transition = Transition())
+        {
+            if (transition is null) return 5;
+            runnerLock = TryLock(LockPath(), TimeSpan.Zero);
+            if (runnerLock is not null)
+            {
+                if (!InstanceId.TryParse(id, out var parsed) || parsed.CannotStart(system)) { runnerLock.Dispose(); return 4; }
+                WriteState(id, "connected", null);
+                break;
+            }
+        }
+        if (DateTime.UtcNow >= lockUntil) return 3;
+        await Task.Delay(50);
     }
     try { File.Delete(Path.Combine(home, "runner.stop")); } catch (IOException) { }
     CleanStopFolder(id);

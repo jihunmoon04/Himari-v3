@@ -1,4 +1,3 @@
-using System.Net;
 
 namespace Himari.Workbench;
 
@@ -33,9 +32,9 @@ public static class OriginPolicy
         return true;
     }
 
+    /// <summary>§4 names exactly two loopback hosts for developer mode: <c>127.0.0.1</c> and <c>localhost</c>.</summary>
     public static bool IsLoopback(Uri uri) =>
-        uri.IsLoopback || string.Equals(uri.IdnHost, "localhost", StringComparison.OrdinalIgnoreCase)
-        || IPAddress.TryParse(uri.IdnHost.Trim('[', ']'), out var address) && IPAddress.IsLoopback(address);
+        uri.IdnHost == "127.0.0.1" || string.Equals(uri.IdnHost, "localhost", StringComparison.OrdinalIgnoreCase);
 
     public static bool SameOrigin(Uri server, string? candidate) =>
         Uri.TryCreate(candidate, UriKind.Absolute, out var uri) && SameOrigin(server, uri);

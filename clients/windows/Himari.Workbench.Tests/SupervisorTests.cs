@@ -491,6 +491,10 @@ public sealed class SupervisorTests : IDisposable
         Assert.Equal("끄기를 요청했지만 확인하지 못했습니다", message);
         Assert.Equal(RunnerPhase.Error, supervisor.View.Phase);
         Assert.NotNull(store.Current.OwnedInstance);
+        // A later failed status is shown as "확인 불가", not as the old error (§5.2).
+        hub.StatusFails = true;
+        await supervisor.RefreshAsync();
+        Assert.Equal(RunnerPhase.Unverifiable, supervisor.View.Phase);
     }
 
     [Fact]
