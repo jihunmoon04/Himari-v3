@@ -166,14 +166,15 @@ export function FilesPanel({ conversation }: { conversation: string }) {
   const folders = useQuery({ queryKey: ["conversation", conversation, "folders"],
     queryFn: () => conversationFolders(conversation), retry: false });
   const [at, setAt] = useState<{ path: string; kind: string } | null>(null);
+  // every hook before the first early return: a render that returns early must call the same hooks (React #310)
+  const [problem, setProblem] = useState<string | null>(null);
   if (folders.isLoading) return <p className="text-faint">Loading…</p>;
   if (folders.error) return <p role="alert" className="text-danger">{why(folders.error)}</p>;
   const items = folders.data?.items ?? [];
   if (!items.length) {
     return <p className="text-faint">This conversation has no folders here (it only talks, or the machine is off).</p>;
   }
-  const [problem, setProblem] = useState<string | null>(null);
-  const open = (path: string, kind: string) => {
+  const open =(path: string, kind: string) => {
     setProblem(null);
     if (kind === "directory" || kind === "file") return setAt({ path, kind });
     // a link (or anything else): where it leads decides how it opens
