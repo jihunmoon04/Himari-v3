@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -212,7 +212,7 @@ H1은 W3 전에 필요하다. 사용자가 직접 보낸 글도 hub 원장에
 | `POST /api/hub/sessions/{id}/messages` | `send` | `prompt`, `model`?, `effort`?, `mode`? |
 | `POST /api/hub/sessions` | `new` | `project`, `prompt`, 선택 인자 |
 | `POST /api/hub/sessions/{id}/close` | `close` | |
-| `GET /api/hub/tasks/{id}` | `task`(H1) | MCP 경로 카드. H1이 hub에 생기면 더함(W0에는 없음) |
+| `GET /api/hub/tasks/{id}` | `task`(H1) | 보낸 글과 MCP 경로 카드를 작업 id로 따라감(W3에서 더함) |
 | `PUT /api/hub/projects/{name}/preset` | `preset` | |
 | `GET /api/hub/pending`, `POST …/answer`, `POST /api/hub/tasks/{id}/cancel` | 그대로 | V3-P95 |
 
@@ -359,6 +359,33 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
 - **검사:** Vitest(hub 항목 변환, 병합), Playwright가 `scripts/web_next_hub.py`(실제 HTTP·SSE로 대본을 돌리는 가짜 hub)로
   사이드바, 세션(접힌 생각, diff, 계획, 요청, 위험한 마크업, 실시간 한 줄), 작업 현황의 실시간 변화, 긴 세션의 앞 구간.
 - **아직:** 보내기·새 대화·닫기·승인(W3), 마지막 활동 시각(H7), 닫힌 세션 목록.
+
+### 7.8 W3에서 만든 것 (2026-11-17)
+
+- **서버:** `GET /api/hub/tasks/{id}`(hub `task`, H1). 작업에 `project`, 실제로 도는 `session`(없으면 null), 결과 앞
+  4,000자, `result_truncated`, 그 작업의 `pending`을 계약의 칸만 옮긴다(`hub.task_detail`).
+- **보낸 글 따라가기(§5.2):** `features/hub/follow.ts`가 이 페이지에서 보낸 작업(`send`·`new`)을 페이지 전체에서 들고,
+  끝날(`done`·`failed`) 때까지 2초(1분 뒤 5초, hub가 답하지 않으면 5·10·30초)마다 `task`를 읽는다. `send`가 돌려준
+  `session`은 보낸 곳일 뿐이라 실제 세션으로 치지 않는다. 실제 세션이 지금 화면과 다르면 그 세션으로 옮기고
+  "에이전트가 세션 #n을 잃어 새 세션에서 이어 갑니다" 안내를 보인다. 세션이 생기기 전에 끝난 작업은 입력창 위에 실패로 남긴다.
+- **세션 화면:** 입력창(모델·강도·모드는 `projects`에 그 에이전트 몫이 있을 때만, 모드는 둘 이상일 때만, 그 글 하나에만),
+  턴이 돌면 보내기 옆에 **중지**(세션의 `task`를 `cancel`), 작업 중에 보낸 글은 입력창 위 **"Waiting for the running turn (n)"**
+  줄에 쌓이고 하나씩 **Cancel**(열린 질문 4의 답: 차례 표시는 이 줄과 개수로 한다). 닫힌 세션은 입력창 대신 안내.
+  자세히 패널에 **Close session**(턴이 돌면 막음, 확인 후)과 마지막 활동 시각(H7). `hub_unknown`이면 "보내졌을 수도 있으니
+  확인한 뒤 다시 보내라"고 하고 다시 보내지 않는다(초안은 남김).
+- **승인·질문(§4.2, §4.6):** `components/HubRequest.tsx`. 대화 안의 `request` 항목은 최신 `pending`에 그 요청(`id` =
+  `interaction_id`)이 있을 때만 답할 수 있는 카드로 그리고, 아니면 기록으로 둔다. 이벤트가 아직 없는 요청은 입력창 위에 카드로.
+  승인은 에이전트의 선택지(허용 쪽이 주 버튼), 에이전트가 거절 선택지를 주지 않았으면 **Refuse**, 질문은 칸마다 선택 목록이나
+  글 한 줄과 **Answer**·**Decline**, 모두 **Stop task**. 답한 뒤(받아들여졌든 409든) `pending`과 세션을 다시 읽는다.
+  **받은 승인(`/approvals`)**: 모든 `pending`을 오래된 순으로, 프로젝트·에이전트·기기·작업 글과 "Open session". 사이드바에
+  대기 수, 탭 제목 `(n) HIMARI`.
+- **새 작업(§4.1):** 홈 입력창에서 받는 쪽을 HIMARI 또는 프로젝트로 고른다. 프로젝트면 에이전트(기본은 그 프로젝트의
+  `default_agent`)와 모델·강도·모드를 골라 `new`를 보내고, 작업을 따라가 세션이 생기면 그 화면으로 옮긴다.
+- **검사:** pytest `test_web_hub_sessions.py`(작업 보기와 중계), Vitest(`answer.test.ts` 답 만들기, `follow.test.ts` 따라가기),
+  Playwright(가짜 hub `scripts/web_next_hub.py`의 프로젝트 `work`: 쉬는 세션에 보내기와 대기 글 취소, 대화 안에서 승인,
+  받은 승인에서 질문에 답하고 탭 제목, 홈에서 새 세션, 세션을 잃은 보내기가 새 세션으로 옮김). 가짜 hub는 이제 보내기·새
+  대화·중지·답·닫기를 대본대로 하고, 두 스트림이 그 변화를 실시간으로 보낸다.
+- **아직:** MCP 경로 카드(W4), 오른쪽 변경·계획 탭(W5), 백그라운드 알림(옛 화면에만 있음), 첨부·`/` 명령(H3·H4).
 
 ## 8. hub에 필요한 것
 

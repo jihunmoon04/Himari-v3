@@ -33,6 +33,7 @@ from himari.interfaces.web.hub import (  # noqa: E402
     HubNotFound,
     event_view,
     session_detail,
+    task_detail,
     task_view,
 )
 
@@ -213,6 +214,16 @@ def test_a_session_and_a_task_as_the_page_gets_them() -> None:
     assert detail["pending"][0]["options"] == [{"option_id": "allow", "name": "Yes", "kind": "allow_once"}]
     task = task_view({**TASK, "session": 5})
     assert task is not None and task["session"] == 5 and task_view({"status": "done"}) is None
+    followed = task_detail({**TASK, "session": None, "project": "demo", "result": "가" * 9000, "result_truncated": True,
+                            "pending": [{"id": 1, "task_id": 9, "kind": "question", "asks": "Which?", "fields": {}},
+                                        {"id": "x"}], "token": TOKEN})
+    assert followed is not None and TOKEN not in json.dumps(followed)
+    assert followed["session"] is None and followed["project"] == "demo" and followed["result_truncated"] is True
+    assert len(followed["result"]) == 4000 and [p["id"] for p in followed["pending"]] == [1]
+    cut_here = task_detail({**TASK, "result": "x" * 4001, "result_truncated": False})
+    assert cut_here is not None and cut_here["result_truncated"] is True  # the relay cut it: it says so
+    bare = task_detail(TASK)  # an older hub's answer: no session yet, nothing waits
+    assert bare is not None and bare["session"] is None and bare["result"] is None and bare["pending"] == []
 
 
 # -- the calls ----------------------------------------------------------------------------------
@@ -257,6 +268,13 @@ def test_the_users_own_work_on_a_session(client: TestClient, hub: Hub) -> None:
     for bad in ({"prompt": ""}, {"prompt": "x", "other": 1}, {"prompt": "x", "model": ""}):
         assert client.post("/api/hub/sessions/5/messages", json=bad, headers=SEND).status_code == 400, bad
     assert len(hub.calls) == 4  # nothing more reached the hub
+    hub.replies["task"] = (200, {"task": {**TASK, "status": "done", "session": 6, "project": "demo",
+                                          "result": "ok", "result_truncated": False, "pending": []}})
+    followed = client.get("/api/hub/tasks/9")
+    assert followed.status_code == 200 and followed.json()["task"]["session"] == 6
+    assert followed.json()["task"]["result"] == "ok" and hub.calls[-1] == ("task", {"id": 9})
+    hub.replies["task"] = (400, {"error": "없는 작업: 99"})
+    assert client.get("/api/hub/tasks/99").json()["error"]["code"] == "hub_refused"
 
 
 def test_the_hubs_refusals_are_told_apart(client: TestClient, hub: Hub, tmp_path: Path) -> None:

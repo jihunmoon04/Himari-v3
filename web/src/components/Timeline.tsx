@@ -2,7 +2,7 @@ import {
   Brain, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleHelp, LoaderCircle, MessageCircleQuestion,
   ShieldQuestion, Wrench,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { stepTitle } from "@/features/himari/items";
 import type { LiveState } from "@/features/himari/live";
 import type { Item, ToolStep, Turn } from "@/features/timeline";
@@ -192,11 +192,13 @@ function TurnLine({ turn }: { turn: Turn }) {
   );
 }
 
-export function Timeline({ items, live, running, working }: {
+export function Timeline({ items, live, running, working, renderRequest }: {
   items: Item[];
   live?: LiveState;
   running: boolean;
   working?: string; // a hub session at work: the line shown while nothing new comes
+  // a request that can still be answered, drawn by the page (it knows the pending list); null: drawn as a record
+  renderRequest?: (item: Extract<Item, { kind: "request" }>) => ReactNode | null;
 }) {
   const lastWork = [...items].reverse().find((item) => item.kind === "work")?.key;
   return (
@@ -227,7 +229,9 @@ export function Timeline({ items, live, running, working }: {
                 <AssistantText text={item.text} />
               </div>
             );
-          case "request":
+          case "request": {
+            const answerable = item.outcome ? null : renderRequest?.(item);
+            if (answerable) return <div key={item.key}>{answerable}</div>;
             return (
               <div
                 key={item.key}
@@ -249,6 +253,7 @@ export function Timeline({ items, live, running, working }: {
                 )}
               </div>
             );
+          }
           case "turn":
             return <TurnLine key={item.key} turn={item.turn} />;
           case "notice":

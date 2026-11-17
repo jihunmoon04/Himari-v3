@@ -2571,6 +2571,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def hub_cancel(task_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)) -> None:
         await hub_call(hub_for(who).cancel(task_id))
 
+    @app.get("/api/hub/tasks/{task_id}")
+    async def hub_task(task_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A task the page sent (``send``, ``new``) or HIMARI handed over, followed to its end: its status, the
+        session it really runs in (null until it has one; a ``send`` whose session the agent lost moves), the start
+        of its result, and what it waits on (V3-P102 §5)."""
+        return {"task": await hub_call(hub_for(who).task(task_id))}
+
     @app.get("/api/hub/projects")
     async def hub_projects(who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """Projects, profiles, agents and their modes, the models and efforts allowed, the hub's devices."""

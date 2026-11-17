@@ -3,7 +3,7 @@
 import { PanelLeftOpen } from "lucide-react";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Outlet, useLocation } from "react-router";
-import { usePrincipalEvents } from "@/app/queries";
+import { useHubPending, useHubProjects, usePrincipalEvents } from "@/app/queries";
 import { cn } from "@/lib/cn";
 import { Sidebar } from "./Sidebar";
 import { IconButton } from "./ui/button";
@@ -44,8 +44,19 @@ export function PageHeader({ children, actions }: { children?: ReactNode; action
   );
 }
 
+/** "(2) HIMARI" while two agent requests wait for the user. */
+function useWaitingTitle() {
+  const hub = useHubProjects();
+  const pending = useHubPending(hub.status === "on");
+  const count = pending.data?.pending.length ?? 0;
+  useEffect(() => {
+    document.title = count > 0 ? `(${count}) HIMARI` : "HIMARI";
+  }, [count]);
+}
+
 export function Shell() {
   usePrincipalEvents(true);
+  useWaitingTitle();
   const narrow = useNarrow();
   const [wide, setWide] = useState(true); // the list's state on a wide screen
   const [drawer, setDrawer] = useState(false); // and on a narrow one
