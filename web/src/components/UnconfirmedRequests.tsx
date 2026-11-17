@@ -5,7 +5,7 @@
 // (as without H13) only once the open requests and the projects were read again and shown.
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { ProjectRequestBody } from "@/api/hub";
+import { readHubProjects, type ProjectRequestBody } from "@/api/hub";
 import { hubKeys, useHubProjects } from "@/app/queries";
 import { hubHasRequestKeys, KINDS } from "@/features/hub/project_view";
 import { openRequests, requests, useHubRequests } from "@/features/hub/requests";
@@ -26,12 +26,12 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
 
   const reread = async () => { // shown once both are read again (a refused key may be discarded only then)
     setBusy(true);
-    try {
-      await Promise.allSettled([client.invalidateQueries({ queryKey: hubKeys.projects }), requests.refresh()]);
-      setLooked(true);
-    } finally {
-      setBusy(false);
-    }
+    const [projects, open] = await Promise.allSettled([
+      client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 }), requests.refresh()]);
+    const read = projects.status === "fulfilled" && open.status === "fulfilled" && open.value;
+    setLooked(read);
+    if (!read) setProblem("The open requests or the projects could not be read again.");
+    setBusy(false);
   };
   const again = async () => {
     setBusy(true);

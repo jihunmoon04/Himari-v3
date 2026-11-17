@@ -62,7 +62,7 @@ export class RequestStore {
   private tracked: number[];
   private listeners = new Set<() => void>();
   private snapshot: Snapshot;
-  private reading: Promise<void> | null = null;
+  private reading: Promise<boolean> | null = null;
   private again = false;
 
   constructor(private readonly reader: Reader, private readonly storage: () => KeyValue | null,
@@ -110,24 +110,27 @@ export class RequestStore {
 
   // -- reading the hub --------------------------------------------------------------------------
 
-  /** The open list, then the ids it lacked; one at a time (asked meanwhile: once more after). */
-  refresh(): Promise<void> {
+  /** The open list, then the ids it lacked; one at a time (asked meanwhile: once more after). True when the last
+   *  read went through whole (the open list and every batch of ids). */
+  refresh(): Promise<boolean> {
     if (this.reading) {
       this.again = true;
       return this.reading;
     }
     this.reading = (async () => {
+      let whole = false;
       do {
         this.again = false;
-        await this.readOnce();
+        whole = await this.readOnce();
       } while (this.again);
+      return whole;
     })().finally(() => {
       this.reading = null;
     });
     return this.reading;
   }
 
-  private async readOnce() {
+  private async readOnce(): Promise<boolean> {
     let listed: Set<number> | null = null;
     try {
       const got = await this.reader.open();
@@ -150,13 +153,15 @@ export class RequestStore {
       if (listed?.has(id) || entry?.unknown) continue;
       if (!entry?.request || isOpen(entry.request)) ask.add(id);
     }
-    await this.readIds([...ask], true);
+    const idsRead = await this.readIds([...ask], true);
     this.prune();
     this.emit();
+    return listed !== null && idsRead;
   }
 
-  /** These ids, in batches of BATCH. A batch that fails changes nothing. */
-  async readIds(ids: readonly number[], quiet = false): Promise<void> {
+  /** These ids, in batches of BATCH. A batch that fails changes nothing. True when every batch was read. */
+  async readIds(ids: readonly number[], quiet = false): Promise<boolean> {
+    let whole = true;
     for (let start = 0; start < ids.length; start += BATCH) {
       const chunk = ids.slice(start, start + BATCH);
       try {
@@ -170,13 +175,14 @@ export class RequestStore {
         const missing = Array.isArray(got.missing) ? got.missing : chunk.filter((id) => !given.has(id));
         for (const id of missing) if (chunk.includes(id)) this.markUnknown(id);
       } catch {
-        // asked again on the next read
+        whole = false; // asked again on the next read
       }
     }
     if (!quiet) {
       this.prune();
       this.emit();
     }
+    return whole;
   }
 
   // -- followed ids -----------------------------------------------------------------------------
@@ -193,7 +199,7 @@ export class RequestStore {
     if (!known) this.emit();
     if (known && entry?.request) return Promise.resolve(); // followed already: the regular reads keep it
     if (entry?.unknown || (entry?.request && !isOpen(entry.request))) return Promise.resolve();
-    return this.readIds([id]);
+    return this.readIds([id]).then(() => undefined);
   }
 
   untrack(id: number) {

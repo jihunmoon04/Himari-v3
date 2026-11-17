@@ -43,6 +43,15 @@ export const answerLost = (error: unknown) =>
   error instanceof ApiError && (error.code === "hub_unknown" || error.status === 0
     || (error.status >= 500 && error.code === `http_${error.status}`));
 
+/** The request of a reply that should hold one; a reply without one (empty, cut, not JSON) is a lost answer. */
+export function requestOf(reply: { request?: HubProjectRequest } | null | undefined): HubProjectRequest {
+  const request = reply?.request;
+  if (!request || !Number.isInteger(request.id) || !Number.isInteger(request.rev) || typeof request.state !== "string") {
+    throw new ApiError(0, "offline", "The server's answer was not readable.");
+  }
+  return request;
+}
+
 export class UnconfirmedList {
   private items: Unconfirmed[];
   private listeners = new Set<() => void>();
@@ -121,9 +130,9 @@ export async function sendKeyed(entry: Unconfirmed, again: boolean, list: Unconf
   list.put(again ? { ...entry, refused: null } : entry);
   const key = { client_key: entry.client_key, key_time: entry.key_time };
   try {
-    const { request } = entry.route === "request"
+    const request = requestOf(entry.route === "request"
       ? await senders.request({ ...(entry.body as ProjectRequestBody), ...key })
-      : await senders.remove({ ...(entry.body as RemoveBody), ...key });
+      : await senders.remove({ ...(entry.body as RemoveBody), ...key }));
     requestStore.merge(request);
     void requestStore.track(request.id); // followed (and kept in this tab) before the entry goes (§5)
     list.drop(entry.client_key);

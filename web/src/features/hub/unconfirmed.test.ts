@@ -68,6 +68,15 @@ describe("a request sent with a client key", () => {
     expect(list.getSnapshot()).toEqual([]);
   });
 
+  it("an answer without a request (empty, cut) is a lost answer: the entry stays", async () => {
+    const { list, store, senders } = setup();
+    vi.mocked(senders.request).mockResolvedValueOnce(null as never).mockResolvedValueOnce({} as never);
+    expect("error" in await sendKeyed(entry, false, list, store, senders)).toBe(true);
+    expect(list.getSnapshot()).toHaveLength(1);
+    expect("error" in await sendKeyed(entry, true, list, store, senders)).toBe(true);
+    expect(list.getSnapshot()).toEqual([{ ...entry, refused: null }]); // still to be sent again
+  });
+
   it("a first send the hub refuses, or that never reached it, leaves nothing behind", async () => {
     const { list, store, senders } = setup();
     vi.mocked(senders.remove)

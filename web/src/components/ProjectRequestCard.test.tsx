@@ -83,9 +83,26 @@ describe("a project request's card", () => {
     show({ id: 4, rev: 1, state: "waiting_user", kind: "create", project: "site", runner: "linux", origin: "model",
       why: "for the docs" }, withH({}));
     fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
-    expect(await screen.findByText(/did not answer; read again/)).toBeTruthy();
+    expect(await screen.findByText(/did not answer; it is read again/)).toBeTruthy();
     expect(answer).toHaveBeenCalledWith(4, true);
     await waitFor(() => expect(read).toHaveBeenCalledWith([4]));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Allow" }) as HTMLButtonElement).disabled)
+      .toBe(false)); // read again, and it still waits: it may be allowed again
+  });
+
+  it("after a lost answer whose request cannot be read again, offers nothing but reading it again", async () => {
+    vi.spyOn(api, "answerProjectRequest").mockRejectedValueOnce(new ApiError(503, "hub_unknown", "lost"));
+    const read = vi.mocked(api.readProjectRequestsByIds).mockRejectedValueOnce(new ApiError(503, "hub_unavailable", ""));
+    show({ id: 8, rev: 1, state: "waiting_user", kind: "create", project: "site", runner: "linux", origin: "model" },
+      withH({}));
+    fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
+    expect(await screen.findByText(/could not be read again/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Allow" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Refuse" }) as HTMLButtonElement).disabled).toBe(true);
+    read.mockResolvedValueOnce({ requests: [{ id: 8, rev: 2, state: "applying", kind: "create", project: "site",
+      runner: "linux" }], missing: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Read it again" }));
+    expect(await screen.findByText("The device is registering it")).toBeTruthy(); // the first one went through
   });
 
   it("without H17, rests the settle button for a minute after a lost answer", async () => {

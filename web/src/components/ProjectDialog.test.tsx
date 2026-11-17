@@ -103,6 +103,18 @@ describe("an unconfirmed request whose key the hub refused", () => {
     expect(open).toHaveBeenCalled();
     expect(await screen.findByText("No open request like it.")).toBeTruthy();
   });
+
+  it("stays when the reads fail: nothing was learnt", async () => {
+    vi.spyOn(api, "readHubProjects").mockRejectedValue(new ApiError(503, "hub_unavailable", "down"));
+    vi.spyOn(api, "readProjectRequests").mockResolvedValue({ requests: [], missing: null });
+    const entry = { client_key: "k2", key_time: "2026-11-17T10:00:00Z", route: "request" as const, at: 1,
+      body: { kind: "create" as const, project: "site", runner: "linux" }, refused: "client_key_expired" };
+    unconfirmed.put(entry);
+    mount(<UnconfirmedItem entry={entry} />, hub);
+    fireEvent.click(screen.getByRole("button", { name: "Read the open requests again" }));
+    expect(await screen.findByText(/could not be read again/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Discard" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
 
 describe("a lost answer", () => {

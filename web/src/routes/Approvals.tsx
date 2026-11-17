@@ -10,7 +10,7 @@ import { ProjectRequestCard } from "@/components/ProjectRequestCard";
 import { UnconfirmedRequests } from "@/components/UnconfirmedRequests";
 import { PageHeader } from "@/components/Shell";
 import { useHubList } from "@/features/hub/list";
-import { openRequests, useHubRequests } from "@/features/hub/requests";
+import { openRequests, requests, useHubRequests } from "@/features/hub/requests";
 
 function ProjectRequests() {
   const store = useHubRequests();
@@ -20,13 +20,18 @@ function ProjectRequests() {
   useEffect(() => {
     setSeen((before) => (waiting.every((id) => before.includes(id)) ? before : [...new Set([...before, ...waiting])]));
   }, [waiting]);
-  const shown = [...new Set([...seen, ...waiting])].filter((id) => store.entries.has(id)).sort((x, y) => x - y);
+  // and the requests this tab follows (kept over a reload, §5): one that ended meanwhile shows how, until put away
+  const followed = store.tracked.filter((id) => !waiting.includes(id));
+  const shown = [...new Set([...seen, ...waiting, ...followed])].filter((id) => store.entries.has(id))
+    .sort((x, y) => x - y);
   return (
     <section aria-label="Project requests" className="space-y-2">
       <h2 className="text-xs font-medium text-faint">Project requests</h2>
       <UnconfirmedRequests />
       {waiting.length === 0 && <p className="text-sm text-faint">No project request waits for you.</p>}
-      {shown.map((id) => <ProjectRequestCard key={id} id={id} />)}
+      {shown.map((id) => (
+        <ProjectRequestCard key={id} id={id} onClose={followed.includes(id) ? () => requests.untrack(id) : undefined} />
+      ))}
     </section>
   );
 }

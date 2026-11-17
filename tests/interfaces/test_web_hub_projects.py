@@ -304,6 +304,12 @@ def test_the_hubs_answers_are_told_apart(client: TestClient, hub: Hub, tmp_path:
     assert lost.status_code == 503 and lost.json()["error"]["code"] == "hub_unknown"
     odd = client.post("/api/hub/projects/adopt", json={"project": "p", "runner": "r"}, headers=SEND)
     assert odd.status_code == 503 and odd.json()["error"]["code"] == "hub_unknown"  # done, but not readable
+    hub.replies = {"project_request": (500, {}), "project_request_answer": (502, {}), "runner_dirs": (500, {})}
+    for path, sent in (("/api/hub/project-requests", body), ("/api/hub/project-requests/7/answer", {"approve": True})):
+        failed = client.post(path, json=sent, headers=SEND)  # a change the hub took may have been done
+        assert failed.status_code == 503 and failed.json()["error"]["code"] == "hub_unknown"
+    read = client.post("/api/hub/runner-dirs", json={"runner": "r"}, headers=SEND)  # a read: nothing was done
+    assert read.status_code == 503 and read.json()["error"]["code"] == "hub_unavailable"
     (tmp_path / "user.token").write_text("wrong", encoding="ascii")
     wrong = client.post("/api/hub/runner-dirs", json={"runner": "r"}, headers=SEND)
     assert wrong.status_code == 503 and wrong.json()["error"]["code"] == "hub_misconfigured"

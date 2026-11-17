@@ -28,7 +28,7 @@ import { hubKeys, useHubProjects } from "@/app/queries";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { cardView, heldFor, hubHasRequestKeys, runnerOf, secondsLeft } from "@/features/hub/project_view";
 import { requests, useHubRequests } from "@/features/hub/requests";
-import { answerLost, sendKeyed } from "@/features/hub/unconfirmed";
+import { answerLost, requestOf, sendKeyed } from "@/features/hub/unconfirmed";
 import { cn } from "@/lib/cn";
 import { Button, IconButton } from "./ui/button";
 
@@ -109,6 +109,7 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
   const [asking, setAsking] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [settleFailed, setSettleFailed] = useState(false);
+  const [unsure, setUnsure] = useState(false); // a lost answer, and the request not read again since
   const [, setTick] = useState(0);
   const restUntil = resting.get(id) ?? 0;
   useEffect(() => {
@@ -121,23 +122,36 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
   }, [entry.request, entry.unknown, id]);
 
   const view = cardView(entry, asking);
+  const stopped = busy || unsure;
   const keys = hubHasRequestKeys(hub.data);
   const rests = restUntil > Date.now();
+
+  /** The request as the hub has it now; until that read goes through nothing on the card can be pressed. */
+  const readAgain = async () => {
+    setBusy(true);
+    const whole = await requests.readIds([id]);
+    setUnsure(!whole);
+    setBusy(false);
+  };
 
   const act = async (run: () => Promise<{ request: HubProjectRequest }>, lostAnswer?: () => void) => {
     setBusy(true);
     setProblem(null);
     try {
-      requests.merge((await run()).request);
+      requests.merge(requestOf(await run()));
+      setBusy(false);
       return true;
     } catch (error) {
-      setProblem(answerLost(error) ? "The hub did not answer; read again. Try again if it still waits."
-        : failureText(error));
-      if (answerLost(error)) lostAnswer?.();
-      void requests.readIds([id]); // whatever happened, as the hub has it now
+      if (answerLost(error)) { // it may have been done: read it first, then try again only if it still waits
+        setProblem("The hub did not answer; it is read again. Try again if it still waits.");
+        lostAnswer?.();
+        await readAgain();
+      } else {
+        setProblem(failureText(error));
+        void requests.readIds([id]); // as the hub has it now
+        setBusy(false);
+      }
       return false;
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -233,18 +247,18 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
       {view.actions.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
           {view.actions.includes("approve") && (
-            <Button variant="primary" disabled={busy} onClick={() => void act(() => answerProjectRequest(id, true))}>
+            <Button variant="primary" disabled={stopped} onClick={() => void act(() => answerProjectRequest(id, true))}>
               Allow
             </Button>
           )}
           {view.actions.includes("refuse") && (
-            <Button disabled={busy} onClick={() => void act(() => answerProjectRequest(id, false))}>Refuse</Button>
+            <Button disabled={stopped} onClick={() => void act(() => answerProjectRequest(id, false))}>Refuse</Button>
           )}
           {view.actions.includes("cancel") && (
-            <Button variant="ghost" disabled={busy} onClick={() => void act(() => cancelProjectRequest(id))}>Cancel</Button>
+            <Button variant="ghost" disabled={stopped} onClick={() => void act(() => cancelProjectRequest(id))}>Cancel</Button>
           )}
           {view.actions.includes("resolve") && (
-            <Button variant="primary" disabled={busy || rests} onClick={() => void settle()}>
+            <Button variant="primary" disabled={stopped || rests} onClick={() => void settle()}>
               {rests ? "Wait a minute" : "Settle"}
             </Button>
           )}
@@ -259,8 +273,14 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
           {view.actions.includes("reread") && <Button onClick={rereadProjects}>Read the projects again</Button>}
         </div>
       )}
+      {unsure && (
+        <div className="mt-2 flex items-center gap-2 text-xs text-danger">
+          <span className="flex-1">The request could not be read again: whether it was done is not known yet.</span>
+          <Button className="text-xs" disabled={busy} onClick={() => void readAgain()}>Read it again</Button>
+        </div>
+      )}
       {request && view.actions.includes("resolve") && settleFailed && !rests && (
-        <LostDevice request={request} busy={busy} onSettle={(outcome) => void settle(outcome)} />
+        <LostDevice request={request} busy={stopped} onSettle={(outcome) => void settle(outcome)} />
       )}
       {problem && <p role="alert" className="mt-2 text-xs text-danger">{problem}</p>}
     </section>

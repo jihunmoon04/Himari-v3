@@ -364,7 +364,10 @@ class HubClient:
             raise HubUnavailable("the hub's user token is empty")
         return token
 
-    def _post(self, op: str, body: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+    def _post(self, op: str, body: dict[str, Any], timeout: float | None = None, *, changes: bool = False
+              ) -> dict[str, Any]:
+        """``changes``: the op changes the hub's state (V3-P103 §4.1), so a 5xx after the hub took it says nothing of
+        whether it was done: HubUnknown, not HubUnavailable."""
         token = self.token()
         request = urllib.request.Request(
             f"{self.url.rstrip('/')}/user/{op}", json.dumps(body).encode("utf-8"),
@@ -382,6 +385,8 @@ class HubClient:
                 raise HubRefused(detail if isinstance(detail, str) else "the hub refused this") from None
             if error.code in (401, 403):
                 raise HubMisconfigured(f"the hub answered HTTP {error.code}") from None
+            if changes and error.code >= 500:
+                raise HubUnknown(f"the hub answered HTTP {error.code}") from None
             raise HubUnavailable(f"the hub answered HTTP {error.code}") from None
         except urllib.error.URLError as error:
             if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
@@ -406,8 +411,9 @@ class HubClient:
     async def cancel(self, task_id: int) -> None:
         await asyncio.to_thread(self._post, "cancel", {"id": task_id})
 
-    async def _call(self, op: str, body: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
-        return await asyncio.to_thread(self._post, op, body, timeout)
+    async def _call(self, op: str, body: dict[str, Any], timeout: float | None = None, *, changes: bool = False
+                    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self._post, op, body, timeout, changes=changes)
 
     async def projects(self) -> dict[str, Any]:
         return projects_view(await self._call("projects", {}))
@@ -489,7 +495,7 @@ class HubClient:
     # -- projects and device folders (V3-P103 §4; hub user-api-v1 §4.6) ------------------------
 
     async def _request(self, op: str, body: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
-        found = project_request_view((await self._call(op, body, timeout)).get("request"))
+        found = project_request_view((await self._call(op, body, timeout, changes=True)).get("request"))
         if found is None:
             raise HubUnknown("the hub's answer was not readable")
         return found
@@ -528,7 +534,7 @@ class HubClient:
         return await self._request("project_folder_remove", body)
 
     async def _project(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
-        found = _view(_PROJECT, (await self._call(op, body)).get("project"))
+        found = _view(_PROJECT, (await self._call(op, body, changes=True)).get("project"))
         if found is None:
             raise HubUnknown("the hub's answer was not readable")
         return {"project": found}
