@@ -28,11 +28,13 @@ import { cn } from "@/lib/cn";
 // tasks whose move to another session this page has already followed (it moves once, not on every render)
 const movedAlready = new Set<number>();
 
-/** Why a send or a stop did not go through, in words; ``hub_unknown``: it may have been done (nothing is retried). */
+/** Why a send, a stop or a close did not go through, in words. The answer lost on the way (``hub_unknown`` from the
+ *  hub, or the connection to this server broke after the request left: ``offline``) means it may have been done:
+ *  nothing is retried, and the user is told to check first (the hub keeps no key to drop a duplicate). */
 export function sendProblem(failure: unknown): string {
   if (failure instanceof ApiError) {
-    if (failure.code === "hub_unknown") {
-      return "The hub's answer was lost: the message may have been sent. Check this session before sending it again.";
+    if (failure.code === "hub_unknown" || failure.code === "offline") {
+      return "The answer was lost on the way: it may have been done. Check the session before trying again.";
     }
     if (failure.code === "hub_refused") return `The hub refused it: ${failure.message}`;
     return failure.message;
@@ -112,6 +114,18 @@ function SessionPage({ id }: { id: number }) {
   const running = session?.activity === "running" || session?.activity === "waiting";
   const closed = session?.state === "closed";
   const lastIsTurnEnd = items.at(-1)?.kind === "turn";
+  // what waits its turn is in the session's detail; the listing's count says when it changed (another browser, a
+  // turn that took the next one), and without a live stream the detail is read again now and then
+  useEffect(() => {
+    if (listed && detail.data && (listed.queued ?? 0) !== detail.data.queued.length) {
+      void client.invalidateQueries({ queryKey: hubKeys.session(id) });
+    }
+  }, [client, id, listed?.queued, detail.data?.queued.length]);
+  useEffect(() => {
+    if (stream.live) return;
+    const timer = window.setInterval(() => void client.invalidateQueries({ queryKey: hubKeys.session(id) }), 10_000);
+    return () => window.clearInterval(timer);
+  }, [client, id, stream.live]);
   const [choices, setChoices] = useState<MessageChoices>({});
   const [problem, setProblem] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
