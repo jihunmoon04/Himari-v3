@@ -77,7 +77,7 @@ export function openList() {
   let poll: number | undefined;
   let retry: number | undefined;
   let ended = false;
-  let epoch = 0; // bumped when the stream is tried again: a poll answered after that is stale
+  let epoch = 0; // bumped when the stream opens after reads by asking: a poll answered after that is stale
 
   const read = async () => {
     const asked = epoch;
@@ -92,9 +92,7 @@ export function openList() {
 
   const connect = () => {
     if (ended) return;
-    epoch += 1;
-    window.clearInterval(poll);
-    poll = undefined;
+    // the reads by asking go on until the stream has opened (it may stay pending): "open" stops them
     source = new EventSource(hubStreamUrl(), { withCredentials: true });
     const on = (name: string, apply: (data: Record<string, unknown>) => void) =>
       source?.addEventListener(name, (message) => {

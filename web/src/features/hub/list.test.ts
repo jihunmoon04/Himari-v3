@@ -100,8 +100,25 @@ describe("the list stream and its polling fallback", () => {
     expect(polls).toBe(3); // at once on the refusal, then every 10 s: one timer
     await vi.advanceTimersByTimeAsync(5_000); // the stream is tried again, and is back
     FakeSource.made[1]!.fire("open");
+    const atOpen = signals.polled.mock.calls.length;
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(signals.polled.mock.calls.length).toBe(polls);
+    expect(signals.polled.mock.calls.length).toBe(atOpen); // no timer left behind
+    stop();
+  });
+
+  it("keeps reading by asking while a stream tried again has not opened yet", async () => {
+    const stop = openList();
+    const first = FakeSource.made[0]!;
+    first.readyState = FakeSource.CLOSED;
+    first.fire("error"); // refused
+    await vi.advanceTimersByTimeAsync(30_000); // tried again: a new stream, pending
+    expect(FakeSource.made).toHaveLength(2);
+    const before = signals.polled.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(signals.polled.mock.calls.length).toBe(before + 2); // still every 10 s
+    FakeSource.made[1]!.fire("open");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(signals.polled.mock.calls.length).toBe(before + 2); // open: the timer stopped
     stop();
   });
 
