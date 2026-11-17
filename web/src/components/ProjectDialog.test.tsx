@@ -181,6 +181,30 @@ describe("a user device's folder", () => {
   });
 });
 
+describe("an unconfirmed request on a hub without client keys", () => {
+  afterEach(() => {
+    cleanup();
+    requests.reset(true);
+    unconfirmed.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("reads the open requests at once, and says none is like it only after they were read", async () => {
+    const old: HubProjects = { projects: hub.projects, runners: hub.runners }; // no held: a hub without H8..H17
+    vi.spyOn(api, "readHubProjects").mockResolvedValue(old);
+    let answer: (read: { requests: api.HubProjectRequest[]; missing: number[] | null }) => void = () => undefined;
+    vi.spyOn(api, "readProjectRequests").mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    const entry = { client_key: "k3", key_time: "2026-11-18T10:00:00Z", route: "remove" as const, at: 1,
+      body: { project: "site", runner: "linux" } };
+    unconfirmed.put(entry);
+    mount(<UnconfirmedItem entry={entry} />, old);
+    await waitFor(() => expect(api.readProjectRequests).toHaveBeenCalled());
+    expect(screen.queryByText("No open request like it.")).toBeNull(); // not read yet: nothing to say
+    answer({ requests: [], missing: null });
+    expect(await screen.findByText("No open request like it.")).toBeTruthy();
+  });
+});
+
 describe("adopting a held folder", () => {
   afterEach(() => {
     cleanup();

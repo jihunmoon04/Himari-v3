@@ -4,7 +4,7 @@
 // hub no longer takes (``client_key_expired`` …) ends the resending; the entry can then only be discarded, and
 // (as without H13) only once the open requests and the projects were read again and shown.
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProjectRequestBody } from "@/api/hub";
 import { readProjectsNow, useHubProjects } from "@/app/queries";
 import { hubHasRequestKeys, KINDS } from "@/features/hub/project_view";
@@ -35,12 +35,20 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
 
   const reread = async () => { // shown once both are read again (a refused key may be discarded only then)
     setBusy(true);
+    setProblem(null);
     const [projects, open] = await Promise.all([readProjectsNow(client), requests.refresh()]);
     const read = projects && open;
     setLooked(read);
     if (!read) setProblem("The open requests or the projects could not be read again.");
     setBusy(false);
   };
+  // a hub without H13 cannot give it back: the open requests are read at once to show the ones like it (§4.1)
+  const readOnce = useRef(false);
+  useEffect(() => {
+    if (keys || readOnce.current || hub.data === undefined) return;
+    readOnce.current = true;
+    void reread();
+  });
   const again = async () => {
     setBusy(true);
     setProblem(null);
@@ -80,7 +88,7 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
           {alike.map((r) => <ProjectRequestCard key={r.id} id={r.id} />)}
         </div>
       )}
-      {(looked || !keys) && alike.length === 0 && (
+      {looked && alike.length === 0 && (
         <p className="mt-2 text-xs text-faint">No open request like it.</p>
       )}
     </div>
