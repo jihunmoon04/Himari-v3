@@ -47,10 +47,22 @@ public partial class MainWindow
             if (browser is null)
             {
                 environment ??= await CoreWebView2Environment.CreateAsync(null, DataFolder);
-                browser = new WebView2 { DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xF7, 0xF5, 0xFA) };
-                BrowserHost.Children.Insert(0, browser);
-                await browser.EnsureCoreWebView2Async(environment);
-                Configure(browser.CoreWebView2);
+                var created = new WebView2 { DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xF7, 0xF5, 0xFA) };
+                BrowserHost.Children.Insert(0, created);
+                try
+                {
+                    await created.EnsureCoreWebView2Async(environment);
+                    Configure(created.CoreWebView2);
+                }
+                catch
+                {
+                    // Not kept: "다시 시도" starts again from a new control (and a new environment) instead of a half-made one.
+                    BrowserHost.Children.Remove(created);
+                    created.Dispose();
+                    environment = null;
+                    throw;
+                }
+                browser = created;
             }
             browser.Visibility = Visibility.Visible;
             browser.CoreWebView2.Settings.AreDevToolsEnabled = settings.DeveloperMode;

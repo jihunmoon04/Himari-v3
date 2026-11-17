@@ -118,8 +118,10 @@ async Task<int> Start()
     var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(config.StartConfirmMs);
     while (DateTime.UtcNow < until)
     {
-        var read = RunnerProtocol.ReadStateFile(home);
-        if (read.File is { } state && state.Instance == id) { Print(new { instance = id, pid = state.Pid, started_at = state.StartedAt }); return 0; }
+        // H10: success only once H14 confirms it: the runner lock is held and the state file of that holder names this id.
+        if (RunnerProtocol.ReadStateFile(home).File?.Instance == id && Status() is { } confirmed
+            && JsonNode.Parse(JsonSerializer.Serialize(confirmed)) is { } seen && (string?)seen["instance"] == id)
+        { Print(new { instance = id, pid = (int?)seen["pid"], started_at = (string?)seen["started_at"] }); return 0; }
         if (child.HasExited)
         {
             if (child.ExitCode == 3)

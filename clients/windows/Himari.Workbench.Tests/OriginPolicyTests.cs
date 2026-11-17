@@ -43,7 +43,8 @@ public sealed class OriginPolicyTests
     public void Frames()
     {
         Assert.Equal(NavigationDecision.Allow, OriginPolicy.Frame(Server, "https://himari.example/frame"));
-        Assert.Equal(NavigationDecision.Allow, OriginPolicy.Frame(Server, "about:blank"));
+        Assert.Equal(NavigationDecision.Block, OriginPolicy.Frame(Server, "about:blank"));
+        Assert.Equal(NavigationDecision.Block, OriginPolicy.Frame(Server, "about:srcdoc"));
         Assert.Equal(NavigationDecision.Block, OriginPolicy.Frame(Server, "https://ads.example/frame"));
         Assert.Equal(NavigationDecision.Block, OriginPolicy.Frame(Server, "data:text/html,hi"));
     }

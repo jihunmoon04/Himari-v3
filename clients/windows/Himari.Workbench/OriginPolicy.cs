@@ -56,9 +56,9 @@ public static class OriginPolicy
         return userInitiated && !redirected && ExternalHttps(uri) is not null ? NavigationDecision.OpenExternal : NavigationDecision.Block;
     }
 
-    /// <summary>Frames: the server's origin only (and the blank documents a frame starts with, which inherit its origin).</summary>
+    /// <summary>Frames: the server's origin only (§4), with no exception for <c>about:</c> documents (the console has no frames).</summary>
     public static NavigationDecision Frame(Uri server, string? uri) =>
-        SameOrigin(server, uri) || uri is "about:blank" or "about:srcdoc" ? NavigationDecision.Allow : NavigationDecision.Block;
+        SameOrigin(server, uri) ? NavigationDecision.Allow : NavigationDecision.Block;
 
     /// <summary>
     /// <c>target=_blank</c> and <c>window.open</c>: never a new window in the app. Same origin opens here; a cross-origin

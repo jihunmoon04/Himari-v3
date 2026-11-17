@@ -12,6 +12,7 @@ public partial class App : System.Windows.Application
     private SingleInstance? instance;
     private RunnerSupervisor? supervisor;
     private MainWindow? window;
+    private Window? wizardShown;
     private volatile bool exiting;
 
     protected override async void OnStartup(StartupEventArgs e)
@@ -44,6 +45,8 @@ public partial class App : System.Windows.Application
                 Tell($"설정 파일이 깨져서 덮어쓰지 않고 옮겨 두었습니다:\n{load.MovedTo}\n\n처음 설정을 다시 합니다.");
                 break;
         }
+        // §3: a second launch in this session shows this app, the first-run wizard included, so listen before it opens.
+        instance.Listen(() => Dispatcher.BeginInvoke(ShowFromSecondLaunch));
         if (!store.Current.IsComplete && !RunWizard(store, null, null)) { Quit(); return; }
 
         var log = WorkbenchLog.Default();
@@ -51,7 +54,6 @@ public partial class App : System.Windows.Application
             new WindowsSystemInfo(), log);
         window = new MainWindow(store, supervisor, log, ExitFromTray, RunWizard);
         MainWindow = window;
-        instance.Listen(() => Dispatcher.BeginInvoke(window.ShowFromOutside));
         // WPF's event comes on this thread; the SystemEvents one may come on its own thread (StopForSessionEnd handles both).
         SessionEnding += (_, _) => StopForSessionEnd();
         Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => StopForSessionEnd();
@@ -73,7 +75,21 @@ public partial class App : System.Windows.Application
             : async (command, home) => await new ProcessHubCommandRunner(command, home).RunAsync(["runner", "status", "--json"], HubSetup.FirstCheckTimeout);
         var wizard = new SetupWizard(store, () => supervisor?.HoldsRunner ?? false, save, probe, problem) { Owner = owner };
         if (owner is null) wizard.WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        return wizard.ShowDialog() == true;
+        wizardShown = wizard;
+        try { return wizard.ShowDialog() == true; }
+        finally { wizardShown = null; }
+    }
+
+    /// <summary>On the UI thread: the open wizard if there is one (it is modal), otherwise the main window.</summary>
+    private void ShowFromSecondLaunch()
+    {
+        if (wizardShown is { } open)
+        {
+            if (open.WindowState == WindowState.Minimized) open.WindowState = WindowState.Normal;
+            open.Activate();
+            return;
+        }
+        window?.ShowFromOutside();
     }
 
     /// <summary>Tray "종료": stop requests for the owned and pending instances, at most 5 s for the acknowledgement.</summary>
