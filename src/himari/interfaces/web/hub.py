@@ -23,6 +23,7 @@ One short request per call, run off the event loop. The live streams are in
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import socket
 import urllib.error
@@ -380,7 +381,7 @@ class HubClient:
             if error.code == 400:  # the hub read the request and said no: its reason is safe to show
                 try:
                     detail = json.loads(error.read() or b"{}").get("error")
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, OSError, http.client.HTTPException):  # its words cut off
                     detail = None
                 raise HubRefused(detail if isinstance(detail, str) else "the hub refused this") from None
             if error.code in (401, 403):
@@ -392,7 +393,8 @@ class HubClient:
             if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
                 raise HubUnavailable("the hub could not be reached") from None  # nothing reached it
             raise HubUnknown("the hub did not answer") from None
-        except (OSError, ValueError):  # sent, and the answer was lost or unreadable: it may have been done
+        except (OSError, ValueError, http.client.HTTPException):  # sent, and the answer was lost, cut off or
+            # unreadable (IncompleteRead, a bad status line): it may have been done
             raise HubUnknown("the hub's answer was lost") from None
         if not isinstance(reply, dict):
             raise HubUnknown("the hub's answer was not readable")

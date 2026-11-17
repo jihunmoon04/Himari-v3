@@ -50,7 +50,7 @@ def sse(event: str, data: object) -> str:
 
 class Hub:
     """``/user/<op>`` and the list stream. ``replies[op]``: (status, body); status 0 drops the connection after the
-    hub read it. ``delays[op]``: seconds before it answers. The list stream sends what is put on ``list_frames``."""
+    hub read it, status 1 sends a 200 whose body is cut off. ``delays[op]``: seconds before it answers. The list stream sends what is put on ``list_frames``."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -81,6 +81,13 @@ class Hub:
                 time.sleep(hub.delays.get(op, 0))
                 status, reply = hub.replies.get(op, (200, {}))
                 if status == 0:
+                    self.close_connection = True
+                    return
+                if status == 1:  # the answer breaks off: fewer bytes than it said
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    self.wfile.write(b'{"request": {')
                     self.close_connection = True
                     return
                 self._reply(status, reply)
@@ -350,6 +357,9 @@ def test_the_hubs_answers_are_told_apart(client: TestClient, hub: Hub, tmp_path:
     assert lost.status_code == 503 and lost.json()["error"]["code"] == "hub_unknown"
     odd = client.post("/api/hub/projects/adopt", json={"project": "p", "runner": "r"}, headers=SEND)
     assert odd.status_code == 503 and odd.json()["error"]["code"] == "hub_unknown"  # done, but not readable
+    hub.replies = {"project_folder_remove": (1, {})}  # the answer broke off on its way: it may have been done
+    cut = client.post("/api/hub/projects/remove-folder", json={"project": "p", "runner": "r"}, headers=SEND)
+    assert cut.status_code == 503 and cut.json()["error"]["code"] == "hub_unknown"
     hub.replies = {"project_request": (500, {}), "project_request_answer": (502, {}), "runner_dirs": (500, {})}
     for path, sent in (("/api/hub/project-requests", body), ("/api/hub/project-requests/7/answer", {"approve": True})):
         failed = client.post(path, json=sent, headers=SEND)  # a change the hub took may have been done
