@@ -10,7 +10,11 @@ hub's contract (user-api-v1) has them, over real HTTP and SSE, with scripted pro
   and what is sent meanwhile waits its turn; session 9 (claude@laptop) waits on a permission (request 2); session
   10 (codex@linux) on a question (request 4, a color); session 12's agent has lost it, so what is sent to it goes on
   in a new session. ``new`` opens a session ``NEW_SECONDS`` after it is asked. Every reply of a turn is
-  ``Done: <prompt>``.
+  ``Done: <prompt>``; a prompt that mentions "fail" ends failed with ``The tests did not pass.``
+
+``/mcp`` (W4) is the hub's MCP side for HIMARI, with ``MCP_TOKEN``: ``hub_delegate`` (a task opening a session of
+the project's lane, as ``new`` does; an unknown project is refused) and ``hub_task`` (the task as the hub's tool
+gives it).
 
 The streams follow every change: a session stream sends new events and a new ``state`` when the session's listing
 changes; the list stream sends ``changed`` for every session that changed.
@@ -28,6 +32,15 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 TOKEN = "hub-user-token"
+MCP_TOKEN = "hub-mcp-token"
+_MCP_TOOLS = [
+    {"name": "hub_delegate", "description": "Hand a task to a coding agent in a project.",
+     "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "prompt": {"type": "string"},
+                                                       "agent": {"type": "string"}},
+                     "required": ["project", "prompt"]}},
+    {"name": "hub_task", "description": "A task's state.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}},
+]
 LIVE_LINE = "A live line from the agent."
 LONG = 450
 AT = "2026-11-17T10:00:00Z"
@@ -153,6 +166,17 @@ class FakeHub:
                 return False
 
             def do_POST(self) -> None:  # noqa: N802
+                if self.path == "/mcp":
+                    if self.headers.get("Authorization") != f"Bearer {MCP_TOKEN}":
+                        return self._reply(401, {"error": "token"})
+                    message = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+                    answer = hub.mcp(message)
+                    if answer is None:  # a notification
+                        self.send_response(202)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return None
+                    return self._reply(200, answer)
                 if not self._authorized():
                     return
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
@@ -210,7 +234,10 @@ class FakeHub:
             task = self.tasks[tid]
             if task["status"] != "running":
                 return  # stopped meanwhile
-            self._end(sid, task, "done", f"Done: {task['prompt']}")
+            if "fail" in task["prompt"].lower():
+                self._end(sid, task, "failed", "The tests did not pass.")
+            else:
+                self._end(sid, task, "done", f"Done: {task['prompt']}")
 
     def _end(self, sid: int, task: dict[str, Any], outcome: str, text: str | None) -> None:
         if text:
@@ -303,6 +330,36 @@ class FakeHub:
         else:
             self._start(sid, task)
         return 200, {"task": {**self._task_view(task), "session": sid}}
+
+    def mcp(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        """One JSON-RPC message of HIMARI's MCP client, as the hub's ``/mcp`` answers it."""
+        method, request_id, params = message.get("method"), message.get("id"), message.get("params") or {}
+        if request_id is None:
+            return None
+        if method == "initialize":
+            result: Any = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
+                           "capabilities": {"tools": {}}, "serverInfo": {"name": "fake-hub", "version": "0"}}
+        elif method == "ping":
+            result = {}
+        elif method == "tools/list":
+            result = {"tools": _MCP_TOOLS}
+        elif method == "tools/call":
+            name, args = params.get("name"), params.get("arguments") or {}
+            with self.lock:
+                if name == "hub_delegate" and args.get("project") not in {s["project"] for s in self.sessions.values()}:
+                    result = {"content": [{"type": "text", "text": f"모르는 프로젝트: {args.get('project')}"}],
+                              "isError": True}
+                elif name == "hub_delegate":
+                    _, reply = self._new(args)
+                    result = {"content": [{"type": "text", "text": json.dumps(reply["task"], ensure_ascii=False)}]}
+                elif name == "hub_task" and args.get("id") in self.tasks:
+                    view = self._task_view(self.tasks[args["id"]])
+                    result = {"content": [{"type": "text", "text": json.dumps(view, ensure_ascii=False)}]}
+                else:
+                    result = {"content": [{"type": "text", "text": f"없는 작업이나 도구: {name}"}], "isError": True}
+        else:
+            return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"unknown: {method}"}}
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
     def _new(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         tid = self.next_task

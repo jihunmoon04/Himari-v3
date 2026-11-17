@@ -1479,6 +1479,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "auto_memory": application.auto_memory,  # V3-P85 §12: "on (…)" or "off (why)"
                 "conversation_search": application.conversation_search_enabled,  # V3-P72 §9
                 "streaming": application.streaming_enabled,  # V3-P73 §9
+                # V3-P102 §5.1: the mcp.json server that is the hub (its hub_delegate calls are drawn as cards)
+                "hub_source": config.hub_mcp_source if config.hub_url else None,
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
                          "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
                          "seen_seconds": turn.seen_seconds}}

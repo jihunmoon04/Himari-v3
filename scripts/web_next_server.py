@@ -17,11 +17,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import shutil
 import sys
 import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -31,18 +34,51 @@ from himari.bootstrap.application import Application  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, CallId, TextBlock, ToolCall, ToolId  # noqa: E402
 from himari.interfaces.web.app import create_app  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
-from himari.provider.api import NormalizedFinal, NormalizedToolCalls  # noqa: E402
+from himari.provider.api import (  # noqa: E402
+    NativeInvocationOutcome, NativePreparedRequest, NormalizedFinal, NormalizedToolCalls, OutputSink, RawCapture,
+)
 from himari.provider.scripted import ScriptedAdapter  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from web_next_hub import TOKEN, FakeHub  # noqa: E402
+from web_next_hub import MCP_TOKEN, TOKEN, FakeHub  # noqa: E402
+
+# V3-P102 W4: a message carrying one of these marks has HIMARI hand that work to the hub (its hub_delegate), then
+# say so. Each mark is acted on once, whatever else the script holds.
+HAND_OVERS = {
+    "W4-HAND-OVER": {"project": "work", "prompt": "Write the release notes", "agent": "claude"},
+    "W4-FAILS": {"project": "work", "prompt": "Make the build fail on purpose", "agent": "claude"},
+    "W4-NOWHERE": {"project": "nowhere", "prompt": "Anything at all"},
+}
+MCP_TOKEN_VAR = "HIMARI_E2E_HUB_MCP_TOKEN"
+
+
+class HandingOver(ScriptedAdapter):
+    """The scripted model, which hands work to the hub when a message carries a mark of ``HAND_OVERS``."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._handed: set[str] = set()
+
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
+        body = request.body.decode("utf-8", "replace")
+        for mark, args in HAND_OVERS.items():
+            if mark in body and mark not in self._handed:
+                self._handed.add(mark)
+                self._script[0:0] = [  # before the rest of the script: these two answer this message
+                    NormalizedToolCalls((ToolCall(CallId(f"hand-{len(self._handed)}"), 0, ToolId("hub/hub_delegate"),
+                                                  args),)),
+                    NormalizedFinal((TextBlock(f"I handed it to the hub ({mark})."),)),
+                ]
+                break
+        return await super().invoke_prepared(request, sink, capture)
 
 ANSWER = ("# Plan\n\n**Day 1**: walk <script>window.__pwned = 1</script> [bad](javascript:window.__pwned=2) and "
           "[good](https://example.com)\n\n- palace\n- market\n\nArea $\\pi r^2$ and\n$$\n\\frac{a}{b}\n$$\n")
 
 
 def scripted() -> ScriptedAdapter:
-    return ScriptedAdapter([
+    return HandingOver([
         NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("machine/read_file"), {"path": "plan.txt"}),)),
         NormalizedToolCalls((ToolCall(CallId("c1"), 0, ASK_USER_TOOL_ID, {"question": "Which **city**?"}),)),
         NormalizedFinal((TextBlock(ANSWER),)),
@@ -62,6 +98,14 @@ def main() -> None:
     hub = FakeHub()  # V3-P102 W2: the hub's user path, scripted (scripts/web_next_hub.py)
     root.mkdir(parents=True, exist_ok=True)
     (root / "user.token").write_text(TOKEN, encoding="ascii")
+    # W4: the hub's MCP side as HIMARI's mcp.json names it ("hub", the page's default hub source)
+    data.mkdir(mode=0o700, parents=True, exist_ok=True)
+    mcp = data / "mcp.json"
+    mcp.write_text(json.dumps({"servers": {"hub": {
+        "url": f"{hub.url}/mcp", "token_env": MCP_TOKEN_VAR,
+        "tools": {"hub_delegate": {"effect": "read"}, "hub_task": {"effect": "read"}}}}}), encoding="utf-8")
+    mcp.chmod(0o600)
+    os.environ[MCP_TOKEN_VAR] = MCP_TOKEN
     config = WebConfig("127.0.0.1", args.port, frozenset({"127.0.0.1"}), frozenset({origin}), False, str(data),
                        "scripted-model", None, False, hub_url=hub.url, hub_user_token_file=str(root / "user.token"))
 

@@ -27,6 +27,18 @@ export interface Turn {
   seconds: number | null;
 }
 
+/** Work HIMARI handed to the hub (V3-P102 §5.1): what its ``hub_delegate`` call asked and what it answered. The
+ *  card follows the task by its id from there. */
+export interface Delegation {
+  taskId: number | null; // null: the hub refused it (``error`` says why) or the answer could not be read
+  project: string;
+  agent: string | null;
+  prompt: string;
+  session: number | null; // the session it was sent to, when HIMARI named one
+  status: string | null; // as the hub answered the call (the card reads the task again)
+  error: string | null;
+}
+
 export type Item =
   | { kind: "user"; key: string; text: string; answers: boolean; meta?: string[] }
   | { kind: "answer"; key: string; text: string; model: string | null }
@@ -36,4 +48,5 @@ export type Item =
   | { kind: "question"; key: string; text: string; callKey: string }
   | { kind: "request"; key: string; interaction: string; ask: string; options: string[]; outcome: string | null }
   | { kind: "turn"; key: string; turn: Turn }
+  | { kind: "delegation"; key: string; delegation: Delegation }
   | { kind: "notice"; key: string; text: string };

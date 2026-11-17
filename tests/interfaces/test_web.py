@@ -305,6 +305,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
                     "auto_memory": "off (no HIMARI_MEMORY_MODEL)",  # V3-P85 §12
                     "conversation_search": True,  # V3-P72 §9: on unless HIMARI_CONVERSATION_SEARCH=0
                     "streaming": True,  # V3-P73 §9: on unless HIMARI_STREAMING=0
+                    "hub_source": None,  # V3-P102 §5.1: no hub set up here
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False, "companion": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,

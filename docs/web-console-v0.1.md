@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -386,6 +386,24 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
   받은 승인에서 질문에 답하고 탭 제목, 홈에서 새 세션, 세션을 잃은 보내기가 새 세션으로 옮김). 가짜 hub는 이제 보내기·새
   대화·중지·답·닫기를 대본대로 하고, 두 스트림이 그 변화를 실시간으로 보낸다.
 - **아직:** MCP 경로 카드(W4), 오른쪽 변경·계획 탭(W5), 백그라운드 알림(옛 화면에만 있음), 첨부·`/` 명령(H3·H4).
+
+### 7.9 W4에서 만든 것 (2026-11-17)
+
+- **서버:** 설정 `HIMARI_HUB_MCP_SOURCE`(기본 `hub`, `mcp.json`의 서버 이름)를 `/api/server`의 `hub_source`로 준다. hub가
+  설정되지 않은 서버에서는 null이고, 화면은 아무 카드도 만들지 않는다.
+- **맡긴 작업 카드:** `features/himari/items.ts`가 `<hub_source>/hub_delegate` 호출의 결과마다 그 작업 블록 뒤에 `delegation`
+  항목을 둔다. hub의 Tool은 작업을 JSON으로 돌려주므로 작업 id·상태·에이전트(이름으로 세션을 고른 호출이면 그 세션)를 읽고,
+  오류 결과는 hub가 거절한 이유로 보인다(`hub_task` 호출은 새 카드가 아니다). `components/DelegationCard.tsx`는 그 작업을
+  `task`(H1)로 끝까지 읽는다: 실행 중에는 15초마다, 그리고 목록 스트림에서 그 작업이 도는 세션의 상태·작업이 바뀔 때마다
+  (세션 상태는 다시 읽을 신호일 뿐 작업 상태를 대신하지 않는다). 프로젝트·에이전트@기기·상태(대기, 작업 중, 기다림, 완료,
+  실패, 넘기지 못함)·작업 글·끝난 뒤 결과 앞부분, 기다리는 요청이 있으면 그 세션(또는 받은 승인)으로 가는 링크, "Open session".
+- **사이드바와 오른쪽:** 열려 있는 대화 아래에 그 대화가 맡긴 작업의 세션을 들여 써 붙이고(그 대화의 이벤트에서, 세션이
+  생기기 전에는 "starting"), 대화의 자세히 패널에 "Handed to the hub (n)"으로 그 대화의 카드를 모은다.
+- **검사:** pytest(`hub_source`, 설정 검사), Vitest(카드 만들기: 작업, 거절, 읽을 수 없는 답, hub 소스 이름으로만 알아봄),
+  Playwright: 가짜 hub가 `/mcp`(`hub_delegate`·`hub_task`)를 갖고, 대본 모델은 글에 표식이 있으면 위임한다. 위임한 작업의
+  카드가 대기→완료까지 따라가고 결과를 보이며 사이드바에 세션이 붙고 "Open session"으로 간다. 실패한 작업은 실패와 그
+  결과로, 모르는 프로젝트는 "Not handed over"와 hub의 이유로.
+- **아직:** 다른 대화의 맡긴 세션은 사이드바에 보이지 않는다(열린 대화만). 진행 요약(`hub_task`의 `progress`)은 쓰지 않는다.
 
 ## 8. hub에 필요한 것
 
