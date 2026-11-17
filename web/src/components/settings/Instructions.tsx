@@ -1,0 +1,82 @@
+// Instructions for every conversation (V3-P69) and the companion persona (V3-P89): edited from the revision opened,
+// so a save over a change made elsewhere is refused (409) and says so instead of overwriting it.
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { ApiError } from "@/api/client";
+import { readInstructions, readPersona, saveInstructions, savePersona, type InstructionsText } from "@/api/settings";
+import { Button } from "@/components/ui/button";
+import { toast } from "@/features/toast";
+
+function Editor({ title, help, queryKey, read, save, disabledNote }: {
+  title: string;
+  help: string;
+  queryKey: string;
+  read: () => Promise<InstructionsText>;
+  save: (text: string, revision: number) => Promise<InstructionsText>;
+  disabledNote?: (data: InstructionsText) => string | null;
+}) {
+  const client = useQueryClient();
+  const query = useQuery({ queryKey: ["settings", queryKey], queryFn: read });
+  const [text, setText] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (query.data && text === null) setText(query.data.text); }, [query.data, text]);
+  if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
+  if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read them.</p>;
+  const data = query.data;
+  const value = text ?? data.text;
+  const dirty = value !== data.text;
+  const submit = async () => {
+    setSaving(true);
+    setConflict(false);
+    try {
+      const saved = await save(value, data.revision);
+      client.setQueryData(["settings", queryKey], { ...data, ...saved });
+      setText(saved.text);
+      toast(`${title} saved; used from each conversation's next turn.`);
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 409) setConflict(true);
+      else toast(failure instanceof ApiError ? failure.message : "Could not save them.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const note = disabledNote?.(data);
+  return (
+    <section className="space-y-2" aria-label={title}>
+      <h2 className="text-base font-semibold">{title}</h2>
+      <p className="text-sm text-muted">{help}</p>
+      {note && <p className="text-sm text-wait">{note}</p>}
+      <textarea aria-label={title} value={value} onChange={(event) => setText(event.target.value)} rows={10}
+        className="block w-full resize-y rounded-lg border border-line bg-bg p-3 font-mono text-sm outline-none focus:border-faint" />
+      <div className="flex items-center gap-3 text-xs text-faint">
+        <span>{value.length.toLocaleString()} / {data.max_chars.toLocaleString()}</span>
+        {data.updated_at && <span>saved {new Date(data.updated_at).toLocaleString()}</span>}
+        <div className="ml-auto flex gap-2">
+          <Button variant="ghost" disabled={!dirty || saving} onClick={() => setText(data.text)}>Discard</Button>
+          <Button variant="primary" disabled={!dirty || saving || value.length > data.max_chars} onClick={() => void submit()}>Save</Button>
+        </div>
+      </div>
+      {conflict && (
+        <div role="alert" className="flex items-center gap-2 rounded-lg border border-danger/40 px-3 py-2 text-sm text-danger">
+          <span className="flex-1">They were changed elsewhere since you opened them. Your text is kept here; reload to see theirs.</span>
+          <Button onClick={() => { setConflict(false); void client.invalidateQueries({ queryKey: ["settings", queryKey] }); }}>
+            Reload theirs
+          </Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function InstructionsSettings() {
+  return (
+    <div className="space-y-10">
+      <Editor title="Instructions" queryKey="instructions" read={readInstructions} save={saveInstructions}
+        help="Told to HIMARI in every conversation: how you like answers, what to keep in mind." />
+      <Editor title="Companion persona" queryKey="persona" read={readPersona} save={savePersona}
+        help="Who HIMARI is as the companion on your devices."
+        disabledNote={(data) => (data.companion === false ? "The companion is off on this server: this is not told now." : null)} />
+    </div>
+  );
+}

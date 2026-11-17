@@ -14,6 +14,7 @@ import { Conversation } from "@/routes/Conversation";
 import { Home } from "@/routes/Home";
 import { HubSession } from "@/routes/HubSession";
 import { Login } from "@/routes/Login";
+import { Settings } from "@/routes/Settings";
 import { Trash } from "@/routes/Trash";
 
 // V3-P102 §7.2: the server gave this page a style nonce (its CSP allows <style> elements carrying it). Radix's
@@ -47,6 +48,8 @@ const router = createBrowserRouter(
         { path: "agents", element: <Agents /> },
         { path: "approvals", element: <Approvals /> },
         { path: "trash", element: <Trash /> },
+        { path: "settings", element: <Settings /> },
+        { path: "settings/:section", element: <Settings /> },
         { path: "*", element: <Navigate to="/" replace /> },
       ],
     },

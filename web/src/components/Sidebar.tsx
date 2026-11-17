@@ -220,6 +220,11 @@ function SettingsMenu() {
           <MenuRadioItem value="dark"><Moon className="size-3.5" /> Dark</MenuRadioItem>
         </MenuRadioGroup>
         <MenuSeparator />
+        <MenuItem onSelect={() => navigate("/settings/instructions")}>Instructions</MenuItem>
+        <MenuItem onSelect={() => navigate("/settings/memory")}>Memory</MenuItem>
+        <MenuItem onSelect={() => navigate("/settings/devices")}>Devices</MenuItem>
+        <MenuItem onSelect={() => navigate("/settings/tools")}>Tool servers</MenuItem>
+        <MenuItem onSelect={() => navigate("/settings/folders")}>Folders</MenuItem>
         <MenuItem onSelect={() => navigate("/trash")}>Trash</MenuItem>
         <MenuItem onSelect={() => window.location.assign("/")}>Open the classic page</MenuItem>
         <MenuItem onSelect={() => void leave()} className="text-danger">

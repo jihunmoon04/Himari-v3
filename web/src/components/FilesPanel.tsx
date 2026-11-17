@@ -1,13 +1,14 @@
 // A HIMARI conversation's folders, to look at (V3-P102 §4.4; the classic page's file panel, V3-P75, V3-P99): its own
 // folder first, then the folders attached to it. It only shows: a text file as text, an image as the copy the
 // server's image sandbox made, anything else as a download. Names, paths and texts are shown as text only.
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, File, Folder } from "lucide-react";
 import { useState } from "react";
 import { ApiError } from "@/api/client";
 import {
   browseFolder, conversationFolders, machineDownloadUrl, machineImageUrl, showMachineFile, statMachinePath,
 } from "@/api/himari";
+import { attachWorkspace, detachWorkspace, readWorkspaces, setWorkingWorkspace } from "@/api/settings";
 import { pointAt } from "@/features/references";
 import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
@@ -110,6 +111,51 @@ function FolderView({ path, onOpen }: { path: string; onOpen: (path: string, kin
   );
 }
 
+/** Attach a registered folder, and for the folder shown: make it the working one, or detach it. */
+function FolderControls({ conversation, items, shown }: {
+  conversation: string; items: { binding_id?: string | null; path: string; own?: boolean; working?: boolean }[]; shown: string | null;
+}) {
+  const client = useQueryClient();
+  const registered = useQuery({ queryKey: ["settings", "workspaces"], queryFn: readWorkspaces, retry: false });
+  const attached = new Set(items.map((i) => i.path));
+  const offer = (registered.data?.items ?? []).filter((w) => !attached.has(w.path));
+  const current = items.find((i) => i.path === shown);
+  const act = async (run: () => Promise<unknown>, done: string) => {
+    try {
+      await run();
+      toast(done);
+    } catch (failure) {
+      toast(why(failure), "error");
+    } finally {
+      void client.invalidateQueries({ queryKey: ["conversation", conversation, "folders"] });
+      void client.invalidateQueries({ queryKey: ["settings", "workspaces"] });
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      {offer.length > 0 && (
+        <select aria-label="Attach a folder" value="" className="rounded-md border border-line bg-transparent px-1.5 py-1"
+          onChange={(event) => event.target.value && void act(() => attachWorkspace(conversation, event.target.value), "Attached.")}>
+          <option value="">Attach a folder…</option>
+          {offer.map((w) => <option key={w.id} value={w.id}>{w.label || w.path}</option>)}
+        </select>
+      )}
+      {current && current.binding_id && !current.own && (
+        <>
+          {!current.working && (
+            <button type="button" className="underline" onClick={() => void act(() => setWorkingWorkspace(conversation, current.binding_id!), "Made the working folder.")}>
+              Make working folder
+            </button>
+          )}
+          <button type="button" className="text-danger underline" onClick={() => void act(() => detachWorkspace(conversation, current.binding_id!), "Detached.")}>
+            Detach
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function FilesPanel({ conversation }: { conversation: string }) {
   const folders = useQuery({ queryKey: ["conversation", conversation, "folders"],
     queryFn: () => conversationFolders(conversation), retry: false });
@@ -141,6 +187,8 @@ export function FilesPanel({ conversation }: { conversation: string }) {
           </button>
         ))}
       </div>
+      <FolderControls conversation={conversation} items={items}
+        shown={at === null ? items[0]!.path : items.find((i) => at.path === i.path || at.path.startsWith(`${i.path}/`))?.path ?? null} />
       {problem && <p role="alert" className="text-danger">{problem}</p>}
       {at === null ? (
         <FolderView path={items[0]!.path} onOpen={open} />

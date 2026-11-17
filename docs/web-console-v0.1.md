@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W6b 구현**(§7.12) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W6b 구현**(§7.12) · **W6c 구현**(§7.13) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -449,6 +449,23 @@ W6은 넷으로 나눈다: **W6a** 대화 도구, **W6b** 입력(첨부·붙여�
   보이며 글은 그것 없이 감, `/rev` → 양식 → 펼친 글, 대본 모델의 `memory_save` → 메모리 줄 → Undo. 가짜 hub의 MCP에 프롬프트 하나.
 - **확인 못 함(시험 서버):** 받아들여진 업로드와 그 파일·그림이 타임라인에 보이는 것, 참조 보내기(둘 다 기계가 있어야 함).
   운영에서 확인한다. 홈 화면(새 대화)의 첨부는 아직 없다(대화가 생긴 뒤에 붙인다).
+
+### 7.13 W6c에서 만든 것: 설정 화면 (2026-11-17)
+
+설정은 한 페이지(`/settings/<section>`, 사이드바 설정 메뉴)에 다섯 칸이다. 서버 경로는 옛 화면이 쓰던 그대로다.
+
+- **Instructions:** 모든 대화의 지침과 반려 페르소나(반려가 꺼진 서버에서는 지금 쓰이지 않는다고 적음). 연 판(revision)에서
+  고쳐 저장하고, 그사이 다른 곳에서 바뀌었으면(409) 덮지 않고 알린 뒤 쓴 글을 남긴 채 "Reload theirs".
+- **Memory:** Notes(더하기, 고치기, 지우기, 분류·기한·유효 기간, 출처 대화 링크, 자동 메모리 상태), Suggestions(Keep·Discard),
+  Timeline(에피소드 고치기·지우기, 더 보기).
+- **Devices:** 기기 더하기(짝짓기 코드는 한 번만 보임), 이름 바꾸기, 끊기(확인 뒤), 조용한 시간(한 시간, 내일 8시까지, 끝내기).
+- **Tool servers:** MCP 서버마다 새 대화의 기본 켬·끔(대화마다는 W6a의 대화 메뉴). 저장한 값이 오면 상자가 바뀐다.
+- **Folders:** 등록한 폴더(경로, 이름표, HIMARI에게 주는 메모, 붙은 곳, 클라우드 동기 여부), 등록·고치기·해제(붙어 있으면 막음).
+  대화의 Files 패널에서 등록한 폴더를 붙이고, 보고 있는 폴더를 작업 폴더로 하거나 뗀다. 기계가 없는 서버에서는 쓸 수 없다고 적는다.
+- **검사:** Playwright(지침 저장과 다시 읽기, 메모 더하기·고치기·지우기, Tool 서버 기본 끔·켬, 폴더 없음 안내, 기기 더하기와 코드,
+  이름 바꾸기, 끊기, 조용한 시간 시작·끝).
+- **확인 못 함(시험 서버):** 폴더 등록과 대화에 붙이기(기계 필요), 제안(자동 메모리 필요). 메인 영역의 파일 탐색 화면은 옮기지
+  않았다(대화의 Files 패널로 대신, W6d에서 다시 본다).
 
 ## 8. hub에 필요한 것
 
