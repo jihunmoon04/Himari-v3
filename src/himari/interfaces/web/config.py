@@ -115,6 +115,10 @@ HUB_URL_VAR = "HIMARI_HUB_URL"  # V3-P95: the hub server; unset: its requests ar
 HUB_USER_TOKEN_FILE_VAR = "HIMARI_HUB_USER_TOKEN_FILE"  # V3-P95: the hub's user.token
 HUB_MCP_SOURCE_VAR = "HIMARI_HUB_MCP_SOURCE"  # V3-P102 §5.1: which mcp.json server is the hub
 DEFAULT_HUB_MCP_SOURCE = "hub"
+# what mcp.json takes as a server name (himari.mcp.config: _SOURCE, MAX_SOURCE_CHARS); the MCP client is wired by the
+# composition root only, so the rule is repeated here rather than imported
+_MCP_SOURCE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_MCP_SOURCE_CHARS = 24
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
@@ -261,8 +265,9 @@ class WebConfig:
         if hub_user_token_file is not None and not os.path.isabs(hub_user_token_file):
             raise WebConfigError(f"{HUB_USER_TOKEN_FILE_VAR} must be an absolute path")
         hub_mcp_source = source.get(HUB_MCP_SOURCE_VAR, "").strip() or DEFAULT_HUB_MCP_SOURCE
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", hub_mcp_source):
-            raise WebConfigError(f"{HUB_MCP_SOURCE_VAR} must be an mcp.json server name (letters, digits, - and _)")
+        if not _MCP_SOURCE.fullmatch(hub_mcp_source) or len(hub_mcp_source) > _MCP_SOURCE_CHARS:  # or no server matches
+            raise WebConfigError(f"{HUB_MCP_SOURCE_VAR} must be an mcp.json server name "
+                                 "(lowercase letters, digits and single '-')")
         return cls(
             host=host,
             port=port,

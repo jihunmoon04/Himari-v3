@@ -181,5 +181,6 @@ def test_the_hub_settings_come_together() -> None:
     assert not hasattr(WebConfig.from_env({**base, "HIMARI_MACHINE_ATTACHED_WRITE": "1"}), "machine_attached_write")
     assert config.hub_mcp_source == "hub"  # V3-P102 §5.1: the mcp.json server that is the hub
     assert WebConfig.from_env({**base, "HIMARI_HUB_MCP_SOURCE": " hub-2 "}).hub_mcp_source == "hub-2"
-    with pytest.raises(WebConfigError, match="mcp.json server name"):
-        WebConfig.from_env({**base, "HIMARI_HUB_MCP_SOURCE": "hub/x"})
+    for name in ("hub/x", "Hub", "hub_2", "hub--2", "h" * 25):  # what mcp.json would refuse as a server name
+        with pytest.raises(WebConfigError, match="mcp.json server name"):
+            WebConfig.from_env({**base, "HIMARI_HUB_MCP_SOURCE": name})
