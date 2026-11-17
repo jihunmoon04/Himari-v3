@@ -16,8 +16,12 @@ const field = "rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-n
 const why = (failure: unknown, fallback: string) => (failure instanceof ApiError ? failure.message : fallback);
 
 function NoteForm({ start, onSave, onCancel, label }: {
-  start?: Note; onSave: (note: NoteInput) => Promise<void>; onCancel?: () => void; label: string;
+  start?: Note;
+  onSave: (note: NoteInput, revision: number | null) => Promise<boolean>; // true: saved
+  onCancel?: () => void;
+  label: string;
 }) {
+  const [revision] = useState(start?.revision ?? null); // the version it was opened from, whatever is read later
   const [category, setCategory] = useState<Category>(start?.category ?? "preference");
   const [text, setText] = useState(start?.text ?? "");
   const [due, setDue] = useState(start?.due ?? "");
@@ -26,8 +30,9 @@ function NoteForm({ start, onSave, onCancel, label }: {
   const submit = async () => {
     setBusy(true);
     try {
-      await onSave({ category, text: text.trim(), due: due.trim() || null, valid_until: valid.trim() || null });
-      if (!start) { setText(""); setDue(""); setValid(""); }
+      const saved = await onSave({ category, text: text.trim(), due: due.trim() || null, valid_until: valid.trim() || null },
+        revision);
+      if (saved && !start) { setText(""); setDue(""); setValid(""); } // a failed save keeps what was written
     } finally {
       setBusy(false);
     }
@@ -62,15 +67,17 @@ function Notes() {
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read the notes.</p>;
   const { memories, enabled, auto, max_count } = query.data;
-  const save = async (run: () => Promise<unknown>, done: string) => {
+  const save = async (run: () => Promise<unknown>, done: string): Promise<boolean> => {
     try {
       await run();
       toast(done);
       setEditing(null);
+      return true;
     } catch (failure) {
       toast(failure instanceof ApiError && failure.status === 409
-        ? "The note was changed elsewhere; the list is read again." : why(failure, "Could not save the note."), "error");
-      throw failure;
+        ? "The note was changed elsewhere since you opened it; nothing was saved. Cancel to see it as it is now."
+        : why(failure, "Could not save the note."), "error");
+      return false;
     } finally {
       void refresh();
     }
@@ -82,13 +89,13 @@ function Notes() {
         {memories.length} of {max_count} notes · automatic memory {auto.running ? "on" : "off"}
         {auto.model ? ` (${auto.model})` : ""}{auto.last_applied_at ? ` · last ${new Date(auto.last_applied_at).toLocaleString()}` : ""}
       </p>
-      <NoteForm label="New note" onSave={(note) => save(() => addNote(note), "Note added.").catch(() => undefined)} />
+      <NoteForm label="New note" onSave={(note) => save(() => addNote(note), "Note added.")} />
       <ul className="space-y-2" aria-label="Notes">
         {memories.map((note) => (
           <li key={note.id} className="rounded-lg border border-line px-3 py-2 text-sm">
             {editing === note.id ? (
               <NoteForm label="Edit note" start={note} onCancel={() => setEditing(null)}
-                onSave={(input) => save(() => editNote(note.id, note.revision, input), "Note saved.").catch(() => undefined)} />
+                onSave={(input, opened) => save(() => editNote(note.id, opened ?? note.revision, input), "Note saved.")} />
             ) : (
               <div className="flex items-start gap-2">
                 <div className="min-w-0 flex-1">
@@ -105,7 +112,7 @@ function Notes() {
                 </div>
                 <Button variant="ghost" className="px-2 py-0.5 text-xs" onClick={() => setEditing(note.id)}>Edit</Button>
                 <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger" aria-label={`Delete note ${note.id}`}
-                  onClick={() => void save(() => deleteNote(note.id, note.revision), "Note deleted.").catch(() => undefined)}>
+                  onClick={() => void save(() => deleteNote(note.id, note.revision), "Note deleted.")}>
                   Delete
                 </Button>
               </div>

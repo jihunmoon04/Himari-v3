@@ -17,21 +17,40 @@ function Editor({ title, help, queryKey, read, save, disabledNote }: {
 }) {
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["settings", queryKey], queryFn: read });
+  // the version the draft was opened from: what a save is checked against (a later read never takes its place
+  // while there is a draft, so a change made elsewhere is refused, not overwritten)
+  const [base, setBase] = useState<InstructionsText | null>(null);
   const [text, setText] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
-  useEffect(() => { if (query.data && text === null) setText(query.data.text); }, [query.data, text]);
+  useEffect(() => {
+    if (!query.data) return;
+    if (base === null || (text === base.text && query.data.revision !== base.revision)) { // nothing written yet
+      setBase(query.data);
+      setText(query.data.text);
+    }
+  }, [query.data, base, text]);
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
-  if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read them.</p>;
-  const data = query.data;
+  if (query.error || !query.data || !base) return <p role="alert" className="text-sm text-danger">Could not read them.</p>;
+  const data = base;
   const value = text ?? data.text;
   const dirty = value !== data.text;
+  const reloadTheirs = async () => {
+    setConflict(false);
+    const fresh = await query.refetch();
+    if (fresh.data) {
+      setBase(fresh.data);
+      setText(fresh.data.text);
+    }
+  };
   const submit = async () => {
     setSaving(true);
     setConflict(false);
     try {
       const saved = await save(value, data.revision);
-      client.setQueryData(["settings", queryKey], { ...data, ...saved });
+      const kept = { ...data, ...saved };
+      client.setQueryData(["settings", queryKey], kept);
+      setBase(kept);
       setText(saved.text);
       toast(`${title} saved; used from each conversation's next turn.`);
     } catch (failure) {
@@ -59,10 +78,9 @@ function Editor({ title, help, queryKey, read, save, disabledNote }: {
       </div>
       {conflict && (
         <div role="alert" className="flex items-center gap-2 rounded-lg border border-danger/40 px-3 py-2 text-sm text-danger">
-          <span className="flex-1">They were changed elsewhere since you opened them. Your text is kept here; reload to see theirs.</span>
-          <Button onClick={() => { setConflict(false); void client.invalidateQueries({ queryKey: ["settings", queryKey] }); }}>
-            Reload theirs
-          </Button>
+          <span className="flex-1">They were changed elsewhere since you opened them. Your text is still here (copy it if you
+            want it); reloading shows theirs in its place.</span>
+          <Button onClick={() => void reloadTheirs()}>Reload theirs</Button>
         </div>
       )}
     </section>
