@@ -52,7 +52,8 @@ export function Home() {
         return;
       }
       if (failedBeforeRunning(mine)) {
-        setError(`The agent did not start: ${mine.lost ?? mine.task.result ?? "the task failed"}`);
+        // what was sent is shown with why, so it can be sent again (the draft was cleared when it went)
+        setError(`The agent did not start (${mine.lost ?? mine.task.result ?? "the task failed"}). You sent: ${mine.task.prompt ?? ""}`);
         dismiss(mine.task.id);
       }
     }
