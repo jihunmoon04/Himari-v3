@@ -30,6 +30,12 @@ user token and passes them on, rebuilt field by field (``hub``'s views).
   ``CHECK_SECONDS`` on its own timer, whether events flow or not, and ends
   when it no longer holds (signed out, expired). A comment line goes to the
   browser on the same timer when nothing else did.
+- **Projects (V3-P103 §4.2).** ``project_request`` (one request, rebuilt) and
+  ``projects`` (read the projects again) go to every browser as they come;
+  nothing of them is kept here. Events may be lost while the upstream is
+  away, so ``projects`` follows every new ``sessions`` from the hub, and
+  while the list is read by asking it goes out with the first read and every
+  ``PROJECTS_POLL_SECONDS``.
 - **Timeouts.** An upstream that sends nothing for ``READ_SECONDS`` (the
   hub pings every 15 s) is treated as gone.
 """
@@ -56,6 +62,7 @@ from himari.interfaces.web.hub import (
     HubRefused,
     HubUnavailable,
     event_view,
+    project_request_view,
     session_view,
     sessions_of,
 )
@@ -68,6 +75,7 @@ CONNECT_SECONDS = 10.0
 CHECK_SECONDS = 15.0
 LINGER_SECONDS = 30.0
 POLL_SECONDS = 10.0
+PROJECTS_POLL_SECONDS = 30.0  # V3-P103 §4.2: while polling, how often the page is told to read projects again
 BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 SESSION_STREAMS = 16
 QUEUE_FRAMES = 256
@@ -236,6 +244,7 @@ class ListRelay:
         self._reachable = True
         self._task: asyncio.Task[None] | None = None
         self._idle_since: float | None = None
+        self._projects_told: float | None = None  # while polling: when ``projects`` last went out
 
     @property
     def readers(self) -> int:
@@ -326,8 +335,16 @@ class ListRelay:
             data = _json(message)
             if data is None:
                 continue
-            if message.event == "sessions":
+            if message.event == "sessions":  # a new upstream: what happened while it was away may be lost
                 self._replace(sessions_of(data.get("sessions"), limit=100_000))
+                self._send(frame("projects", {}))
+                self._projects_told = None  # polling again later tells it at once
+            elif message.event == "project_request":
+                shown = project_request_view(data)
+                if shown is not None:
+                    self._send(frame("project_request", shown))
+            elif message.event == "projects":
+                self._send(frame("projects", {}))
             elif message.event == "changed" and self._sessions is not None:
                 changed = sessions_of(data.get("sessions"), limit=100_000)
                 for item in changed:
@@ -343,6 +360,11 @@ class ListRelay:
                 self._replace(await self._client.sessions(limit=500))
             except (HubUnavailable, HubRefused):
                 self._mark(False)
+            else:
+                now = self._clock()
+                if self._projects_told is None or now - self._projects_told >= PROJECTS_POLL_SECONDS:
+                    self._projects_told = now  # nothing else tells of projects, devices or requests now
+                    self._send(frame("projects", {}))
             if self._clock() >= deadline:
                 return
             await self._pause(POLL_SECONDS)
@@ -362,7 +384,8 @@ class ListRelay:
 
 async def list_frames(relay: ListRelay, reader: ListReader, signed_in: Callable[[], bool], closing: asyncio.Event,
                       *, check: float = CHECK_SECONDS) -> AsyncIterator[str]:
-    """One browser's list stream: ``sessions`` (replace), ``changed`` (merge by id), ``hub`` (reachable or not)."""
+    """One browser's list stream: ``sessions`` (replace), ``changed`` (merge by id), ``hub`` (reachable or not),
+    ``project_request`` and ``projects`` (V3-P103 §4.2)."""
     try:
         yield f"retry: {RETRY_MS}\n\n"
         next_check = time.monotonic() + check
