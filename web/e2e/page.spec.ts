@@ -446,6 +446,38 @@ test("a conversation's panel: its folders, what it handed to the hub, its detail
   await done();
 });
 
+test("a conversation's folder opens in its Files panel after loading, and a file in it opens", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the conversations list is a drawer there; the panel itself is checked above");
+  const done = await watch(page);
+  // This server has no machine, so the browser is handed a folder: the panel must go from its loading render to
+  // a folder with the same hooks (React #310 hid behind "no folders here" until production).
+  const folder = "/home/coder/HIMARI/conversations/c1";
+  await page.route(/\/api\/conversations\/[^/?]+\/workspaces$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 300)); // "Loading…" is rendered first
+    await route.fulfill({ json: { items: [{ binding_id: null, path: folder, own: true, working: true }] } });
+  });
+  await page.route(/\/api\/machine\/list\?/, (route) => route.fulfill({ json: {
+    path: folder, parent: null, next: null,
+    entries: [{ name: "notes.txt", kind: "file", size: 12 }, { name: "src", kind: "directory" }],
+  } }));
+  await page.route(/\/api\/machine\/file\?/, (route) => route.fulfill({ json: {
+    path: `${folder}/notes.txt`, size: 12, kind: "text", text: "W6-FILES-OK\n", truncated: false,
+  } }));
+  await signIn(page);
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: "Plan a trip" }).click();
+  await page.getByRole("button", { name: "Details" }).click();
+  const panel = page.getByRole("complementary", { name: "Details" });
+  await panel.getByRole("tab", { name: "Files" }).click();
+  const files = panel.getByRole("tabpanel");
+  await expect(files.getByRole("group", { name: "Folders" })).toContainText("This conversation · working");
+  await expect(files.getByRole("list", { name: "Folder" })).toContainText("notes.txt");
+  await files.getByRole("button", { name: /notes\.txt/ }).click();
+  await expect(files).toContainText("W6-FILES-OK");
+  await files.getByRole("button", { name: "Back" }).click();
+  await expect(files.getByRole("list", { name: "Folder" })).toContainText("src");
+  await done();
+});
+
 // -- W6a: a conversation's own tools ------------------------------------------------------------------------------
 
 test("a conversation's menu: rename, its Tool servers, the trash with Undo, restore and delete for good", async ({ page, isMobile }) => {

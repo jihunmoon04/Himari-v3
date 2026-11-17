@@ -43,6 +43,8 @@ jobs:
         run: npm ci
       - name: Type check
         run: npm run typecheck
+      - name: Hooks in the same order on every render (React #310; oxlint, .oxlintrc.json)
+        run: npm run lint
       - name: Unit tests
         run: npm test
       - name: Build
