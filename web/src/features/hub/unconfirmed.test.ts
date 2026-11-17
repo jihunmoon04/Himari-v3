@@ -87,6 +87,23 @@ describe("a request sent with a client key", () => {
     expect(await onlySend("remove", "site", "linux", async () => "after")).toBe("after");
   });
 
+  it("while its send is on its way it is neither discarded nor sent a second time", async () => {
+    const { list, store, senders } = setup();
+    let answer: (reply: { request: HubProjectRequest }) => void = () => undefined;
+    vi.mocked(senders.request).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const first = sendKeyed(entry, false, list, store, senders);
+    expect(list.getSending().has("k1")).toBe(true);
+    expect(list.discard("k1")).toBe(false);
+    expect(list.getSnapshot()).toHaveLength(1);
+    const twice = await sendKeyed(entry, true, list, store, senders);
+    expect("error" in twice && (twice.error as ApiError).code).toBe("sending");
+    expect(senders.request).toHaveBeenCalledTimes(1);
+    answer({ request: made });
+    await first;
+    expect(list.getSending().size).toBe(0);
+    expect(list.getSnapshot()).toEqual([]);
+  });
+
   it("a first send the hub refuses, or that never reached it, leaves nothing behind", async () => {
     const { list, store, senders } = setup();
     vi.mocked(senders.remove)

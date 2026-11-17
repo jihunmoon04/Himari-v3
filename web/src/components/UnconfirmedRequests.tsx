@@ -9,7 +9,15 @@ import type { ProjectRequestBody } from "@/api/hub";
 import { readProjectsNow, useHubProjects } from "@/app/queries";
 import { hubHasRequestKeys, KINDS } from "@/features/hub/project_view";
 import { openRequests, requests, useHubRequests } from "@/features/hub/requests";
-import { answerLost, sameAs, sendKeyed, unconfirmed, useUnconfirmed, type Unconfirmed } from "@/features/hub/unconfirmed";
+import {
+  answerLost,
+  sameAs,
+  sendKeyed,
+  unconfirmed,
+  useUnconfirmed,
+  useUnconfirmedSending,
+  type Unconfirmed,
+} from "@/features/hub/unconfirmed";
 import { failureText, ProjectRequestCard } from "./ProjectRequestCard";
 import { Button } from "./ui/button";
 
@@ -21,6 +29,7 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
   const [problem, setProblem] = useState<string | null>(null);
   const [looked, setLooked] = useState(false);
   const keys = hubHasRequestKeys(hub.data);
+  const flying = useUnconfirmedSending().has(entry.client_key); // its send is on its way (here or elsewhere)
   const kind = entry.route === "remove" ? "remove_folder" : (entry.body as ProjectRequestBody).kind;
   const label = [KINDS[kind] ?? kind, entry.body.project, `on ${entry.body.runner}`].join(" · ");
 
@@ -56,13 +65,13 @@ export function UnconfirmedItem({ entry, onSent }: { entry: Unconfirmed; onSent?
       )}
       <div className="mt-2 flex flex-wrap gap-2">
         {keys && !entry.refused && (
-          <Button variant="primary" disabled={busy} onClick={() => void again()}>Send again</Button>
+          <Button variant="primary" disabled={busy || flying} onClick={() => void again()}>Send again</Button>
         )}
         {(!keys || entry.refused) && (
           <Button disabled={busy} onClick={() => void reread()}>Read the open requests again</Button>
         )}
-        <Button variant="ghost" disabled={busy || ((!keys || !!entry.refused) && !looked)}
-          onClick={() => unconfirmed.drop(entry.client_key)}>Discard</Button>
+        <Button variant="ghost" disabled={busy || flying || ((!keys || !!entry.refused) && !looked)}
+          onClick={() => unconfirmed.discard(entry.client_key)}>Discard</Button>
       </div>
       {problem && <p role="alert" className="mt-2 text-xs text-danger">{problem}</p>}
       {alike.length > 0 && (

@@ -89,6 +89,36 @@ export class UnconfirmedList {
     if (this.items.some((item) => item.client_key === key)) this.set(this.items.filter((item) => item.client_key !== key));
   }
 
+  // -- sends on their way: an entry being sent is neither discarded nor sent a second time -------------------------
+  private inFlight = new Set<string>();
+  private flying: ReadonlySet<string> = new Set();
+
+  getSending = () => this.flying;
+
+  /** False when this key is being sent already. */
+  startSending(key: string): boolean {
+    if (this.inFlight.has(key)) return false;
+    this.inFlight.add(key);
+    this.tell();
+    return true;
+  }
+
+  endSending(key: string) {
+    if (this.inFlight.delete(key)) this.tell();
+  }
+
+  /** The user's discard: never while its send is on its way (its answer may yet be lost: §4.1). */
+  discard(key: string): boolean {
+    if (this.inFlight.has(key)) return false;
+    this.drop(key);
+    return true;
+  }
+
+  private tell() {
+    this.flying = new Set(this.inFlight);
+    for (const listener of this.listeners) listener();
+  }
+
   reset() {
     this.set([]);
   }
@@ -114,6 +144,11 @@ export function useUnconfirmed(): readonly Unconfirmed[] {
   return useSyncExternalStore(unconfirmed.subscribe, unconfirmed.getSnapshot);
 }
 
+/** The keys being sent now. */
+export function useUnconfirmedSending(): ReadonlySet<string> {
+  return useSyncExternalStore(unconfirmed.subscribe, unconfirmed.getSending);
+}
+
 export interface Senders {
   request: (body: ProjectRequestBody & ClientKey) => Promise<{ request: HubProjectRequest }>;
   remove: (body: RemoveBody & ClientKey) => Promise<{ request: HubProjectRequest }>;
@@ -127,6 +162,9 @@ const realSenders: Senders = { request: (body) => makeProjectRequest(body), remo
 export async function sendKeyed(entry: Unconfirmed, again: boolean, list: UnconfirmedList = unconfirmed,
                                 requestStore: RequestStore = store, senders: Senders = realSenders,
                                 ): Promise<{ request: HubProjectRequest } | { error: unknown }> {
+  if (!list.startSending(entry.client_key)) {
+    return { error: new ApiError(409, "sending", "It is being sent already.") };
+  }
   list.put(again ? { ...entry, refused: null } : entry);
   const key = { client_key: entry.client_key, key_time: entry.key_time };
   try {
@@ -145,6 +183,8 @@ export async function sendKeyed(entry: Unconfirmed, again: boolean, list: Unconf
       list.drop(entry.client_key); // refused or never sent: nothing was made
     }
     return { error };
+  } finally {
+    list.endSending(entry.client_key);
   }
 }
 
