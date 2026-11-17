@@ -17,7 +17,7 @@ public partial class MainWindow : Window
     private readonly RunnerSupervisor supervisor;
     private readonly WorkbenchLog log;
     private readonly Action exit;
-    private readonly Func<SettingsStore, Window?, bool> wizard;
+    private readonly Func<SettingsStore, Window?, string?, bool> wizard;
     private readonly Forms.NotifyIcon tray;
     private readonly Forms.ToolStripMenuItem runnerItem;
     private readonly DispatcherTimer poll = new();
@@ -28,7 +28,7 @@ public partial class MainWindow : Window
     private bool exiting;
     private bool busy;
 
-    internal MainWindow(SettingsStore store, RunnerSupervisor supervisor, WorkbenchLog log, Action exit, Func<SettingsStore, Window?, bool> wizard)
+    internal MainWindow(SettingsStore store, RunnerSupervisor supervisor, WorkbenchLog log, Action exit, Func<SettingsStore, Window?, string?, bool> wizard)
     {
         this.store = store; this.supervisor = supervisor; this.log = log; this.exit = exit; this.wizard = wizard;
         InitializeComponent();
@@ -63,12 +63,20 @@ public partial class MainWindow : Window
         Topmost = true; Topmost = false;
     }
 
-    /// <summary>After the first status at start-up: a hub command that cannot run at all reopens the wizard (§5.6).</summary>
+    /// <summary>
+    /// After the first status at start-up: a configured hub command that does not work (missing executable, not a hub
+    /// folder, old hub, failed dependencies, timeout, any other failure) reopens the wizard with what failed (§5.6).
+    /// </summary>
     internal void AfterFirstCheck()
     {
-        if (supervisor.View.Phase != RunnerPhase.Unverifiable || store.Current.Hub is not { } hub) return;
-        if (File.Exists(hub.Executable) && Directory.Exists(hub.WorkingDirectory)) return;
-        if (wizard(store, this)) _ = AfterSettingsChange(serverChanged: true, runnerChanged: true);
+        if (exiting || supervisor.View.Phase != RunnerPhase.Unverifiable || store.Current.Hub is not { } hub || supervisor.LastStatusResult is not { } result) return;
+        HubCheck check = HubSetup.Classify(hub, result);
+        if (check.Stage == HubCheckStage.Ok) return;
+        ShowFromOutside();
+        if (!wizard(store, this, check.Message)) return;
+        _ = ReloadBrowserAsync();
+        // The command may be the same one, now working (dependencies fixed): ask again, and start with the app if linked.
+        _ = supervisor.RefreshAsync();
     }
 
     internal void PrepareExit()
@@ -174,18 +182,11 @@ public partial class MainWindow : Window
     private async void SettingsClick(object sender, RoutedEventArgs e)
     {
         var before = store.Current;
-        var dialog = new SettingsWindow(store, supervisor, () => wizard(store, this)) { Owner = this };
+        var dialog = new SettingsWindow(store, supervisor, () => wizard(store, this, null)) { Owner = this };
         if (dialog.ShowDialog() != true) return;
+        // The supervisor has already checked the runner again if its command or home changed (ChangeSettingsAsync).
         var after = store.Current;
-        await AfterSettingsChange(
-            serverChanged: before.Server != after.Server || before.DeveloperMode != after.DeveloperMode,
-            runnerChanged: !(after.Hub?.SameAs(before.Hub) ?? before.Hub is null) || before.EffectiveHubHome != after.EffectiveHubHome || before.Linked != after.Linked);
-    }
-
-    private async Task AfterSettingsChange(bool serverChanged, bool runnerChanged)
-    {
-        if (serverChanged) await ReloadBrowserAsync();
-        if (runnerChanged) await supervisor.SettingsChangedAsync();
+        if (before.Server != after.Server || before.DeveloperMode != after.DeveloperMode) await ReloadBrowserAsync();
     }
 
     private void ShowNotice(string text, bool sticky = false)
@@ -200,6 +201,6 @@ public partial class MainWindow : Window
     private void TrySave(Func<WorkbenchSettings, WorkbenchSettings> change)
     {
         try { store.Update(change); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { log.Write($"settings write failed: {ex.Message}"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 }

@@ -24,7 +24,7 @@ public sealed class SupervisorTests : IDisposable
 
     private RunnerSupervisor New() => new(store, _ => hub, system, WorkbenchLog.None);
     private string Id(long deadlineFromNow = 30_000, long? boot = null) => new InstanceId(boot ?? system.BootId, system.UptimeMs + deadlineFromNow, Guid.NewGuid().ToString("N")).ToString();
-    private string[] StopFiles() => Directory.Exists(StopRequests.Folder(home)) ? Directory.GetFiles(StopRequests.Folder(home)).Select(Path.GetFileName).ToArray()! : [];
+    private string[] StopFiles() => Directory.Exists(StopRequests.Folder(home)) ? Directory.GetFiles(StopRequests.Folder(home)).Select(path => Path.GetFileName(path)).ToArray() : [];
 
     [Fact]
     public async Task LinkedAppStartsAnOffRunnerAndOwnsIt()
@@ -240,7 +240,7 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
-    public async Task ExitDuringStartWritesStopRequestsWithoutWaitingAndTheLateStartOnlyRecords()
+    public async Task ExitDuringStartWritesStopRequestsWithoutWaitingForTheStartAndTheLateStartOnlyRecords()
     {
         hub.StartGate = new TaskCompletionSource();
         var supervisor = New();
@@ -286,6 +286,28 @@ public sealed class SupervisorTests : IDisposable
         Assert.Contains(StopFiles(), name => name.StartsWith(pending + "."));
         Assert.Equal(owned, store.Current.ExitStopRequested);
         Assert.Empty(hub.Calls);
+    }
+
+    [Fact]
+    public async Task ExitKeepsWatchingForAPendingRunnerThatComesUpLate()
+    {
+        string pending = Id();
+        store.Update(s => s with { PendingInstance = pending });
+        var supervisor = New();
+        // No state file yet: the pending runner is still coming up and must still be able to acknowledge (§5.5).
+        var late = Task.Run(async () =>
+        {
+            await Wait.Until(() => StopFiles().Any(name => name.StartsWith(pending + ".")));
+            await Task.Delay(1500);
+            hub.WriteState(pending, "starting");
+            await Task.Delay(300);
+            hub.WriteState(pending, "stopping", StopFiles().First(name => name.StartsWith(pending + ".")));
+        });
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var outcome = supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait);
+        await late;
+        Assert.True(outcome.Acknowledged);
+        Assert.InRange(watch.Elapsed.TotalSeconds, 1.5, 5.5);
     }
 
     [Fact]
@@ -430,6 +452,62 @@ public sealed class SupervisorTests : IDisposable
         }));
         Assert.Equal(1, hub.MaxConcurrent);
         Assert.Single(hub.CallsOf("start"));
+    }
+
+    [Fact]
+    public async Task AStatusThatExitedWithAnErrorIsUnverifiableEvenWithAReply()
+    {
+        hub.StatusExitCode = 1;
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.Empty(hub.CallsOf("start"));
+        Assert.Equal(RunnerPhase.Unverifiable, supervisor.View.Phase);
+        Assert.Equal(1, supervisor.LastStatusResult!.ExitCode);
+    }
+
+    [Fact]
+    public async Task HubSettingsCannotChangeWhileTheAppHoldsARunner()
+    {
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.NotNull(store.Current.OwnedInstance);
+        string other = temp.Sub("다른 홈");
+        Assert.Equal(RunnerSupervisor.HoldsRunnerMessage, await supervisor.ChangeSettingsAsync(s => s with { HubHome = other }));
+        Assert.Equal(home, store.Current.HubHome);
+        // Other settings still change.
+        Assert.Null(await supervisor.ChangeSettingsAsync(s => s with { DeveloperMode = true }));
+        Assert.True(store.Current.DeveloperMode);
+    }
+
+    [Fact]
+    public async Task ASettingsChangeWaitsForAStartInTheQueueAndSeesItsInstance()
+    {
+        hub.StartGate = new TaskCompletionSource();
+        var supervisor = New();
+        Task init = supervisor.InitializeAsync();
+        await Wait.Until(() => hub.CallsOf("start").Length == 1);
+        string other = temp.Sub("다른 홈");
+        Task<string?> change = supervisor.ChangeSettingsAsync(s => s with { HubHome = other });
+        await Task.Delay(200);
+        Assert.False(change.IsCompleted);
+        hub.StartGate.SetResult();
+        await init;
+        Assert.Equal(RunnerSupervisor.HoldsRunnerMessage, await change);
+        Assert.Equal(home, store.Current.HubHome);
+    }
+
+    [Fact]
+    public async Task ChangingTheHubHomeAsksTheHubAgain()
+    {
+        store.Update(s => s with { Linked = false });
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        int before = hub.CallsOf("status").Length;
+        Assert.Null(await supervisor.ChangeSettingsAsync(s => s with { HubHome = temp.Sub("다른 홈") }));
+        Assert.Equal(before + 1, hub.CallsOf("status").Length);
+        Assert.Null(await supervisor.ChangeSettingsAsync(s => s with { Linked = true }));
+        Assert.Equal(before + 1, hub.CallsOf("status").Length);
+        Assert.Empty(hub.CallsOf("start"));
     }
 
     [Theory]

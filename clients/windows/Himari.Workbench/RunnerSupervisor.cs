@@ -95,6 +95,7 @@ public sealed class RunnerSupervisor
     private string? recheckKey;
     private long lastCheckMs = long.MinValue;
     private bool checkQueued;
+    private HubResult? lastStatusResult;
 
     public RunnerSupervisor(SettingsStore store, Func<WorkbenchSettings, IHubCommandRunner?> hubFor, ISystemInfo system, WorkbenchLog log)
     {
@@ -110,7 +111,8 @@ public sealed class RunnerSupervisor
 
     /// <summary>
     /// True while the app owns, or may own, a runner: the hub home and command must not change then (§5.1), so that
-    /// the app never loses track of a runner in another home.
+    /// the app never loses track of a runner in another home. Only a hint for the dialogs: the rule itself is applied
+    /// inside the queue by <see cref="ChangeSettingsAsync"/>.
     /// </summary>
     public bool HoldsRunner { get { var s = store.Current; return s.OwnedInstance is not null || s.PendingInstance is not null; } }
 
@@ -155,16 +157,15 @@ public sealed class RunnerSupervisor
         autoStart = false;
         if (hubFor(store.Current) is not { } hub) return (StopResult.Unreadable, "hub 명령이 설정되지 않았습니다");
         SetOperation(RunnerPhase.Stopping);
-        log.Write($"stop {instance}");
         HubResult result;
         try { result = await hub.RunAsync(["runner", "stop", "--instance", instance, "--json"], StopTimeout); }
         finally { SetOperation(null); }
+        LogCommand("stop", result);
         StopResult outcome = result.Outcome == HubOutcome.Exited ? RunnerProtocol.ParseStop(result.StdOut) : StopResult.Unreadable;
-        log.Write($"stop {instance}: {outcome} (exit {result.ExitCode?.ToString() ?? result.Outcome.ToString()})");
         switch (outcome)
         {
             case StopResult.Stopped or StopResult.Killed or StopResult.NotRunning or StopResult.RunnerKilled:
-                store.Update(s => s.OwnedInstance == instance ? s with { OwnedInstance = null } : s);
+                SafeUpdate(s => s.OwnedInstance == instance ? s with { OwnedInstance = null } : s);
                 if (!exiting) await CheckCore(); else Publish();
                 return (outcome, outcome == StopResult.Killed ? "실행기가 제시간에 끝나지 않아 강제로 껐습니다" : null);
             case StopResult.OtherInstance:
@@ -175,21 +176,52 @@ public sealed class RunnerSupervisor
                 return (outcome, "끄기를 요청했지만 확인하지 못했습니다");
             default:
                 string line = result.Outcome == HubOutcome.Exited && Redaction.LastLine(result.StdErr).Length == 0 ? "hub가 끄기 결과를 알려 주지 않았습니다" : result.Describe();
-                log.Write($"stop failed: {line}");
                 SetError(line);
                 return (outcome, line);
         }
     }, (StopResult.Unreadable, "앱을 끝내는 중입니다"));
 
     /// <summary>
-    /// The app's settings changed (hub home or command, linkage). Forget the last status and ask again.
+    /// Changes the settings inside the operation queue, so no start, stop or check runs against a hub command or home
+    /// that changes under it (§5.1). A change of the hub command or home is refused while the app owns, or may own, a
+    /// runner. Returns null, or why nothing was changed.
     /// </summary>
-    public Task SettingsChangedAsync()
+    public Task<string?> ChangeSettingsAsync(Func<WorkbenchSettings, WorkbenchSettings> change) => Queue<string?>(async () =>
     {
-        lock (gate) { status = null; statusFailure = null; operationError = null; file = new(StateFileKind.Missing, null); recheckKey = null; }
-        Publish();
-        return RefreshAsync();
-    }
+        bool refused = false, runnerChanged = false;
+        try
+        {
+            store.TryUpdate(s =>
+            {
+                WorkbenchSettings next = change(s);
+                runnerChanged = RunnerSettingsDiffer(s, next);
+                if (runnerChanged && (s.OwnedInstance is not null || s.PendingInstance is not null)) { refused = true; return null; }
+                return next;
+            });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return $"설정을 저장하지 못했습니다: {ex.Message}"; }
+        if (refused) return HoldsRunnerMessage;
+        if (runnerChanged)
+        {
+            lock (gate) { status = null; statusFailure = null; operationError = null; file = new(StateFileKind.Missing, null); recheckKey = null; lastStatusResult = null; }
+            Publish();
+            await CheckCore();
+            // A hub fixed at start-up (the wizard after an unverifiable first check) still gets the start with the app.
+            await AutoStartCore();
+        }
+        else Publish();
+        return null;
+    }, "앱을 끝내는 중입니다");
+
+    public const string HoldsRunnerMessage =
+        "앱이 켠 실행기가 있는 동안에는 hub 명령이나 hub 홈을 바꿀 수 없습니다. 먼저 상태 줄에서 실행기를 끄세요(다른 홈의 실행기를 잃지 않도록).";
+
+    public static bool RunnerSettingsDiffer(WorkbenchSettings before, WorkbenchSettings after) =>
+        !(after.Hub?.SameAs(before.Hub) ?? before.Hub is null)
+        || !string.Equals(Path.GetFullPath(after.EffectiveHubHome), Path.GetFullPath(before.EffectiveHubHome), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The last <c>runner status</c> run, for explaining a failure (the wizard, §5.6).</summary>
+    public HubResult? LastStatusResult { get { lock (gate) return lastStatusResult; } }
 
     /// <summary>
     /// Every 5 s (2 s with the window shown): read the state file only (§5.2). When it disagrees with the last status,
@@ -230,12 +262,12 @@ public sealed class RunnerSupervisor
         // Read under the settings lock: a start either sees "exiting" and stops before writing its pending id,
         // or has written it already and gets a stop request here.
         store.TryUpdate(s => { owned = s.OwnedInstance; pending = s.PendingInstance; linked = s.Linked; home = s.EffectiveHubHome; return s; });
-        if (!linked) { log.Write("exit: not linked, the runner is left running"); return new ExitStopOutcome(0, false); }
+        if (!linked) return new ExitStopOutcome(0, false);
         var requests = new Dictionary<string, string>();
         foreach (string target in new[] { owned, pending }.OfType<string>().Distinct())
         {
-            try { requests[target] = StopRequests.Write(home, target); log.Write($"exit: stop request {requests[target]}"); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { log.Write($"exit: stop request for {target} failed: {ex.Message}"); }
+            try { requests[target] = StopRequests.Write(home, target); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
         }
         if (owned is not null && requests.ContainsKey(owned))
         {
@@ -243,20 +275,22 @@ public sealed class RunnerSupervisor
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         if (requests.Count == 0) return new ExitStopOutcome(0, false);
+        // A pending runner may still come up within the wait and acknowledge its request; with no pending request,
+        // a missing state file or another instance's means nothing will acknowledge.
+        bool pendingAsked = pending is not null && requests.ContainsKey(pending);
         long until = system.UptimeMs + (long)ackWait.TotalMilliseconds;
         while (true)
         {
             StateFileRead read = RunnerProtocol.ReadStateFile(home);
-            if (read.Kind == StateFileKind.Missing) break;
-            if (read.File is { } state)
+            RunnerStateFile? state = read.File;
+            if (state?.Instance is { } shown && requests.TryGetValue(shown, out string? request))
             {
-                if (state.Instance is null || !requests.TryGetValue(state.Instance, out string? request)) break;
-                if (state.StopAck == request) { log.Write($"exit: {state.Instance} acknowledged"); return new ExitStopOutcome(requests.Count, true); }
+                if (state.StopAck == request) return new ExitStopOutcome(requests.Count, true);
             }
+            else if (!pendingAsked && read.Kind != StateFileKind.Broken) break;
             if (system.UptimeMs >= until) break;
             Thread.Sleep(100);
         }
-        log.Write("exit: no acknowledgement");
         return new ExitStopOutcome(requests.Count, false);
     }
 
@@ -277,13 +311,14 @@ public sealed class RunnerSupervisor
             return;
         }
         HubResult result = await hub.RunAsync(["runner", "status", "--json"], StatusTimeout).ConfigureAwait(false);
-        StatusReply? reply = result.Outcome == HubOutcome.Exited ? RunnerProtocol.ParseStatus(result.StdOut) : null;
-        lock (gate) lastCheckMs = system.UptimeMs;
+        // Only a clean exit with a complete reply counts (§5.2): anything else is "확인 불가", never "off".
+        StatusReply? reply = result is { Outcome: HubOutcome.Exited, ExitCode: 0 } ? RunnerProtocol.ParseStatus(result.StdOut) : null;
+        lock (gate) { lastCheckMs = system.UptimeMs; lastStatusResult = result; }
         if (reply is null)
         {
+            LogCommand("status", result);
             string line = result.Outcome == HubOutcome.Exited && Redaction.LastLine(result.StdErr).Length == 0
                 ? "hub가 실행기 상태를 알려 주지 않았습니다(runner status --json이 없는 옛 hub일 수 있음)" : result.Describe();
-            log.Write($"status failed (exit {result.ExitCode?.ToString() ?? result.Outcome.ToString()}): {line}");
             lock (gate) { status = null; statusFailure = line; }
             Publish();
             return;
@@ -296,7 +331,7 @@ public sealed class RunnerSupervisor
     /// <summary>The ownership rules of §5.3 after a status the hub could answer.</summary>
     private void ApplyOwnership(StatusReply reply)
     {
-        store.Update(s =>
+        SafeUpdate(s =>
         {
             string? owned = s.OwnedInstance, pending = s.PendingInstance, exitStop = s.ExitStopRequested;
             if (pending is not null)
@@ -311,7 +346,6 @@ public sealed class RunnerSupervisor
             if (owned is not null && owned != pending && (!reply.Running || reply.Instance is not null && reply.Instance != owned)) owned = null;
             if (exitStop is not null && (!reply.Running || reply.Instance is not null && reply.Instance != exitStop)) exitStop = null;
             if (owned == s.OwnedInstance && pending == s.PendingInstance && exitStop == s.ExitStopRequested) return s;
-            log.Write($"ownership: owned {owned ?? "-"}, pending {pending ?? "-"}");
             return s with { OwnedInstance = owned, PendingInstance = pending, ExitStopRequested = exitStop };
         });
     }
@@ -343,20 +377,21 @@ public sealed class RunnerSupervisor
         try { id = InstanceId.Create(system).ToString(); }
         catch (InvalidOperationException ex) { SetError(ex.Message); return ex.Message; }
         // Written before the hub is asked, so that an app that dies now still knows the id next time (§5.3).
-        if (!store.TryUpdate(s => exiting ? null : s with { PendingInstance = id })) return "앱을 끝내는 중입니다";
+        try { if (!store.TryUpdate(s => exiting ? null : s with { PendingInstance = id })) return "앱을 끝내는 중입니다"; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { string failed = $"설정을 저장하지 못해 켜지 않았습니다: {ex.Message}"; SetError(failed); return failed; }
         if (exiting) return "앱을 끝내는 중입니다";
         SetOperation(RunnerPhase.Starting);
-        log.Write($"start {id}");
         HubResult result;
         try { result = await hub.RunAsync(["runner", "start", "--instance", id, "--json"], StartTimeout).ConfigureAwait(false); }
         finally { SetOperation(null); }
+        LogCommand("start", result);
         StartReply? reply = result.Outcome == HubOutcome.Exited ? RunnerProtocol.ParseStart(result.StdOut) : null;
         if (reply is { Error: StartError.None } && reply.Instance == id)
         {
             // Even when the app is exiting by now, this only records the result: the runner has its stop request already.
-            store.Update(s => s with { OwnedInstance = id, PendingInstance = s.PendingInstance == id ? null : s.PendingInstance });
+            SafeUpdate(s => s with { OwnedInstance = id, PendingInstance = s.PendingInstance == id ? null : s.PendingInstance });
             lock (gate) { status = new StatusReply(true, id, reply.Pid, reply.StartedAt, status?.Registration ?? Registration.Ok, null); operationError = null; }
-            log.Write($"start {id}: started (pid {reply.Pid})");
             Publish();
             return null;
         }
@@ -369,7 +404,6 @@ public sealed class RunnerSupervisor
             StartError.Unconfirmed => "실행기를 켰는지 확인하지 못했습니다",
             _ => result.Outcome == HubOutcome.Exited && Redaction.LastLine(result.StdErr).Length == 0 ? "hub가 켜기 결과를 알려 주지 않았습니다" : result.Describe(),
         };
-        log.Write($"start {id}: {reply?.Error.ToString() ?? result.Outcome.ToString()} (exit {result.ExitCode?.ToString() ?? "-"}): {message}");
         SetError(message);
         return message;
     }
@@ -380,6 +414,27 @@ public sealed class RunnerSupervisor
         Registration.Broken => $"실행기 등록에 문제가 있습니다: {reply.Why ?? "이유 모름"}",
         _ => null,
     };
+
+    /// <summary>§5.1: the app log holds the hub command's exit code and its masked last stderr line, nothing else.</summary>
+    private void LogCommand(string verb, HubResult result)
+    {
+        string exit = result.Outcome switch
+        {
+            HubOutcome.Exited => $"exit {result.ExitCode}",
+            HubOutcome.NotFound => "not found",
+            HubOutcome.TimedOut => "timed out",
+            _ => "not run",
+        };
+        string line = Redaction.LastLine(result.StdErr);
+        log.Write(line.Length > 0 ? $"runner {verb}: {exit}: {line}" : $"runner {verb}: {exit}");
+    }
+
+    /// <summary>A settings write that fails keeps the old value; the next check applies the rules again.</summary>
+    private void SafeUpdate(Func<WorkbenchSettings, WorkbenchSettings> change)
+    {
+        try { store.Update(change); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
 
     private void SetOperation(RunnerPhase? value) { lock (gate) operation = value; Publish(); }
     private void SetError(string message) { lock (gate) operationError = message; Publish(); }

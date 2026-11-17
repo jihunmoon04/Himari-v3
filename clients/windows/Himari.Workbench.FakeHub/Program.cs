@@ -36,7 +36,8 @@ switch (verb)
         if (config.StatusFail) { Console.Error.WriteLine("fake hub: status failed Authorization: Bearer secret-token-value"); return 1; }
         if (config.OldHub) { Console.Error.WriteLine("himari-hub runner: error: unrecognized arguments: --json"); return 2; }
         await Task.Delay(config.StatusDelayMs);
-        Print(Status());
+        if (Status() is not { } reply) { Console.Error.WriteLine("himari-hub: runner.transition.lock is busy"); return 1; }
+        Print(reply);
         return 0;
     case "start" when json:
         return await Start();
@@ -71,15 +72,17 @@ FileStream? TryLock(string path, TimeSpan wait)
     }
 }
 
+// H14: a blocking lock, waited for up to 2 s. Who cannot get it does not go on without it.
 FileStream? Transition() => TryLock(Path.Combine(home, "runner.transition.lock"), TimeSpan.FromSeconds(2));
 
 string StartedAt(Process process) => process.StartTime.ToUniversalTime().ToString("o");
 
 // H14: under the transition lock, the runner lock decides; the state file names the instance only when its pid's
-// creation time matches started_at.
-object Status()
+// creation time matches started_at. Null when the transition lock stays busy: the status is a failure then.
+object? Status()
 {
     using var transition = Transition();
+    if (transition is null) return null;
     using (var probe = TryLock(LockPath(), TimeSpan.Zero))
         if (probe is not null) return new { running = false, instance = (string?)null, pid = (int?)null, started_at = (string?)null, registration = config.Registration, why = config.Why };
     var read = RunnerProtocol.ReadStateFile(home);
@@ -116,7 +119,7 @@ async Task<int> Start()
         {
             if (child.ExitCode == 3)
             {
-                string? other = JsonSerializer.Serialize(Status()) is var s ? JsonNode.Parse(s)?["instance"]?.GetValue<string?>() : null;
+                string? other = Status() is { } now ? JsonNode.Parse(JsonSerializer.Serialize(now))?["instance"]?.GetValue<string?>() : null;
                 Print(new { error = "running", instance = other });
             }
             else Print(new { error = "failed", exit_code = child.ExitCode });
@@ -132,8 +135,8 @@ async Task<int> Start()
 async Task<int> Stop(string id)
 {
     if (!InstanceId.TryParse(id, out _)) { Console.Error.WriteLine("himari-hub: bad --instance"); return 2; }
-    string current = JsonSerializer.Serialize(Status());
-    var node = JsonNode.Parse(current)!;
+    if (Status() is not { } now) { Console.Error.WriteLine("himari-hub: runner.transition.lock is busy"); return 1; }
+    var node = JsonNode.Parse(JsonSerializer.Serialize(now))!;
     if (!node["running"]!.GetValue<bool>()) { Print(new { result = "not_running" }); return 0; }
     string? running = node["instance"]?.GetValue<string?>();
     if (running is not null && running != id) { Print(new { result = "other_instance" }); return 0; }
@@ -143,22 +146,42 @@ async Task<int> Stop(string id)
     var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(config.StopTimeoutMs);
     while (DateTime.UtcNow < until)
     {
-        using (var probe = TryLock(LockPath(), TimeSpan.Zero)) if (probe is not null) { Print(new { result = "stopped" }); return 0; }
+        if (RunnerLockFree() is true) { Print(new { result = "stopped" }); return 0; }
         await Task.Delay(100);
     }
+    // H15: the forced stop happens under the transition lock, so no other runner can take the runner lock or publish
+    // its state in between; the state file is removed only while it still names the killed instance.
+    using var transition = Transition();
+    if (transition is null) { Print(new { result = "unconfirmed" }); return 0; }
+    using (var probe = TryLock(LockPath(), TimeSpan.Zero)) if (probe is not null) { Print(new { result = "stopped" }); return 0; }
     var read = RunnerProtocol.ReadStateFile(home);
     if (read.File is not { } state || state.Instance != id) { Print(new { result = "other_instance" }); return 0; }
+    bool gone = false;
     try
     {
         using var process = Process.GetProcessById(state.Pid ?? -1);
-        if (StartedAt(process) != state.StartedAt) { Print(new { result = "unconfirmed" }); return 0; }
+        if (StartedAt(process) != state.StartedAt) { Print(new { result = "other_instance" }); return 0; }
         process.Kill(entireProcessTree: true);
-        process.WaitForExit(5000);
-        try { File.Delete(StatePath()); } catch (IOException) { }
-        Print(new { result = "killed" });
+        if (!process.WaitForExit(5000)) { Print(new { result = "unconfirmed" }); return 0; }
     }
-    catch (ArgumentException) { Print(new { result = "stopped" }); }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { gone = true; }
+    // The OS releases the dead runner's lock; "killed" only once that is seen.
+    using (var released = TryLock(LockPath(), TimeSpan.FromSeconds(5)))
+    {
+        if (released is null) { Print(new { result = "unconfirmed" }); return 0; }
+        if (RunnerProtocol.ReadStateFile(home).File?.Instance == id) try { File.Delete(StatePath()); } catch (IOException) { }
+    }
+    Print(new { result = gone ? "stopped" : "killed" });
     return 0;
+}
+
+// The runner lock probed under the transition lock (null: the transition lock stayed busy).
+bool? RunnerLockFree()
+{
+    using var transition = Transition();
+    if (transition is null) return null;
+    using var probe = TryLock(LockPath(), TimeSpan.Zero);
+    return probe is not null;
 }
 
 // The runner (H9, H10, H15, H16): lock, check the deadline, publish the state, follow its own stop requests.
@@ -169,6 +192,7 @@ async Task<int> RunRunner()
     FileStream? runnerLock;
     using (var transition = Transition())
     {
+        if (transition is null) return 5;
         runnerLock = TryLock(LockPath(), TimeSpan.FromSeconds(2));
         if (runnerLock is null) return 3;
         if (!InstanceId.TryParse(id, out var parsed) || parsed.CannotStart(system)) { runnerLock.Dispose(); return 4; }
@@ -192,7 +216,10 @@ async Task<int> RunRunner()
         if (DateTime.UtcNow >= nextBeat) { WriteState(id, "connected", ack); nextBeat = DateTime.UtcNow.AddSeconds(5); }
         await Task.Delay(100);
     }
-    using (var transition = Transition())
+    // H14 ⓑ: remove the state and release the runner lock only while holding the transition lock (waits as long as it takes).
+    FileStream? leaving;
+    while ((leaving = Transition()) is null) { }
+    using (leaving)
     {
         try { File.Delete(StatePath()); } catch (IOException) { }
         runnerLock.Dispose();

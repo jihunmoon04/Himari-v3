@@ -42,6 +42,8 @@ public static class RunnerProtocol
         {
             "ok" => Registration.Ok, "missing" => Registration.Missing, "broken" => Registration.Broken, _ => Registration.Unknown,
         };
+        // A reply without a known registration is incomplete: a failed status, never "off".
+        if (registration == Registration.Unknown) return null;
         string? instance = String(root, "instance");
         if (instance is not null && !InstanceId.TryParse(instance, out _)) instance = null;
         return new StatusReply(running.GetBoolean(), running.GetBoolean() ? instance : null, Int(root, "pid"), String(root, "started_at"), registration, String(root, "why"));

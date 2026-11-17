@@ -59,7 +59,8 @@ public partial class MainWindow
         catch (WebView2RuntimeNotFoundException) { ShowRuntimeMissing(); }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or IOException or UnauthorizedAccessException)
         {
-            log.Write($"webview failed: {ex.GetType().Name}: {ex.Message}");
+            // §5.1 keeps the log to exit codes and masked lines: the kind of failure only, never its message.
+            log.Write($"webview failed: {ex.GetType().Name}");
             ShowFallback("작업 콘솔을 열지 못했습니다", ex.Message, "다시 시도", () => _ = ReloadBrowserAsync());
         }
     }

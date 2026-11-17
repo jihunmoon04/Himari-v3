@@ -42,7 +42,7 @@ public static class HubSetup
         if (UsesUv(command) && !IsHubFolder(command.Arguments[2]))
             return new(HubCheckStage.NotHubFolder, $"hub 폴더가 아닙니다(pyproject.toml이 없음): {command.Arguments[2]}");
         if (result.Outcome == HubOutcome.TimedOut) return new(HubCheckStage.TimedOut, "hub 명령이 제시간에 끝나지 않았습니다");
-        if (result.Outcome == HubOutcome.Exited && RunnerProtocol.ParseStatus(result.StdOut) is { } status)
+        if (result is { Outcome: HubOutcome.Exited, ExitCode: 0 } && RunnerProtocol.ParseStatus(result.StdOut) is { } status)
             return new(HubCheckStage.Ok, "hub 명령이 동작합니다", status);
         string line = Redaction.LastLine(result.StdErr);
         string all = result.StdErr + "\n" + result.StdOut;

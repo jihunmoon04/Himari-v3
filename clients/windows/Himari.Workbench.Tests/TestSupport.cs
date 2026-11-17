@@ -46,6 +46,8 @@ public sealed class ScriptedHub : IHubCommandRunner
     public string Registration { get; set; } = "ok";
     public string? Why { get; set; }
     public bool StatusFails { get; set; }
+    /// <summary>The exit code of a status that still prints a complete reply (a nonzero one must not count).</summary>
+    public int StatusExitCode { get; set; }
     public string StatusStdErr { get; set; } = "Traceback: boom";
     /// <summary>The next start's reply; null = start succeeds with the id it was given.</summary>
     public Func<string, string>? StartReply { get; set; }
@@ -69,7 +71,7 @@ public sealed class ScriptedHub : IHubCommandRunner
             {
                 case "status":
                     if (StatusFails) return new HubResult(HubOutcome.Exited, 1, "", StatusStdErr);
-                    return Ok(new { running = Running, instance = Running && !HideInstance ? Instance : null, pid = Running ? 4242 : (int?)null,
+                    return Ok(StatusExitCode, new { running = Running, instance = Running && !HideInstance ? Instance : null, pid = Running ? 4242 : (int?)null,
                         started_at = Running ? "2026-11-18T00:00:00Z" : null, registration = Registration, why = Why });
                 case "start":
                     if (StartGate is { } gate) await gate.Task;
@@ -93,7 +95,8 @@ public sealed class ScriptedHub : IHubCommandRunner
             state, stop_ack = stopAck, name, server = "example.invalid", error = (string?)null,
         }));
 
-    private static HubResult Ok(object value) => new(HubOutcome.Exited, 0, JsonSerializer.Serialize(value) + "\n", "");
+    private static HubResult Ok(object value) => Ok(0, value);
+    private static HubResult Ok(int exitCode, object value) => new(HubOutcome.Exited, exitCode, JsonSerializer.Serialize(value) + "\n", "");
 }
 
 public static class FakeHubExe

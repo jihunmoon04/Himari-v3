@@ -9,11 +9,13 @@ public partial class SettingsWindow : Window
     private readonly SettingsStore store;
     private readonly RunnerSupervisor supervisor;
     private readonly Func<bool> wizard;
+    private bool saving;
 
     internal SettingsWindow(SettingsStore store, RunnerSupervisor supervisor, Func<bool> wizard)
     {
         this.store = store; this.supervisor = supervisor; this.wizard = wizard;
         InitializeComponent();
+        Closing += (_, e) => e.Cancel = saving;
         Fill(store.Current);
     }
 
@@ -26,8 +28,9 @@ public partial class SettingsWindow : Window
         StartAtLogin.IsChecked = LoginStartup.IsEnabled;
     }
 
-    private void SaveClick(object sender, RoutedEventArgs e)
+    private async void SaveClick(object sender, RoutedEventArgs e)
     {
+        if (saving) return;
         Problem.Visibility = Visibility.Collapsed;
         bool developer = DeveloperMode.IsChecked == true;
         if (!OriginPolicy.TryServerUri(ServerAddress.Text, developer, out var server, out string error)) { Show(error); return; }
@@ -35,12 +38,17 @@ public partial class SettingsWindow : Window
         if (problem is not null) { Show(problem); return; }
         WorkbenchSettings before = store.Current;
         if (SettingsChanges.Check(before, command!, home!, supervisor.HoldsRunner, this) is { } refusal) { Show(refusal); return; }
+        bool linked = Linked.IsChecked == true, atLogin = StartAtLogin.IsChecked == true;
+        saving = true; IsEnabled = false;
         try
         {
-            store.Update(s => s with { Server = server.AbsoluteUri, DeveloperMode = developer, Hub = command, HubHome = home, Linked = Linked.IsChecked == true });
-            if (LoginStartup.IsEnabled != (StartAtLogin.IsChecked == true)) LoginStartup.Set(StartAtLogin.IsChecked == true);
+            // In the supervisor's queue: no start or stop runs against a command or home that changes under it (§5.1).
+            if (await supervisor.ChangeSettingsAsync(s => s with { Server = server.AbsoluteUri, DeveloperMode = developer, Hub = command, HubHome = home, Linked = linked }) is { } failed)
+            { Show(failed); return; }
+            try { if (LoginStartup.IsEnabled != atLogin) LoginStartup.Set(atLogin); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { Show($"로그인 시 시작을 바꾸지 못했습니다: {ex.Message}"); return; }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { Show($"설정을 저장하지 못했습니다: {ex.Message}"); return; }
+        finally { saving = false; IsEnabled = true; }
         DialogResult = true;
     }
 
@@ -61,7 +69,7 @@ internal static class SettingsChanges
         bool commandChanged = !command.SameAs(before.Hub);
         bool homeChanged = !string.Equals(Path.GetFullPath(home), Path.GetFullPath(before.EffectiveHubHome), StringComparison.OrdinalIgnoreCase);
         if ((commandChanged || homeChanged) && holdsRunner && before.Hub is not null)
-            return "앱이 켠 실행기가 있는 동안에는 hub 명령이나 hub 홈을 바꿀 수 없습니다. 먼저 상태 줄에서 실행기를 끄세요(다른 홈의 실행기를 잃지 않도록).";
+            return RunnerSupervisor.HoldsRunnerMessage;
         bool executableChanged = !string.Equals(command.Executable, before.Hub?.Executable, StringComparison.OrdinalIgnoreCase);
         if (before.Hub is not null && (executableChanged || homeChanged)
             && System.Windows.MessageBox.Show(owner, $"이 앱은 아래 실행 파일을 그대로 실행합니다.\n\n실행 파일: {command.Executable}\n인자: {string.Join(" ", command.Arguments.Select(a => $"[{a}]"))}\n작업 폴더: {command.WorkingDirectory}\nhub 홈: {home}\n\n바꿀까요?",

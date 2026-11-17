@@ -12,7 +12,7 @@ public partial class App : System.Windows.Application
     private SingleInstance? instance;
     private RunnerSupervisor? supervisor;
     private MainWindow? window;
-    private bool exiting;
+    private volatile bool exiting;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -44,15 +44,15 @@ public partial class App : System.Windows.Application
                 Tell($"설정 파일이 깨져서 덮어쓰지 않고 옮겨 두었습니다:\n{load.MovedTo}\n\n처음 설정을 다시 합니다.");
                 break;
         }
-        if (!store.Current.IsComplete && !RunWizard(store, null)) { Quit(); return; }
+        if (!store.Current.IsComplete && !RunWizard(store, null, null)) { Quit(); return; }
 
         var log = WorkbenchLog.Default();
-        log.Write($"app start (pid {Environment.ProcessId})");
         supervisor = new RunnerSupervisor(store, s => s.Hub is { } hub ? new ProcessHubCommandRunner(hub, s.EffectiveHubHome) : null,
             new WindowsSystemInfo(), log);
         window = new MainWindow(store, supervisor, log, ExitFromTray, RunWizard);
         MainWindow = window;
         instance.Listen(() => Dispatcher.BeginInvoke(window.ShowFromOutside));
+        // WPF's event comes on this thread; the SystemEvents one may come on its own thread (StopForSessionEnd handles both).
         SessionEnding += (_, _) => StopForSessionEnd();
         Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => StopForSessionEnd();
         window.Show();
@@ -60,9 +60,15 @@ public partial class App : System.Windows.Application
         window.AfterFirstCheck();
     }
 
-    private bool RunWizard(SettingsStore store, Window? owner)
+    private bool RunWizard(SettingsStore store, Window? owner, string? problem)
     {
-        var wizard = new SetupWizard(store, () => supervisor?.HoldsRunner ?? false) { Owner = owner };
+        // Before the supervisor exists nothing runs against the hub, so the first run saves directly.
+        Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save = supervisor is { } running ? running.ChangeSettingsAsync : change =>
+        {
+            try { store.Update(change); return Task.FromResult<string?>(null); }
+            catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { return Task.FromResult<string?>($"설정을 저장하지 못했습니다: {ex.Message}"); }
+        };
+        var wizard = new SetupWizard(store, () => supervisor?.HoldsRunner ?? false, save, problem) { Owner = owner };
         if (owner is null) wizard.WindowStartupLocation = WindowStartupLocation.CenterScreen;
         return wizard.ShowDialog() == true;
     }
@@ -77,13 +83,17 @@ public partial class App : System.Windows.Application
         Quit();
     }
 
-    /// <summary>Logoff or shutdown: no hub command, just the stop request files (§5.5). Best effort.</summary>
+    /// <summary>
+    /// Logoff or shutdown: no hub command, just the stop request files (§5.5). Best effort. May run off the UI thread
+    /// (SystemEvents), so the stop requests come first and touch nothing of the window; the window is told on its own thread.
+    /// </summary>
     private void StopForSessionEnd()
     {
-        if (supervisor is null) return;
+        if (supervisor is not { } running) return;
         exiting = true;
-        window?.PrepareExit();
-        supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait);
+        if (Dispatcher.CheckAccess()) window?.PrepareExit();
+        else Dispatcher.BeginInvoke(() => window?.PrepareExit());
+        running.RequestStopForExit(RunnerSupervisor.ExitAckWait);
     }
 
     protected override void OnExit(ExitEventArgs e)

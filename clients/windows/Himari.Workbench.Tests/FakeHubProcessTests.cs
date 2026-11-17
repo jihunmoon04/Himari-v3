@@ -119,4 +119,30 @@ public sealed class FakeHubProcessTests : IDisposable
         Assert.Null(store.Current.OwnedInstance);
         Assert.Null(store.Current.PendingInstance);
     }
+
+    [Fact]
+    public async Task ABusyTransitionLockFailsTheStatusInsteadOfGuessing()
+    {
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        using (new FileStream(Path.Combine(home, "runner.transition.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            var result = await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30));
+            Assert.Equal(1, result.ExitCode);
+            Assert.Null(RunnerProtocol.ParseStatus(result.StdOut));
+        }
+        Assert.Equal(0, (await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).ExitCode);
+    }
+
+    [Fact]
+    public async Task AForcedStopKillsOnlyTheConfirmedRunnerAndReportsItOnceTheLockIsFree()
+    {
+        Configure(new { IgnoreStop = true, StopTimeoutMs = 1000 });
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        var started = RunnerProtocol.ParseStart((await runner.RunAsync(["runner", "start", "--json"], TimeSpan.FromSeconds(30))).StdOut);
+        Assert.Equal(StartError.None, started.Error);
+        var stop = await runner.RunAsync(["runner", "stop", "--instance", started.Instance!, "--json"], TimeSpan.FromSeconds(30));
+        Assert.Equal(StopResult.Killed, RunnerProtocol.ParseStop(stop.StdOut));
+        Assert.False(File.Exists(Path.Combine(home, RunnerProtocol.StateFileName)));
+        Assert.False(RunnerProtocol.ParseStatus((await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).StdOut)!.Running);
+    }
 }

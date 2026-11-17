@@ -42,6 +42,8 @@ public sealed class HubSetupTests : IDisposable
         Assert.Contains("의존성 설치 실패", failed.Message);
         Assert.Contains("token=…", failed.Message);
         Assert.DoesNotContain("abc", failed.Message);
+        // A complete reply from a command that failed is still a failure (§5.2).
+        Assert.NotEqual(HubCheckStage.Ok, HubSetup.Classify(uv, new HubResult(HubOutcome.Exited, 1, "{\"running\": false, \"registration\": \"ok\"}", "boom")).Stage);
         Assert.Equal(HubCheckStage.TimedOut, HubSetup.Classify(uv, new HubResult(HubOutcome.TimedOut, null, "", "")).Stage);
         var ok = HubSetup.Classify(uv, new HubResult(HubOutcome.Exited, 0, "{\"running\": false, \"registration\": \"missing\"}", ""));
         Assert.Equal(HubCheckStage.Ok, ok.Stage);

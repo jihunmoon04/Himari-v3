@@ -11,20 +11,26 @@ public partial class SetupWizard : Window
 {
     private readonly SettingsStore store;
     private readonly Func<bool> holdsRunner;
+    private readonly Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save;
     private HubCommand? checkedCommand;
     private string? checkedHome;
+    private bool saving;
 
-    internal SetupWizard(SettingsStore store, Func<bool> holdsRunner)
+    /// <param name="save">Saves the settings: through the supervisor's queue once it exists (§5.1); returns null or why not.</param>
+    /// <param name="problem">Why the wizard opened again: the configured hub command does not work (§5.6 step 3).</param>
+    internal SetupWizard(SettingsStore store, Func<bool> holdsRunner, Func<Func<WorkbenchSettings, WorkbenchSettings>, Task<string?>> save, string? problem = null)
     {
-        this.store = store; this.holdsRunner = holdsRunner;
+        this.store = store; this.holdsRunner = holdsRunner; this.save = save;
         InitializeComponent();
+        Closing += (_, e) => e.Cancel = saving;
         WorkbenchSettings settings = store.Current;
         if (settings.Server is { Length: > 0 } server) ServerAddress.Text = server;
         DeveloperMode.IsChecked = settings.DeveloperMode;
         Hub.Load(settings.Hub, settings.EffectiveHubHome);
         Linked.IsChecked = settings.Linked;
         StartAtLogin.IsChecked = LoginStartup.IsEnabled;
-        if (Hub.Executable.Text.Length == 0) HubResult.Text = "PATH에서 uv를 찾지 못했습니다. 실행 파일을 직접 고르세요.";
+        if (problem is not null) Say(HubResult, $"설정된 hub 명령이 동작하지 않습니다. {problem}", false);
+        else if (Hub.Executable.Text.Length == 0) HubResult.Text = "PATH에서 uv를 찾지 못했습니다. 실행 파일을 직접 고르세요.";
     }
 
     private async void CheckServerClick(object sender, RoutedEventArgs e)
@@ -71,20 +77,25 @@ public partial class SetupWizard : Window
 
     private void UpdateFinish() => FinishButton.IsEnabled = checkedCommand is not null;
 
-    private void FinishClick(object sender, RoutedEventArgs e)
+    private async void FinishClick(object sender, RoutedEventArgs e)
     {
+        if (saving) return;
         bool developer = DeveloperMode.IsChecked == true;
         if (!OriginPolicy.TryServerUri(ServerAddress.Text, developer, out var server, out string error)) { Say(ServerResult, error, false); return; }
         var (command, home, problem) = Hub.Read();
         if (problem is not null || checkedCommand is null || !command!.SameAs(checkedCommand) || home != checkedHome)
         { Say(HubResult, "hub 명령을 바꿨습니다. 다시 \"hub 확인\"을 누르세요.", false); FinishButton.IsEnabled = false; return; }
         if (SettingsChanges.Check(store.Current, command, home!, holdsRunner(), this) is { } refusal) { Say(HubResult, refusal, false); return; }
+        bool linked = Linked.IsChecked == true, atLogin = StartAtLogin.IsChecked == true;
+        saving = true; IsEnabled = false;
         try
         {
-            store.Update(s => s with { Server = server.AbsoluteUri, DeveloperMode = developer, Hub = command, HubHome = home, Linked = Linked.IsChecked == true });
-            if (LoginStartup.IsEnabled != (StartAtLogin.IsChecked == true)) LoginStartup.Set(StartAtLogin.IsChecked == true);
+            if (await save(s => s with { Server = server.AbsoluteUri, DeveloperMode = developer, Hub = command, HubHome = home, Linked = linked }) is { } failed)
+            { Say(HubResult, failed, false); return; }
+            try { if (LoginStartup.IsEnabled != atLogin) LoginStartup.Set(atLogin); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { Say(HubResult, $"로그인 시 시작을 바꾸지 못했습니다: {ex.Message}", false); return; }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { Say(HubResult, $"설정을 저장하지 못했습니다: {ex.Message}", false); return; }
+        finally { saving = false; IsEnabled = true; }
         DialogResult = true;
     }
 
