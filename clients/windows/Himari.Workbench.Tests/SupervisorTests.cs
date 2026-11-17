@@ -365,7 +365,7 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
-    public async Task AfterAnExitStopTheStillRunningRunnerIsShownAndReplacedOnceGone()
+    public async Task AfterAnExitStopTheStillRunningRunnerIsShownAndNotReplaced()
     {
         string owned = Id();
         store.Update(s => s with { OwnedInstance = owned, ExitStopRequested = owned });
@@ -374,10 +374,12 @@ public sealed class SupervisorTests : IDisposable
         await supervisor.InitializeAsync();
         Assert.Empty(hub.CallsOf("start"));
         Assert.Equal("실행기: 끄기 요청을 받음 · laptop · 앱이 켠 것 · 끄기를 요청했지만 아직 떠 있음", supervisor.View.Text);
+        // §5.3: a runner up at app start is left as it is; once it is gone the app does not start another by itself.
         hub.Running = false; hub.Instance = null;
         await supervisor.RefreshAsync();
-        Assert.Single(hub.CallsOf("start"));
+        Assert.Empty(hub.CallsOf("start"));
         Assert.Null(store.Current.ExitStopRequested);
+        Assert.Equal(RunnerPhase.Off, supervisor.View.Phase);
     }
 
     [Fact]

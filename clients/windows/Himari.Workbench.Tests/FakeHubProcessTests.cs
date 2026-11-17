@@ -131,6 +131,17 @@ public sealed class FakeHubProcessTests : IDisposable
     }
 
     [Fact]
+    public async Task TheTerminalFormsWorkWithoutJson()
+    {
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        var start = await runner.RunAsync(["runner", "start"], TimeSpan.FromSeconds(30));
+        Assert.Equal(0, start.ExitCode);
+        Assert.StartsWith("instance: ", start.StdOut);
+        var stop = await runner.RunAsync(["runner", "stop"], TimeSpan.FromSeconds(30));
+        Assert.Equal("result: stopped", stop.StdOut.Trim());
+    }
+
+    [Fact]
     public async Task ABusyTransitionLockFailsTheStatusInsteadOfGuessing()
     {
         var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);

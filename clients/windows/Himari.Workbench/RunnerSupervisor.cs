@@ -371,13 +371,9 @@ public sealed class RunnerSupervisor
         if (!s.Linked) { autoStart = false; return; }
         // Unverifiable, or a start of ours not settled yet: no automatic action, try again at the next check.
         if (reply is null || s.PendingInstance is not null) return;
-        if (reply.Running)
-        {
-            // The runner this app asked to stop when it last exited is still finishing: start once it is gone.
-            if (reply.Instance is not null && reply.Instance == s.ExitStopRequested) return;
-            autoStart = false;
-            return;
-        }
+        // §5.3: a runner already up at app start is left as it is, whoever started it. One this app asked to stop when it
+        // last exited is shown as still finishing ("끄기를 요청했지만 아직 떠 있음"); no new one is started after it.
+        if (reply.Running) { autoStart = false; return; }
         autoStart = false;
         if (RegistrationProblem(reply) is not null) { Publish(); return; }
         await StartCore();

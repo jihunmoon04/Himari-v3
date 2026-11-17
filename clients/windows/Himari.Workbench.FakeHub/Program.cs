@@ -30,6 +30,7 @@ string verb = args.Length > 1 ? args[1] : "";
 string? instanceArg = Option("--instance");
 bool json = args.Contains("--json");
 
+// The terminal forms (no --json) behave the same and print the result as text (H10, §5.4).
 switch (verb)
 {
     case "status" when json:
@@ -39,13 +40,13 @@ switch (verb)
         if (Status() is not { } reply) { Console.Error.WriteLine("himari-hub: runner.transition.lock is busy"); return 1; }
         Print(reply);
         return 0;
-    case "start" when json:
+    case "start":
         return await Start();
-    case "stop" when json && instanceArg is not null:
+    case "stop" when instanceArg is not null:
         return await Stop(instanceArg);
-    case "stop" when json && args.Contains("--legacy"):
+    case "stop" when args.Contains("--legacy"):
         return await StopLegacy();
-    case "stop" when json:
+    case "stop":
         return await StopWhoever();
     case "" or "run":
         return await RunRunner();
@@ -60,7 +61,13 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 
-void Print(object value) => Console.WriteLine(JsonSerializer.Serialize(value));
+// JSON with --json; otherwise the same fields as one line of text for a person.
+void Print(object value)
+{
+    string body = JsonSerializer.Serialize(value);
+    if (json) { Console.WriteLine(body); return; }
+    Console.WriteLine(string.Join(", ", JsonNode.Parse(body)!.AsObject().Select(pair => $"{pair.Key}: {pair.Value}")));
+}
 
 string LockPath() => Path.Combine(home, "runner.lock");
 string StatePath() => Path.Combine(home, RunnerProtocol.StateFileName);
@@ -79,7 +86,8 @@ FileStream? TryLock(string path, TimeSpan wait)
 // H14: a blocking lock, waited for up to 2 s. Who cannot get it does not go on without it.
 FileStream? Transition() => TryLock(Path.Combine(home, "runner.transition.lock"), TimeSpan.FromSeconds(2));
 
-string StartedAt(Process process) => process.StartTime.ToUniversalTime().ToString("o");
+// The creation time as the runner reads it from its own handle (H9) and as status and stop compare it (H14, H15).
+string? StartedAt(int pid) => Native.StartedAt(pid);
 
 // H14: under the transition lock, the runner lock decides; the state file names the instance only when its pid's
 // creation time matches started_at. Null when the transition lock stays busy: the status is a failure then.
@@ -91,15 +99,8 @@ object? Status()
         if (probe is not null) return new { running = false, instance = (string?)null, pid = (int?)null, started_at = (string?)null, registration = config.Registration, why = config.Why };
     var read = RunnerProtocol.ReadStateFile(home);
     string? instance = null; int? pid = null; string? started = null;
-    if (read.File is { Pid: { } p } state)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(p);
-            if (StartedAt(process) == state.StartedAt) { instance = state.Instance; pid = p; started = state.StartedAt; }
-        }
-        catch (ArgumentException) { }
-    }
+    if (read.File is { Pid: { } p } state && StartedAt(p) is { } created && created == state.StartedAt)
+    { instance = state.Instance; pid = p; started = state.StartedAt; }
     if (config.InstanceNull) { instance = null; }
     return new { running = true, instance, pid, started_at = started, registration = config.Registration, why = config.Why };
 }
@@ -163,14 +164,13 @@ async Task<int> Stop(string id)
     var read = RunnerProtocol.ReadStateFile(home);
     if (read.File is not { Instance: { } shown } state) { Print(new { result = "unconfirmed" }); return 0; }
     if (shown != id) { Print(new { result = "other_instance" }); return 0; }
-    try
+    // One handle: its creation time is checked and the process is ended through it, so a reused pid is never hit.
+    // The runner's Job (KILL_ON_JOB_CLOSE) ends everything under it when the runner's handle to it closes.
+    using (var target = state.Pid is { } targetPid ? Native.Open(targetPid) : null)
     {
-        using var process = Process.GetProcessById(state.Pid ?? -1);
-        if (StartedAt(process) != state.StartedAt) { Print(new { result = "unconfirmed" }); return 0; }
-        process.Kill(entireProcessTree: true);
-        if (!process.WaitForExit(5000)) { Print(new { result = "unconfirmed" }); return 0; }
+        if (target is null || Native.StartedAt(target) != state.StartedAt) { Print(new { result = "unconfirmed" }); return 0; }
+        if (!Native.TerminateAndWait(target, 5000)) { Print(new { result = "unconfirmed" }); return 0; }
     }
-    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { Print(new { result = "unconfirmed" }); return 0; }
     // The OS releases the dead runner's lock; "killed" only once that is seen.
     using (var released = TryLock(LockPath(), TimeSpan.FromSeconds(5)))
     {
@@ -226,6 +226,12 @@ async Task<int> RunRunner()
 {
     await Task.Delay(config.RunnerDelayMs);
     string id = Environment.GetEnvironmentVariable("HIMARI_RUNNER_INSTANCE") is { Length: > 0 } given ? given : InstanceId.Create(system).ToString();
+    // H15: into its own Job before anything else; a runner that cannot do that does not start (and writes no state).
+    System.ComponentModel.Win32Exception? jobFailure = null;
+    try { job = Native.JoinNewKillOnCloseJob(); }
+    catch (System.ComponentModel.Win32Exception ex) { jobFailure = ex; }
+    if (jobFailure is not null) { Console.Error.WriteLine($"himari-hub runner: could not join a Job: {jobFailure.Message}"); return 6; }
+    startedAt = StartedAt(Environment.ProcessId);
     FileStream? runnerLock;
     using (var transition = Transition())
     {
@@ -266,10 +272,9 @@ async Task<int> RunRunner()
 
 void WriteState(string id, string state, string? stopAck)
 {
-    using var self = Process.GetCurrentProcess();
     var value = new
     {
-        instance = id, pid = Environment.ProcessId, started_at = StartedAt(self), updated_at = DateTimeOffset.Now.ToString("o"),
+        instance = id, pid = Environment.ProcessId, started_at = startedAt, updated_at = DateTimeOffset.Now.ToString("o"),
         state, stop_ack = stopAck, name = config.Name, server = "example.invalid", error = (string?)null,
     };
     string temp = StatePath() + ".tmp";
@@ -294,6 +299,13 @@ void CleanStopFolder(string own)
         bool keep = last > 0 && InstanceId.TryParse(name[..last], out var target) && (name[..last] == own || !target.CannotStart(system));
         if (!keep) try { File.Delete(path); } catch (IOException) { }
     }
+}
+
+partial class Program
+{
+    // The runner's Job handle, held for its whole life (H15), and its creation time read once from its own handle (H9).
+    internal static Microsoft.Win32.SafeHandles.SafeFileHandle? job;
+    internal static string? startedAt;
 }
 
 sealed record FakeConfig

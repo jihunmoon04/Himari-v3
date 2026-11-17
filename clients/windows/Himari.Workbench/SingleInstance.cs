@@ -71,9 +71,10 @@ public sealed class SingleInstance : IDisposable
     {
         try
         {
-            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.CurrentUserOnly);
-            client.Connect((int)AnswerTimeout.TotalMilliseconds);
+            // §3: 5 s in all for the first app to answer, connecting included.
             using var talk = new CancellationTokenSource(AnswerTimeout);
+            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.CurrentUserOnly);
+            client.ConnectAsync(talk.Token).GetAwaiter().GetResult();
             using var reader = new StreamReader(client, Encoding.UTF8, false, 256, leaveOpen: true);
             using var writer = new StreamWriter(client, new UTF8Encoding(false), 256, leaveOpen: true) { AutoFlush = true };
             string? hello = reader.ReadLineAsync(talk.Token).AsTask().GetAwaiter().GetResult();
