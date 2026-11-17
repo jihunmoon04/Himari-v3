@@ -184,8 +184,9 @@ public static partial class Redaction
     // "Authorization: x", "Authorization=x", "'Authorization': 'x'" and "Authorization x" all hide x (§5.1).
     [GeneratedRegex(@"(?i)(authorization[""']?(?:\s*[:=]\s*|\s+)[""']?)(?:(?:bearer|basic|token)\s+)?[^\s""',;]+")]
     private static partial Regex AuthorizationValue();
-    [GeneratedRegex(@"(?i)(bearer\s+)(?!…)[^\s""',;]+")]
+    // A value may be quoted: bearer "x", token="x" and token='x' hide x too.
+    [GeneratedRegex(@"(?i)(bearer\s+[""']?)(?!…)[^\s""',;]+")]
     private static partial Regex BearerValue();
-    [GeneratedRegex(@"(?i)(token=)[^\s""'&,;]+")]
+    [GeneratedRegex(@"(?i)(token=[""']?)(?!…)[^\s""'&,;]+")]
     private static partial Regex TokenValue();
 }

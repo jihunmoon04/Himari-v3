@@ -285,7 +285,8 @@ async Task<int> RunRunner()
             }
             break;
         }
-        if (DateTime.UtcNow >= nextBeat) { WriteState(id, "connected", ack); nextBeat = DateTime.UtcNow.AddSeconds(5); }
+        // Each heartbeat also drops requests that have become malformed or can no longer apply (§5.4, H15).
+        if (DateTime.UtcNow >= nextBeat) { WriteState(id, "connected", ack); CleanStopFolder(id); nextBeat = DateTime.UtcNow.AddSeconds(5); }
         await Task.Delay(100);
     }
     // H14 ⓑ: remove the state and release the runner lock only while holding the transition lock (waits as long as it takes).

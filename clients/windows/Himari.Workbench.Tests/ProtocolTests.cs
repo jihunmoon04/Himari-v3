@@ -138,6 +138,9 @@ public sealed class ProtocolTests
     [InlineData("Authorization Basic dXNlcjpwYXNz", "Authorization …")]
     [InlineData("header {'Authorization': 'Bearer abc'}", "header {'Authorization': '…'}")]
     [InlineData("GET /x?token=s3cr3t&y=1 failed", "GET /x?token=…&y=1 failed")]
+    [InlineData("config token=\"s3cr3t\" rejected", "config token=\"…\" rejected")]
+    [InlineData("config token='s3cr3t'", "config token='…'")]
+    [InlineData("header Bearer \"abc.def\"", "header Bearer \"…\"")]
     [InlineData("using bearer XYZ for now", "using bearer … for now")]
     [InlineData("plain failure", "plain failure")]
     public void SecretsAreMasked(string line, string expected) => Assert.Equal(expected, Redaction.Mask(line));
