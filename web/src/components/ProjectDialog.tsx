@@ -22,7 +22,7 @@ import {
   runnerOf,
 } from "@/features/hub/project_view";
 import { useHubRequests } from "@/features/hub/requests";
-import { answerLost, sendKeyed, useUnconfirmed } from "@/features/hub/unconfirmed";
+import { answerLost, sendKeyed, unconfirmedFor, useUnconfirmed } from "@/features/hub/unconfirmed";
 import { cn } from "@/lib/cn";
 import { failureText, ProjectRequestCard } from "./ProjectRequestCard";
 import { UnconfirmedItem } from "./UnconfirmedRequests";
@@ -146,7 +146,10 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
   const runners = (data?.runners ?? []).filter((r) => r.name);
   const chosen = runnerOf(data, runner);
   const mode = chosen?.approve?.mode;
-  const blocked = chosen ? cannotAdd(chosen) : null;
+  // a device that takes no new folder, or (as the projects read now say) has one for this project already
+  const whyNot = (r: NonNullable<typeof chosen>) => cannotAdd(r) ?? (!creating && r.folders?.[init.project ?? ""] !== undefined
+    ? "It has a folder for this project already." : null);
+  const blocked = chosen ? whyNot(chosen) : null;
   const nameWrong = creating ? nameProblem(name, (data?.projects ?? []).map((p) => p.name)) : null;
   const folderWrong = mode === "user" ? folderNameProblem(newFolder) : null;
   const lost = pendingKeys.find((u) => u.client_key === lostKey);
@@ -156,8 +159,11 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
     setKey(null);
     newClientKey().then(setKey).catch(() => setKey(null));
   }, [lost, lostKey]);
+  // one for the same project and device whose answer was lost: sent again or discarded first, never a new key
+  const same = !lost && chosen?.name
+    ? unconfirmedFor(pendingKeys, "request", creating ? name : init.project ?? "", chosen.name, init.kind) : undefined;
   const ready = !!key && checked && !busy && !nameWrong && !!chosen && !blocked && !folderWrong
-    && (mode !== "user" || picked !== null) && sent === null && !lost;
+    && (mode !== "user" || picked !== null) && sent === null && !lost && !same;
 
   const submit = async () => {
     if (!ready || !key || !chosen?.name) return;
@@ -211,8 +217,7 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
         {runners.length === 0 && <p className="mt-1 text-xs text-faint">No device is connected to the hub.</p>}
         <div className="mt-1 space-y-1">
           {runners.map((r) => {
-            const why = cannotAdd(r) ?? (!creating && r.folders?.[init.project ?? ""] !== undefined
-              ? "It has a folder for this project already." : null);
+            const why = whyNot(r);
             return (
               <label key={r.name} className={cn("flex items-start gap-2 rounded-lg px-2 py-1.5",
                 why ? "opacity-50" : "hover:bg-raised")}>
@@ -268,6 +273,13 @@ function Form({ init, onDone }: { init: DialogInit; onDone: () => void }) {
         </div>
       )}
       {lost && <UnconfirmedItem entry={lost} onSent={setSent} />}
+      {same && (
+        <div className="space-y-2">
+          <p className="text-xs text-wait">This was asked before and its answer was lost: send it again or discard it first.</p>
+          <UnconfirmedItem entry={same} onSent={setSent} />
+        </div>
+      )}
+      {chosen && blocked && <p role="alert" className="text-xs text-danger">{blocked}</p>}
       {problem && <p role="alert" className="text-xs text-danger">{problem}</p>}
       {checkFailed && !checked && (
         <div role="alert" className="flex items-center gap-2 text-xs text-danger">

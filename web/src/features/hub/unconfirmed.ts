@@ -148,6 +148,13 @@ export async function sendKeyed(entry: Unconfirmed, again: boolean, list: Unconf
   }
 }
 
+/** An unconfirmed one for the same thing (route, kind, project, device): while it waits nothing new is sent for it,
+ *  since a new key would make a second request if the first was done (§4.1). */
+export const unconfirmedFor = (items: readonly Unconfirmed[], route: Route, project: string, runner: string,
+                               kind?: string) =>
+  items.find((u) => u.route === route && u.body.project === project && u.body.runner === runner
+    && (kind === undefined || (u.body as ProjectRequestBody).kind === kind));
+
 /** Requests of the same kind, project and device among the open ones (a hub without H13: what a lost answer may
  *  have made). */
 export const sameAs = (entry: Unconfirmed, open: readonly HubProjectRequest[]) => {

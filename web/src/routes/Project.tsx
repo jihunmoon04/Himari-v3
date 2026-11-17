@@ -17,7 +17,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { foldersOf, heldFor } from "@/features/hub/project_view";
 import { isOpen, requests, useHubRequests } from "@/features/hub/requests";
-import { answerLost, sendKeyed } from "@/features/hub/unconfirmed";
+import { answerLost, sendKeyed, unconfirmedFor, useUnconfirmed } from "@/features/hub/unconfirmed";
 import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
 
@@ -113,6 +113,7 @@ function RemoveFolder({ project, runner, connected }: { project: string; runner:
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  const waiting = unconfirmedFor(useUnconfirmed(), "remove", project, runner); // never a second key for it
   const remove = async () => {
     setBusy(true);
     setProblem(null);
@@ -129,7 +130,9 @@ function RemoveFolder({ project, runner, connected }: { project: string; runner:
   };
   return (
     <>
-      <Button variant="ghost" disabled={!connected} title={connected ? undefined : "The device is not connected."}
+      <Button variant="ghost" disabled={!connected || !!waiting}
+        title={waiting ? "A removal whose answer was lost waits below: send it again or discard it first."
+          : connected ? undefined : "The device is not connected."}
         aria-label={`Remove ${runner}'s folder`} onClick={() => setOpen(true)}>
         <FolderMinus className="size-3.5" /> Remove
       </Button>

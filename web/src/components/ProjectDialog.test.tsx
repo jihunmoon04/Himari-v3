@@ -117,6 +117,42 @@ describe("a new project whose answer was lost", () => {
   });
 });
 
+describe("what the dialog will not send", () => {
+  afterEach(() => {
+    cleanup();
+    closeProjectDialog();
+    requests.reset(true);
+    unconfirmed.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("a folder for a device that, read now, has one for the project already", async () => {
+    const local: HubProjects = { projects: [{ name: "site" }], held: [],
+      runners: [{ name: "laptop", connected: true, approve: { mode: "local" }, folders: { site: "D:/site" } }] };
+    vi.spyOn(api, "readHubProjects").mockResolvedValue(local);
+    vi.spyOn(api, "newClientKey").mockResolvedValue({ client_key: "k", key_time: "2026-11-18T10:00:00Z" });
+    mount(<ProjectDialogHost />, { ...local, runners: [{ ...local.runners![0]!, folders: {} }] });
+    openProjectDialog({ kind: "add_folder", project: "site", runner: "laptop", again: true });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getAllByText("It has a folder for this project already.").length).toBeGreaterThan(0);
+    expect(askButton().disabled).toBe(true);
+  });
+
+  it("a new request while one for the same project and device waits unconfirmed", async () => {
+    vi.spyOn(api, "readHubProjects").mockResolvedValue(hub);
+    vi.spyOn(api, "newClientKey").mockResolvedValue({ client_key: "new", key_time: "2026-11-18T10:00:00Z" });
+    vi.spyOn(api, "readRunnerDirs").mockResolvedValue({ path: null, dirs: ["/r"] });
+    unconfirmed.put({ client_key: "old", key_time: "2026-11-18T09:00:00Z", route: "request", at: 1,
+      body: { kind: "add_folder", project: "site", runner: "linux", path: "/r" } });
+    mount(<ProjectDialogHost />, hub);
+    openProjectDialog({ kind: "add_folder", project: "site", runner: "linux" });
+    fireEvent.click(await screen.findByRole("button", { name: "/r" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose this folder" }));
+    expect(await screen.findByText(/its answer was lost: send it again or discard it first/)).toBeTruthy();
+    expect(askButton().disabled).toBe(true);
+  });
+});
+
 describe("adopting a held folder", () => {
   afterEach(() => {
     cleanup();

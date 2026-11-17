@@ -28,7 +28,7 @@ import { hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { cardView, heldFor, hubHasRequestKeys, runnerOf, secondsLeft } from "@/features/hub/project_view";
 import { requests, sessionKeyValue, useHubRequests } from "@/features/hub/requests";
-import { answerLost, requestOf, sendKeyed } from "@/features/hub/unconfirmed";
+import { answerLost, requestOf, sendKeyed, unconfirmed, unconfirmedFor } from "@/features/hub/unconfirmed";
 import { cn } from "@/lib/cn";
 import { Button, IconButton } from "./ui/button";
 
@@ -215,6 +215,9 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
       const runner = runnerOf(client.getQueryData<HubProjects>(hubKeys.projects), request.runner);
       if (!read) {
         setProblem("The projects could not be read again; try again.");
+      } else if (request.project && request.runner
+        && unconfirmedFor(unconfirmed.getSnapshot(), "remove", request.project, request.runner)) {
+        setProblem("A removal of it whose answer was lost waits: send it again or discard it first.");
       } else if (!runner || runner.connected === false) {
         setProblem("The device is not connected.");
       } else if (!request.project || runner.folders?.[request.project] === undefined) {
