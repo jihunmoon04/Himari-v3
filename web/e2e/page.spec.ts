@@ -548,7 +548,9 @@ test("a / prompt with an argument comes into the composer as text", async ({ pag
   const done = await watch(page);
   await signIn(page);
   await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: /W4-FAILS/ }).click();
-  const message = page.getByLabel("Message", { exact: true });
+  // the conversation's own composer, not the home page's still on screen while it opens
+  const message = page.getByPlaceholder("Message HIMARI (/ for prompts)");
+  await expect(page).toHaveURL(/\/next\/c\/[A-Za-z0-9_-]+$/);
   await message.fill("/rev");
   const picker = page.getByRole("listbox", { name: "Prompts" });
   await expect(picker.getByRole("option", { name: /\/review/ })).toBeVisible();
