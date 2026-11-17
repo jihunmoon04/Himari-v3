@@ -39,6 +39,17 @@ export interface Delegation {
   error: string | null;
 }
 
+/** A project request HIMARI made (V3-P103 §6.6, its ``hub_project_request``): the card follows the request by its
+ *  id, read from the user path (the tool's own answer leaves the device path and pairing code out). */
+export interface AskedProject {
+  requestId: number | null; // null: the hub refused it (``error`` says why), or no answer yet
+  kind: string;
+  project: string;
+  runner: string;
+  error: string | null;
+  answered: boolean;
+}
+
 /** A file shown in the timeline: what a message attached, or what a Tool gave the user (V3-P66, V3-P67). */
 export interface Shown {
   key: string;
@@ -60,6 +71,7 @@ export type Item =
   | { kind: "request"; key: string; interaction: string; ask: string; options: string[]; outcome: string | null }
   | { kind: "turn"; key: string; turn: Turn }
   | { kind: "delegation"; key: string; delegation: Delegation }
+  | { kind: "project_request"; key: string; asked: AskedProject }
   | { kind: "files"; key: string; files: Shown[] }
   | { kind: "memory"; key: string; run: string; call: string; action: string; text: string; undo: boolean }
   | { kind: "notice"; key: string; text: string };

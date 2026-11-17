@@ -49,6 +49,10 @@ HAND_OVERS = {
     "W4-FAILS": {"project": "work", "prompt": "Make the build fail on purpose", "agent": "claude"},
     "W4-NOWHERE": {"project": "nowhere", "prompt": "Anything at all"},
 }
+# V3-P103 §6.6: a message carrying this mark has HIMARI ask the hub for a new project (its hub_project_request).
+ASK_PROJECT = ("P103-ASK", {"kind": "create", "project": "asked-by-himari", "runner": "linux",
+                            "path": "/home/u/code/asked-by-himari", "create_dir": True,
+                            "why": "You asked for a place for the release notes."})
 MCP_TOKEN_VAR = "HIMARI_E2E_HUB_MCP_TOKEN"
 
 
@@ -68,6 +72,13 @@ class HandingOver(ScriptedAdapter):
                 NormalizedToolCalls((ToolCall(CallId("remember-1"), 0, ToolId("memory_save"),
                                               {"category": "preference", "text": "The user likes green tea."}),)),
                 NormalizedFinal((TextBlock("I will remember that."),)),
+            ]
+        mark, asked = ASK_PROJECT
+        if mark in body and mark not in self._handed:
+            self._handed.add(mark)
+            self._script[0:0] = [
+                NormalizedToolCalls((ToolCall(CallId("ask-project"), 0, ToolId("hub/hub_project_request"), asked),)),
+                NormalizedFinal((TextBlock("I asked the hub for the project (P103-ASK)."),)),
             ]
         for mark, args in HAND_OVERS.items():
             if mark in body and mark not in self._handed:
@@ -110,7 +121,8 @@ def main() -> None:
     mcp = data / "mcp.json"
     mcp.write_text(json.dumps({"servers": {"hub": {
         "url": f"{hub.url}/mcp", "token_env": MCP_TOKEN_VAR,
-        "tools": {"hub_delegate": {"effect": "read"}, "hub_task": {"effect": "read"}}}}}), encoding="utf-8")
+        "tools": {"hub_delegate": {"effect": "read"}, "hub_task": {"effect": "read"},
+                  "hub_project_request": {"effect": "read"}}}}}), encoding="utf-8")
     mcp.chmod(0o600)
     os.environ[MCP_TOKEN_VAR] = MCP_TOKEN
     config = WebConfig("127.0.0.1", args.port, frozenset({"127.0.0.1"}), frozenset({origin}), False, str(data),

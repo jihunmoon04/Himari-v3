@@ -2,6 +2,11 @@
 // the list. ``sessions`` replaces the list, ``changed`` merges by id, ``hub`` says whether the hub is reachable.
 // When the stream cannot open (the hub has no stream left, or the server refused), the list is read every
 // POLL_MS and the stream is tried again after RETRY_MS.
+//
+// V3-P103 §4.2, §5: the same stream carries the hub's project requests (``project_request``, one changed request)
+// and ``projects`` (read the projects again). Whoever listens for them (onProjectSignals) is also told when the
+// stream (re)connects and on every tick of the polling fallback, so that one timer reads everything while the
+// stream is away and stops when it is back.
 import { useEffect, useSyncExternalStore } from "react";
 import { hubStreamUrl, listHubSessions, type HubSession } from "@/api/hub";
 
@@ -23,6 +28,19 @@ let signal: (() => void) | null = null;
 export function onListSignal(handler: () => void) {
   signal = handler;
 }
+
+export interface ProjectSignals {
+  request?: (data: Record<string, unknown>) => void; // one request changed
+  projects?: () => void; // read the projects again
+  connected?: () => void; // the stream opened or came back: what happened meanwhile may be lost
+  polled?: () => void; // a tick of the polling fallback
+}
+let projectSignals: ProjectSignals = {};
+
+export function onProjectSignals(handlers: ProjectSignals) {
+  projectSignals = handlers;
+}
+
 let users = 0;
 let stop: (() => void) | null = null;
 
@@ -52,7 +70,8 @@ function merge(changed: unknown) {
   if (moved) signal?.();
 }
 
-function open() {
+/** The stream for the page (exported for its tests); the returned function ends it. */
+export function openList() {
   let source: EventSource | null = null;
   let poll: number | undefined;
   let retry: number | undefined;
@@ -67,6 +86,7 @@ function open() {
     } catch {
       if (!ended && asked === epoch) set({ reachable: false });
     }
+    if (!ended && asked === epoch) projectSignals.polled?.();
   };
 
   const connect = () => {
@@ -86,6 +106,9 @@ function open() {
     on("sessions", (data) => replace(data.sessions));
     on("changed", (data) => merge(data.sessions));
     on("hub", (data) => set({ reachable: data.reachable === true }));
+    on("project_request", (data) => projectSignals.request?.(data));
+    on("projects", () => projectSignals.projects?.());
+    source.addEventListener("open", () => projectSignals.connected?.());
     source.addEventListener("error", () => {
       if (source?.readyState !== EventSource.CLOSED) return; // the browser reconnects by itself
       // refused before it started (no stream left, signed out, not set up): read by asking, try again later
@@ -115,7 +138,7 @@ export function useHubList(enabled: boolean): HubList {
   useEffect(() => {
     if (!enabled) return;
     users += 1;
-    if (users === 1) stop = open();
+    if (users === 1) stop = openList();
     return () => {
       users -= 1;
       if (users === 0) {

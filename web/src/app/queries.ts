@@ -12,7 +12,8 @@ import {
   readSession,
 } from "@/api/himari";
 import { readHubPending, readHubProjects, readHubSession, readHubTask } from "@/api/hub";
-import { onListSignal } from "@/features/hub/list";
+import { onListSignal, onProjectSignals } from "@/features/hub/list";
+import { requests } from "@/features/hub/requests";
 import { openStream } from "@/lib/sse";
 
 export const queryClient: QueryClient = new QueryClient({
@@ -132,6 +133,15 @@ export const useHubSessionDetail = (id: number) =>
 
 // what waits for the user may have changed (a session's activity or task, the list read whole): read it again
 onListSignal(() => void queryClient.invalidateQueries({ queryKey: hubKeys.pending }));
+
+// V3-P103 §5: a request that changed is merged by its rev; on ``projects``, a (re)connect and every tick of the
+// polling fallback the projects and the open and followed requests are read again
+const rereadProjects = () => {
+  void queryClient.invalidateQueries({ queryKey: hubKeys.projects });
+  void requests.refresh();
+};
+onProjectSignals({ request: (data) => requests.merge(data), projects: rereadProjects, connected: rereadProjects,
+  polled: rereadProjects });
 
 export const useHubPending = (enabled: boolean) =>
   useQuery({ queryKey: hubKeys.pending, queryFn: readHubPending, enabled, refetchInterval: 30_000 });

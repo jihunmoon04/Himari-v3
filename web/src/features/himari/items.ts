@@ -1,7 +1,7 @@
 // V3-P102 §7.4: HIMARI's events as the timeline's items. The timeline knows only these kinds; hub sessions get
 // their own converter into the same kinds (W2). Pure functions, tested in items.test.ts.
 import { fileUrl, type EventView, type FileView, type ReferenceView } from "@/api/himari";
-import type { Delegation, Item, Shown, ToolStep } from "@/features/timeline";
+import type { AskedProject, Delegation, Item, Shown, ToolStep } from "@/features/timeline";
 
 export type { Item, ToolStep } from "@/features/timeline";
 
@@ -47,6 +47,27 @@ export function delegationOf(step: ToolStep): Delegation {
   return { ...asked, error: "The hub's answer could not be read." };
 }
 
+/** A ``hub_project_request`` call and its result (V3-P103 §6.6): the hub's tool answers ``{"request": {…}}``; an
+ *  error result is the hub's reason. */
+export function askedProjectOf(step: ToolStep): AskedProject {
+  const args = step.arguments;
+  const asked: AskedProject = { requestId: null, kind: text(args.kind), project: text(args.project),
+    runner: text(args.runner), error: null, answered: step.result !== null };
+  if (!step.result) return asked;
+  if (step.result.isError) return { ...asked, error: step.result.text || "The hub refused it." };
+  try {
+    const parsed: unknown = JSON.parse(step.result.text);
+    const found = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    const request = found && typeof found.request === "object" && found.request ? found.request as Record<string, unknown>
+      : found;
+    const id = request ? whole(request.id) : null;
+    if (id !== null && id > 0) return { ...asked, requestId: id };
+  } catch {
+    // not the request: said below
+  }
+  return { ...asked, error: "The hub's answer could not be read." };
+}
+
 /** A file as the timeline shows it; ``conversation`` gives its links (none without it, or once it expired). */
 export function shownFile(file: FileView, conversation: string | null | undefined): Shown {
   const url = conversation && !file.expired ? fileUrl(conversation, file) : null;
@@ -68,9 +89,11 @@ export const referenceLabel = (ref: ReferenceView) =>
 
 /** The items for ``events`` (oldest first). Tool calls of consecutive steps fold into one work block, as the old
  *  page does (V3-P68); an ask_user call is a question, and the user's answer to it is a user item. ``hubSource``:
- *  the mcp.json server that is the hub; each result of its ``hub_delegate`` adds a card after its work block. */
+ *  the mcp.json server that is the hub; each result of its ``hub_delegate`` adds a card after its work block, and
+ *  so does each of its ``hub_project_request`` (V3-P103 §6.6). */
 export function toItems(events: readonly EventView[], hubSource?: string | null, conversation?: string | null): Item[] {
   const delegate = hubSource ? `${hubSource}/hub_delegate` : null;
+  const asks = hubSource ? `${hubSource}/hub_project_request` : null; // V3-P103 §6.6
   const items: Item[] = [];
   const steps = new Map<string, ToolStep>();
   let work: Extract<Item, { kind: "work" }> | null = null;
@@ -137,6 +160,10 @@ export function toItems(events: readonly EventView[], hubSource?: string | null,
         if (step && delegate !== null && step.toolId === delegate) {
           closeWork(); // the card comes after the calls it followed; later calls start a new block
           items.push({ kind: "delegation", key: `${key}:delegation`, delegation: delegationOf(step) });
+        }
+        if (step && asks !== null && step.toolId === asks) {
+          closeWork();
+          items.push({ kind: "project_request", key: `${key}:project`, asked: askedProjectOf(step) });
         }
         break; // an ask_user answer comes back as the user's message; a result without its call is dropped
       }

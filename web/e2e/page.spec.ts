@@ -286,11 +286,11 @@ test("approvals lists what waits; a question is answered there; the tab title co
   await expect(question).toContainText("Which color?");
   await expect(question).toContainText("work · codex · on linux");
   await expect(page.getByRole("group", { name: "Permission request" })).toContainText("Run pytest"); // demo's
-  await expect(page).toHaveTitle("(2) HIMARI");
+  await expect(page).toHaveTitle("(3) HIMARI"); // two agents' requests and HIMARI's project request (V3-P103 §6.7)
   await question.getByLabel("Color").selectOption("blue");
   await question.getByRole("button", { name: "Answer" }).click();
   await expect(page.getByRole("group", { name: "Question" })).toHaveCount(0);
-  await expect(page).toHaveTitle("(1) HIMARI");
+  await expect(page).toHaveTitle("(2) HIMARI");
   await page.goto("/s/10");
   await expect(page.locator(".answer").filter({ hasText: "You chose blue." })).toBeVisible();
   await done();
@@ -762,5 +762,186 @@ test("a session is named, closed, found among the closed ones and opened again, 
   await panel.getByRole("button", { name: "Clear" }).click();
   await expect(heading).toContainText("archive › claude@linux");
   await expect(panel.getByLabel("Name")).toHaveValue("");
+  await done();
+});
+
+// -- V3-P103: hub projects and device folders (the scripted hub: laptop local, linux user, old off, gone away) -----
+
+const SPECIAL = "a/b?c#d 한글 x";
+const projectPage = (name: string) => `/project?name=${encodeURIComponent(name)}`;
+
+test("a project's page opens from the sidebar, a name with / ? # and Hangul in its query", async ({ page, isMobile }) => {
+  const done = await watch(page);
+  await signIn(page);
+  await openSidebar(page, isMobile);
+  await page.getByRole("link", { name: `About ${SPECIAL}` }).click();
+  await expect(page).toHaveURL((url) => url.pathname === "/project" && url.searchParams.get("name") === SPECIAL);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(SPECIAL);
+  const folders = page.getByRole("region", { name: "Folders on devices" });
+  // The desktop run's settings check (below) takes linux's folder out, so the phone run sees none.
+  if (isMobile) await expect(folders).toContainText("No connected device has a folder for it.");
+  else await expect(folders).toContainText("/home/u/code/special");
+  await done();
+});
+
+test("a new project on a local device: its pairing code, then done, then its page", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub makes each project once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("button", { name: "New project" }).click();
+  const dialog = page.getByRole("dialog", { name: "New project" });
+  await dialog.getByLabel("Name").fill("demo");
+  await expect(dialog).toContainText("A project of this name is already there.");
+  await dialog.getByLabel("Name").fill("p103-local");
+  await expect(dialog.getByRole("radio", { name: /^old/ })).toBeDisabled(); // takes no requests
+  await expect(dialog).toContainText("himari-hub runner approve");
+  await dialog.getByRole("radio", { name: /^laptop/ }).check();
+  await dialog.getByLabel("Make a new folder").check();
+  await dialog.getByLabel("Default agent (optional)").selectOption("codex");
+  await dialog.getByRole("button", { name: "Ask the device" }).click();
+  await expect(dialog.getByLabel("Pairing code")).toHaveText("482-913");
+  await expect(dialog).toContainText("Pick the folder on laptop's screen");
+  await expect(page).toHaveURL(/\/project\?name=p103-local$/, { timeout: 15_000 }); // done: its page
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("p103-local");
+  await expect(page.getByRole("region", { name: "Folders on devices" })).toContainText("D:/code/p103-local");
+  await expect(page.getByLabel("Default agent")).toHaveValue("codex");
+  await expect(page.getByRole("region", { name: "Requests" }).getByRole("group", { name: /Project request/ }))
+    .toContainText("Done");
+  await done();
+});
+
+test("a new project on a user device: its folder picked here, one level at a time", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub makes each project once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("button", { name: "New project" }).click();
+  const dialog = page.getByRole("dialog", { name: "New project" });
+  await dialog.getByLabel("Name").fill("p103-user");
+  await dialog.getByRole("radio", { name: /^linux/ }).check();
+  const ask = dialog.getByRole("button", { name: "Ask the device" });
+  await expect(ask).toBeDisabled(); // nothing picked yet
+  const picker = dialog.getByRole("group", { name: "Folders on the device" });
+  await picker.getByRole("button", { name: "/home/u/code" }).click();
+  await picker.getByRole("button", { name: "notes" }).click();
+  await picker.getByRole("button", { name: "Choose this folder" }).click();
+  await expect(picker).toContainText("Chosen: /home/u/code/notes");
+  await dialog.getByLabel("New folder in it (optional)").fill("a/b");
+  await expect(dialog).toContainText("One folder name");
+  await dialog.getByLabel("New folder in it (optional)").fill("fresh");
+  await ask.click();
+  await expect(page).toHaveURL(/\/project\?name=p103-user$/, { timeout: 15_000 });
+  await expect(page.getByRole("region", { name: "Folders on devices" })).toContainText("/home/u/code/notes/fresh");
+  await done();
+});
+
+test("HIMARI's project request is allowed in Approvals; lost ones are settled, by the device or as told", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub's requests are answered once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/approvals");
+  const asked = page.getByRole("group", { name: "Project request 1" });
+  await expect(asked).toContainText("HIMARI asks for this");
+  await expect(asked).toContainText("The user asked for a place for the new site.");
+  await expect(asked).toContainText("/home/u/code/from-himari");
+  await asked.getByRole("button", { name: "Allow" }).click();
+  await expect(asked).toContainText("Done", { timeout: 15_000 });
+  const lost = page.getByRole("group", { name: "Project request 2" });
+  await expect(lost).toContainText("Not known whether the device registered it");
+  await lost.getByRole("button", { name: "Settle" }).click();
+  await expect(lost).toContainText("Done", { timeout: 15_000 }); // the device answered behind its fence
+  const gone = page.getByRole("group", { name: "Project request 3" });
+  await expect(gone).toContainText("Not known whether the device removed it");
+  await gone.getByRole("button", { name: "Settle" }).click();
+  await expect(gone.getByRole("alert")).toContainText("gone");
+  await gone.getByText("If the device is lost").click();
+  await gone.getByLabel(/^Removed\./).check();
+  await gone.getByRole("button", { name: "Settle as this" }).click();
+  await expect(gone).toContainText("Removed");
+  await expect(gone).toContainText("Settled by you.");
+  await done();
+});
+
+test("a device's folder is taken out: its card follows the removal to the end", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub removes each folder once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto(projectPage("demo"));
+  const folders = page.getByRole("region", { name: "Folders on devices" });
+  await folders.getByRole("button", { name: "Remove laptop's folder" }).click();
+  const confirm = page.getByRole("dialog", { name: "Remove laptop's folder?" });
+  await expect(confirm).toContainText("runner.json only; the folder and its work stay");
+  await confirm.getByRole("button", { name: "Remove" }).click();
+  const card = page.getByRole("region", { name: "Requests" }).getByRole("group", { name: /Project request/ });
+  await expect(card).toContainText("Remove a folder · demo · on laptop");
+  await expect(card).toContainText("Removed", { timeout: 15_000 });
+  await expect(folders).not.toContainText("D:/code/demo");
+  await done();
+});
+
+test("held folders are adopted, with or without a project of their name", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub adopts each folder once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  const held = page.getByRole("list", { name: "Held folders" });
+  await expect(held).toContainText("ghost");
+  await expect(held.getByRole("button", { name: "Adopt ghost from gone" })).toBeDisabled(); // not connected
+  await held.getByRole("button", { name: "Adopt orphan from linux" }).click();
+  await expect(page.getByRole("link", { name: "About orphan" })).toBeVisible(); // a project now
+  await expect(held).not.toContainText("orphan");
+  await page.goto(projectPage("work"));
+  const here = page.getByRole("region", { name: "Held folders" });
+  await expect(here).toContainText("laptop");
+  await here.getByRole("button", { name: "Adopt work from laptop" }).click();
+  await expect(page.getByRole("region", { name: "Held folders" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Folders on devices" })).toContainText("laptop");
+  await done();
+});
+
+test("a project's settings, the permission preset only after a confirmation; a name with / ? # too", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted hub keeps the settings, on desktop");
+  const done = await watch(page);
+  const asked: string[] = [];
+  page.on("dialog", (dialog) => {
+    asked.push(dialog.message());
+    void dialog.accept();
+  });
+  await signIn(page);
+  await page.goto(projectPage(SPECIAL));
+  await page.getByLabel("Default agent").selectOption("codex");
+  await page.getByLabel("Profile").selectOption("careful");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
+  expect(asked).toEqual([]); // no preset changed: nothing to confirm
+  await page.getByLabel("Permission preset").fill("careful");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Permission preset")).toHaveValue("careful");
+  await expect.poll(() => asked.length).toBe(1);
+  expect(asked[0]).toContain(`permission preset of ${SPECIAL}`);
+  await page.reload();
+  await expect(page.getByLabel("Default agent")).toHaveValue("codex");
+  await expect(page.getByLabel("Profile")).toHaveValue("careful");
+  const folders = page.getByRole("region", { name: "Folders on devices" });
+  await folders.getByRole("button", { name: "Remove linux's folder" }).click();
+  await page.getByRole("dialog", { name: "Remove linux's folder?" }).getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByRole("region", { name: "Requests" }).getByRole("group", { name: /Project request/ }))
+    .toContainText("Removed", { timeout: 15_000 });
+  await expect(folders).not.toContainText("/home/u/code/special");
+  await done();
+});
+
+test("HIMARI asks for a project in a conversation: the card shows the user path's record and is allowed there", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted model asks once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Message", { exact: true }).fill("Make me a project P103-ASK");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("I asked the hub for the project (P103-ASK).")).toBeVisible({ timeout: 20_000 });
+  const card = page.getByRole("group", { name: /Project request/ });
+  await expect(card).toContainText("HIMARI asks for this");
+  await expect(card).toContainText("/home/u/code/asked-by-himari"); // the operator's view, path included
+  await card.getByRole("button", { name: "Allow" }).click();
+  await expect(card).toContainText("Done", { timeout: 15_000 });
+  await card.getByRole("button", { name: "Open project" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("asked-by-himari");
   await done();
 });
