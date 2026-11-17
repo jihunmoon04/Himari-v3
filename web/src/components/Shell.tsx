@@ -6,6 +6,7 @@ import { Outlet, useLocation } from "react-router";
 import { useHubPending, useHubProjects, usePrincipalEvents } from "@/app/queries";
 import { cn } from "@/lib/cn";
 import { Sidebar } from "./Sidebar";
+import { Toasts } from "./Toasts";
 import { IconButton } from "./ui/button";
 
 const NARROW = "(max-width: 767px)";
@@ -87,6 +88,7 @@ export function Shell() {
         <main className="flex min-w-0 flex-1 flex-col">
           <Outlet />
         </main>
+        <Toasts />
       </div>
     </SidebarToggle.Provider>
   );

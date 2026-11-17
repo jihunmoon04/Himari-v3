@@ -150,3 +150,55 @@ export const statMachinePath = (path: string) => get<{ path: string; kind: strin
 export const showMachineFile = (path: string) => get<ShownFile>(`/api/machine/file?path=${enc(path)}`);
 export const machineImageUrl = (path: string) => `/api/machine/image?path=${enc(path)}`;
 export const machineDownloadUrl = (path: string) => `/api/machine/download?path=${enc(path)}`;
+
+// -- a conversation's own tools (V3-P102 W6a): its name, the trash, its model, its Tool servers, compacting ---------
+
+export interface DeleteNotice {
+  servers: string[]; // the external servers it called, whose own data stays
+  unconfigured: string[];
+  running: boolean;
+  trash_days: number;
+  memory_count: number;
+  episode_count: number;
+}
+
+export interface TrashedConversation extends ConversationSummary {
+  trashed_at: string;
+  purge_after: string;
+}
+
+export interface ModelChoice {
+  model: string; // what the next turn uses
+  effort: string | null;
+  chosen: { model: string | null; effort: string | null } | null; // what this conversation chose (null: defaults)
+  fallback: boolean;
+}
+
+export interface ToolSource {
+  source: string;
+  enabled: boolean;
+  default: boolean;
+  choice: boolean | null; // this conversation's own choice (null: the default)
+  available: boolean;
+  tools: string[];
+  problems: string[];
+}
+
+export const readDeleteNotice = (id: string) => get<DeleteNotice>(`/api/conversations/${enc(id)}/delete-notice`);
+export const trashConversation = (id: string) =>
+  post<{ trashed_at: string; purge_after: string }>(`/api/conversations/${enc(id)}/trash`);
+export const restoreConversation = (id: string) => post<void>(`/api/conversations/${enc(id)}/restore`);
+export const purgeConversation = (id: string) => del<void>(`/api/conversations/${enc(id)}`);
+export const listTrash = (limit = 50, offset = 0) =>
+  get<{ items: TrashedConversation[]; next_offset: number | null }>(`/api/conversations?trashed=1&limit=${limit}&offset=${offset}`);
+export const readModelChoice = (id: string) => get<ModelChoice>(`/api/conversations/${enc(id)}/model`);
+export const saveModelChoice = (id: string, model: string | null, effort: string | null) =>
+  put<ModelChoice>(`/api/conversations/${enc(id)}/model`, { model, effort });
+export const readToolSources = (id: string) => get<{ sources: ToolSource[] }>(`/api/conversations/${enc(id)}/tools`);
+export const setToolSource = (id: string, source: string, enabled: boolean | null) =>
+  put<{ sources: ToolSource[] }>(`/api/conversations/${enc(id)}/tools/${enc(source)}`, { enabled });
+export const compactConversation = (id: string) => post<Job>(`/api/conversations/${enc(id)}/compact`);
+export const dismissWaiting = (id: string) => post<Job>(`/api/conversations/${enc(id)}/dismiss`);
+/** The notes a conversation saved, counted from the memory list (what a deletion for good takes with it). */
+export const listMemories = () =>
+  get<{ memories: { id: string; source?: { conversation?: string | null } | null }[] }>("/api/memories");

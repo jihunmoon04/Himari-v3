@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -421,6 +421,19 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
 - **검사:** Vitest(`changes.test.ts`: 턴별·파일별 묶기, 계획 기록, 나란히 보기 줄), Playwright: 세션 5의 패널(파일 목록과 `+2 −1`,
   Split 표, 계획 1/2와 기록, 정보), 데스크톱에서 너비 끌기와 기억, 폰에서 화면 너비 시트, `Esc`로 닫기, 대화 패널의 세 탭.
 - **아직:** 타임라인의 diff에서 패널의 그 파일로 바로 가기, 붙인 폴더를 패널에서 붙이고 떼기(옛 화면에만), 파일 안 찾기.
+
+### 7.11 W6a에서 만든 것: 대화 도구 (2026-11-17)
+
+W6은 넷으로 나눈다: **W6a** 대화 도구, **W6b** 입력(첨부·붙여넣기·`/` 프롬프트·메모리 줄·참조), **W6c** 설정 화면(지침·메모리·
+기기·Tool 서버·폴더·파일), **W6d** 전환(렌더러·KaTeX 옮기기, `/`를 새 화면으로, 옛 정적 파일과 스모크 지우기, 좁은 화면).
+
+- **대화 메뉴(`components/ConversationMenu.tsx`, 머리줄의 ⋯):** 이름 바꾸기(비우면 첫 글로), Tool 서버(MCP 서버마다 기본·켬·끔,
+  연결 여부·도구 수·문제), 이전 기록 요약(압축, 턴이 돌면 막음), 남은 질문 닫기(기다릴 때만), 휴지통으로(서버의 삭제 안내
+  그대로: 보관 일수, 돌던 작업 중지, 저장한 메모 수, 지우지 않는 외부 서버 데이터). 옮긴 뒤 홈으로 가고 알림에 **Undo**.
+- **휴지통(`/trash`, 설정 메뉴):** 옮긴 날과 영구 삭제일, **Restore**, **Delete for good**(되돌릴 수 없음, 함께 지워지는 메모 수).
+- **모델·강도:** 대화 입력창 왼쪽에서 고르면 바로 저장되어 다음 턴부터 쓴다(고를 것이 없으면 보이지 않음).
+- **그 밖:** 답 복사(마우스를 올리거나 폰에서는 늘), 위로 올려 읽는 동안 "Latest"로 맨 아래로, 페이지 전체의 알림(`features/toast.ts`).
+- **검사:** Playwright(이름 바꾸기와 사이드바, Tool 서버 끔·기본, 휴지통과 Undo, 휴지통 화면의 복원과 영구 삭제, 답 복사).
 
 ## 8. hub에 필요한 것
 

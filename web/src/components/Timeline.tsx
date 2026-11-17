@@ -1,5 +1,5 @@
 import {
-  Brain, ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleHelp, LoaderCircle, MessageCircleQuestion,
+  Brain, Check, ChevronRight, Copy, CircleAlert, CircleCheck, CircleDashed, CircleHelp, LoaderCircle, MessageCircleQuestion,
   ShieldQuestion, Wrench,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -10,6 +10,27 @@ import { cn } from "@/lib/cn";
 import { AssistantText } from "./AssistantText";
 import { DelegationCard } from "./DelegationCard";
 import { DiffView, diffStats } from "./DiffView";
+
+/** Copies an answer's text (as written, Markdown and all). */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false); // the browser refused (not a secure page, no permission)
+    }
+  };
+  return (
+    <button type="button" onClick={() => void copy()} aria-label={copied ? "Copied" : "Copy answer"}
+      className="mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-faint opacity-0 transition-opacity
+        hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 max-md:opacity-100">
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />} {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
 
 function UserBubble({ text, meta }: { text: string; meta?: string[] }) {
   return (
@@ -209,7 +230,12 @@ export function Timeline({ items, live, running, working, renderRequest }: {
           case "user":
             return <UserBubble key={item.key} text={item.text} meta={item.meta} />;
           case "answer":
-            return <AssistantText key={item.key} text={item.text} />;
+            return (
+              <div key={item.key} className="group">
+                <AssistantText text={item.text} />
+                <CopyButton text={item.text} />
+              </div>
+            );
           case "thought":
             return <Thought key={item.key} text={item.text} />;
           case "work":

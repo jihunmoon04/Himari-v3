@@ -434,3 +434,77 @@ test("a conversation's panel: its folders, what it handed to the hub, its detail
   await expect(panel).toContainText(/conv_/);
   await done();
 });
+
+// -- W6a: a conversation's own tools ------------------------------------------------------------------------------
+
+test("a conversation's menu: rename, its Tool servers, the trash with Undo, restore and delete for good", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the conversations list is a drawer there");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: "Plan a trip" }).click();
+  const menu = () => page.getByRole("button", { name: "Conversation menu" }).click();
+
+  await menu();
+  await page.getByRole("menuitem", { name: "Rename…" }).click();
+  await page.getByRole("dialog").getByLabel("Name").fill("Trip plans");
+  await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("header h1")).toHaveText("Trip plans");
+  await expect(page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: "Trip plans" })).toBeVisible();
+
+  await menu();
+  await page.getByRole("menuitem", { name: "Tool servers…" }).click();
+  const servers = page.getByRole("list", { name: "Tool servers of this conversation" });
+  await expect(servers).toContainText("hub");
+  await servers.getByLabel("Use hub").selectOption("off");
+  await expect(servers).toContainText("not used");
+  await servers.getByLabel("Use hub").selectOption("default");
+  await expect(servers).toContainText("in use");
+  await page.getByRole("dialog").getByRole("button", { name: "Done" }).click();
+
+  await menu();
+  await page.getByRole("menuitem", { name: "Move to trash…" }).click();
+  await expect(page.getByRole("dialog")).toContainText("It moves to the trash");
+  await page.getByRole("dialog").getByRole("button", { name: "Move to trash" }).click();
+  await expect(page).toHaveURL(/\/next\/?$/);
+  const moved = page.getByRole("status").filter({ hasText: "Moved “Trip plans” to the trash" });
+  await moved.getByRole("button", { name: "Undo" }).click();
+  await expect(page.locator("header h1")).toHaveText("Trip plans");
+
+  await menu();
+  await page.getByRole("menuitem", { name: "Move to trash…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Move to trash" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("menuitem", { name: "Trash" }).click();
+  const trashed = page.getByRole("list", { name: "Trashed conversations" }).getByRole("listitem").filter({ hasText: "Trip plans" });
+  await trashed.getByRole("button", { name: "Restore" }).click();
+  await expect(page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: "Trip plans" })).toBeVisible();
+  await expect(trashed).toHaveCount(0);
+
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: "Trip plans" }).click();
+  await menu();
+  await page.getByRole("menuitem", { name: "Move to trash…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Move to trash" }).click();
+  await page.goto("/next/trash");
+  await page.getByRole("list", { name: "Trashed conversations" }).getByRole("listitem").filter({ hasText: "Trip plans" })
+    .getByRole("button", { name: "Delete for good" }).click();
+  await expect(page.getByRole("dialog")).toContainText("This cannot be undone.");
+  await page.getByRole("dialog").getByRole("button", { name: "Delete for good" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Deleted “Trip plans” for good." })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Trashed conversations" }).getByRole("listitem")
+    .filter({ hasText: "Trip plans" })).toHaveCount(0);
+  await done();
+});
+
+test("an answer is copied as written", async ({ page, context, isMobile }) => {
+  test.skip(isMobile, "the conversations list is a drawer there");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: /W4-HAND-OVER/ }).click();
+  const answer = page.locator(".group").filter({ hasText: "I handed it to the hub (W4-HAND-OVER)." });
+  await answer.hover();
+  await answer.getByRole("button", { name: "Copy answer" }).click();
+  await expect(answer.getByRole("button", { name: "Copied" })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("I handed it to the hub (W4-HAND-OVER).");
+  await done();
+});
