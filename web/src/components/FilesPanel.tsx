@@ -5,10 +5,10 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ChevronLeft, File, Folder } from "lucide-react";
 import { useState } from "react";
 import { ApiError } from "@/api/client";
-import { browseFolder, conversationFolders, machineDownloadUrl, machineImageUrl, showMachineFile } from "@/api/himari";
+import {
+  browseFolder, conversationFolders, machineDownloadUrl, machineImageUrl, showMachineFile, statMachinePath,
+} from "@/api/himari";
 import { cn } from "@/lib/cn";
-
-const IMAGE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
 function size(bytes: number | null | undefined) {
   if (bytes == null) return "";
@@ -19,20 +19,19 @@ function size(bytes: number | null | undefined) {
 
 const why = (error: unknown) => (error instanceof ApiError ? error.message : "Could not read it.");
 
+/** How a file is shown is the server's call (its ``kind``), never its name's. */
 function FileView({ path, onBack }: { path: string; onBack: () => void }) {
-  const image = IMAGE.test(path);
-  const shown = useQuery({ queryKey: ["machine", "file", path], queryFn: () => showMachineFile(path), enabled: !image,
-    retry: false });
+  const shown = useQuery({ queryKey: ["machine", "file", path], queryFn: () => showMachineFile(path), retry: false });
   return (
     <div className="space-y-2">
       <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-xs text-muted hover:text-ink">
         <ChevronLeft className="size-3.5" /> Back
       </button>
       <p className="break-all font-mono text-xs text-muted">{path}</p>
-      {image ? (
-        <img src={machineImageUrl(path)} alt={path.split("/").pop() ?? "image"} className="max-w-full rounded-md border border-line" />
-      ) : shown.isLoading ? (
+      {shown.isLoading ? (
         <p className="text-faint">Loading…</p>
+      ) : shown.data?.kind === "image" ? (
+        <img src={machineImageUrl(path)} alt={path.split("/").pop() ?? "image"} className="max-w-full rounded-md border border-line" />
       ) : shown.error ? (
         <p role="alert" className="text-danger">{why(shown.error)}</p>
       ) : shown.data?.kind === "text" && typeof shown.data.text === "string" ? (
@@ -109,7 +108,15 @@ export function FilesPanel({ conversation }: { conversation: string }) {
   if (!items.length) {
     return <p className="text-faint">This conversation has no folders here (it only talks, or the machine is off).</p>;
   }
-  const open = (path: string, kind: string) => setAt({ path, kind });
+  const [problem, setProblem] = useState<string | null>(null);
+  const open = (path: string, kind: string) => {
+    setProblem(null);
+    if (kind === "directory" || kind === "file") return setAt({ path, kind });
+    // a link (or anything else): where it leads decides how it opens
+    statMachinePath(path)
+      .then((found) => setAt({ path: found.path, kind: found.kind === "directory" ? "directory" : "file" }))
+      .catch((failure: unknown) => setProblem(why(failure)));
+  };
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap gap-1" role="group" aria-label="Folders">
@@ -122,6 +129,7 @@ export function FilesPanel({ conversation }: { conversation: string }) {
           </button>
         ))}
       </div>
+      {problem && <p role="alert" className="text-danger">{problem}</p>}
       {at === null ? (
         <FolderView path={items[0]!.path} onOpen={open} />
       ) : at.kind === "directory" ? (
