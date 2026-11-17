@@ -1,4 +1,4 @@
-// Answering what an agent asks (V3-P102 §4.2, §4.6; the classic page's hub.js does the same). Pure, tested in
+// Answering what an agent asks (V3-P102 §4.2, §4.6; as the classic page's hub.js did). Pure, tested in
 // answer.test.ts.
 import type { HubField, HubPending } from "@/api/hub";
 

@@ -1,5 +1,5 @@
 """HIMARI Web server: a JSON API over the assembled Application plus the
-static UI (V3-P46).
+page built from ``web/`` (V3-P46, V3-P102).
 
 Authentication: the local operator signs in with the operator secret
 (``POST /api/session``) and gets an in-memory session in an ``HttpOnly``
@@ -52,7 +52,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
-from importlib import resources
 from typing import Annotated, Any, BinaryIO, Literal
 
 from fastapi import Depends, FastAPI, Path, Query, Request, Response
@@ -205,18 +204,6 @@ MAX_MESSAGE_CHARS = 32_000
 MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
-STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript",
-                "hub.js": "text/javascript",  # the hub's waiting requests (V3-P95)
-                "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
-                "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
-                "local_store.js": "text/javascript", "drafts.js": "text/javascript",  # kept in the browser (V3-P78 §5)
-                # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
-                "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
-KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
-               "Main-Bold", "Main-BoldItalic", "Main-Italic", "Main-Regular", "Math-BoldItalic", "Math-Italic",
-               "SansSerif-Bold", "SansSerif-Italic", "SansSerif-Regular", "Script-Regular", "Size1-Regular",
-               "Size2-Regular", "Size3-Regular", "Size4-Regular", "Typewriter-Regular")
-STATIC_FILES.update({f"katex/fonts/KaTeX_{name}.woff2": "font/woff2" for name in KATEX_FONTS})
 
 Opener = Callable[[], Awaitable[Application]]
 
@@ -1113,9 +1100,6 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SCREEN_PATH = re.compile(r"^/api/device/screens/[^/]+$")  # V3-P91 §4.2: a screen of at most SCREEN_MAX_BYTES
-SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders",
-                 "/settings/devices")  # V3-P79 §3.1, V3-P83
-PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
 GENERATION_HEADER = "X-Himari-Connection-Generation"  # V3-P93 §6.1.2: a device SSE stream's generation id
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
@@ -2673,20 +2657,29 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     # -- the new page beside the old one (V3-P102 §7.2, W1) -------------------------------------
 
+    # -- the page (V3-P102 §7.2; at / since W6) ---------------------------------------------------
+
     built = next_page.load()
 
-    def next_built() -> next_page.Built:
+    def page_built() -> next_page.Built:
         if built is None:
             raise ApiError(404, "not_found", "Not available.")
         return built
 
     @app.get("/next", include_in_schema=False)
-    async def next_root() -> Response:
-        return Response(status_code=308, headers={"Location": next_page.BASE})
+    @app.get("/next/{rest:path}", include_in_schema=False)
+    async def next_moved(request: Request, rest: str = "") -> Response:
+        """The page grew at /next/ (W1–W6c) and is at / now: an old link or bookmark goes to the same place. Only a
+        path of this site: a leading slash or backslash, which would make it another site's, is dropped."""
+        query = request.url.query
+        return Response(status_code=308,
+                        headers={"Location": "/" + rest.lstrip("/\\") + (f"?{query}" if query else "")})
 
-    @app.get("/next/assets/{name:path}", include_in_schema=False)
-    async def next_asset(name: str) -> Response:
-        found = next_built().assets.get(name)  # only the names that were built: never a path into the package
+    @app.get("/assets/{name:path}", include_in_schema=False)
+    async def asset(name: str) -> Response:
+        """The build's files (hashed names, and KaTeX as the renderer loads it): only the names that were built, never
+        a path into the package."""
+        found = page_built().assets.get(name)
         if found is None:
             raise ApiError(404, "not_found", "Not available.")
         item, media = found
@@ -2694,38 +2687,16 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         return Response(item.read_bytes(), media_type=f"{media}{charset}",
                         headers={"Cache-Control": next_page.ASSET_CACHE})
 
-    @app.get("/next/{rest:path}", include_in_schema=False)
-    async def next_index(request: Request, rest: str) -> Response:
-        """The page for any address under /next/: it reads the address itself (SPA fallback)."""
-        html, nonce = next_built().page()
+    @app.get("/", include_in_schema=False)
+    @app.get("/{rest:path}", include_in_schema=False)
+    async def page(request: Request, rest: str = "") -> Response:
+        """The page for any address that is not the API or a file: it reads the address itself (SPA fallback).
+        Registered last, so every route of the server comes first."""
+        if rest == "api" or rest.startswith(("api/", "assets/")):
+            raise ApiError(404, "not_found", "Not available.")
+        html, nonce = page_built().page()
         setattr(request.state, STYLE_NONCE_STATE, nonce)  # the security middleware writes the CSP with it
         return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
-
-    # -- static UI ----------------------------------------------------------------------------
-
-    static = resources.files("himari.interfaces.web") / "static"
-
-    @app.get("/")
-    async def index() -> Response:
-        return Response((static / "index.html").read_bytes(), media_type="text/html; charset=utf-8")
-
-    # V3-P79 §3.1: each surface's address is the same page, which reads it; the data stays behind the API.
-    for surface in SURFACE_PATHS:
-        app.add_api_route(surface, index, methods=["GET"], include_in_schema=False)
-
-    @app.get("/c/{conversation_id}", include_in_schema=False)
-    async def conversation_page(conversation_id: str) -> Response:
-        if not PAGE_ID.fullmatch(conversation_id):
-            raise ApiError(404, "not_found", "Not available.")
-        return await index()
-
-    @app.get("/assets/{name:path}")
-    async def asset(name: str) -> Response:
-        media = STATIC_FILES.get(name)  # only the listed names: never a path into the package
-        if media is None:
-            raise ApiError(404, "not_found", "Not available.")
-        charset = "; charset=utf-8" if media.startswith("text/") else ""
-        return Response((static / name).read_bytes(), media_type=f"{media}{charset}")
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),

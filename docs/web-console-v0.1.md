@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W6b 구현**(§7.12) · **W6c 구현**(§7.13) · **W5~W6c 운영 배포**(2026-11-17, v3 `1c2f5b1`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w6c.md)) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W6b 구현**(§7.12) · **W6c 구현**(§7.13) · **W6d 구현: `/`가 새 화면**(§7.14) · **W5~W6c 운영 배포**(2026-11-17, v3 `1c2f5b1`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w6c.md)) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -466,6 +466,26 @@ W6은 넷으로 나눈다: **W6a** 대화 도구, **W6b** 입력(첨부·붙여�
   이름 바꾸기, 끊기, 조용한 시간 시작·끝).
 - **확인 못 함(시험 서버):** 폴더 등록과 대화에 붙이기(기계 필요), 제안(자동 메모리 필요). 메인 영역의 파일 탐색 화면은 옮기지
   않았다(대화의 Files 패널로 대신, W6d에서 다시 본다).
+
+### 7.14 W6d에서 한 것: 전환 (2026-11-17)
+
+- **`/`가 새 화면:** Vite `base: "/"`, Router basename 없음. 서버는 `/assets/{이름}`을 빌드의 목록에 있는 이름만 주고(긴 캐시),
+  API(`/api`, `/api/…`)와 `/assets/…`가 아닌 모든 GET에 `index.html`을 준다(SPA fallback, 요청마다 스타일 nonce, 서버의
+  다른 경로가 모두 먼저). 빌드가 없으면 화면은 404이고 API는 그대로다.
+- **옛 주소:** `/next`·`/next/…`는 같은 `/…`로 308(쿼리 유지). 앞의 `/`·`\`는 떼어 다른 사이트 주소가 되지 않게 한다.
+  옛 화면의 주소(`/c/{id}`, `/settings/memory`, `/trash`)는 새 화면에 같은 경로가 있다. `/files`는 홈으로 간다(옮기지 않음).
+- **렌더러와 KaTeX:** `static/rich_text.js` → `web/src/lib/rich_text.js`, `static/katex` → `web/public/assets/katex`.
+  §7.2의 계획(`<base>katex/…`)과 달리 KaTeX는 `/assets/katex/…`에 그대로 둔다: Windows 반려 앱이 같은 렌더러와 KaTeX를
+  빌드에 넣어(`Himari.Companion.csproj`, 새 위치로 고침) 자기 `Reader/assets/katex/`에서 같은 경로로 부르기 때문이다.
+  렌더러 시험 `scripts/rich_text_smoke.mjs`는 새 위치로 그대로 돈다(CI `static-checks`).
+- **지운 것:** `interfaces/web/static/`의 나머지(index.html, app.js, app.css, hub.js, live.js, files.js, drafts.js,
+  local_store.js, appearance.js), 서버의 `STATIC_FILES`·`SURFACE_PATHS`, 옛 스모크(`ui_state_smoke`, `live_smoke`, `files_smoke`,
+  `ui_smoke.py`)와 그 CI 단계, 설정 메뉴의 "Open the classic page". `package-data`는 `dist/**`만(`assets/katex`와 글꼴 포함).
+  `check_web_build.py`는 wheel에 KaTeX도 있는지 본다.
+- **검사:** pytest(`test_web_next.py`: 주소마다 같은 페이지와 하나의 CSP, API의 빈 경로는 페이지가 아님, 빌드 파일과
+  KaTeX만 주고 옛 파일·경로 밖은 404, `/next/…` 이동과 다른 사이트로 가지 않음, 빌드 없음; 옛 화면 시험 둘을 옮김),
+  Playwright(모든 시험을 `/`에서, 옛 주소의 이동과 KaTeX).
+- **아직:** 휴대폰 실기 확인(소유자), 좁은 화면 다듬기, 메인 영역의 파일 탐색 화면, 백그라운드 알림(옛 화면에만 있던 것).
 
 ## 8. hub에 필요한 것
 

@@ -231,40 +231,6 @@ def test_the_entry_point_refuses_a_bad_mcp_json_before_listening(tmp_path: Path,
 # --- envelope ------------------------------------------------------------------------------
 
 
-def test_surface_addresses_are_the_page(server: Server) -> None:
-    """V3-P79 §3.1: each surface's address is the same page, with the same headers; nothing else is."""
-    page = server.client.get("/").text
-    for path in ("/c/conv_12", "/c/a-B_9", "/files", "/trash", "/settings/instructions", "/settings/memory",
-                 "/settings/folders"):
-        got = server.client.get(path)
-        assert got.status_code == 200 and got.text == page, path
-        assert "default-src 'self'" in got.headers["content-security-policy"] and got.headers["x-frame-options"] == "DENY"
-    for path in ("/c/", "/c/a.b", "/c/" + "x" * 129, "/c/a/b", "/settings", "/settings/other", "/files/x", "/chat/1"):
-        assert server.client.get(path).status_code == 404, path
-    assert server.client.post("/files").status_code != 200  # a page to read only (the Origin guard answers first)
-
-
-def test_static_ui_and_security_headers(server: Server) -> None:
-    page = server.client.get("/")
-    assert page.status_code == 200 and "/assets/app.js" in page.text
-    assert "default-src 'self'" in page.headers["content-security-policy"]
-    assert page.headers["x-content-type-options"] == "nosniff" and page.headers["x-frame-options"] == "DENY"
-    for name in ("app.js", "app.css", "rich_text.js", "appearance.js", "live.js"):
-        assert server.client.get(f"/assets/{name}").status_code == 200
-    assert server.client.get("/assets/../app.py").status_code == 404
-    script = server.client.get("/assets/katex/katex.min.js")
-    assert script.status_code == 200 and script.headers["content-type"] == "text/javascript; charset=utf-8"
-    assert server.client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
-    font = server.client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
-    assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
-    for unlisted in ("katex/SOURCE", "katex/LICENSE", "katex/fonts/KaTeX_Main-Regular.ttf", "katex%2F..%2Fapp.js",
-                     "katex/fonts%2F..%2F..%2Fapp.js"):
-        assert server.client.get(f"/assets/{unlisted}").status_code == 404
-    assert server.client.get("/assets/index.html").status_code == 404
-    api = server.client.get("/api/session")
-    assert api.headers["cache-control"] == "no-store" and api.json()["authenticated"] is False
-
-
 def test_untrusted_host_and_large_bodies_are_refused(server: Server) -> None:
     assert server.client.get("/", headers={"host": "evil.example"}).status_code == 400
     big = server.client.post("/api/session", content=b'{"token": "' + b"x" * 300_000 + b'"}',

@@ -17,14 +17,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: UI async regressions
-        run: node scripts/ui_state_smoke.mjs
-      - name: Assistant text formulas
+      - name: Assistant text formulas (web/src/lib/rich_text.js, also the Windows companion's)
         run: node scripts/rich_text_smoke.mjs
-      - name: Answer being written
-        run: node scripts/live_smoke.mjs
-      - name: File explorer pane
-        run: node scripts/files_smoke.mjs
       - name: Install dev tools
         run: pip install -e ".[dev]"
       - name: Import boundaries (V3-046)
