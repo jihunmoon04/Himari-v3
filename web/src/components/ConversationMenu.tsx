@@ -26,6 +26,11 @@ export function deleteLines(notice: DeleteNotice): string[] {
     lines.push(notice.memory_count === 1 ? "1 note HIMARI saved in this conversation is deleted when it is deleted for good."
       : `${notice.memory_count} notes HIMARI saved in this conversation are deleted when it is deleted for good.`);
   }
+  if (notice.episode_count) {
+    lines.push(notice.episode_count === 1
+      ? "1 timeline entry HIMARI kept from this conversation is deleted when it is deleted for good."
+      : `${notice.episode_count} timeline entries HIMARI kept from this conversation are deleted when it is deleted for good.`);
+  }
   lines.push(notice.servers.length
     ? `Data stored by the external servers this conversation used (${notice.servers.map((s) =>
       notice.unconfigured.includes(s) ? `${s} (no longer configured)` : s).join(", ")}) is not deleted.`
@@ -127,7 +132,8 @@ function TrashDialog({ id, name, notice, open, onOpenChange }: {
     try {
       const moved = await trashConversation(id);
       onOpenChange(false);
-      navigate("/");
+      // home only from the conversation that went (stopping its work may take a while; the reader may have moved on)
+      if (window.location.pathname.endsWith(`/c/${encodeURIComponent(id)}`)) navigate("/");
       await client.invalidateQueries({ queryKey: keys.conversations });
       toast(`Moved “${name}” to the trash. It is deleted for good on ${new Date(moved.purge_after).toLocaleDateString()}.`, "ok", {
         label: "Undo",

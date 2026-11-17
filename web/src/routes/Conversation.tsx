@@ -106,7 +106,7 @@ export function Conversation() {
         <PageHeader
           actions={
             <>
-              <ConversationMenu id={id} title={conversation?.title || conversation?.preview || ""} waiting={Boolean(waiting)}
+              <ConversationMenu key={id} id={id} title={conversation?.title || conversation?.preview || ""} waiting={Boolean(waiting)}
                 running={running} />
               <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
                 {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
