@@ -96,7 +96,9 @@ function SessionPage({ id }: { id: number }) {
   const list = useHubList(hub.status === "on");
   const detail = useHubSessionDetail(id);
   const pending = useHubPending(hub.status === "on");
-  const onState = useCallback(() => {
+  const [streamed, setStreamed] = useState<Session | null>(null); // the session stream's latest listing of it
+  const onState = useCallback((shown: Session | null) => {
+    if (shown) setStreamed(shown);
     void client.invalidateQueries({ queryKey: hubKeys.session(id) });
     void client.invalidateQueries({ queryKey: hubKeys.pending });
   }, [client, id]);
@@ -106,7 +108,11 @@ function SessionPage({ id }: { id: number }) {
   const { box, onScroll } = useStickToBottom(stream.events.length);
 
   const listed = list.sessions.find((s) => s.id === id);
-  const session: Session | undefined = listed ?? (detail.data ? { ...detail.data, queued: detail.data.queued.length } : undefined);
+  // the freshest listing of this session: its own live stream's, else the shared list's while that one is live,
+  // else its detail (read again on every signal, and every 10 s without a live stream)
+  const fromDetail = detail.data ? { ...detail.data, queued: detail.data.queued.length } : undefined;
+  const session: Session | undefined = (stream.live && streamed) || (list.reachable ? listed : undefined)
+    || fromDetail || listed;
   const waiting = useMemo(
     () => (pending.data?.pending ?? []).filter((p) => session?.task != null && p.task_id === session.task),
     [pending.data, session?.task],
