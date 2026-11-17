@@ -47,6 +47,21 @@ public sealed class FakeHubProcessTests : IDisposable
     }
 
     [Fact]
+    public async Task AStartThatTimesOutLeavesTheRunnerItLaunched()
+    {
+        Configure(new { StartHangMs = 60_000 });
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        var start = await runner.RunAsync(["runner", "start", "--json"], TimeSpan.FromSeconds(4));
+        Assert.Equal(HubOutcome.TimedOut, start.Outcome);
+        // Only the command was ended; its runner (a descendant) is still up and still the confirmed instance.
+        var status = RunnerProtocol.ParseStatus((await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).StdOut);
+        Assert.True(status!.Running);
+        Assert.NotNull(status.Instance);
+        Configure(new { });
+        Assert.Equal(StopResult.Stopped, RunnerProtocol.ParseStop((await runner.RunAsync(["runner", "stop", "--instance", status.Instance!, "--json"], TimeSpan.FromSeconds(30))).StdOut));
+    }
+
+    [Fact]
     public async Task MissingExecutableIsReported()
     {
         var result = await new ProcessHubCommandRunner(new HubCommand(Path.Combine(work, "없음.exe"), [], work), home).RunAsync(["runner"], TimeSpan.FromSeconds(5));

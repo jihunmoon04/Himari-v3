@@ -74,7 +74,9 @@ public sealed class ProcessHubCommandRunner(HubCommand command, string hubHome) 
         Task finished = await Task.WhenAny(exited.Task, Task.Delay(timeout, cancel)).ConfigureAwait(false);
         if (finished != exited.Task)
         {
-            try { process.Kill(entireProcessTree: true); } catch (Exception ex) when (ex is InvalidOperationException or Win32Exception) { }
+            // Only the command process itself, never its tree: a runner that "runner start" launched is a descendant,
+            // and only the hub's instance-checked stop may end it (§5.3, §5.4). The result stays unknown (pending kept).
+            try { process.Kill(entireProcessTree: false); } catch (Exception ex) when (ex is InvalidOperationException or Win32Exception) { }
             return new HubResult(HubOutcome.TimedOut, null, Snapshot(stdout), Snapshot(stderr));
         }
         await Task.WhenAny(Task.WhenAll(outRead, errRead), Task.Delay(StreamGrace)).ConfigureAwait(false);

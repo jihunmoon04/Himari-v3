@@ -97,7 +97,9 @@ public partial class SetupWizard : Window
             if (await save(s => s with { Server = server.AbsoluteUri, DeveloperMode = developer, Hub = command, HubHome = home, Linked = linked }) is { } failed)
             { Say(HubResult, failed, false); return; }
             try { if (LoginStartup.IsEnabled != atLogin) LoginStartup.Set(atLogin); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { Say(HubResult, $"로그인 시 시작을 바꾸지 못했습니다: {ex.Message}", false); return; }
+            // The settings are saved already: finish as saved and say what did not change.
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            { System.Windows.MessageBox.Show(this, $"설정은 저장했지만 로그인 시 시작을 바꾸지 못했습니다: {ex.Message}", "HIMARI 작업 앱 처음 설정", MessageBoxButton.OK, MessageBoxImage.Warning); }
         }
         finally { saving = false; IsEnabled = true; }
         DialogResult = true;

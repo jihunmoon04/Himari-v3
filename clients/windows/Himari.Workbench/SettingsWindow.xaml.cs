@@ -46,7 +46,9 @@ public partial class SettingsWindow : Window
             if (await supervisor.ChangeSettingsAsync(s => s with { Server = server.AbsoluteUri, DeveloperMode = developer, Hub = command, HubHome = home, Linked = linked }) is { } failed)
             { Show(failed); return; }
             try { if (LoginStartup.IsEnabled != atLogin) LoginStartup.Set(atLogin); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { Show($"로그인 시 시작을 바꾸지 못했습니다: {ex.Message}"); return; }
+            // The settings are saved already: close as saved (so the window follows them) and say what did not change.
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            { System.Windows.MessageBox.Show(this, $"설정은 저장했지만 로그인 시 시작을 바꾸지 못했습니다: {ex.Message}", "HIMARI 작업 앱 설정", MessageBoxButton.OK, MessageBoxImage.Warning); }
         }
         finally { saving = false; IsEnabled = true; }
         DialogResult = true;

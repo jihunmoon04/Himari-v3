@@ -130,7 +130,11 @@ async Task<int> Start()
         // H10: success only once H14 confirms it: the runner lock is held and the state file of that holder names this id.
         if (RunnerProtocol.ReadStateFile(home).File?.Instance == id && Status() is { } confirmed
             && JsonNode.Parse(JsonSerializer.Serialize(confirmed)) is { } seen && (string?)seen["instance"] == id)
-        { Print(new { instance = id, pid = (int?)seen["pid"], started_at = (string?)seen["started_at"] }); return 0; }
+        {
+            await Task.Delay(config.StartHangMs); // a start command that hangs after its runner is up (timeout tests)
+            Print(new { instance = id, pid = (int?)seen["pid"], started_at = (string?)seen["started_at"] });
+            return 0;
+        }
         if (child.HasExited)
         {
             // H10: "running" only when H14 confirms another runner is up (its instance, or null when unknown);
@@ -361,6 +365,7 @@ sealed record FakeConfig
     public int StatusDelayMs { get; init; }
     public int StartConfirmMs { get; init; } = 15000;
     public int StartDelayMs { get; init; }
+    public int StartHangMs { get; init; }
     public string? StartReply { get; init; }
     public int RunnerDelayMs { get; init; }
     // §5.4: RUNNER_STOP (90 s) + 15 s before the forced stop.
