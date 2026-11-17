@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit -p .",
+    "lint": "oxlint -c .oxlintrc.json --deny-warnings src e2e",
     "build": "tsc --noEmit -p . && vite build",
     "test": "vitest run",
     "e2e": "playwright test"
@@ -35,6 +36,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "jsdom": "^31.0.1",
+    "oxlint": "^1.94.0",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
