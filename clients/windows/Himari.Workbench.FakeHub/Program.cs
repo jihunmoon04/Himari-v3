@@ -163,7 +163,12 @@ async Task<int> Stop(string id)
     var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(config.StopTimeoutMs);
     while (DateTime.UtcNow < until)
     {
-        if (RunnerLockFree() is true) { Print(new { result = "stopped" }); return 0; }
+        // H14 each time: off → stopped; a confirmed other instance → the target ended and another took over.
+        if (Status() is { } seen && JsonNode.Parse(JsonSerializer.Serialize(seen)) is { } after)
+        {
+            if ((bool?)after["running"] == false) { Print(new { result = "stopped" }); return 0; }
+            if ((string?)after["instance"] is { } other && other != id) { Print(new { result = "other_instance" }); return 1; }
+        }
         await Task.Delay(100);
     }
     // H15: the forced stop happens under the transition lock, so no other runner can take the runner lock or publish

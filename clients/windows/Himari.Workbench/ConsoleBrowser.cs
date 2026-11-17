@@ -20,6 +20,8 @@ public partial class MainWindow
     private CoreWebView2Environment? environment;
     private Uri? server;
     private bool runtimeMissing;
+    // One (re)load at a time: a settings save during the first initialization must not create a second control.
+    private readonly SemaphoreSlim browserLoad = new(1, 1);
 
     private static string DataFolder => Path.Combine(SettingsStore.DefaultDirectory, "workbench", "webview");
 
@@ -30,8 +32,22 @@ public partial class MainWindow
         await ReloadBrowserAsync();
     }
 
-    /// <summary>(Re)opens the console at the configured server address.</summary>
-    private async Task ReloadBrowserAsync()
+    /// <summary>
+    /// (Re)opens the console at the configured server address, one call at a time. <paramref name="fresh"/> first drops
+    /// the control and its environment (after the WebView2 process failed).
+    /// </summary>
+    private async Task ReloadBrowserAsync(bool fresh = false)
+    {
+        await browserLoad.WaitAsync();
+        try
+        {
+            if (fresh && browser is { } old) { BrowserHost.Children.Remove(old); old.Dispose(); browser = null; environment = null; }
+            await LoadBrowserAsync();
+        }
+        finally { browserLoad.Release(); }
+    }
+
+    private async Task LoadBrowserAsync()
     {
         if (runtimeMissing) return;
         WorkbenchSettings settings = store.Current;
@@ -119,7 +135,7 @@ public partial class MainWindow
         core.ProcessFailed += (_, e) =>
         {
             if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
-                Dispatcher.BeginInvoke(() => { BrowserHost.Children.Remove(browser); browser?.Dispose(); browser = null; environment = null; _ = ReloadBrowserAsync(); });
+                Dispatcher.BeginInvoke(() => _ = ReloadBrowserAsync(fresh: true));
             else ShowNotice("작업 콘솔 화면이 멈췄습니다. 다시 엽니다");
         };
     }
