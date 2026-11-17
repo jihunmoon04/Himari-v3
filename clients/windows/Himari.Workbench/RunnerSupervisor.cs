@@ -85,6 +85,8 @@ public sealed class RunnerSupervisor
     private readonly object gate = new();
     private volatile bool exiting;
     private int exitRequested;
+    private readonly ManualResetEventSlim exitDone = new(false);
+    private ExitStopOutcome? exitOutcome;
 
     private StatusReply? status;
     private string? statusFailure;
@@ -266,7 +268,19 @@ public sealed class RunnerSupervisor
     public ExitStopOutcome RequestStopForExit(TimeSpan ackWait)
     {
         exiting = true;
-        if (Interlocked.Exchange(ref exitRequested, 1) == 1) return new ExitStopOutcome(0, false);
+        if (Interlocked.Exchange(ref exitRequested, 1) == 1)
+        {
+            // Another caller (tray exit, WPF's or SystemEvents' SessionEnding) is writing the requests and waiting
+            // already: return only when it is done, so Windows is not told too early that this app is ready to end.
+            exitDone.Wait(ackWait + TimeSpan.FromSeconds(1));
+            return exitOutcome ?? new ExitStopOutcome(0, false);
+        }
+        try { return exitOutcome = ExitCore(ackWait); }
+        finally { exitDone.Set(); }
+    }
+
+    private ExitStopOutcome ExitCore(TimeSpan ackWait)
+    {
         Publish();
         string? owned = null, pending = null; bool linked = false; string home = "";
         // Read under the settings lock: a start either sees "exiting" and stops before writing its pending id,
@@ -279,9 +293,12 @@ public sealed class RunnerSupervisor
             try { requests[target] = StopRequests.Write(home, target); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
         }
-        if (owned is not null && requests.ContainsKey(owned))
+        // Remembered for the next launch's "끄기를 요청했지만 아직 떠 있음" (§5.3): the owned instance, or else the pending
+        // one (a start that succeeds after this keeps the value, so its runner is shown the same way).
+        string? asked = owned is not null && requests.ContainsKey(owned) ? owned : pending is not null && requests.ContainsKey(pending) ? pending : null;
+        if (asked is not null)
         {
-            try { store.Update(s => s with { ExitStopRequested = owned }); }
+            try { store.Update(s => s with { ExitStopRequested = asked }); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         if (requests.Count == 0) return new ExitStopOutcome(0, false);
@@ -322,6 +339,8 @@ public sealed class RunnerSupervisor
             Publish();
             return;
         }
+        // The time before asking: the reply can only be said to come from after a pending deadline if it was asked after it.
+        long asked = system.UptimeMs;
         HubResult result = await hub.RunAsync(["runner", "status", "--json"], StatusTimeout).ConfigureAwait(false);
         // Only a clean exit with a complete reply counts (§5.2): anything else is "확인 불가", never "off".
         StatusReply? reply = result is { Outcome: HubOutcome.Exited, ExitCode: 0 } ? RunnerProtocol.ParseStatus(result.StdOut) : null;
@@ -337,12 +356,12 @@ public sealed class RunnerSupervisor
             return;
         }
         lock (gate) { status = reply; statusFailure = null; operationError = null; file = RunnerProtocol.ReadStateFile(Home); }
-        ApplyOwnership(reply);
+        ApplyOwnership(reply, asked);
         Publish();
     }
 
     /// <summary>The ownership rules of §5.3 after a status the hub could answer.</summary>
-    private void ApplyOwnership(StatusReply reply)
+    private void ApplyOwnership(StatusReply reply, long askedAtMs)
     {
         SafeUpdate(s =>
         {
@@ -353,8 +372,9 @@ public sealed class RunnerSupervisor
                 else if (reply.Instance == pending) { owned = pending; pending = null; }
                 // Another boot: a runner with this id can never come up.
                 else if (id.BootId != system.BootId) pending = null;
-                // After the deadline, off or a confirmed other instance settles it; "instance: null" never does.
-                else if (system.UptimeMs >= id.DeadlineMs && (!reply.Running || reply.Instance is not null)) pending = null;
+                // A status asked after the deadline that is off or a confirmed other instance settles it; "instance: null"
+                // never does, nor does one asked before the deadline that only came back after it.
+                else if (askedAtMs >= id.DeadlineMs && (!reply.Running || reply.Instance is not null)) pending = null;
             }
             if (owned is not null && owned != pending && (!reply.Running || reply.Instance is not null && reply.Instance != owned)) owned = null;
             if (exitStop is not null && (!reply.Running || reply.Instance is not null && reply.Instance != exitStop)) exitStop = null;

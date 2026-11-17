@@ -311,6 +311,59 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task ASecondExitCallerReturnsOnlyWhenTheFirstIsDone()
+    {
+        string owned = Id();
+        store.Update(s => s with { OwnedInstance = owned });
+        hub.WriteState(owned, "connected");
+        var supervisor = New();
+        var first = Task.Run(() => supervisor.RequestStopForExit(TimeSpan.FromSeconds(2)));
+        await Wait.Until(() => StopFiles().Length == 1);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var second = supervisor.RequestStopForExit(TimeSpan.FromSeconds(2));
+        Assert.True(first.IsCompleted);
+        Assert.InRange(watch.Elapsed.TotalSeconds, 1, 3);
+        Assert.Equal(1, second.RequestsWritten);
+        Assert.Single(StopFiles());
+    }
+
+    [Fact]
+    public async Task APendingStartThatSucceedsAfterExitIsRememberedAsAskedToStop()
+    {
+        hub.StartGate = new TaskCompletionSource();
+        var supervisor = New();
+        Task init = supervisor.InitializeAsync();
+        await Wait.Until(() => hub.CallsOf("start").Length == 1);
+        string id = store.Current.PendingInstance!;
+        supervisor.RequestStopForExit(TimeSpan.Zero);
+        Assert.Equal(id, store.Current.ExitStopRequested);
+        hub.StartGate.SetResult();
+        await init;
+        Assert.Equal(id, store.Current.OwnedInstance);
+        Assert.Equal(id, store.Current.ExitStopRequested);
+        // The next launch shows it as still finishing.
+        var next = New();
+        await next.InitializeAsync();
+        next.PollStateFile();
+        Assert.True(next.View.ExitStopPending);
+        Assert.Single(hub.CallsOf("start"));
+    }
+
+    [Fact]
+    public async Task AStatusAskedBeforeThePendingDeadlineDoesNotSettleIt()
+    {
+        string pending = Id(deadlineFromNow: 150);
+        store.Update(s => s with { PendingInstance = pending, Linked = false });
+        hub.StatusDelay = 400;
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.Equal(pending, store.Current.PendingInstance);
+        hub.StatusDelay = 0;
+        await supervisor.RefreshAsync();
+        Assert.Null(store.Current.PendingInstance);
+    }
+
+    [Fact]
     public void ExitWaitsAtMostFiveSecondsForAnAcknowledgement()
     {
         string owned = Id();

@@ -50,6 +50,8 @@ public sealed class ScriptedHub : IHubCommandRunner
     public int StatusExitCode { get; set; }
     public string StatusStdErr { get; set; } = "Traceback: boom";
     public string StatusStdOut { get; set; } = "";
+    /// <summary>How long a status takes to answer, in ms.</summary>
+    public int StatusDelay { get; set; }
     /// <summary>The next start's reply; null = start succeeds with the id it was given.</summary>
     public Func<string, string>? StartReply { get; set; }
     public TaskCompletionSource? StartGate { get; set; }
@@ -71,6 +73,7 @@ public sealed class ScriptedHub : IHubCommandRunner
             switch (verb)
             {
                 case "status":
+                    await Task.Delay(StatusDelay);
                     if (StatusFails) return new HubResult(HubOutcome.Exited, 1, StatusStdOut, StatusStdErr);
                     return Ok(StatusExitCode, new { running = Running, instance = Running && !HideInstance ? Instance : null, pid = Running ? 4242 : (int?)null,
                         started_at = Running ? "2026-11-18T00:00:00Z" : null, registration = Registration, why = Why });
