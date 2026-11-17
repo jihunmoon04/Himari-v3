@@ -577,3 +577,74 @@ test("what HIMARI remembers shows as a line that can be undone", async ({ page, 
   await expect(line).toContainText("Undone");
   await done();
 });
+
+// -- W6c: settings ---------------------------------------------------------------------------------------------
+
+test("settings: instructions kept, notes added, edited and deleted, the Tool servers' defaults", async ({ page, isMobile }) => {
+  test.skip(isMobile, "settings change once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("menuitem", { name: "Instructions" }).click();
+  const instructions = page.getByRole("textbox", { name: "Instructions" });
+  await instructions.fill("Answer briefly.");
+  await page.getByRole("region", { name: "Instructions" }).getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Instructions saved" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Instructions" })).toHaveValue("Answer briefly.");
+
+  await page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: "Memory" }).click();
+  const fresh = page.getByRole("form", { name: "New note" });
+  await fresh.getByLabel("Note").fill("The user drinks coffee.");
+  await fresh.getByRole("button", { name: "Add note" }).click();
+  const notes = page.getByRole("list", { name: "Notes" });
+  const coffee = notes.getByRole("listitem").filter({ hasText: "The user drinks coffee." });
+  await expect(coffee).toBeVisible();
+  await coffee.getByRole("button", { name: "Edit" }).click();
+  await notes.getByRole("form", { name: "Edit note" }).getByLabel("Note").fill("The user drinks tea now.");
+  await notes.getByRole("form", { name: "Edit note" }).getByRole("button", { name: "Save" }).click();
+  const tea = notes.getByRole("listitem").filter({ hasText: "The user drinks tea now." });
+  await expect(tea).toBeVisible();
+  await tea.getByRole("button", { name: /Delete note/ }).click();
+  await expect(notes.getByRole("listitem").filter({ hasText: "The user drinks tea now." })).toHaveCount(0);
+
+  await page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: "Tool servers" }).click();
+  const hubDefault = page.getByLabel("hub on by default");
+  await expect(hubDefault).toBeChecked();
+  // the box shows what the server saved: it turns once the save answers
+  await hubDefault.click();
+  await expect(hubDefault).not.toBeChecked();
+  await hubDefault.click();
+  await expect(hubDefault).toBeChecked();
+
+  await page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: "Folders" }).click();
+  await expect(page.getByRole("region", { name: "Folders" })).toContainText("not available here");
+  await done();
+});
+
+test("settings: a device added shows its pairing code once, is renamed and revoked; quiet starts and ends", async ({ page, isMobile }) => {
+  test.skip(isMobile, "settings change once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.goto("/next/settings/devices");
+  await page.getByLabel("New device name").fill("Test phone");
+  await page.getByRole("button", { name: "Add device" }).click();
+  await expect(page.getByLabel("Pairing code")).toHaveText(/\S{4,}/);
+  const devices = page.getByRole("list", { name: "Devices" });
+  const phone = devices.getByRole("listitem").filter({ hasText: "Test phone" });
+  await expect(phone).toContainText("not paired yet");
+  await phone.getByRole("button", { name: "Rename" }).click();
+  await devices.getByLabel("Device name").fill("Test tablet");
+  await devices.getByRole("button", { name: "Save" }).click();
+  const tablet = devices.getByRole("listitem").filter({ hasText: "Test tablet" });
+  await expect(tablet).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await tablet.getByRole("button", { name: "Revoke" }).click();
+  await expect(devices.getByRole("listitem").filter({ hasText: "Test tablet" })).toHaveCount(0);
+  const quiet = page.getByLabel("Quiet");
+  await quiet.getByRole("button", { name: "Quiet for an hour" }).click();
+  await expect(quiet).toContainText("Quiet until");
+  await quiet.getByRole("button", { name: "End quiet" }).click();
+  await expect(quiet).toContainText("Not quiet.");
+  await done();
+});
