@@ -1,6 +1,6 @@
 # Web에서 hub 프로젝트와 기기 폴더 다루기 (V3-P103 설계 초안 v0.1)
 
-> 2026-11-18 · rev. 9(Codex 설계 검수 8차 NOT_READY 반영, §12) · **설계 초안** · 대상: v3 `cb56a53`(V3-P102 작업 콘솔 운영 중), hub `f1f5119`(프로젝트 요청 구현, 운영 배포 전)
+> 2026-11-18 · rev. 10(Codex 설계 검수 9차 NOT_READY 반영, §12) · **설계 초안** · 대상: v3 `cb56a53`(V3-P102 작업 콘솔 운영 중), hub `f1f5119`(프로젝트 요청 구현, 운영 배포 전)
 > 앞 문서: [작업 콘솔](web-console-v0.1.md)(V3-P102), hub [프로젝트 요청 설계](https://github.com/jihunmoon04/himari-hub/blob/main/docs/projects-v0.1.md), hub [user 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md) §4.6·§5.2
 
 ## 1. 목표와 범위
@@ -25,7 +25,7 @@
 
 | id | 무엇 | 왜 |
 | --- | --- | --- |
-| H8 | user `projects`의 `runners[]`에 `held`(그 기기가 알렸지만 예약 때문에 보류된 이름) | 보류된 폴더를 화면이 늘 찾을 수 있어야 함(요청 카드가 사라진 뒤에도) |
+| H8 | user `projects`의 최상위에 `held`: 원장 `project_holds`의 전체 보류 목록 `[{"project", "runner", "created_at"}]`(그 기기가 알렸지만 예약 때문에 보류된 이름). `runners[]`(메모리의 연결된 기기)에서 만들지 않으므로 hub가 다시 켜진 뒤 기기가 아직 다시 붙지 않았어도 보인다 | 보류된 폴더를 화면이 늘 찾을 수 있어야 함(요청 카드가 사라진 뒤에도, hub 재시작 뒤에도) |
 | H11 | **MCP 응답에서 기기 경로와 짝 코드를 뺀다.** 모델에 가는 뷰를 user 뷰와 따로 둔다. 요청(`hub_project_request`·`hub_project_requests`): `result_path`·`code`를 빼고, `path`는 모델이 준 것만(`origin = model`). `hub_projects`: `projects[].path`(hub `mcp.py` `_project`)와 `runners[].approve.roots`를 빼고(`approve`는 `mode`만 남김), `approve.why`와 요청의 `reason`은 알려진 코드만(그 밖은 `other`). MCP 오류 문구에도 경로를 넣지 않는다 | hub 설계는 기기 경로를 모델에 보이지 않기로 했는데 지금 hub의 MCP 응답은 user 뷰를 그대로 돌려줌(`projects.py` `view`, `mcp.py` `_project`의 `path`, `remote.py` `runners.view`의 `roots`). **hub 버그로 고친다** |
 | H12 | user `project_requests`에 `ids`(최대 50, 그 이상은 v3가 나눠 보냄): 답은 `{"requests": [...], "missing": [id…]}`. `requests`는 상태와 상관없이, `missing`은 hub에 그 id가 없음(30일이 지나 지워짐)을 확인한 것 | 응답을 받지 못한 동작과 끊긴 동안 끝난 요청의 결과를 확인(§5) |
 | H13 | `project_request`·`project_folder_remove`에 `client_key`(1~64자). hub는 키를 요청 행의 칸(유일 색인)으로 둔다. **같은 키의 호출은 한 줄로 선다:** hub(상주 서버 프로세스 하나)는 키마다 프로세스 안의 잠금을 두고, 찾기·검사·만들기를 그 잠금 안에서 한다. 그래서 같은 키의 두 번째 호출은 첫 호출이 만들거나 실패할 때까지 기다렸다가 아래를 처음부터 한다. **키를 먼저 찾는다:** 받은 입력(`key_time` 포함)을 정규화해 키로 찾고, 있으면 같은 op·같은 정규화한 입력일 때 그 요청을 그대로 돌려준다(끝났어도, 기기가 지금 끊겼거나 폴더가 이미 빠졌어도: 기기 상태 검사와 기기로 다시 보내기를 하지 않음). 다르면 400 `client_key_reused`. 없을 때만 지금의 검사를 하고 같은 트랜잭션에서 만든다(유일 색인은 hub가 여러 개 떠도 둘이 생기지 않게 하는 마지막 막이고, 지면 키를 다시 찾아 그 요청을 돌려준다). **키에는 v3 서버가 정한 발급 시각(`key_time`)이 붙는다:** 키가 없을 때 `key_time`이 hub 시계로 24시간보다 오래거나 5분보다 미래면 만들지 않는다(400 `client_key_expired`·`client_key_time`). 저장된 키와 `key_time`이 다르면 다른 입력이므로 `client_key_reused`(`key_time`만 바꿔 다시 보내도 우회되지 않음). 받는 범위(24시간 + 5분)가 키를 남기는 기간(30일)보다 훨씬 짧으므로, v3와 hub의 시계가 5분 넘게 어긋나지 않는 한 지워진 키로 새 요청이 생기지 않는다. v3와 hub는 같은 서버(또는 NTP를 쓰는 서버)에서 돈다. 키는 요청 행과 함께 끝난 뒤 30일에 지워지므로, 지워진 키로 늦게 다시 보내도 새 요청이 생기지 않는다 | `hub_unknown` 뒤 다시 보내도 요청이 둘 생기지 않음 |
@@ -53,8 +53,8 @@
 | `POST /api/hub/runner-dirs` | `runner_dirs` | 본문 `runner`, `path`?(경로가 접근 기록·프록시 기록의 URL에 남지 않게 POST 본문으로). 읽기지만 Origin 검사를 거침. 시간 제한 15초 |
 
 - **요청 레코드(`REQUEST`, REST와 SSE에 같은 것):** `id`, `kind`, `project`, `runner`, `origin`, `path`, `create_dir`, `agent`, `why`(500자), `code`, `mode`, `state`, `rev`, `result_path`, `reason`, `resolving`(H17, 없으면 `false`), `created_at`, `decided_at`, `expires_at`, `claimed_at`, `ended_at`, `same_name_on`.
-  - **`same_name_on`은 화면이 쓰지 않는다.** hub가 요청 행이 아니라 지금의 보류 목록에서 계산하는 칸이라, 보류가 바뀌어도 요청의 `rev`가 오르지 않는다. 그래서 v3는 이 칸을 넘기기는 하되 화면은 `rev` 병합에 넣지 않고, 보류된 같은 이름은 늘 `projects`의 `runners[].held`(H8)에서 찾는다(`projects` 신호로 갱신됨). `rev`로 병합하는 것은 요청 행에서 오는 칸뿐이다.
-- **`PROJECTS`:** `runners[]`에 `approve`(`mode`, `roots`, `why`), `folders`({이름: 경로}), `held`(H8). 기기 경로와 짝 코드는 운영자 화면에만 간다. v3는 이 칸들을 모델에게 주지 않는다(모델은 hub의 MCP로만 보고, 그것은 H11이 막는다).
+  - **`same_name_on`은 화면이 쓰지 않는다.** hub가 요청 행이 아니라 지금의 보류 목록에서 계산하는 칸이라, 보류가 바뀌어도 요청의 `rev`가 오르지 않는다. 그래서 v3는 이 칸을 넘기기는 하되 화면은 `rev` 병합에 넣지 않고, 보류된 같은 이름은 늘 `projects`의 최상위 `held`(H8)에서 찾는다(`projects` 신호로 갱신됨). `rev`로 병합하는 것은 요청 행에서 오는 칸뿐이다.
+- **`PROJECTS`:** `runners[]`에 `approve`(`mode`, `roots`, `why`), `folders`({이름: 경로}). 최상위에 `held`(H8). 화면은 `held`의 각 줄을 `runners[]`의 같은 이름과 이어 그 기기의 연결 여부를 함께 보인다(`runners[]`에 없으면 "연결 안 됨"). 기기 경로와 짝 코드는 운영자 화면에만 간다. v3는 이 칸들을 모델에게 주지 않는다(모델은 hub의 MCP로만 보고, 그것은 H11이 막는다).
 - 로그에는 요청 id·상태·종류와 오류 종류(`hub_refused` 등)만 남긴다. 경로·짝 코드·hub 오류 문구(경로가 들어 있을 수 있음)는 남기지 않는다. 경로가 들어가는 값은 모두 본문으로 오가고(URL에 없음), 예외 기록에도 요청 본문을 넣지 않는다.
 
 ### 4.1 `hub_unknown` 뒤
@@ -113,7 +113,7 @@ v3는 hub 목록 스트림 하나를 브라우저들에 나눠 준다(V3-P102 §
 - **보류된 폴더(H8):** 이 이름을 보류 중인 기기 + **채택**.
 - **이 프로젝트의 열린 요청 카드.**
 
-**사이드바의 보류 목록:** 프로젝트가 아직 없는 이름이 어떤 기기에서 보류 중이면(H8: 그 이름의 프로젝트가 `projects`에 없음) Projects 아래 "보류된 폴더"에 그 이름과 기기를 보이고 **채택**(그 이름의 프로젝트를 만들고 붙임)을 둔다. 채택은 그 기기가 연결돼 있고 지금도 그 이름을 알릴 때만 된다(아니면 hub 문구).
+**사이드바의 보류 목록:** 프로젝트가 아직 없는 이름이 어떤 기기에서 보류 중이면(H8의 `held`에 있고 그 이름의 프로젝트가 `projects`에 없음) Projects 아래 "보류된 폴더"에 그 이름과 기기를 보이고 **채택**(그 이름의 프로젝트를 만들고 붙임)을 둔다. 채택은 그 기기가 연결돼 있고 지금도 그 이름을 알릴 때만 된다(아니면 hub 문구).
 
 ### 6.3 요청 카드
 
@@ -172,7 +172,7 @@ HIMARI의 `<hub source>/hub_project_request` Tool 호출을 맡긴 작업 카드
   - op마다 필드 다시 만들기·크기 한도, 오류 매핑(409/503 종류), `resolve`의 긴 시간 제한, `client_key`·`ids` 전달.
   - 이름에 `/`·`?`·`#`·한글·공백이 있는 프로젝트의 설정·빼기·채택.
   - 목록 스트림: 새 이벤트 둘 전달, upstream 재연결 때 `projects`, 폴링 동안 30초마다 `projects`, 로그아웃하면 15초 안에 닫힘.
-- Vitest: `useHubRequests`(이벤트·열린 목록·`ids` 읽기가 어느 순서로 와도 같은 결과, 오래된 읽기가 새 `rev`를 덮지 않음, 목록에 없다는 것으로 지우지 않음, 늦게 등록한 id를 바로 읽음, 50개 넘는 id 나눠 읽기, `missing`만 확인 불가·읽기 실패는 그대로, 폴링 대체와 SSE 복구 때 타이머 하나, 만들기 답을 받은 직후 새로고침하고 그 사이 요청이 끝나도 카드가 끝난 결과로 다시 나타남, 요청의 `rev`는 그대로인데 보류만 바뀌어도 카드의 "같은 이름이 보류 중"이 `projects`를 따라 바뀜), 종류·상태별 카드 문구, 종류별 다시 요청, `hub_unknown` 뒤 동작(`sessionStorage`의 확인되지 않은 요청 포함).
+- Vitest: `useHubRequests`(이벤트·열린 목록·`ids` 읽기가 어느 순서로 와도 같은 결과, 오래된 읽기가 새 `rev`를 덮지 않음, 목록에 없다는 것으로 지우지 않음, 늦게 등록한 id를 바로 읽음, 50개 넘는 id 나눠 읽기, `missing`만 확인 불가·읽기 실패는 그대로, 폴링 대체와 SSE 복구 때 타이머 하나, 만들기 답을 받은 직후 새로고침하고 그 사이 요청이 끝나도 카드가 끝난 결과로 다시 나타남, 요청의 `rev`는 그대로인데 보류만 바뀌어도 카드의 "같은 이름이 보류 중"이 `projects`를 따라 바뀜, hub가 다시 켜진 뒤 기기가 다시 붙기 전에도 보류가 "연결 안 됨"과 함께 보임), 종류·상태별 카드 문구, 종류별 다시 요청, `hub_unknown` 뒤 동작(`sessionStorage`의 확인되지 않은 요청 포함).
 - Playwright(가짜 hub `scripts/web_next_hub.py`에 op 더함): 새 프로젝트(local: 짝 코드 → done → 프로젝트 화면), user 방식 폴더 고르기, 모델 요청 허가, `lost` 정리(펜스 성공·기기 없음 → force, 빼기 포함), 빼기 카드, 보류 채택(프로젝트 있음·없음), 설정, 특수 문자 이름.
 - 운영: hub와 함께 올린 뒤 laptop(`local`)에서 새 프로젝트, `linux`(`user`)에서 루트 아래 새 폴더, HIMARI에게 "프로젝트 만들어 줘"를 말해 허가까지, MCP 응답에 경로가 없는지(H11).
 
@@ -251,3 +251,7 @@ hub를 먼저 올리고 v3를 올린다. hub만 올라간 동안 v3는 지금처
 ### 8차 (rev. 8 → rev. 9): NOT_READY, P2 하나
 
 - P2 `same_name_on`은 보류 목록에서 계산돼 `rev` 없이 바뀜 → 화면은 이 칸을 병합하지 않고 `projects.held`(H8)에서 찾음(§4, §5).
+
+### 9차 (rev. 9 → rev. 10): NOT_READY, P2 하나
+
+- P2 `runners[]`는 메모리의 연결된 기기라 hub 재시작 뒤 다시 붙지 않은 기기의 보류가 빠짐 → H8을 원장 `project_holds` 전체를 주는 최상위 `held`로, 연결 여부는 `runners[]`와 이어서 보임(§3, §4, §6.2).
