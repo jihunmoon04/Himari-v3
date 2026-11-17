@@ -28,7 +28,7 @@ import { hubKeys, readProjectsNow, useHubProjects } from "@/app/queries";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { cardView, heldFor, hubHasRequestKeys, runnerOf, secondsLeft } from "@/features/hub/project_view";
 import { requests, sessionKeyValue, useHubRequests } from "@/features/hub/requests";
-import { answerLost, requestOf, sendKeyed, unconfirmed, unconfirmedFor } from "@/features/hub/unconfirmed";
+import { answerLost, onlySend, requestOf, sendKeyed, unconfirmed, unconfirmedFor } from "@/features/hub/unconfirmed";
 import { cn } from "@/lib/cn";
 import { Button, IconButton } from "./ui/button";
 
@@ -223,10 +223,15 @@ export function ProjectRequestCard({ id, onClose }: { id: number; onClose?: () =
       } else if (!request.project || runner.folders?.[request.project] === undefined) {
         setProblem("It is already removed.");
       } else {
-        const key = await newClientKey();
-        const sent = await sendKeyed({ ...key, route: "remove", at: Date.now(),
-          body: { project: request.project, runner: runner.name ?? request.runner ?? "" } }, false);
-        if ("error" in sent) setProblem(failureText(sent.error));
+        const body = { project: request.project, runner: runner.name ?? request.runner ?? "" };
+        const sent = await onlySend("remove", body.project, body.runner, async () => {
+          if (unconfirmedFor(unconfirmed.getSnapshot(), "remove", body.project, body.runner)) return "waiting" as const;
+          const key = await newClientKey();
+          return sendKeyed({ ...key, route: "remove", at: Date.now(), body }, false);
+        });
+        if (sent === null) setProblem("This removal is being sent already.");
+        else if (sent === "waiting") setProblem("A removal of it whose answer was lost waits: send it again or discard it first.");
+        else if ("error" in sent) setProblem(failureText(sent.error));
         else onClose?.();
       }
     } catch (error) {

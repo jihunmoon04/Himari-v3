@@ -155,6 +155,22 @@ export const unconfirmedFor = (items: readonly Unconfirmed[], route: Route, proj
   items.find((u) => u.route === route && u.body.project === project && u.body.runner === runner
     && (kind === undefined || (u.body as ProjectRequestBody).kind === kind));
 
+const sending = new Set<string>(); // route|project|runner of a send on its way (from asking for its key on)
+
+/** Run ``send`` as the only send for this route, project and device: claimed at once, before anything is awaited, so
+ *  two controls (a page's Remove and a card's Ask again) never send it with two keys. Null when one is on its way. */
+export async function onlySend<T>(route: Route, project: string, runner: string, send: () => Promise<T>
+                                  ): Promise<T | null> {
+  const key = JSON.stringify([route, project, runner]);
+  if (sending.has(key)) return null;
+  sending.add(key);
+  try {
+    return await send();
+  } finally {
+    sending.delete(key);
+  }
+}
+
 /** Requests of the same kind, project and device among the open ones (a hub without H13: what a lost answer may
  *  have made). */
 export const sameAs = (entry: Unconfirmed, open: readonly HubProjectRequest[]) => {

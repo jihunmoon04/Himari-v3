@@ -360,11 +360,10 @@ class ListRelay:
                 self._replace(await self._client.sessions(limit=500))
             except (HubUnavailable, HubRefused):
                 self._mark(False)
-            else:
-                now = self._clock()
-                if self._projects_told is None or now - self._projects_told >= PROJECTS_POLL_SECONDS:
-                    self._projects_told = now  # nothing else tells of projects, devices or requests now
-                    self._send(frame("projects", {}))
+            now = self._clock()  # whether or not the list could be read: the projects' own routes may answer
+            if self._projects_told is None or now - self._projects_told >= PROJECTS_POLL_SECONDS:
+                self._projects_told = now  # nothing else tells of projects, devices or requests now
+                self._send(frame("projects", {}))
             if self._clock() >= deadline:
                 return
             await self._pause(POLL_SECONDS)

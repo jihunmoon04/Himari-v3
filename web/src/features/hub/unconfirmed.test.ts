@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import type { HubProjectRequest } from "@/api/hub";
 import { RequestStore, TRACKED_KEY, type KeyValue } from "./requests";
-import { keyRefusal, sameAs, sendKeyed, UNCONFIRMED_KEY, UnconfirmedList, type Senders, type Unconfirmed } from "./unconfirmed";
+import { keyRefusal, onlySend, sameAs, sendKeyed, UNCONFIRMED_KEY, UnconfirmedList, type Senders, type Unconfirmed } from "./unconfirmed";
 
 class Memory implements KeyValue {
   data = new Map<string, string>();
@@ -75,6 +75,16 @@ describe("a request sent with a client key", () => {
     expect(list.getSnapshot()).toHaveLength(1);
     expect("error" in await sendKeyed(entry, true, list, store, senders)).toBe(true);
     expect(list.getSnapshot()).toEqual([{ ...entry, refused: null }]); // still to be sent again
+  });
+
+  it("is sent by one control at a time: a second one for the same thing meanwhile sends nothing", async () => {
+    let release: () => void = () => undefined;
+    const first = onlySend("remove", "site", "linux", () => new Promise<string>((resolve) => { release = () => resolve("sent"); }));
+    expect(await onlySend("remove", "site", "linux", async () => "twice")).toBeNull();
+    expect(await onlySend("remove", "site", "laptop", async () => "other device")).toBe("other device");
+    release();
+    expect(await first).toBe("sent");
+    expect(await onlySend("remove", "site", "linux", async () => "after")).toBe("after");
   });
 
   it("a first send the hub refuses, or that never reached it, leaves nothing behind", async () => {

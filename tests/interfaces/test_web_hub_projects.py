@@ -486,6 +486,21 @@ def test_while_polling_projects_goes_out_every_thirty_seconds(hub: Hub, tmp_path
     run_list(hub, tmp_path, act)
 
 
+def test_while_polling_projects_goes_out_even_when_the_list_cannot_be_read(hub: Hub, tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hub_stream, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(hub_stream, "PROJECTS_POLL_SECONDS", 0.3)
+    hub.busy = True
+    hub.replies["sessions"] = (500, {})  # the list cannot be read; the projects' routes may still answer
+
+    async def act(relay: hub_stream.ListRelay) -> None:
+        reader = relay.join()
+        got = await until(reader, lambda g: sum(name == "projects" for name, _ in g) >= 2)
+        assert "sessions" not in [name for name, _ in got]
+
+    run_list(hub, tmp_path, act)
+
+
 def test_a_signed_out_browser_loses_its_list_while_requests_flow() -> None:
     async def scenario() -> int:
         relay = hub_stream.ListRelay(HubClient("http://127.0.0.1:1", "none"),

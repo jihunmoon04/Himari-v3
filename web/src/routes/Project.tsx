@@ -17,7 +17,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { openProjectDialog } from "@/features/hub/dialog";
 import { foldersOf, heldFor } from "@/features/hub/project_view";
 import { isOpen, requests, useHubRequests } from "@/features/hub/requests";
-import { answerLost, sendKeyed, unconfirmedFor, useUnconfirmed } from "@/features/hub/unconfirmed";
+import { answerLost, onlySend, sendKeyed, unconfirmed, unconfirmedFor, useUnconfirmed } from "@/features/hub/unconfirmed";
 import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
 
@@ -118,9 +118,14 @@ function RemoveFolder({ project, runner, connected }: { project: string; runner:
     setBusy(true);
     setProblem(null);
     try {
-      const key = await newClientKey();
-      const sent = await sendKeyed({ ...key, route: "remove", body: { project, runner }, at: Date.now() }, false);
-      if ("error" in sent && !answerLost(sent.error)) setProblem(failureText(sent.error));
+      const sent = await onlySend("remove", project, runner, async () => {
+        if (unconfirmedFor(unconfirmed.getSnapshot(), "remove", project, runner)) return "waiting" as const;
+        const key = await newClientKey();
+        return sendKeyed({ ...key, route: "remove", body: { project, runner }, at: Date.now() }, false);
+      });
+      if (sent === null) setProblem("This removal is being sent already.");
+      else if (sent === "waiting") setProblem("A removal whose answer was lost waits: send it again or discard it first.");
+      else if ("error" in sent && !answerLost(sent.error)) setProblem(failureText(sent.error));
       else setOpen(false); // its card (or, its answer lost, the unconfirmed one) shows below
     } catch (error) {
       setProblem(failureText(error));
