@@ -100,7 +100,7 @@ export function useFollowed(): readonly Followed[] {
 /** For the tests: the list as it is now. */
 export const peekFollowed = (): readonly Followed[] => followed;
 
-/** For the tests: forget everything. */
+/** Forget everything and stop reading (a sign-out; the tests). */
 export function resetFollowed() {
   for (const timer of timers.values()) window.clearTimeout(timer);
   timers.clear();

@@ -1,11 +1,12 @@
 import "./styles.css";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { setNonce } from "get-nonce";
-import { StrictMode } from "react";
+import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import { queryClient, useSession } from "@/app/queries";
 import { Shell } from "@/components/Shell";
+import { resetFollowed } from "@/features/hub/follow";
 import { applyAppearance, watchAppearance } from "@/lib/appearance";
 import { Agents } from "@/routes/Agents";
 import { Approvals } from "@/routes/Approvals";
@@ -24,6 +25,10 @@ watchAppearance();
 
 function Root() {
   const session = useSession();
+  const signedIn = session.data?.authenticated === true;
+  useEffect(() => {
+    if (!signedIn) resetFollowed(); // signed out (here or in another tab): nothing of the last sign-in stays
+  }, [signedIn]);
   if (session.isLoading) return null;
   if (!session.data?.authenticated) return <Login />;
   return <Shell />;

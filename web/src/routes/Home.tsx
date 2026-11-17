@@ -36,16 +36,9 @@ export function Home() {
   const project = projects.find((p) => p.name === target);
   const agents = (hub.data?.agents ?? []).filter((a) => a.installed !== false && a.name).map((a) => a.name!);
   const chosenAgent = agent ?? project?.default_agent ?? agents[0];
-
-  // a project chosen while the hub answered, gone from the list (the hub went down): back to HIMARI, so what is
-  // shown is always where the message goes
-  useEffect(() => {
-    if (target !== HIMARI && hub.status !== "loading" && !project) {
-      setTarget(HIMARI);
-      setAgent(undefined);
-      setChoices({});
-    }
-  }, [target, hub.status, project]);
+  // a project chosen while the hub answered, gone from the list (the hub went down): it stays chosen and nothing
+  // is sent until it is back; only the user changes where a message goes
+  const unavailable = target !== HIMARI && !project;
 
   useEffect(() => {
     for (const mine of fresh) {
@@ -80,22 +73,24 @@ export function Home() {
   const start = async (text: string) => {
     setError(null);
     try {
-      if (project?.name) await startAgent(project.name, text);
-      else await startHimari(text);
+      if (target === HIMARI) await startHimari(text);
+      else if (project?.name) await startAgent(project.name, text);
+      else throw new ApiError(503, "hub_unavailable", "The hub is not answering; the message waits until it is back.");
     } catch (failure) {
-      setError(!project
+      setError(target === HIMARI
         ? failure instanceof ApiError ? failure.message : "Could not start the conversation."
         : sendProblem(failure));
       throw failure; // the draft stays
     }
   };
 
-  const tools = projects.length > 0 ? (
+  const tools = projects.length > 0 || unavailable ? (
     <>
       <select aria-label="Send to" value={target} className={pick}
         onChange={(event) => { setTarget(event.target.value); setAgent(undefined); setChoices({}); }}>
         <option value={HIMARI}>To: HIMARI</option>
         {projects.map((p) => <option key={p.name} value={p.name}>To: {p.name}</option>)}
+        {unavailable && <option value={target}>To: {target} (hub not answering)</option>}
       </select>
       {project && agents.length > 0 && (
         <select aria-label="Agent" value={chosenAgent} className={pick}
@@ -117,12 +112,17 @@ export function Home() {
             draftKey="home"
             onSend={start}
             autoFocus
-            disabled={starting}
+            disabled={starting || unavailable}
             placeholder={project
               ? `Start a ${chosenAgent ?? "agent"} session in ${project.name}`
               : "Ask HIMARI, or hand it a task"}
             tools={tools}
           />
+          {unavailable && (
+            <p role="status" className="mt-2 text-sm text-muted">
+              The hub is not answering: the message to {target} waits until it is back (or choose HIMARI).
+            </p>
+          )}
           {starting && (
             <p role="status" className="mt-2 text-sm text-muted">Starting the agent… the session opens once it runs.</p>
           )}
