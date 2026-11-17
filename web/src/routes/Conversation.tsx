@@ -3,15 +3,14 @@ import { CircleAlert, PanelRight, PanelRightClose } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { ApiError } from "@/api/client";
-import { cancelJob, resumeTurn, sendMessage } from "@/api/himari";
+import { cancelJob, resumeTurn } from "@/api/himari";
 import { keys, useDetail, useEvents, useServer } from "@/app/queries";
 import { DelegationCard } from "@/components/DelegationCard";
 import { FilesPanel } from "@/components/FilesPanel";
 import { SidePanel } from "@/components/SidePanel";
-import { Composer } from "@/components/Composer";
 import { ConversationMenu } from "@/components/ConversationMenu";
 import { JumpToLatest } from "@/components/JumpToLatest";
-import { ModelPicker, modelSettled } from "@/components/ModelPicker";
+import { HimariComposer } from "@/components/HimariComposer";
 import { PageHeader } from "@/components/Shell";
 import { Timeline } from "@/components/Timeline";
 import { Button, IconButton } from "@/components/ui/button";
@@ -54,7 +53,7 @@ export function Conversation() {
   const running = detail.data?.job.running ?? false;
   const live = useLive(id, running ? (detail.data?.job.job_id ?? "") : null);
   const hubSource = useServer(true).data?.hub_source ?? null;
-  const items = useMemo(() => toItems(events.data?.items ?? [], hubSource), [events.data, hubSource]);
+  const items = useMemo(() => toItems(events.data?.items ?? [], hubSource, id), [events.data, hubSource, id]);
   const delegations = items.flatMap((item) => (item.kind === "delegation" ? [item] : []));
   const { box, onScroll, atBottom, jump } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
@@ -118,7 +117,7 @@ export function Conversation() {
         </PageHeader>
         <div ref={box} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-3xl px-4 py-6">
-            {events.isLoading ? <p className="text-sm text-faint">Loading…</p> : <Timeline items={items} live={live} running={running} />}
+            {events.isLoading ? <p className="text-sm text-faint">Loading…</p> : <Timeline items={items} live={live} running={running} conversation={id} />}
             {(stopped || continuable) && (
               <div className="mt-6 flex items-center gap-2 rounded-xl border border-line px-4 py-3 text-sm text-muted">
                 <CircleAlert className="size-4 shrink-0 text-wait" />
@@ -133,15 +132,14 @@ export function Conversation() {
         <div className="relative mx-auto w-full max-w-3xl px-4 pb-4">
           {!atBottom && <JumpToLatest onClick={jump} />}
           {error && <p role="alert" className="mb-2 text-sm text-danger">{error}</p>}
-          <Composer
+          <HimariComposer
             key={id}
-            draftKey={`c:${id}`}
-            autoFocus
+            conversation={id}
             running={running}
-            placeholder={waiting ? "Answer HIMARI" : undefined}
+            waiting={Boolean(waiting)}
             onStop={() => void act(() => cancelJob(id)).catch(() => undefined)}
-            onSend={(text) => act(async () => { await modelSettled(id); return sendMessage(id, text); })}
-            tools={<ModelPicker conversation={id} />}
+            onSent={refresh}
+            onError={setError}
           />
         </div>
       </div>

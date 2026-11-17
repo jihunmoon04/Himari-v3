@@ -103,7 +103,8 @@ test("signed out in another tab: the next send shows the sign-in, the draft stay
   await composer.fill("lost?");
   expect((await page.request.delete("/api/session", { headers: { origin: baseURL! } })).status()).toBe(204);
   // the page may notice by itself first (a background read is refused); otherwise the send is
-  if (await composer.isVisible()) await composer.press("Enter");
+  // (it may also notice between the two steps: the composer is gone then, and that is the same outcome)
+  if (await composer.isVisible()) await composer.press("Enter", { timeout: 3_000 }).catch(() => undefined);
   await expect(page.getByLabel("Operator token")).toBeVisible();
   await page.getByLabel("Operator token").fill(token());
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -506,5 +507,71 @@ test("an answer is copied as written", async ({ page, context, isMobile }) => {
   await answer.getByRole("button", { name: "Copy answer" }).click();
   await expect(answer.getByRole("button", { name: "Copied" })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("I handed it to the hub (W4-HAND-OVER).");
+  await done();
+});
+
+// -- W6b: what the composer sends besides text ------------------------------------------------------------------
+
+const PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("files are taken from the button and from a paste; one the server refuses says why and is not sent", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the conversations list is a drawer there");
+  // This server has no machine runner, so it takes no uploads (V3-P101): each file says so, and the message goes
+  // without it. An upload that is taken is checked on a server with a runner.
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: /W4-FAILS/ }).click();
+  await page.getByLabel("Files to attach").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+  const pending = page.getByLabel("To send with the message");
+  await expect(pending).toContainText("notes.txt");
+  await expect(pending).toContainText(/failed: .+/);
+  await page.getByLabel("Message", { exact: true }).evaluate((area, data) => {
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], "pixel.png", { type: "image/png" }));
+    area.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+  }, PIXEL);
+  await expect(pending).toContainText("pixel.png"); // a pasted image is a file, not text
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
+  await page.getByLabel("Message", { exact: true }).fill("Read these");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("article", { name: "Your message" }).filter({ hasText: "Read these" })).toBeVisible();
+  await expect(pending).toContainText("notes.txt"); // not sent: it stays, saying why
+  await pending.getByRole("button", { name: "Remove notes.txt" }).click();
+  await pending.getByRole("button", { name: "Remove pixel.png" }).click();
+  await expect(pending).toHaveCount(0);
+  await done();
+});
+
+test("a / prompt with an argument comes into the composer as text", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the conversations list is a drawer there");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: /W4-FAILS/ }).click();
+  const message = page.getByLabel("Message", { exact: true });
+  await message.fill("/rev");
+  const picker = page.getByRole("listbox", { name: "Prompts" });
+  await expect(picker.getByRole("option", { name: /\/review/ })).toBeVisible();
+  await message.press("Enter");
+  const form = page.getByRole("dialog", { name: "Review something" });
+  await form.getByLabel("topic").fill("the docs");
+  await form.getByRole("button", { name: "Insert" }).click();
+  // as the server expands it: which prompt and arguments, then the prompt's text
+  await expect(message).toHaveValue(/^\[MCP prompt hub\/review · topic=the docs\]\s+Review the docs carefully\.$/);
+  await message.fill("");
+  await done();
+});
+
+test("what HIMARI remembers shows as a line that can be undone", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the scripted model remembers once, on desktop");
+  const done = await watch(page);
+  await signIn(page);
+  await page.getByLabel("Message", { exact: true }).fill("Note this: W6B-REMEMBER");
+  await page.keyboard.press("Enter");
+  const line = page.getByRole("note", { name: "Memory" });
+  await expect(line).toContainText("Remembered", { timeout: 15_000 });
+  await expect(line).toContainText("The user likes green tea.");
+  await line.getByRole("button", { name: "Undo" }).click();
+  await expect(line).toContainText("Undone");
   await done();
 });
