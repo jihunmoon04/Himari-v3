@@ -17,11 +17,28 @@ export interface HubAgent {
   modes?: string[];
 }
 
+/** How a device takes project requests (V3-P103 §2): ``off`` (none; removing still works), ``local`` (its person
+ *  picks the folder, with a pairing code), ``user`` (the user path's approval is enough, under ``roots``). */
+export interface HubApprove {
+  mode?: "off" | "local" | "user" | string;
+  roots?: string[];
+  why?: string | null;
+}
+
 export interface HubRunner {
   name?: string;
   agents?: string[];
   projects?: string[];
   connected?: boolean;
+  approve?: HubApprove; // V3-P103
+  folders?: Record<string, string>; // project name: its folder on this device
+}
+
+/** H8: a name a device reported that a reservation held back (whether the device is connected or not). */
+export interface HubHeld {
+  project?: string;
+  runner?: string;
+  created_at?: string;
 }
 
 export interface HubProjects {
@@ -31,6 +48,7 @@ export interface HubProjects {
   efforts?: Record<string, string[]>;
   agents?: HubAgent[];
   runners?: HubRunner[];
+  held?: HubHeld[]; // H8; missing from a hub without it
 }
 
 export type Activity = "running" | "waiting" | "idle" | "closed";
@@ -175,3 +193,75 @@ export type HubAnswer = { option_id: string } | { content: Record<string, unknow
 export const answerHubPending = (id: number, answer: HubAnswer) => post<void>(`/api/hub/pending/${id}/answer`, answer);
 export const hubStreamUrl = () => "/api/hub/stream";
 export const hubSessionStreamUrl = (id: number, after: number) => `/api/hub/sessions/${enc(String(id))}/stream?after=${after}`;
+
+// -- projects and device folders (V3-P103 §4) --------------------------------------------------------------------
+
+export type ProjectRequestKind = "create" | "add_folder" | "remove_folder";
+export type ProjectRequestState =
+  | "waiting_user" | "waiting_device" | "applying" | "done" | "refused" | "expired" | "failed" | "cancelled" | "lost";
+
+/** A project request as the user path gives it (REST and the list stream alike). ``rev`` grows with every change;
+ *  ``same_name_on`` is never used (the hub computes it from the holds, not the request). */
+export interface HubProjectRequest {
+  id: number;
+  rev: number;
+  state: ProjectRequestState | string;
+  kind?: ProjectRequestKind | string;
+  project?: string;
+  runner?: string;
+  origin?: "user" | "model" | string;
+  path?: string | null;
+  create_dir?: boolean;
+  agent?: string | null;
+  why?: string | null;
+  code?: string | null;
+  mode?: string | null;
+  result_path?: string | null;
+  reason?: string | null;
+  resolving?: boolean; // H17
+  created_at?: string;
+  decided_at?: string | null;
+  expires_at?: string | null;
+  claimed_at?: string | null;
+  ended_at?: string | null;
+  same_name_on?: string[];
+}
+
+export interface ProjectRequestBody {
+  kind: "create" | "add_folder";
+  project: string;
+  runner: string;
+  path?: string;
+  create_dir?: boolean;
+  agent?: string;
+}
+
+export interface ClientKey {
+  client_key: string;
+  key_time: string;
+}
+
+export const readProjectRequests = (open: boolean) =>
+  get<{ requests: HubProjectRequest[]; missing: number[] | null }>(`/api/hub/project-requests?open=${open}`);
+/** H12: these requests whatever their state (at most 50); ``missing`` null: the hub does not say (no H12). */
+export const readProjectRequestsByIds = (ids: readonly number[]) =>
+  get<{ requests: HubProjectRequest[]; missing: number[] | null }>(`/api/hub/project-requests?ids=${ids.join(",")}`);
+export const makeProjectRequest = (body: ProjectRequestBody & Partial<ClientKey>) =>
+  post<{ request: HubProjectRequest }>("/api/hub/project-requests", body);
+export const answerProjectRequest = (id: number, approve: boolean) =>
+  post<{ request: HubProjectRequest }>(`/api/hub/project-requests/${id}/answer`, { approve });
+export const cancelProjectRequest = (id: number) =>
+  post<{ request: HubProjectRequest }>(`/api/hub/project-requests/${id}/cancel`);
+export const resolveProjectRequest = (id: number, force?: { outcome: "applied" | "not_applied" }) =>
+  post<{ request: HubProjectRequest }>(`/api/hub/project-requests/${id}/resolve`,
+    force ? { force: true, outcome: force.outcome } : {});
+export const removeProjectFolder = (body: { project: string; runner: string } & Partial<ClientKey>) =>
+  post<{ request: HubProjectRequest }>("/api/hub/projects/remove-folder", body);
+/** Only the settings given change; null clears one. */
+export const setProjectSettings = (project: string, settings: { agent?: string | null; profile?: string | null;
+  preset?: string | null }) => post<{ project: HubProject }>("/api/hub/projects/settings", { project, ...settings });
+export const adoptHeldFolder = (project: string, runner: string) =>
+  post<{ project: HubProject }>("/api/hub/projects/adopt", { project, runner });
+export const readRunnerDirs = (runner: string, path: string | null) =>
+  post<{ path: string | null; dirs: string[] }>("/api/hub/runner-dirs", path === null ? { runner } : { runner, path });
+export const newClientKey = () => post<ClientKey>("/api/hub/client-key");

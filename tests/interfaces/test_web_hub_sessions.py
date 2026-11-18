@@ -449,10 +449,11 @@ def listed(hub: Hub, tmp_path: Path) -> Hub:
 
 
 async def until(reader: hub_stream.ListReader, count: int) -> list[tuple[str | None, str, Any]]:
+    """The next ``count`` frames, without V3-P103's ``projects`` signals (test_web_hub_projects checks those)."""
     got: list[tuple[str | None, str, Any]] = []
     while len(got) < count:
         await reader.ready.wait()
-        got += frames("".join(reader.take()))
+        got += [item for item in frames("".join(reader.take())) if item[1] != "projects"]
     return got
 
 
