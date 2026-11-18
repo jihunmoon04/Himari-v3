@@ -108,7 +108,15 @@ public static class LoginStartup
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     public const string ValueName = "HIMARI Workbench";
 
-    public static string Command => $"\"{Environment.ProcessPath}\"";
+    /// <summary>The app's own exe (its apphost), also when this process was started as <c>dotnet Himari.Workbench.dll</c>.</summary>
+    public static string Command
+    {
+        get
+        {
+            string apphost = Path.Combine(AppContext.BaseDirectory, "Himari.Workbench.exe");
+            return $"\"{(File.Exists(apphost) ? apphost : Environment.ProcessPath)}\"";
+        }
+    }
 
     public static bool IsEnabled
     {

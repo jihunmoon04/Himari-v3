@@ -307,7 +307,10 @@ public sealed class SupervisorTests : IDisposable
         string owned = Id(), pending = Id();
         store.Update(s => s with { OwnedInstance = owned, PendingInstance = pending });
         hub.WriteState(owned, "connected");
+        hub.Running = true; hub.Instance = owned;
         var supervisor = New();
+        await supervisor.InitializeAsync();
+        int calls = hub.Calls.Count;
         var ack = Task.Run(async () =>
         {
             await Wait.Until(() => StopFiles().Any(name => name.StartsWith(owned + ".")));
@@ -320,7 +323,7 @@ public sealed class SupervisorTests : IDisposable
         Assert.Equal(2, outcome.RequestsWritten);
         Assert.Contains(StopFiles(), name => name.StartsWith(pending + "."));
         Assert.Equal(owned, store.Current.ExitStopRequested);
-        Assert.Empty(hub.Calls);
+        Assert.Equal(calls, hub.Calls.Count);
     }
 
     [Fact]
@@ -352,10 +355,10 @@ public sealed class SupervisorTests : IDisposable
         store.Update(s => s with { OwnedInstance = owned });
         hub.WriteState(owned, "connected");
         var supervisor = New();
-        var first = Task.Run(() => supervisor.RequestStopForExit(TimeSpan.FromSeconds(2)));
+        var first = Task.Run(() => supervisor.RequestStopForExit(TimeSpan.FromSeconds(2), sessionEnding: true));
         await Wait.Until(() => StopFiles().Length == 1);
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        var second = supervisor.RequestStopForExit(TimeSpan.FromSeconds(2));
+        var second = supervisor.RequestStopForExit(TimeSpan.FromSeconds(2), sessionEnding: true);
         // The second returned once the first had written and waited (its task completes right after).
         Assert.InRange(watch.Elapsed.TotalSeconds, 1, 3);
         Assert.True(first.Wait(1000));
@@ -411,7 +414,7 @@ public sealed class SupervisorTests : IDisposable
             await Task.Delay(1000);
             hub.WriteState(owned, "stopping", StopFiles().Single());
         });
-        var outcome = supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait);
+        var outcome = supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait, sessionEnding: true);
         await back;
         Assert.True(outcome.Acknowledged);
     }
@@ -423,7 +426,7 @@ public sealed class SupervisorTests : IDisposable
         store.Update(s => s with { OwnedInstance = owned });
         hub.WriteState(owned, "connected");
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        var outcome = New().RequestStopForExit(TimeSpan.FromSeconds(1));
+        var outcome = New().RequestStopForExit(TimeSpan.FromSeconds(1), sessionEnding: true);
         Assert.False(outcome.Acknowledged);
         Assert.InRange(watch.Elapsed.TotalSeconds, 0.9, 3);
     }
@@ -459,6 +462,37 @@ public sealed class SupervisorTests : IDisposable
         await tray;
         Assert.Equal(1, logoff.RequestsWritten);
         Assert.StartsWith(owned + ".", Assert.Single(StopFiles()));
+    }
+
+    [Fact]
+    public async Task TrayExitLeavesAnOwnerTheLastStatusDidNotConfirmButLogoffDoesNot()
+    {
+        string owned = Id();
+        store.Update(s => s with { OwnedInstance = owned });
+        hub.StatusFails = true;
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.Equal(0, supervisor.RequestStopForExit(TimeSpan.Zero).RequestsWritten);
+        Assert.Empty(StopFiles());
+        var other = New();
+        await other.InitializeAsync();
+        Assert.Equal(1, other.RequestStopForExit(TimeSpan.Zero, sessionEnding: true).RequestsWritten);
+    }
+
+    [Fact]
+    public async Task ABrokenStateFileWhileOffIsAskedAboutOnce()
+    {
+        store.Update(s => s with { Linked = false });
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        File.WriteAllText(Path.Combine(home, RunnerProtocol.StateFileName), "{\"instance\": ");
+        supervisor.PollStateFile();
+        await Wait.Until(() => hub.CallsOf("status").Length == 2);
+        await Task.Delay(100);
+        system.Offset += 16_000;
+        supervisor.PollStateFile();
+        await Task.Delay(200);
+        Assert.Equal(2, hub.CallsOf("status").Length);
     }
 
     [Fact]

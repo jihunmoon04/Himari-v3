@@ -85,11 +85,10 @@ public sealed class RunnerSupervisor
     private readonly object gate = new();
     private readonly object launchGate = new();
     private volatile bool exiting;
-    private int exitRequested;
+    private readonly object exitDecision = new();
+    private bool exitStarted, exitPassIsSession, sessionPassStarted;
     private readonly ManualResetEventSlim exitDone = new(false);
     private ExitStopOutcome? exitOutcome;
-    private volatile bool exitPassWasSession;
-    private int sessionPass;
 
     private StatusReply? status;
     private string? statusFailure;
@@ -274,7 +273,7 @@ public sealed class RunnerSupervisor
                 else if (key != recheckKey) { recheckKey = key; recheck = true; }
                 // A disagreement that stays (say the file is gone and stays gone) is asked about again every 15 s too:
                 // the runner may have ended since the last status (§5.2).
-                if (!recheck && (Unsettled() || key is not null) && system.UptimeMs - lastCheckMs >= RecheckEveryMs) recheck = true;
+                if (!recheck && (Unsettled() || key is not null && status!.Running) && system.UptimeMs - lastCheckMs >= RecheckEveryMs) recheck = true;
                 if (recheck) checkQueued = true;
             }
         }
@@ -296,17 +295,23 @@ public sealed class RunnerSupervisor
     {
         // Under the launch gate: a hub command either started before this, or never starts (§5.3).
         lock (launchGate) exiting = true;
-        if (Interlocked.Exchange(ref exitRequested, 1) == 1)
+        bool first = false, ownPass = false;
+        lock (exitDecision)
         {
-            // Another caller (tray exit, WPF's or SystemEvents' SessionEnding) is writing the requests and waiting
-            // already: return only when it is done, so Windows is not told too early that this app is ready to end.
+            if (!exitStarted) { exitStarted = true; first = true; exitPassIsSession = sessionEnding; }
+            // A logoff during a tray exit runs its own pass at once: the tray exit may leave out what §5.5 asks for
+            // (unlinked, or an owner the last status did not confirm), and waiting for it first could exceed 5 s.
+            else if (sessionEnding && !exitPassIsSession && !sessionPassStarted) { sessionPassStarted = true; ownPass = true; }
+        }
+        if (ownPass) return ExitCore(ackWait, true);
+        if (!first)
+        {
+            // Another caller is writing the same requests and waiting already: return only when it is done, so
+            // Windows is not told too early that this app is ready to end.
             exitDone.Wait(ackWait + TimeSpan.FromSeconds(1));
-            // An unlinked tray exit writes nothing; a logoff that comes meanwhile still writes its requests (§5.5).
-            if (sessionEnding && !exitPassWasSession && Interlocked.Exchange(ref sessionPass, 1) == 0) return ExitCore(ackWait, true);
             return exitOutcome ?? new ExitStopOutcome(0, false);
         }
-        exitPassWasSession = sessionEnding;
-        if (sessionEnding) Interlocked.Exchange(ref sessionPass, 1);
+        if (sessionEnding) lock (exitDecision) sessionPassStarted = true;
         try { return exitOutcome = ExitCore(ackWait, sessionEnding); }
         finally { exitDone.Set(); }
     }
@@ -319,6 +324,13 @@ public sealed class RunnerSupervisor
         // or has written it already and gets a stop request here.
         store.TryUpdate(s => { owned = s.OwnedInstance; pending = s.PendingInstance; linked = s.Linked; home = s.EffectiveHubHome; return s; });
         if (!linked && !sessionEnding) return new ExitStopOutcome(0, false);
+        // §5.4: a linked stop at tray exit leaves an owner the last status did not confirm (status failed, or
+        // "instance: null"). Logoff writes it anyway (§5.5), and a pending id always gets its request (§5.3).
+        if (!sessionEnding)
+        {
+            StatusReply? last; lock (gate) last = status;
+            if (owned is not null && !(last is { Running: true } && last.Instance == owned)) owned = null;
+        }
         var requests = new Dictionary<string, string>();
         foreach (string target in new[] { owned, pending }.OfType<string>().Distinct())
         {
@@ -533,6 +545,8 @@ public sealed class RunnerSupervisor
         if (status.Running && status.Instance is not null)
             return fresh && state!.Instance == status.Instance ? null : $"{file.Kind}:{fresh}:{state?.Instance}:{status.Instance}";
         if (!status.Running && fresh) return $"appeared:{state!.Instance}";
+        // §5.2: a stale or broken file while off is asked about once (a runner may be starting or have just crashed).
+        if (!status.Running && file.Kind != StateFileKind.Missing) return $"off:{file.Kind}:{state?.Instance}:{state?.UpdatedAt}";
         return null;
     }
 
