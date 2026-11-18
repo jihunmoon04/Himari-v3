@@ -1,6 +1,6 @@
 # HIMARI와 hub 프로젝트의 관계 (V3-P105 설계 초안 v0.1)
 
-> 2026-11-18 · rev. 6(Codex 설계 검수 5차 뒤 **hub 쪽 계약을 hub 설계로 분리**, §13) · **설계 초안** · 대상: v3 `039a62a`(V3-P102·P103 운영 중, V3-P104 병합), hub `7d247fb`(운영 `0769e1b`)
+> 2026-11-18 · rev. 7(Codex 설계 검수 6차 NOT_READY 반영, §13. rev. 6에서 hub 쪽 계약을 hub 설계로 분리) · **설계 초안** · 대상: v3 `039a62a`(V3-P102·P103 운영 중, V3-P104 병합), hub `7d247fb`(운영 `0769e1b`)
 > 앞 문서: [작업 콘솔](web-console-v0.1.md)(V3-P102), [hub 프로젝트 화면](hub-projects-ui-v0.1.md)(V3-P103), hub [user 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)
 > **hub 쪽:** 세션의 주인, 활성 슬롯, 멱등, 주인 폐기, 프로필 권한, 원장 id는 hub 설계 [주인이 있는 세션](https://github.com/jihunmoon04/himari-hub/blob/main/docs/owned-sessions-v0.1.md)(이하 "hub 문서")가 정한다. 이 문서는 v3가 하는 일과, v3가 hub에 기대는 성질(§9)만 적는다.
 > 이 문서는 V3-P102와 V3-P103의 화면 일부를 바꾼다(§8).
@@ -86,7 +86,8 @@ HIMARI는 그 대화에서 어떤 프로젝트에 처음 맡기기 전에 `hub_n
 
 - hub Tool 결과(노트 본문, 작업 결과, 승인 제목·선택지, 세션 이름, `last_task` 글)는 에이전트나 사람이 쓴 자유 글이다. 경로·비밀값·지시가 들어 있을 수 있다. hub H11은 **구조화된 칸**(프로젝트 `path`, `roots`, 짝 코드 등)을 MCP 응답에서 뺄 뿐, 자유 글 안에 인용된 것까지 지우지는 못한다.
 - 그래서 이 글들은 **언제나 Tool 결과(신뢰하지 않는 글)로만** 모델에게 간다. v3는 hub Tool 결과의 어떤 부분도 Current State나 시스템 영역으로 옮기지 않는다(§4.1과 §6.2의 절은 사본의 열거값·id·검증된 이름으로만 만든다).
-- **자동 기억(V3-P85)은 hub MCP 서버의 Tool 결과를 읽지 않는다.** 기억 작업에 넘기는 대화 기록에서 `HIMARI_HUB_MCP_SOURCE` 서버의 Tool 결과 본문을 "(hub Tool 결과, 생략)"으로 바꾼다. 사용자 글과 HIMARI 답은 그대로 읽으므로, 판정에 "프로젝트에 관한 사실은 기억하지 않음(노트에 속함)"을 더한다.
+- **자동 기억(V3-P85)은 이미 Tool 결과를 읽지 않는다**(`memory/passes.py`의 `message_of()`가 사용자 글과 HIMARI 답만 넘김). 남는 길은 HIMARI가 답에 노트나 결과를 다시 인용하는 경우다. 그래서 자동 기억이 만드는 **메모와 에피소드 둘 다**의 판정에 "프로젝트에 관한 사실(코드, 결정, 경로, 기기)은 기억하지 않음(노트에 속함)"을 더하고, HIMARI 답이 노트 내용을 인용한 대화로 회귀 시험을 둔다.
+- **로그와 브라우저 DTO.** 새 경로(보내기 작업자, 사본 맞추기, 가져오기, 정리 작업자)의 로그에는 원장 id, 작업·세션 id, 상태와 오류 코드만 남긴다. 토큰, `_meta`, 요청 원문(`request`), hub 오류 글은 남기지 않는다. 브라우저로 가는 DTO도 허용 칸만 담고 `request`·`_meta`·주인 문자열 전체는 보내지 않는다(카드는 대화 제목으로 보임).
 
 ## 5. 위임: v3가 하는 일
 
@@ -96,7 +97,8 @@ HIMARI는 그 대화에서 어떤 프로젝트에 처음 맡기기 전에 `hub_n
 
 - v3는 hub의 **v3 전용 MCP 토큰**(주인 이름공간이 붙은 클라이언트, hub 문서 §3)을 운영자 설정 파일로 받는다.
 - v3 MCP 클라이언트는 hub로 지정된 서버(`HIMARI_HUB_MCP_SOURCE`)에 보내는 모든 `tools/call`의 `params._meta`에 `himari/owner`(`v3:<v3 인스턴스 id>:<conversation_id>`), `himari/ledger`(기대하는 원장 id), 위임이면 `himari/call`(§5.3의 키)을 붙인다. **모델이 보는 Tool 인자는 바꾸지 않는다**(모델은 이 칸을 쓰지도 보지도 않는다).
-- v3 인스턴스 id는 v3 데이터 폴더에 처음 만들 때 정하는 임의 값이다. 대화 id는 `meta.next_id` 카운터에서 나오므로 다시 쓰이지 않고, 그래서 주인도 다시 쓰이지 않는다.
+- v3 인스턴스 id는 임의 128비트 값(16진 32자)이다. `meta.value`는 `STRICT INTEGER`라 넣을 수 없으므로 새 표 `instance(id TEXT NOT NULL)`(줄 하나)에 둔다. 스키마 판을 올리는 옮기기(§5.8)가 처음 한 번 만들고, 그 뒤로 바꾸지 않는다. 대화 id는 `meta.next_id` 카운터에서 나오므로 다시 쓰이지 않고, 그래서 주인도 다시 쓰이지 않는다.
+- **hub 안내문과 압축.** hub MCP 서버의 안내문(`initialize.instructions`)은 hub 코드에 고정된 글이라(hub 문서 §6) 지금처럼 서버 안내 절에 넣는다. 압축 요약(`compaction.py`)에 넘기는 기록에서는 hub Tool 결과 본문을 작업 id·상태·코드만 남긴 한 줄로 바꾼다(자유 글이 요약으로 올라가 시스템 영역의 요약 블록에 남지 않게).
 
 ### 5.2 맡기기 전 확인
 
@@ -109,9 +111,12 @@ v3는 MCP `initialize` 결과(`capabilities.experimental["himari"]`)와 user 경
 
 ### 5.3 보내기 기록
 
-- **보내기 전에 기록한다.** `hub_sends(ledger_id, owner, call, request, request_hash, conversation_id, project, state, task_id, refusal, created_at, updated_at)`에 `sending`으로 쓰고 커밋한 뒤 보낸다. `call`은 그 Tool 호출의 id, `request`는 **정규화한 요청 본문**(Tool 이름, 모델이 준 인자, `_meta`)이라 재시작 뒤에도 같은 요청을 다시 만들 수 있다.
-- **상태.** `sending` → `accepted`(작업 id) / `refused`(hub가 `isError`와 `structuredContent.accepted: false`로 **접수 전에** 거절했음이 확정. 코드 보관) / `unknown`(다시 보내기를 모두 실패) / `abandoned`(대화 삭제, 원장 교체). `accepted`·`refused`·`abandoned`는 끝 상태다. `accepted: false`가 없는 오류(접수 여부를 알 수 없는 오류)는 `refused`로 닫지 않고 다시 보낸다.
-- **다시 보내기는 같은 키·같은 본문으로만.** hub는 같은 키를 가장 먼저 찾아 영수증을 돌려주므로(hub 문서 §5.2) 작업은 하나만 생긴다. v3 서버의 작업자 하나가 `sending`을 1초, 3초, 10초 뒤 다시 보내고, 그 뒤에는 `unknown`으로 둔다. v3가 시작할 때와 사용자가 카드의 "다시 보내기"를 누를 때 `unknown`을 다시 `sending`으로 돌린다. 브라우저 탭은 작업자를 깨울 뿐 직접 보내지 않는다(여러 탭이 눌러도 한 기록을 한 작업자가 처리).
+- **보내기 전에 기록한다.** `hub_sends(id, run_id, call_id, ledger_id, owner, call, call_time, request, request_hash, conversation_id, project, state, lease, task_id, refusal, created_at, updated_at)`에 `sending`으로 쓰고 커밋한 뒤 보낸다.
+  - **키는 v3 서버가 발급한다.** 공급자의 `call_id`는 실행마다 겹칠 수 있으므로 쓰지 않는다. 그 Tool 호출의 `CallRef(run_id, call_id)`마다 줄 하나(`UNIQUE(run_id, call_id)`)이고, 줄을 만들 때 임의 128비트 `call`과 `call_time`(서버 시계)을 정한다(`UNIQUE(ledger_id, call)`). 첫 전송과 다시 보내기, 카드, 브라우저의 "다시 보내기"가 모두 이 줄을 쓴다.
+  - `request`는 **정규화한 요청 본문**(Tool 이름, 모델이 준 인자, `_meta`)이라 재시작 뒤에도 같은 요청을 다시 만들 수 있다.
+- **상태.** `sending` → `accepted`(작업 id) / `refused`(hub가 `isError`와 `structuredContent.accepted: false`로 **접수 전에** 거절했음이 확정. 코드 보관) / `unknown`(다시 보내기를 모두 실패) / `expired`(기한이 지나 더 보내지 않음) / `abandoned`(대화 삭제, 원장 교체). `accepted`·`refused`·`expired`·`abandoned`는 끝 상태다. `accepted: false`가 없는 오류(접수 여부를 알 수 없는 오류)는 `refused`로 닫지 않고 다시 보낸다.
+- **다시 보내기는 같은 키·같은 본문으로만, 기한 안에서만.** hub는 같은 키를 가장 먼저 찾아 영수증을 돌려주고, 원장에 없는 키는 `call_time`이 24시간보다 오래면 받지 않는다(hub 문서 §5.2). 그래서 v3는 `call_time`에서 **23시간까지만** 다시 보내고, 그 뒤의 `unknown`은 `expired`로 닫아 보기만 한다("확인할 수 없음"). v3 서버의 작업자가 `sending`을 1초, 3초, 10초 뒤 다시 보내고, 그 뒤에는 `unknown`으로 둔다. v3가 시작할 때와 사용자가 카드의 "다시 보내기"를 누를 때 기한 안의 `unknown`을 다시 `sending`으로 돌린다. `task_by_call`의 `null`은 받지 않았다는 증거로 쓰지 않는다.
+- **보내기 실행권.** 첫 전송(Tool 실행)과 다시 보내기 작업자는 같은 규칙으로 보낸다: 그 줄의 `lease`를 조건부로 올리고(`UPDATE … SET lease = lease + 1 WHERE id = ? AND lease = ? AND state IN ('sending','unknown')`, 같은 트랜잭션에서 대화가 삭제 중이 아닌지 확인) 성공한 쪽만 보낸다. 응답은 그 줄의 원장 id·`lease`가 그대로이고 대화가 삭제 중이 아닐 때만 반영한다. 브라우저 탭은 작업자를 깨울 뿐 직접 보내지 않는다.
 - **모델이 같은 일을 다시 부르면** 새 Tool 호출(새 키)이다. 그래서 지침은 "`unknown`이면 다시 맡기기 전에 사용자에게 알린다"이다.
 - **카드는 이 기록에서 그린다.** hub가 받은 뒤 v3가 Tool 결과를 쓰기 전에 죽으면 대화에 결과 이벤트가 없을 수 있다. 맡긴 작업 카드는 `hub_sends`(호출 id로 대화의 Tool 호출과 이어 붙임)와 사본에서 그리므로 결과 이벤트 없이도 복구된다. 모델에게는 다음 요청의 작업 절(§6.2)로 알린다.
 
@@ -119,20 +124,25 @@ v3는 MCP `initialize` 결과(`capabilities.experimental["himari"]`)와 user 경
 
 - 브라우저가 받은 모든 hub 항목(작업, 세션, 승인 요청, 프로젝트, 프로젝트 요청)에 원장 id가 붙는다. 사본과 보내기 기록도 원장 id를 가진다.
 - **상태를 바꾸는 모든 중계**(지금 있는 것 포함: 승인 답, 중지, 세션에 직접 보내기, 새 대화, 닫기, 이름 바꾸기, 다시 열기, 권한 묶음, 프로젝트 설정, 프로젝트 요청 op들, 그리고 새 가져오기·다시 보내기)는 **브라우저가 그 항목과 함께 받은 원장 id를 그대로** `expect_ledger`로 hub에 넘긴다. 중계가 최신 원장 id를 채워 넣지 않는다. hub가 바꾸기 전에 비교하고 다르면 `ledger_mismatch`(hub 문서 §5.9). 화면은 "hub가 바뀌었습니다"를 보이고 다시 읽는다.
-- **읽기와 스트림:** 원장 id가 바뀌면(user 스트림 첫 프레임의 `ledger`, 또는 응답의 `ledger`) 화면은 들고 있던 카드·목록·세션 기록·스트림 커서·대기 중인 응답을 모두 버리고 다시 읽는다. v3 서버는 그 원장의 사본을 버리고 `sending`·`unknown`을 `abandoned`로 닫는다.
+- **읽기와 스트림:** hub는 id나 커서를 돌려주는 모든 읽기 응답에 그 응답을 만든 원장 id를 넣는다(hub 문서 §5.9). 중계는 그 값을 응답과 함께 넘기고, 자기가 아는 최신 원장 id로 바꿔 붙이지 않는다. 화면과 v3 서버는 **응답의 원장 id가 지금 원장 세대와 다르면 그 응답을 버린다**(교체 전에 보낸 요청의 늦은 응답이 새 원장의 항목으로 둔갑하지 않게). 원장 id가 바뀌면 화면은 들고 있던 카드·목록·세션 기록·스트림 커서·대기 중인 응답을 모두 버리고 다시 읽는다. `features/hub/follow.ts`의 따라가기 키와 V3-P103의 `sessionStorage` 미확인 요청에도 원장 id를 넣는다. v3 서버는 그 원장의 사본을 버리고 그 원장의 `sending`·`unknown`을 `abandoned`로 닫는다.
+- **원장을 지키지 못하는 hub:** `projects` 응답에 `ledger`가 없으면(쓰기 op가 `expect_ledger`를 지킨다는 보장이 없음) v3 서버는 hub로 가는 모든 쓰기 중계를 막는다. 배포 순서가 hub 먼저이므로 운영에서는 생기지 않는다.
 
 ### 5.5 화면용 사본
 
 - **`hub_owned`:** 화면(사이드바 태그, 거르기, 프로젝트 화면의 "맡긴 대화", 카드)과 작업 스냅샷을 위한 사본. 칸은 원장 id, 주인, 활성 슬롯, 작업(상태, 시도, 대상·지금·마지막 전달 세션, 사유 코드), 세션(주인, `owner_rev`), 받은 `owner_seq`.
 - **원본은 hub이고, 사본은 이벤트에서 만들지 않는다**(이벤트에는 이후 상태·이동·원장 교체가 없다). `hub_sends`와 정리 기록(§5.6)도 이벤트로 다시 만들 수 없는 v3의 영속 기록이다.
-- **맞추기.** hub의 `owner_state {owner}`(읽기 트랜잭션 하나의 스냅샷과 `owner_seq`, hub 문서 §5.8)로 그 주인의 사본을 **통째로 바꾼다.** 응답에 없는 줄은 지운다. 받은 `owner_seq`가 가진 것보다 작으면(늦은 응답) 버린다. 작업이 200개보다 많을 때만 `tasks {owner, after, limit, at_seq}`로 나눠 읽고, `snapshot_changed`가 오면 `owner_state`부터 다시 읽는다. 위임의 Tool 결과(영수증)는 사본에 "접수됨, 시도 없음" 줄을 미리 넣을 뿐이고, 다음 `owner_state`가 그 줄을 덮는다.
+- **맞추기.** hub의 `owner_state {owner}`(읽기 트랜잭션 하나의 스냅샷과 `owner_seq`, hub 문서 §5.8)로 그 주인의 사본을 **통째로 바꾼다.**
+  - `owner_state`의 작업이 200개(가득)이면 그 `owner_seq`를 `at_seq`로 `tasks {owner, after, limit, at_seq}`를 `next`가 null이 될 때까지 읽어 합친다. `snapshot_changed`가 오면 처음부터 다시 읽는다. **다 읽은 뒤에만** 한 트랜잭션에서 사본을 바꾼다(반쯤 읽은 사본을 내보이지 않음).
+  - 응답에 없는 줄은 지운다. 받은 `owner_seq`가 가진 것보다 작거나 응답의 원장 id가 다르면 버린다.
+  - 위임의 Tool 결과(영수증)는 사본에 "접수됨, 상세 없음" 줄을 미리 넣을 뿐이고, 다음 `owner_state`가 그 줄을 덮는다.
+  - `hub_sends`와 사본은 작업 id로 잇는다. 접수 응답을 잃어 작업 id가 없는 `unknown` 줄은, 작업 스냅샷을 만들기 전과 화면이 열 때 `task_by_call`로 대조해 작업이 있으면 `accepted`로 바꾼다(없음은 아무것도 확정하지 않음).
 - **채우는 때:** 위임 Tool 결과, Web 목록 스트림의 세션 변화, 화면이 열 때(대화마다 최대 30초에 한 번), 작업 스냅샷을 만들기 전 사본이 30초보다 오래됐을 때(1초 시간 제한, 실패하면 있던 사본).
 - **조회가 실패하면** 있던 사본을 그대로 두고, 화면과 작업 절은 "확인 못 함"을 "작업 없음"과 나눠 보인다.
 - 사본과 보내기 기록을 쓰는 모든 트랜잭션은 같은 트랜잭션에서 그 대화가 있고 삭제 중이 아닌지 본다(늦은 응답이 지운 대화를 되살리지 않음).
 
 ### 5.6 대화를 지울 때
 
-1. **삭제를 시작할 때(휴지통 비우기, V3-P65의 삭제 시작):** 그 대화를 삭제 중으로 표시한다. 이 뒤로 그 대화의 새 위임(§5.2-3), 다시 보내기, 그 대화로의 가져오기를 막는다. `hub_sends`의 `sending`·`unknown`을 `abandoned`로 닫는다. 정리 기록 `hub_owner_tombstones(owner, ledger_id, created_at, done_at)`을 남긴다.
+1. **삭제 시작(`begin_purge`):** 사람이 휴지통을 비울 때와 보관 기한이 지나 자동으로 지울 때(V3-P65) 모두 같은 트랜잭션 하나를 쓴다. 그 안에서 ① 대화를 삭제 중으로 표시하고 ② `hub_sends`의 `sending`·`unknown`을 `abandoned`로 닫고(`lease`도 올려 이미 보내는 중인 쪽의 응답이 반영되지 않게) ③ 그 대화가 쓴 원장마다(`hub_sends`와 사본에 나온 원장 id, 그리고 지금 원장) 정리 기록 `hub_owner_tombstones(owner, ledger_id, created_at, done_at)`(키 `(owner, ledger_id)`)을 남긴다. 이 뒤로 그 대화의 새 위임(§5.2-3), 다시 보내기, 그 대화로의 가져오기는 같은 트랜잭션에서 삭제 중을 보고 막힌다(§5.3의 실행권과 §5.7). `begin_purge` 전에 이미 hub로 나간 요청은 hub가 폐기를 커밋하기 전에 접수될 수 있으므로, 정리 의무는 `busy`가 0이 될 때까지 남는다(아래 3).
 2. **영구 삭제 트랜잭션:** 그 대화의 `hub_owned`와 `hub_sends` 줄을 지운다(`request` 원문 포함). 정리 기록은 남긴다.
 3. **정리 작업자:** 정리 기록마다 hub의 `owner_retire {owner, expect_ledger}`(hub 문서 §5.7)를 부르고, 답의 `busy`가 0이 될 때까지 되풀이한다(30초 간격, hub가 내려가 있으면 기다림). 0이면 `done_at`을 쓴다. 폐기를 hub가 먼저 커밋하므로, 이미 보낸 위임이 늦게 도착해도 작업이 생기지 않는다. 정리 의무는 정리 기록에 있으므로 hub가 오래 내려가 있어도, v3가 재시작해도 남는다. 원장 id가 바뀌었으면 그 정리 기록은 더 할 일이 없으므로 `done_at`을 쓴다. `done_at`에서 30일 뒤 지운다.
 4. v3 MCP 클라이언트는 정리 기록에 있는 주인으로 보내지 않는다.
@@ -140,11 +150,21 @@ v3는 MCP `initialize` 결과(`capabilities.experimental["himari"]`)와 user 경
 ### 5.7 세션 가져오기 (사용자 동작)
 
 - HIMARI는 다른 대화나 사용자가 직접 연 세션을 이어 가자고 **제안만** 한다. 실제 가져오기는 사용자가 카드나 프로젝트 화면에서 "이 대화로 가져오기"를 누를 때만 일어난다.
-- 화면은 그 세션의 원장 id, 세션 id, 지금 주인, `owner_rev`를 함께 v3 서버로 보낸다. v3 서버는 운영자 검사와 Origin 검사를 거친 뒤 한 트랜잭션에서 ① 대상 대화가 그 사용자의 것이고 있고 삭제 중이 아닌지 ② 원장 id가 지금 것과 같은지 보고, 주인을 **서버가** `v3:<인스턴스 id>:<대상 대화 id>`로 만들어 hub `session_owner {session, owner, rev, expect_ledger}`로 보낸다(브라우저가 준 주인 문자열은 받지 않음). hub가 `rev`·일하는 중·폐기를 검사한다(hub 문서 §5.6). 실패하면 이유를 보이고 다시 읽는다.
+- **두 단계로 한다.**
+  1. **확인 열기:** 화면이 `POST /api/hub/sessions/import-intent {session, conversation, ledger}`를 부른다. v3 서버가 hub에서 그 세션을 **직접 다시 읽어**(원장 id, 지금 주인, `owner_rev`, 프로젝트, 에이전트·기기, 일하는 중인지) 대상 대화(그 사용자의 것, 있음, 삭제 중이 아님)와 묶은 **일회성 확인 토큰**(5분, 한 번만)을 만들어 돌려주고, 확인 대화상자에 서버가 읽은 값을 보인다: 앞 주인(대화 제목, 주인 없음, 대화 없음), 세션, 그리고 "이 대화의 ‹프로젝트› 활성 세션이 이 세션으로 바뀝니다".
+  2. **실행:** 사용자가 확인하면 화면은 토큰만 보낸다. v3 서버는 토큰을 쓰고(한 트랜잭션에서 대상 대화가 여전히 있고 삭제 중이 아닌지 다시 봄), 주인을 **서버가** `v3:<인스턴스 id>:<대상 대화 id>`로 만들어 hub `session_owner {session, owner, rev: <토큰에 묶인 owner_rev>, expect_ledger: <토큰의 원장 id>}`로 보낸다. 브라우저가 준 주인이나 `rev`는 받지 않는다. hub가 `rev`·일하는 중·폐기를 검사한다(hub 문서 §5.6).
+  - 응답을 잃으면 그 세션을 다시 읽어, 주인이 대상 대화면 성공, 아니면 실패로 판정한다. 실패하면 이유를 보이고 확인부터 다시 한다.
 - **가져오면 맥락도 옮겨진다.** 가져온 대화의 에이전트는 앞 대화에서 그 세션이 한 일을 기억한다. 확인 대화상자에 이것을 적는다("이 세션의 지난 대화 내용이 이 대화의 에이전트에게 이어집니다").
 - **사용자가 주인 있는 세션에 직접 보내면**(세션 화면의 입력창) 그 글과 결과는 그 세션의 맥락에 들어간다(hub 문서 §5.5). 세션 화면은 주인 있는 세션이면 입력창 위에 "이 세션은 대화 ‹제목›의 것입니다"를 보인다.
 
-### 5.8 허락의 경계
+### 5.8 저장소 바꿈 (스키마 판 19)
+
+- 새 표: `instance(id)`(§5.1), `hub_sends`(§5.3, `UNIQUE(run_id, call_id)`, `UNIQUE(ledger_id, call)`), `hub_owned`(키 `(ledger_id, owner, kind, item_id)`, `kind`는 slot·session·task), `hub_owned_state(ledger_id, owner, owner_seq, fetched_at)`, `hub_owner_tombstones`(키 `(owner, ledger_id)`), `hub_import_intents(token, user, conversation_id, ledger_id, session_id, owner_rev, expires_at, used_at)`.
+- `hub_sends`·`hub_owned`·`hub_owned_state`·`hub_import_intents`는 대화가 영구 삭제될 때 함께 지운다(같은 삭제 트랜잭션). `hub_owner_tombstones`는 대화와 따로 남는다(`done_at` + 30일에 지움).
+- 판 18 → 19 옮기기는 한 트랜잭션에서 표를 만들고 `instance` 줄 하나를 넣는다. 기존 대화는 그대로다.
+- 시험: 판 18 DB에서 올린 뒤 다시 시작해도 인스턴스 id가 같음, 끝나지 않은 정리 기록과 `sending`·`unknown`이 다시 시작 뒤 이어짐.
+
+### 5.9 허락의 경계
 
 등록된 프로젝트와, 사용자가 그 프로젝트에 허락한 프로필(`model_profiles`, hub 문서 §5.4) 안에서는 HIMARI가 자유롭게 맡긴다. 대화마다 허락받지 않는다. 쓰기와 명령은 에이전트 승인을 거친다. 대신 **어디서 무엇으로 돌았는지를 늘 보인다**(§7.3).
 
@@ -154,14 +174,14 @@ v3는 MCP `initialize` 결과(`capabilities.experimental["himari"]`)와 user 경
 
 | 상황 | HIMARI가 하는 일 |
 | --- | --- |
-| 처음 맡김, 이어서 맡김 | **인자 없이** `hub_delegate(project, prompt)`. hub가 `(대화, 프로젝트)`의 활성 세션에 보내거나 새로 연다 |
+| 처음 맡김, 이어서 맡김 | `project`와 `prompt`만 주고 **선택 인자는 생략**(`hub_delegate(project, prompt)`). hub가 `(대화, 프로젝트)`의 활성 세션에 보내거나 새로 연다 |
 | 주제가 바뀜, 컨텍스트가 거의 참, 앞 대화에 기대면 안 됨 | `fresh: true` |
 | 사용자가 특정 에이전트나 프로필을 원함 | `agent`나 `profile`(허락된 것만). 활성 세션과 조건이 다르면 새 세션이 열리고 그것이 활성이 된다 |
 | 이 대화의 예전 세션으로 돌아감 | `hub_sessions`(이 대화의 것만 보임)의 id를 `session`으로 |
 | 다른 대화나 사용자가 직접 연 세션을 원함 | 사용자에게 가져오기를 제안한다(§5.7) |
 | `profile_revoked`(활성 세션의 프로필이 철회됨) | 사용자에게 알리고, 허락된 프로필로 `fresh`를 낼지 묻는다 |
 
-- **평소에는 선택 인자를 붙이지 않는다.** 붙이면 새 세션으로 갈 수 있다.
+- **평소에는 `project`·`prompt`만 주고 선택 인자는 붙이지 않는다.** 붙이면 새 세션으로 갈 수 있다.
 - **경우별:** 다른 프로젝트로 옮기면 그 프로젝트의 이 대화 활성 세션(없으면 새로). hub가 재시작하면 활성은 원장에 남고 그때 돌던 작업은 `hub_restarted`로 끝난다. 늘 `fresh`인 프로필(검수)을 명시하면 매번 새 세션이고, 그것이 의도다. 기기가 끊겨 새 세션으로 옮긴 뒤(`switched`) 원래 기기가 돌아와도 활성은 새 세션이고, 돌아가려면 `session`으로.
 - **공유되는 범위.** 세션(에이전트의 대화 맥락)은 대화마다 따로다. **프로젝트 노트와 hub의 최근 작업 요약(`project_history`)은 프로젝트 전체가 공유한다:** hub는 새 세션에 노트와 그 프로젝트의 최근 작업 요약(다른 대화가 맡긴 작업과 끝내지 못한 작업 포함)을 넘긴다. 이것이 프로젝트의 연속성이고 의도한 공유다. 다른 대화의 작업 **상세**(기록, 결과 전문, 승인)는 MCP로 볼 수 없다(hub 문서 §6). 가져온 세션의 맥락은 예외로 옮겨진다(§5.7).
 - **같은 프로젝트의 작업은 hub에서 순서대로 돈다**(지금 그대로).
@@ -180,7 +200,7 @@ Current State에 **이 대화의 hub 작업 절**을 더한다(사본과 보내�
 ```
 
 - 키는 `active[].project_id·project·session`, `tasks[].project_id·task·state·end_code·session`, `unconfirmed[].project_id·state`, `status`(`ok` / `stale` / `unknown`, 사본을 확인하지 못했으면 `unknown`)뿐이다. 이름은 §4.1의 표시 규칙, 상태와 `end_code`는 알려진 열거값만(밖은 `other`).
-- 최근 작업 10개. `session`은 마지막으로 글이 전달된 시도의 세션(`prompted_session`), 모르면 null.
+- 크기 한도: `active` 5개, `tasks` 최근 10개, `unconfirmed` 5개(넘으면 `"more"`). `session`은 마지막으로 글이 전달된 시도의 세션(`prompted_session`), 모르면 null.
 - 세션 고르기는 hub가 하므로 이 절은 보고와 판단을 위한 것이고, 잘려도 잘못된 세션으로 가지 않는다.
 
 ### 6.3 지침의 자리
@@ -190,7 +210,7 @@ Current State에 **이 대화의 hub 작업 절**을 더한다(사본과 보내�
 v3 시스템 지침(hub가 켜진 서버에서만):
 - "hub projects" 절에서 맞는 프로젝트를 찾는다. 둘 이상이거나 확신이 없으면 묻는다.
 - 그 대화에서 처음 맡기는 프로젝트는 먼저 `hub_notes`를 읽는다.
-- 평소에는 인자 없이 맡긴다. 주제가 바뀌면 `fresh`. 다른 대화의 세션이 필요하면 사용자에게 가져오기를 제안한다.
+- 평소에는 `project`와 `prompt`만 주고 선택 인자는 생략한다. 주제가 바뀌면 `fresh`. 다른 대화의 세션이 필요하면 사용자에게 가져오기를 제안한다.
 - `unconfirmed`가 `unknown`이면 다시 맡기기 전에 사용자에게 알린다.
 - 프로젝트에 관한 결정과 사실은 `hub_notes_write`로 노트에 적고 HIMARI 기억에 넣지 않는다.
 
@@ -218,7 +238,10 @@ v3 시스템 지침(hub가 켜진 서버에서만):
 
   | 경우 | 보이는 것 |
   | --- | --- |
-  | 보내는 중(`sending`) / 받았는지 모름(`unknown`) | "보내는 중" / "받았는지 모름" + "다시 보내기"(같은 키) |
+  | 보내는 중(`sending`) / 받았는지 모름(`unknown`) | "보내는 중" / "받았는지 모름" + "다시 보내기"(같은 키, 기한 안) |
+  | 기한 지남(`expired`) | "확인할 수 없음"(보기만) |
+  | 대화 삭제·원장 교체로 닫음(`abandoned`) | 카드 없음(대화가 지워짐) / "hub가 바뀌어 확인할 수 없음" |
+  | 접수됐지만 사본에 상세가 아직 없음 | "접수됨"(작업 id) |
   | 접수 전 거절(`refused`) | 거절 코드를 사람 말로("허락되지 않은 프로필" 등) |
   | 접수됨, 시도 없음(영수증만, `queued`) | "대기 중" |
   | 시도 없이 끝남 | 끝 사유 코드(`not_started`, `owner_retired`, `hub_restarted` 등) |
@@ -238,7 +261,7 @@ v3 시스템 지침(hub가 켜진 서버에서만):
 사이드바 아래 "프로젝트"에서 들어간다.
 - **목록:** 프로젝트, 요약, 기기(폴더 등록·연결), 진행 중·대기 중 작업 수, 마지막으로 맡긴 대화. **"새 프로젝트"**(V3-P103 대화상자, 만든 뒤 그 프로젝트 화면으로). 탭으로 **작업 현황**(V3-P102 §4.5). 목록 아래에 **보류 폴더**(V3-P103 H8의 `held` 전체)와 채택.
 - **한 프로젝트**(`/project?name=`, V3-P103 화면을 넓힘): 요약(고치기), **모델이 쓸 수 있는 프로필**(고치기), 노트(읽기와 판 기록), 기기별 폴더와 더하기·빼기, 권한 묶음과 설정, **이 프로젝트에 맡긴 대화**, 세션(열린 것과 "닫힌 것 보기", 세션마다 주인 대화·주인 없음·대화 없음, "대화로 가져오기", 닫기, 이름, 다시 열기), 그 이름의 보류 폴더, 프로젝트 요청 카드와 `lost` 정리, "에이전트에게 직접 맡기기"(보낸 작업 따라가기와 알림 포함).
-- hub가 기능을 알리지 않으면(`features`에 없음) 그 부분을 감춘다: `summary` → 요약, `notes` → 노트, `owner_state` → 맡긴 대화·주인 표시, `owner_retire`·`session_owner` → 가져오기, `task_attempts` → 카드의 시도 목록.
+- hub가 기능을 알리지 않으면(`features`에 없음) 그 부분을 감춘다: `summary` → 요약, `notes` → 노트, `owner_state` → 맡긴 대화·주인 표시, `session_owner` → 가져오기, `owner_retire` → 정리 작업자(없으면 정리 기록을 남긴 채 기다림), `task_attempts` → 카드의 시도 목록.
 
 ## 8. V3-P102·P103에서 바뀌는 것
 
@@ -263,10 +286,13 @@ v3 시스템 지침(hub가 켜진 서버에서만):
 | P103 §6.2 프로젝트 화면, 사이드바의 보류 폴더 | 프로젝트 화면으로(전체 보류는 목록 아래). 요청 카드와 권한 묶음 확인은 그대로 |
 | P103 §6.4 `lost` 정리 | 그대로(요청 카드, 받은 승인, 프로젝트 화면) |
 | P103 §6.6 대화 안의 프로젝트 요청 카드 | 그대로. 맡긴 작업 카드와 다른 컴포넌트이고 한 대화에 함께 나올 수 있다 |
+| P103 §5 확인되지 않은 요청(`sessionStorage`)의 다시 보내기 | 그대로, 저장하는 값에 원장 id를 더하고 다른 원장이면 다시 보내지 않고 버림 |
+| P103 §6.2 보류 폴더 채택 | 프로젝트 목록 아래(전체)와 프로젝트 화면(그 이름). hub `projects`에 `held`가 있을 때만(지금 조건 그대로) |
+| `/s/:id`(세션 화면)에 바로 들어옴 | 그대로 열리되, 응답의 원장 id를 지금 원장과 비교해 다르면 "hub가 바뀌었습니다" |
 
 바뀌지 않는 것: 중계와 SSE의 구조, 세션 화면, 받은 승인, 승인 원칙, V3-P103의 요청 흐름.
 
-**중계 변경.** 필드별로 다시 만드는 허용 목록(`interfaces/web/hub.py`)과 프런트 타입에 칸을 더한다: 모든 항목의 원장 id, 작업의 `owner`·시도 목록·`target_session`·`current_session`·`prompted_session`·`switched`·`end_code`, 세션의 `owner`·`owner_rev`, 프로젝트의 `summary`·`model_profiles`, `projects`의 `ledger`·`features`. 상태를 바꾸는 모든 중계에 `expect_ledger`(브라우저가 준 값). 새 중계(운영자만, 상태를 바꾸는 것은 Origin 검사): `POST /api/hub/sessions/owner`(가져오기, §5.7), `GET /api/hub/owner-state?conversation=`(서버가 주인을 만듦), `POST /api/hub/sends/{call}/retry`(작업자 깨우기), `GET /api/hub/projects/notes`(이름·`history`·`version`은 쿼리 값). `projects/settings` 입력에 `summary`·`model_profiles`. `owner_retire`는 v3 서버 안의 정리 작업자만 부르고 중계로 열지 않는다.
+**중계 변경.** 필드별로 다시 만드는 허용 목록(`interfaces/web/hub.py`)과 프런트 타입에 칸을 더한다: 모든 항목의 원장 id, 작업의 `owner`·시도 목록·`target_session`·`current_session`·`prompted_session`·`switched`·`end_code`, 세션의 `owner`·`owner_rev`, 프로젝트의 `summary`·`model_profiles`, `projects`의 `ledger`·`features`. 상태를 바꾸는 모든 중계에 `expect_ledger`(브라우저가 준 값). 새 중계(운영자만, 상태를 바꾸는 것은 Origin 검사): `POST /api/hub/sessions/import-intent`와 `POST /api/hub/sessions/import`(가져오기, §5.7), `GET /api/hub/owner-state?conversation=`(서버가 주인을 만듦), `POST /api/hub/sends/{call}/retry`(작업자 깨우기), `GET /api/hub/projects/notes`(이름·`history`·`version`은 쿼리 값). `projects/settings` 입력에 `summary`·`model_profiles`. `owner_retire`는 v3 서버 안의 정리 작업자만 부르고 중계로 열지 않는다.
 
 ## 9. v3가 hub에 기대는 성질
 
@@ -347,3 +373,21 @@ rev. 3은 세션의 주인을 hub 원장으로 옮겼다. 3~5차의 지적은 �
 | P2 Current State 저장·조회 계약 | 새 키를 두지 않고 지금의 `state_key` 하나(두 절이 그 안), 스냅샷에 원장 id를 붙여 다음 턴에 섞이지 않게, 진단은 요청 기록의 렌더 결과(§4.1) |
 | P2 P102/P103 표와 기능 감지 | P102 §7.12~7.14와 `new`·`send` 계약, `/agents`·`/s/:id`의 자리, 기능 감지(`features`)와 감출 것(§7.4·§8) |
 | P3 호환 필드와 예시 | Current State 예시에 프로젝트 `id`, §5.2의 확인 목록에 원장 id |
+
+### 13.4 rev. 6(`ffaf64e`), Codex 6차(v3 쪽만): NOT_READY
+
+hub 쪽으로 간 것은 hub 문서 rev. 2에 더했다: 멱등 키의 기한(`call_time`), id·커서를 돌려주는 읽기 응답의 원장 id, 기능 플래그와 op의 대응(`session_owner` 포함), 고정된 MCP 안내문.
+
+| 지적 | 처리 |
+| --- | --- |
+| P1 보내기 키가 공급자 `call_id`라 실행끼리 겹침 | `CallRef(run_id, call_id)`마다 줄 하나, 키는 v3 서버가 발급한 임의 값, 첫 전송·재전송·카드·브라우저가 같은 줄(§5.3) |
+| P1 늦은 재전송이 새 작업을 만들 수 있음 | `call_time`과 hub의 24시간 기한, v3는 23시간까지만 재전송하고 그 뒤 `expired`, `task_by_call`의 없음은 증거가 아님(§5.3) |
+| P1 읽기 응답의 원장을 판별할 수 없음 | hub가 모든 읽기 응답에 그 응답의 원장 id, 중계는 바꿔 붙이지 않음, 다른 원장의 응답은 버림, `follow.ts`와 `sessionStorage`에도 원장 id(§5.4) |
+| P1 삭제와 외부 호출의 순서 | 사람·자동 삭제가 쓰는 `begin_purge` 한 트랜잭션(삭제 중 표시, 보내기 닫기와 `lease` 올림, 원장별 정리 기록), 첫 전송과 재전송의 같은 실행권(`lease`), 응답은 원장·대화·`lease`가 맞을 때만, `busy` 0까지 정리 의무(§5.3·§5.6) |
+| P1 가져오기에서 확인한 세션 상태를 서버가 검증하지 않음 | 서버가 hub에서 다시 읽어 만든 일회성 확인 토큰, 실행은 그 토큰의 `owner_rev`로 hub CAS, 응답을 잃으면 다시 읽어 판정, 대화상자에 활성 슬롯이 바뀜을 보임(§5.7) |
+| P2 시스템 영역과 로그의 경계 | hub 안내문은 hub 코드의 고정 글(hub 문서 §6), 압축 입력의 hub 결과는 id·상태·코드만, 새 경로의 로그와 브라우저 DTO의 허용 칸(§4.4·§5.1) |
+| P2 자동 기억의 수정 지점 | `message_of()`가 이미 Tool 결과를 읽지 않음을 적고, 메모와 에피소드 둘의 판정과 인용 회귀 시험으로 바꿈(§4.4) |
+| P2 사본과 보내기 기록을 합치는 규칙 | 200개면 `at_seq`로 끝까지 읽고 한 번에 바꿈, 작업 id 없는 `unknown`은 `task_by_call`로 대조, `expired`·`abandoned`·상세 없는 접수의 카드, 작업 절의 크기 한도(§5.5·§6.2·§7.3) |
+| P2 기능 플래그와 구형 hub | `session_owner` 플래그는 hub 문서에, `ledger`가 없으면 모든 쓰기 중계를 막음, `/s/:id`·`sessionStorage`·보류 채택을 표에(§5.4·§7.4·§8) |
+| P2 영속 스키마 변경 | 스키마 판 19, `instance` 표(`meta.value`가 `STRICT INTEGER`), 표마다 유일 키와 삭제 관계, 올린 뒤 재시작 시험(§5.8) |
+| P3 "인자 없이"의 뜻 | "`project`와 `prompt`만 주고 선택 인자는 생략"으로(§6.1·§6.3) |
