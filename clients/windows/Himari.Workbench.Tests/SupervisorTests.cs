@@ -530,6 +530,18 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public void AStopRequestThatCannotBeWrittenIsReported()
+    {
+        string owned = Id();
+        // runner.stop.d is a file here, so no request can be created in it.
+        File.WriteAllText(StopRequests.Folder(home), "");
+        store.Update(s => s with { OwnedInstance = owned });
+        var outcome = New().RequestStopForExit(TimeSpan.Zero, sessionEnding: true);
+        Assert.Equal(0, outcome.RequestsWritten);
+        Assert.Equal(1, outcome.RequestsFailed);
+    }
+
+    [Fact]
     public void ExitNeverTouchesARunnerItDoesNotOwn()
     {
         hub.WriteState(Id(), "connected");

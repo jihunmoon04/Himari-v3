@@ -106,6 +106,7 @@ public partial class App : System.Windows.Application
         ExitStopOutcome outcome = await Task.Run(() => supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait));
         // §5.4: not stopped, and said so, when the app could not confirm it owns the running runner.
         if (outcome.OwnerUnverified) Tell("실행기를 끄지 못했습니다(확인 불가). 앱이 켠 실행기인지 확인하지 못해 그대로 둡니다.");
+        if (outcome.RequestsFailed > 0) Tell("실행기에 끄기 요청을 쓰지 못했습니다(hub 홈에 쓸 수 없음). 실행기가 계속 돌 수 있습니다.");
         Quit();
     }
 

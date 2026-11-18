@@ -336,10 +336,11 @@ public sealed class RunnerSupervisor
             if (owned is not null && owned != started && !(last is { Running: true } && last.Instance == owned)) { owned = null; ownerLeft = true; }
         }
         var requests = new Dictionary<string, string>();
+        int failed = 0;
         foreach (string target in new[] { owned, pending }.OfType<string>().Distinct())
         {
             try { requests[target] = StopRequests.Write(home, target); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { failed++; }
         }
         // Remembered for the next launch's "끄기를 요청했지만 아직 떠 있음" (§5.3): the owned instance, or else the pending
         // one (a start that succeeds after this keeps the value, so its runner is shown the same way).
@@ -349,7 +350,7 @@ public sealed class RunnerSupervisor
             try { store.Update(s => s with { ExitStopRequested = asked }); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
-        if (requests.Count == 0) return new ExitStopOutcome(0, false, ownerLeft);
+        if (requests.Count == 0) return new ExitStopOutcome(0, false, ownerLeft, failed);
         // The whole wait, whatever the state file says meanwhile (§5.5): a pending runner may still come up, and a state
         // file that is missing or being replaced for a moment may come back with the acknowledgement.
         long until = system.UptimeMs + (long)ackWait.TotalMilliseconds;
@@ -357,12 +358,14 @@ public sealed class RunnerSupervisor
         {
             StateFileRead read = RunnerProtocol.ReadStateFile(home);
             RunnerStateFile? state = read.File;
+            // One hub home has one runner.lock: the owned and the pending runner cannot both be up, so the acknowledgement of
+            // whichever one the state file names is the one to wait for.
             if (state?.Instance is { } shown && requests.TryGetValue(shown, out string? request) && state.StopAck == request)
-                return new ExitStopOutcome(requests.Count, true, ownerLeft);
+                return new ExitStopOutcome(requests.Count, true, ownerLeft, failed);
             if (system.UptimeMs >= until) break;
             Thread.Sleep(100);
         }
-        return new ExitStopOutcome(requests.Count, false, ownerLeft);
+        return new ExitStopOutcome(requests.Count, false, ownerLeft, failed);
     }
 
     /// <summary>
@@ -597,4 +600,5 @@ public sealed class RunnerSupervisor
 }
 
 /// <param name="OwnerUnverified">Tray exit left the owned runner because the last status could not confirm it (§5.4).</param>
-public sealed record ExitStopOutcome(int RequestsWritten, bool Acknowledged, bool OwnerUnverified = false);
+/// <param name="RequestsFailed">Stop request files that could not be written (the hub home not writable, say).</param>
+public sealed record ExitStopOutcome(int RequestsWritten, bool Acknowledged, bool OwnerUnverified = false, int RequestsFailed = 0);
