@@ -472,7 +472,9 @@ public sealed class SupervisorTests : IDisposable
         hub.StatusFails = true;
         var supervisor = New();
         await supervisor.InitializeAsync();
-        Assert.Equal(0, supervisor.RequestStopForExit(TimeSpan.Zero).RequestsWritten);
+        var tray = supervisor.RequestStopForExit(TimeSpan.Zero);
+        Assert.Equal(0, tray.RequestsWritten);
+        Assert.True(tray.OwnerUnverified);
         Assert.Empty(StopFiles());
         var other = New();
         await other.InitializeAsync();
@@ -494,6 +496,21 @@ public sealed class SupervisorTests : IDisposable
         Assert.StartsWith(owned + ".", Assert.Single(StopFiles()));
         hub.StatusGate.SetResult();
         await init;
+    }
+
+    [Fact]
+    public async Task AnExitStopForAPendingIdIsKeptWhileItMayStillComeUp()
+    {
+        string pending = Id();
+        store.Update(s => s with { PendingInstance = pending, ExitStopRequested = pending, Linked = false });
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.Equal(pending, store.Current.ExitStopRequested);
+        // It comes up late: owned, and shown as asked to stop.
+        hub.Running = true; hub.Instance = pending;
+        await supervisor.RefreshAsync();
+        Assert.Equal(pending, store.Current.OwnedInstance);
+        Assert.True(supervisor.View.ExitStopPending);
     }
 
     [Fact]

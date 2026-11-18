@@ -103,7 +103,9 @@ public partial class App : System.Windows.Application
         if (exiting || supervisor is null) return;
         exiting = true;
         window?.PrepareExit();
-        await Task.Run(() => supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait));
+        ExitStopOutcome outcome = await Task.Run(() => supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait));
+        // §5.4: not stopped, and said so, when the app could not confirm it owns the running runner.
+        if (outcome.OwnerUnverified) Tell("실행기를 끄지 못했습니다(확인 불가). 앱이 켠 실행기인지 확인하지 못해 그대로 둡니다.");
         Quit();
     }
 

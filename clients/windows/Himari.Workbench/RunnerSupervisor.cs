@@ -329,10 +329,11 @@ public sealed class RunnerSupervisor
         if (!linked && !sessionEnding) return new ExitStopOutcome(0, false);
         // §5.4: a linked stop at tray exit leaves an owner the last status did not confirm (status failed, or
         // "instance: null"). Logoff writes it anyway (§5.5), and a pending id always gets its request (§5.3).
+        bool ownerLeft = false;
         if (!sessionEnding)
         {
             StatusReply? last; string? started; lock (gate) { last = status; started = startConfirmed; }
-            if (owned is not null && owned != started && !(last is { Running: true } && last.Instance == owned)) owned = null;
+            if (owned is not null && owned != started && !(last is { Running: true } && last.Instance == owned)) { owned = null; ownerLeft = true; }
         }
         var requests = new Dictionary<string, string>();
         foreach (string target in new[] { owned, pending }.OfType<string>().Distinct())
@@ -348,7 +349,7 @@ public sealed class RunnerSupervisor
             try { store.Update(s => s with { ExitStopRequested = asked }); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
-        if (requests.Count == 0) return new ExitStopOutcome(0, false);
+        if (requests.Count == 0) return new ExitStopOutcome(0, false, ownerLeft);
         // The whole wait, whatever the state file says meanwhile (§5.5): a pending runner may still come up, and a state
         // file that is missing or being replaced for a moment may come back with the acknowledgement.
         long until = system.UptimeMs + (long)ackWait.TotalMilliseconds;
@@ -357,11 +358,11 @@ public sealed class RunnerSupervisor
             StateFileRead read = RunnerProtocol.ReadStateFile(home);
             RunnerStateFile? state = read.File;
             if (state?.Instance is { } shown && requests.TryGetValue(shown, out string? request) && state.StopAck == request)
-                return new ExitStopOutcome(requests.Count, true);
+                return new ExitStopOutcome(requests.Count, true, ownerLeft);
             if (system.UptimeMs >= until) break;
             Thread.Sleep(100);
         }
-        return new ExitStopOutcome(requests.Count, false);
+        return new ExitStopOutcome(requests.Count, false, ownerLeft);
     }
 
     /// <summary>
@@ -431,7 +432,8 @@ public sealed class RunnerSupervisor
                 else if (askedAtMs >= id.DeadlineMs && (!reply.Running || reply.Instance is not null)) pending = null;
             }
             if (owned is not null && owned != pending && (!reply.Running || reply.Instance is not null && reply.Instance != owned)) owned = null;
-            if (exitStop is not null && (!reply.Running || reply.Instance is not null && reply.Instance != exitStop)) exitStop = null;
+            // Kept while it names a pending id that may still come up (§5.3): that runner is then shown as asked to stop.
+            if (exitStop is not null && exitStop != pending && (!reply.Running || reply.Instance is not null && reply.Instance != exitStop)) exitStop = null;
             if (owned == s.OwnedInstance && pending == s.PendingInstance && exitStop == s.ExitStopRequested) return s;
             return s with { OwnedInstance = owned, PendingInstance = pending, ExitStopRequested = exitStop };
         });
@@ -594,4 +596,5 @@ public sealed class RunnerSupervisor
     }
 }
 
-public sealed record ExitStopOutcome(int RequestsWritten, bool Acknowledged);
+/// <param name="OwnerUnverified">Tray exit left the owned runner because the last status could not confirm it (§5.4).</param>
+public sealed record ExitStopOutcome(int RequestsWritten, bool Acknowledged, bool OwnerUnverified = false);
