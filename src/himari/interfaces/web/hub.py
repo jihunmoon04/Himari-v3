@@ -23,6 +23,7 @@ One short request per call, run off the event loop. The live streams are in
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import socket
 import urllib.error
@@ -32,6 +33,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 TIMEOUT_SECONDS = 10.0
+RESOLVE_SECONDS = 40.0  # V3-P103 §4: a fence waits 30 s for the device's answer
+DIRS_SECONDS = 15.0  # V3-P103 §4: a device lists its folders
+MAX_IDS = 50  # V3-P103 H12: the requests one ``project_requests {ids}`` reads
 MAX_TEXT = 4000  # of one shown text: a request's title, a question, a choice
 MAX_LONG = 70_000  # of an agent's text, a tool's input or output, one side of a diff (the hub keeps an event to 64 KB)
 MAX_ITEMS = 50  # requests, and the choices or fields of one
@@ -174,8 +178,16 @@ def _names_by_agent(value: object) -> object:
             for agent, names in list(value.items())[:MAX_ITEMS] if isinstance(agent, str) and isinstance(names, list)}
 
 
+def _folders(value: object) -> object:
+    """A device's folders: project name to its path there (the operator's view only)."""
+    if not isinstance(value, dict):
+        return _BAD
+    return {name[:MAX_TEXT]: path[:MAX_TEXT] for name, path in list(value.items())[:MAX_SESSIONS]
+            if isinstance(name, str) and isinstance(path, str)}
+
+
 _names = _list_of(_name)
-TASK = _record({"id": _int, "status": _short, "agent": _short, "runner": _short, "profile": _short, "fresh": _bool,
+TASK =_record({"id": _int, "status": _short, "agent": _short, "runner": _short, "profile": _short, "fresh": _bool,
                 "model": _short, "effort": _short, "mode": _short, "prompt": _short, "created_at": _short,
                 "finished_at": _short, "session": _int})
 SESSION = _record({
@@ -198,8 +210,22 @@ PROJECTS = _record({
     "models": _names_by_agent, "efforts": _names_by_agent,
     "agents": _list_of(_record({"name": _short, "installed": _bool, "resting_until": _short, "modes": _names})),
     "runners": _list_of(_record({"name": _short, "agents": _names, "projects": _list_of(_name, MAX_SESSIONS),
-                                 "connected": _bool})),
+                                 "connected": _bool,
+                                 # V3-P103 §4: how the device takes project requests, and its folders by project
+                                 "approve": _record({"mode": _short, "roots": _list_of(_short), "why": _short}),
+                                 "folders": _folders})),
+    # H8: every name a device reported that a reservation held back, connected or not
+    "held": _list_of(_record({"project": _short, "runner": _short, "created_at": _short}), MAX_SESSIONS),
 })
+# V3-P103 §4: a project request as the user path gives it (REST and the list stream alike). ``same_name_on`` is
+# passed on but the page never merges it (the hub computes it from the holds, not the request's row).
+REQUEST = _record({
+    "id": _int, "kind": _short, "project": _short, "runner": _short, "origin": _short, "path": _short,
+    "create_dir": _bool, "agent": _short, "why": _text_of(500), "code": _short, "mode": _short, "state": _short,
+    "rev": _int, "result_path": _short, "reason": _short, "resolving": _bool, "created_at": _short,
+    "decided_at": _short, "expires_at": _short, "claimed_at": _short, "ended_at": _short, "same_name_on": _names,
+})
+_PROJECT = _record({"name": _short, "path": _short, "default_agent": _short, "preset": _short, "profile": _short})
 _DIFF = _record({"path": _short, "old": _long, "new": _long, "cut": _bool, "more": _int})
 BODIES: dict[str, Convert] = {
     "session": _record({"action": _short, "native_id": _short}),
@@ -296,6 +322,24 @@ def projects_view(raw: object) -> dict[str, Any]:
     return _view(PROJECTS, raw) or {}
 
 
+def project_request_view(raw: object) -> dict[str, Any] | None:
+    """A project request (V3-P103 §4), or None without its id, ``rev`` and ``state`` (the page merges by ``rev``).
+    ``resolving`` is false from a hub without H17."""
+    shown = _view(REQUEST, raw)
+    if shown is None or not isinstance(shown.get("id"), int) or not isinstance(shown.get("rev"), int) \
+            or not isinstance(shown.get("state"), str):
+        return None
+    shown.setdefault("resolving", False)
+    if shown["resolving"] is None:
+        shown["resolving"] = False
+    return shown
+
+
+def project_requests_of(items: object, limit: int = MAX_SESSIONS) -> list[dict[str, Any]]:
+    return [view for view in map(project_request_view, (items if isinstance(items, list) else [])[:limit])
+            if view is not None]
+
+
 def _options(**given: object) -> dict[str, object]:
     """The optional inputs the caller gave: one left out stays out (the hub's own default applies)."""
     return {name: value for name, value in given.items() if value is not None}
@@ -321,29 +365,36 @@ class HubClient:
             raise HubUnavailable("the hub's user token is empty")
         return token
 
-    def _post(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, op: str, body: dict[str, Any], timeout: float | None = None, *, changes: bool = False
+              ) -> dict[str, Any]:
+        """``changes``: the op changes the hub's state (V3-P103 §4.1), so a 5xx after the hub took it says nothing of
+        whether it was done: HubUnknown, not HubUnavailable."""
         token = self.token()
         request = urllib.request.Request(
             f"{self.url.rstrip('/')}/user/{op}", json.dumps(body).encode("utf-8"),
             {"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310 — the operator's URL
+            # noqa: S310 — the operator's URL
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 reply = json.loads(response.read() or b"{}")
         except urllib.error.HTTPError as error:
             if error.code == 400:  # the hub read the request and said no: its reason is safe to show
                 try:
                     detail = json.loads(error.read() or b"{}").get("error")
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, OSError, http.client.HTTPException):  # its words cut off
                     detail = None
                 raise HubRefused(detail if isinstance(detail, str) else "the hub refused this") from None
             if error.code in (401, 403):
                 raise HubMisconfigured(f"the hub answered HTTP {error.code}") from None
+            if changes and error.code >= 500:
+                raise HubUnknown(f"the hub answered HTTP {error.code}") from None
             raise HubUnavailable(f"the hub answered HTTP {error.code}") from None
         except urllib.error.URLError as error:
             if isinstance(error.reason, (ConnectionRefusedError, socket.gaierror)):
                 raise HubUnavailable("the hub could not be reached") from None  # nothing reached it
             raise HubUnknown("the hub did not answer") from None
-        except (OSError, ValueError):  # sent, and the answer was lost or unreadable: it may have been done
+        except (OSError, ValueError, http.client.HTTPException):  # sent, and the answer was lost, cut off or
+            # unreadable (IncompleteRead, a bad status line): it may have been done
             raise HubUnknown("the hub's answer was lost") from None
         if not isinstance(reply, dict):
             raise HubUnknown("the hub's answer was not readable")
@@ -362,8 +413,9 @@ class HubClient:
     async def cancel(self, task_id: int) -> None:
         await asyncio.to_thread(self._post, "cancel", {"id": task_id})
 
-    async def _call(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(self._post, op, body)
+    async def _call(self, op: str, body: dict[str, Any], timeout: float | None = None, *, changes: bool = False
+                    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self._post, op, body, timeout, changes=changes)
 
     async def projects(self) -> dict[str, Any]:
         return projects_view(await self._call("projects", {}))
@@ -441,3 +493,72 @@ class HubClient:
         reply = await self._call("preset", {"project": project, "preset": preset})
         shown = reply.get("preset")
         return {"project": project, "preset": shown[:MAX_TEXT] if isinstance(shown, str) else None}
+
+    # -- projects and device folders (V3-P103 §4; hub user-api-v1 §4.6) ------------------------
+
+    async def _request(self, op: str, body: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+        found = project_request_view((await self._call(op, body, timeout, changes=True)).get("request"))
+        if found is None:
+            raise HubUnknown("the hub's answer was not readable")
+        return found
+
+    async def project_requests(self, *, open_only: bool = False, limit: int | None = None,
+                               ids: list[int] | None = None) -> dict[str, Any]:
+        """``ids`` (H12): those requests whatever their state, and ``missing`` the ids the hub no longer has; null
+        when the hub did not say (a hub without H12)."""
+        body = {"ids": ids} if ids is not None else _options(open=open_only or None, limit=limit)
+        reply = await self._call("project_requests", body)
+        given = reply.get("requests")
+        if not isinstance(given, list):  # not an answer: the page must not take ids for gone
+            raise HubUnknown("the hub's answer was not readable")
+        found = project_requests_of(given, MAX_SESSIONS)
+        if ids is not None and len(found) != len(given):  # a record it could not read: not an answer for those ids
+            raise HubUnknown("the hub's answer was not readable")
+        missing = reply.get("missing")
+        return {"requests": found,
+                "missing": [item for item in missing[:MAX_SESSIONS] if isinstance(item, int)
+                            and not isinstance(item, bool)] if isinstance(missing, list) else None}
+
+    async def project_request(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``kind`` (create, add_folder), ``project``, ``runner``; ``path``, ``create_dir``, ``agent``,
+        ``client_key`` with ``key_time`` (H13) as given."""
+        return await self._request("project_request", body)
+
+    async def project_request_answer(self, request_id: int, approve: bool) -> dict[str, Any]:
+        return await self._request("project_request_answer", {"id": request_id, "approve": approve})
+
+    async def project_request_cancel(self, request_id: int) -> dict[str, Any]:
+        return await self._request("project_request_cancel", {"id": request_id})
+
+    async def project_request_resolve(self, request_id: int, *, force: bool = False,
+                                      outcome: str | None = None) -> dict[str, Any]:
+        """A ``lost`` request settled: without ``force`` the hub asks the device (up to 30 s)."""
+        return await self._request("project_request_resolve",
+                                   {"id": request_id, **({"force": True, "outcome": outcome} if force else {})},
+                                   RESOLVE_SECONDS)
+
+    async def project_folder_remove(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``project``, ``runner`` (and ``client_key`` with ``key_time``): a ``remove_folder`` request."""
+        return await self._request("project_folder_remove", body)
+
+    async def _project(self, op: str, body: dict[str, Any]) -> dict[str, Any]:
+        found = _view(_PROJECT, (await self._call(op, body, changes=True)).get("project"))
+        if found is None:
+            raise HubUnknown("the hub's answer was not readable")
+        return {"project": found}
+
+    async def project_set(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``project`` and only the settings given (null clears one)."""
+        return await self._project("project_set", body)
+
+    async def project_adopt(self, project: str, runner: str) -> dict[str, Any]:
+        return await self._project("project_adopt", {"project": project, "runner": runner})
+
+    async def runner_dirs(self, runner: str, path: str | None) -> dict[str, Any]:
+        """A ``user`` device's roots (no path) or the folders under one; names only."""
+        reply = await self._call("runner_dirs", _options(runner=runner, path=path), DIRS_SECONDS)
+        dirs = reply.get("dirs")
+        shown = reply.get("path")
+        return {"path": shown[:MAX_TEXT] if isinstance(shown, str) else None,
+                "dirs": [name[:MAX_TEXT] for name in (dirs if isinstance(dirs, list) else [])[:MAX_SESSIONS * 4]
+                         if isinstance(name, str)]}

@@ -1,7 +1,7 @@
 // Server state through TanStack Query (V3-P102 §7.1). The principal's event stream (/api/events) tells when to
 // read again: a job started or ended, a conversation changed. Nothing here polls while that stream is open.
 import { QueryClient, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { ApiError, onUnauthorized } from "@/api/client";
 import {
   conversationActivity,
@@ -12,7 +12,8 @@ import {
   readSession,
 } from "@/api/himari";
 import { readHubPending, readHubProjects, readHubSession, readHubTask } from "@/api/hub";
-import { onListSignal } from "@/features/hub/list";
+import { onListSignal, onProjectSignals } from "@/features/hub/list";
+import { requests } from "@/features/hub/requests";
 import { openStream } from "@/lib/sse";
 
 export const queryClient: QueryClient = new QueryClient({
@@ -109,7 +110,45 @@ export const useHubTask = (id: number | null, enabled: boolean) =>
     },
   });
 
-/** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
+// V3-P103 §4.1: after a lost answer to a settings change or an adoption, the projects are in doubt for the whole page
+// (every control of them, and over leaving a page) until a read of them that started after that moment comes in.
+let projectReads = 0; // reads started by readProjectsNow
+let projectsDoubtedSince: number | null = null; // the read count when the answer was lost
+const doubtListeners = new Set<() => void>();
+const tellDoubt = () => { for (const listener of doubtListeners) listener(); };
+
+/** A lost answer to a change of the projects: their controls stop until the projects are read again. */
+export function doubtProjects() {
+  projectsDoubtedSince = projectReads;
+  tellDoubt();
+}
+
+/** Signed out: nothing of it stays. */
+export function clearProjectsDoubt() {
+  projectsDoubtedSince = null;
+  tellDoubt();
+}
+
+/** The projects read now: a read of its own (one on its way may have started before a change), not the cache.
+ *  True when it went through; it then ends a doubt that began before it started. */
+export async function readProjectsNow(client: QueryClient): Promise<boolean> {
+  const started = ++projectReads;
+  try {
+    await client.cancelQueries({ queryKey: hubKeys.projects });
+    await client.fetchQuery({ queryKey: hubKeys.projects, queryFn: readHubProjects, staleTime: 0 });
+  } catch {
+    return false;
+  }
+  if (projectsDoubtedSince !== null && started > projectsDoubtedSince) clearProjectsDoubt();
+  return true;
+}
+
+/** The hub is set up here, whether or not its projects could be read just now: the list stream (and its polling
+ *  fallback, V3-P103 §5) keeps going while they cannot. */
+export const hubSetUp = (status: string) => status === "on" || status === "down";
+
+/** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on".
+ *  ``doubted``: a change of them may have been done and they were not read since (§4.1). */
 export function useHubProjects() {
   const notSetUp = (error: unknown) => error instanceof ApiError && error.status === 404;
   const query = useQuery({
@@ -121,10 +160,14 @@ export function useHubProjects() {
     retryDelay: (count) => Math.min(30_000, 2_000 * 2 ** count),
     refetchInterval: (q) => (q.state.error && !notSetUp(q.state.error) ? 30_000 : false),
   });
+  const doubted = useSyncExternalStore((listener) => {
+    doubtListeners.add(listener);
+    return () => doubtListeners.delete(listener);
+  }, () => projectsDoubtedSince !== null);
   const status = query.isLoading ? "loading"
     : query.error instanceof ApiError && query.error.status === 404 ? "off"
     : query.error ? "down" : "on";
-  return { ...query, status } as const;
+  return { ...query, status, doubted } as const;
 }
 
 export const useHubSessionDetail = (id: number) =>
@@ -132,6 +175,41 @@ export const useHubSessionDetail = (id: number) =>
 
 // what waits for the user may have changed (a session's activity or task, the list read whole): read it again
 onListSignal(() => void queryClient.invalidateQueries({ queryKey: hubKeys.pending }));
+
+// V3-P103 §5: a request that changed is merged by its rev; on ``projects``, a (re)connect and every tick of the
+// polling fallback the projects and the open and followed requests are read again
+let projectsReading: Promise<void> | null = null;
+let projectsAgain = false;
+
+/** The projects read again for a signal: never by joining a read already on its way (it may have begun before the
+ *  signal), and a signal that comes while it reads gives one more read after it (§5). */
+export function rereadProjectsQuery(client: QueryClient = queryClient): Promise<void> {
+  if (projectsReading) {
+    projectsAgain = true;
+    return projectsReading;
+  }
+  projectsReading = (async () => {
+    do {
+      projectsAgain = false;
+      try {
+        await client.cancelQueries({ queryKey: hubKeys.projects });
+        await client.invalidateQueries({ queryKey: hubKeys.projects });
+      } catch {
+        // the query reads again by itself (its retries); the next signal asks again
+      }
+    } while (projectsAgain);
+  })().finally(() => {
+    projectsReading = null;
+  });
+  return projectsReading;
+}
+
+const rereadProjects = () => {
+  void rereadProjectsQuery();
+  void requests.refresh();
+};
+onProjectSignals({ request: (data) => requests.merge(data), projects: rereadProjects, connected: rereadProjects,
+  polled: rereadProjects });
 
 export const useHubPending = (enabled: boolean) =>
   useQuery({ queryKey: hubKeys.pending, queryFn: readHubPending, enabled, refetchInterval: 30_000 });

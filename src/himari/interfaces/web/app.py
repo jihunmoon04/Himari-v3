@@ -178,6 +178,7 @@ from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
 from himari.interfaces.web import hub_stream, next_page
 from himari.interfaces.web.hub import (
+    MAX_IDS as MAX_PROJECT_REQUEST_IDS,
     MAX_PROMPT as HUB_MAX_PROMPT,
     HubBusy,
     HubClient,
@@ -536,6 +537,65 @@ class HubRenameBody(_Body):
     """H2: a session's name; the hub checks it (one line, 80 characters). Empty or null clears it."""
 
     title: str | None = Field(max_length=400)
+
+
+_HUB_PATH_LIMIT = 4000  # a folder's path on a device
+
+
+class HubClientKey(_Body):
+    """V3-P103 H13: the key this server gave (``POST /api/hub/client-key``) and the time it gave it."""
+
+    client_key: str | None = Field(default=None, min_length=1, max_length=64)
+    key_time: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class HubProjectRequestBody(HubClientKey):
+    """V3-P103 §4: a project made on a device, or a device's folder added to one. Names travel in a body, never in a
+    URL path (the hub's names may hold ``/``, ``?``, ``#``)."""
+
+    kind: Literal["create", "add_folder"]
+    project: str = Field(min_length=1, max_length=200)
+    runner: str = Field(min_length=1, max_length=200)
+    path: str | None = Field(default=None, min_length=1, max_length=_HUB_PATH_LIMIT)
+    create_dir: StrictBool | None = None
+    agent: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class HubProjectAnswerBody(_Body):
+    approve: StrictBool
+
+
+class HubResolveBody(_Body):
+    """``force`` only when the device is lost, with what the user says happened there."""
+
+    force: StrictBool = False
+    outcome: Literal["applied", "not_applied"] | None = None
+
+
+class HubProjectSetBody(_Body):
+    """Only the settings given are changed; null clears one."""
+
+    project: str = Field(min_length=1, max_length=200)
+    agent: str | None = Field(default=None, max_length=200)
+    profile: str | None = Field(default=None, max_length=200)
+    preset: str | None = Field(default=None, max_length=200)
+
+
+class HubFolderRemoveBody(HubClientKey):
+    project: str = Field(min_length=1, max_length=200)
+    runner: str = Field(min_length=1, max_length=200)
+
+
+class HubAdoptBody(_Body):
+    project: str = Field(min_length=1, max_length=200)
+    runner: str = Field(min_length=1, max_length=200)
+
+
+class HubRunnerDirsBody(_Body):
+    """A path in the body: it never lands in an access log's URL."""
+
+    runner: str = Field(min_length=1, max_length=200)
+    path: str | None = Field(default=None, min_length=1, max_length=_HUB_PATH_LIMIT)
 
 
 class McpDefaultBody(_Body):
@@ -2635,6 +2695,122 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def hub_preset(body: HubPresetBody, project: str = Path(min_length=1, max_length=200),
                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         return await hub_call(hub_for(who).preset(project, body.preset))
+
+    # -- projects and device folders (V3-P103 §4) ----------------------------------------------
+    # Names and paths travel in bodies (or a query value), never in a URL path. The log keeps a request's id, state
+    # and kind and the kind of a failure only: never a path, a pairing code or the hub's own words.
+
+    async def hub_project_call[T](op: str, work: Awaitable[T]) -> T:
+        try:
+            done = await work
+        except (HubRefused, HubNotFound, HubUnavailable) as error:
+            mapped = hub_error(error)
+            log.info("hub %s: %s", op, mapped.code)
+            raise mapped from None
+        if isinstance(done, dict) and isinstance(done.get("id"), int):
+            log.info("hub %s: request %s %s %s", op, done["id"], done.get("kind"), done.get("state"))
+        return done
+
+    def client_key_of(body: HubClientKey) -> dict[str, str]:
+        if (body.client_key is None) != (body.key_time is None):
+            raise ApiError(400, "invalid_request", "Give client_key and key_time together.")
+        return {} if body.client_key is None or body.key_time is None else {
+            "client_key": body.client_key, "key_time": body.key_time}
+
+    @app.get("/api/hub/project-requests")
+    async def hub_project_requests(open: bool = False, limit: int = Query(default=100, ge=1, le=500),
+                                   ids: str | None = Query(default=None, min_length=1, max_length=1000),
+                                   who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The requests, the latest first; ``open``: every one not ended. ``ids`` (H12, comma-separated, at most
+        50): those whatever their state, and ``missing`` the ids the hub no longer has (null: the hub did not say)."""
+        client = hub_for(who)
+        asked: list[int] | None = None
+        if ids is not None:
+            parts = ids.split(",")
+            if len(parts) > MAX_PROJECT_REQUEST_IDS or not all(part.isdigit() and len(part) <= 16 for part in parts):
+                raise ApiError(400, "invalid_request", "ids: at most 50 request ids, comma-separated.")
+            asked = list(dict.fromkeys(int(part) for part in parts))
+            if any(not 1 <= item <= 2**53 for item in asked):
+                raise ApiError(400, "invalid_request", "ids: at most 50 request ids, comma-separated.")
+        return await hub_project_call("project_requests", client.project_requests(
+            open_only=open, limit=None if open or asked is not None else limit, ids=asked))
+
+    @app.post("/api/hub/project-requests")
+    async def hub_project_request(body: HubProjectRequestBody, who: PrincipalId = Depends(principal)
+                                  ) -> dict[str, Any]:
+        """A project made on a device (``create``) or a device's folder added (``add_folder``): the request."""
+        client = hub_for(who)
+        if body.agent is not None and body.kind != "create":
+            raise ApiError(400, "invalid_request", "agent is for a new project only.")
+        sent: dict[str, Any] = {"kind": body.kind, "project": body.project, "runner": body.runner}
+        sent.update({name: value for name, value in (("path", body.path), ("create_dir", body.create_dir),
+                                                     ("agent", body.agent)) if value is not None})
+        sent.update(client_key_of(body))
+        return {"request": await hub_project_call("project_request", client.project_request(sent))}
+
+    @app.post("/api/hub/project-requests/{request_id}/answer")
+    async def hub_project_request_answer(body: HubProjectAnswerBody, request_id: int = Path(ge=1, le=2**53),
+                                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """HIMARI's request allowed or refused (only the user path may)."""
+        client = hub_for(who)
+        return {"request": await hub_project_call("project_request_answer",
+                                                  client.project_request_answer(request_id, body.approve))}
+
+    @app.post("/api/hub/project-requests/{request_id}/cancel")
+    async def hub_project_request_cancel(request_id: int = Path(ge=1, le=2**53),
+                                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        client = hub_for(who)
+        return {"request": await hub_project_call("project_request_cancel",
+                                                  client.project_request_cancel(request_id))}
+
+    @app.post("/api/hub/project-requests/{request_id}/resolve")
+    async def hub_project_request_resolve(body: HubResolveBody, request_id: int = Path(ge=1, le=2**53),
+                                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A ``lost`` request settled: the hub asks the device (up to 30 s; this waits 40), or with ``force`` the
+        user says what happened there."""
+        client = hub_for(who)
+        if body.force != (body.outcome is not None):
+            raise ApiError(400, "invalid_request", "force goes with an outcome (applied, not_applied), and only it.")
+        return {"request": await hub_project_call("project_request_resolve", client.project_request_resolve(
+            request_id, force=body.force, outcome=body.outcome))}
+
+    @app.post("/api/hub/projects/settings")
+    async def hub_project_settings(body: HubProjectSetBody, who: PrincipalId = Depends(principal)
+                                   ) -> dict[str, Any]:
+        """The project's default agent, profile and permission preset: only those given (null clears one)."""
+        client = hub_for(who)
+        given: dict[str, Any] = {name: getattr(body, name) for name in ("agent", "profile", "preset")
+                                 if name in body.model_fields_set}
+        return await hub_project_call("project_set", client.project_set({"project": body.project, **given}))
+
+    @app.post("/api/hub/projects/remove-folder")
+    async def hub_project_folder_remove(body: HubFolderRemoveBody, who: PrincipalId = Depends(principal)
+                                        ) -> dict[str, Any]:
+        """Not removed at once: a ``remove_folder`` request the device ends when it takes the folder out."""
+        client = hub_for(who)
+        sent = {"project": body.project, "runner": body.runner, **client_key_of(body)}
+        return {"request": await hub_project_call("project_folder_remove", client.project_folder_remove(sent))}
+
+    @app.post("/api/hub/client-key")
+    async def hub_client_key(who: PrincipalId = Depends(principal)) -> dict[str, str]:
+        """H13: a key for one request the page may send again after ``hub_unknown``, with this server's time (the
+        hub judges its age by its own clock). Nothing goes to the hub."""
+        hub_for(who)
+        return {"client_key": secrets.token_hex(16),
+                "key_time": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")}
+
+    @app.post("/api/hub/projects/adopt")
+    async def hub_project_adopt(body: HubAdoptBody, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A device's held folder joins the project of its name (made when there is none)."""
+        client = hub_for(who)
+        return await hub_project_call("project_adopt", client.project_adopt(body.project, body.runner))
+
+    @app.post("/api/hub/runner-dirs")
+    async def hub_runner_dirs(body: HubRunnerDirsBody, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A ``user`` device's roots, or the folders under one (names only). A read, but a POST: the path stays out
+        of the URL."""
+        client = hub_for(who)
+        return await hub_project_call("runner_dirs", client.runner_dirs(body.runner, body.path))
 
     @app.get("/api/hub/stream")
     async def hub_list_stream(request: Request, who: PrincipalId = Depends(principal)) -> StreamingResponse:

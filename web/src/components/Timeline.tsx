@@ -9,6 +9,7 @@ import type { Item, Shown, ToolStep, Turn } from "@/features/timeline";
 import { cn } from "@/lib/cn";
 import { AssistantText } from "./AssistantText";
 import { DelegationCard } from "./DelegationCard";
+import { AskedProjectCard } from "./AskedProjectCard";
 import { DiffView, diffStats } from "./DiffView";
 import { Files, MemoryLine, References } from "./TimelineFiles";
 
@@ -291,6 +292,8 @@ export function Timeline({ items, live, running, working, renderRequest, convers
             return <TurnLine key={item.key} turn={item.turn} />;
           case "delegation":
             return <DelegationCard key={item.key} delegation={item.delegation} />;
+          case "project_request":
+            return <AskedProjectCard key={item.key} asked={item.asked} />;
           case "files":
             return <Files key={item.key} files={item.files} />;
           case "memory":

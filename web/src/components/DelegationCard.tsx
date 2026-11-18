@@ -8,7 +8,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Bot, CircleAlert, CircleCheck, LoaderCircle, ShieldQuestion } from "lucide-react";
 import { useEffect } from "react";
 import { Link } from "react-router";
-import { hubKeys, useHubProjects, useHubTask } from "@/app/queries";
+import { hubKeys, hubSetUp, useHubProjects, useHubTask } from "@/app/queries";
 import { useHubList } from "@/features/hub/list";
 import type { Delegation } from "@/features/timeline";
 import { cn } from "@/lib/cn";
@@ -22,7 +22,7 @@ export function DelegationCard({ delegation, compact }: { delegation: Delegation
   const hub = useHubProjects();
   const on = hub.status === "on";
   const task = useHubTask(delegation.taskId, on);
-  const list = useHubList(on);
+  const list = useHubList(hubSetUp(hub.status));
   const now = task.data?.task;
   // once the task is read, its session is the answer, null too (a send whose session was lost runs nowhere yet);
   // before that, the session the call named

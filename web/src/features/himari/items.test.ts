@@ -138,3 +138,33 @@ describe("reduceLive", () => {
     expect(reduceLive(writing, { event: "snapshot", data: { run_id: "r1", text: "x", ended: true } }).text).toBe("");
   });
 });
+
+describe("project requests HIMARI made (V3-P103 §6.6)", () => {
+  const call = (id: string, args: Record<string, unknown>, tool = "hub/hub_project_request") =>
+    event(Number(id.slice(1)) * 10, "assistant_tool_calls", { run_id: "r", calls: [{ call_id: id, tool_id: tool, arguments: args }] });
+  const result = (id: string, text: string, is_error = false) =>
+    event(Number(id.slice(1)) * 10 + 1, "tool_result", { run_id: "r", call_id: id, text, is_error });
+  const args = { kind: "create", project: "site", runner: "linux", why: "for the docs" };
+
+  it("draws a card with the request's id after its call; a refusal says why", () => {
+    const items = toItems([
+      call("c1", args), result("c1", JSON.stringify({ request: { id: 42, state: "waiting_user", rev: 1 } })),
+      call("c2", args), result("c2", "기기 linux가 연결돼 있지 않습니다", true),
+      call("c3", args), result("c3", "not json"),
+      call("c4", args),
+      call("c5", { open: true }, "hub/hub_project_requests"), // a listing stays a Tool block
+    ], "hub");
+    const asked = items.flatMap((i) => (i.kind === "project_request" ? [i.asked] : []));
+    expect(asked.map((a) => [a.requestId, a.error, a.answered])).toEqual([
+      [42, null, true], [null, "기기 linux가 연결돼 있지 않습니다", true],
+      [null, "The hub's answer could not be read.", true]]);
+    expect(asked[0]).toMatchObject({ kind: "create", project: "site", runner: "linux" });
+    expect(items.filter((i) => i.kind === "work")).toHaveLength(4);
+  });
+
+  it("is not drawn for a server that is not the hub", () => {
+    const items = toItems([call("c1", args, "other/hub_project_request"),
+      result("c1", JSON.stringify({ request: { id: 1 } }))], "hub");
+    expect(items.some((i) => i.kind === "project_request")).toBe(false);
+  });
+});
