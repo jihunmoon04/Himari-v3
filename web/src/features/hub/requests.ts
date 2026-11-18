@@ -97,7 +97,16 @@ export class RequestStore {
   merge(raw: unknown, quiet = false): boolean {
     if (!valid(raw)) return false;
     const before = this.entries.get(raw.id);
-    if (before?.request && before.request.rev >= raw.rev) return false;
+    if (before?.request && before.request.rev >= raw.rev) {
+      if (!before.unknown) return false;
+      // taken for gone (a hub without H12 said nothing of it), but the hub has it after all: no longer unknown, and
+      // the newer of the two records stands
+      const kept = before.request.rev > raw.rev ? before.request : strip(raw);
+      this.entries.set(raw.id, { request: kept, unknown: false,
+        endedSeen: isOpen(kept) ? null : before.endedSeen ?? this.now() });
+      if (!quiet) this.emit();
+      return true;
+    }
     const request = strip(raw);
     this.entries.set(raw.id, {
       request,

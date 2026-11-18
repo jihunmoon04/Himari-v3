@@ -172,6 +172,19 @@ describe("the project requests' store", () => {
     expect(store.getSnapshot().tracked[0]).toBe(105);
   });
 
+  it("takes back one taken for gone when the hub gives it again, at the same rev too", async () => {
+    const hub = new FakeHub();
+    hub.h12 = false;
+    hub.set(req(4, 2, "waiting_device"));
+    const store = new RequestStore(hub, () => null);
+    store.merge(req(4, 2, "waiting_device"));
+    hub.ids.mockResolvedValueOnce({ requests: [], missing: null }); // without H12 it said nothing of it
+    await store.readIds([4]);
+    expect(states(store)).toEqual({ 4: "unknown" });
+    await store.refresh(); // the open list has it, the same rev
+    expect(states(store)).toEqual({ 4: "waiting_device" });
+  });
+
   it("asked to read while it reads, it reads once more after", async () => {
     const hub = new FakeHub();
     const store = new RequestStore(hub, () => null);
