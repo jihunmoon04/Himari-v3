@@ -46,7 +46,7 @@ public partial class App : System.Windows.Application
                 break;
         }
         // §3: a second launch in this session shows this app, the first-run wizard included, so listen before it opens.
-        instance.Listen(() => Dispatcher.BeginInvoke(ShowFromSecondLaunch));
+        instance.Listen(() => Dispatcher.InvokeAsync(ShowFromSecondLaunch).Task);
         // The supervisor and the logoff handlers exist before the wizard: a settings file may already hold an owned or
         // pending instance, and logoff during the wizard still writes their stop requests (§5.5). Nothing runs against
         // the hub until InitializeAsync, apart from the wizard's own check and save, which go through its queue.

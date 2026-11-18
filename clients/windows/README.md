@@ -133,6 +133,6 @@ dotnet test clients/windows/Himari.Workbench.Tests/Himari.Workbench.Tests.csproj
 - **로그인 시 시작:** 설정에서 켜면 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 `HIMARI Workbench`(기본 끔).
 - **옮겨진 뒤:** `workbench.json`이 없고 `workbench.json.migrated`가 있으면 "HIMARI 앱으로 옮겨졌습니다"를 보이고 끝난다.
 
-hub 쪽 계약(H9·H10·H14·H15·H16)은 hub B1에서 들어온다. 그 전에는 `Himari.Workbench.FakeHub`(시험용 가짜 hub 명령: `runner status|start|stop`(`--json` 있이·없이), 실행기 자신(자기 Job, 전이 잠금), 상태 파일, 멈춤 요청 폴더를 문서 §5.3·§5.4·§9대로)로 시험한다. 손으로 해 보려면 설정의 hub 실행 파일을 그 exe로, 인자를 비우고, hub 홈을 빈 폴더로 둔다. 가짜의 동작은 hub 홈의 `fake-hub.json`(`registration`, `status_fail`, `old_hub`, `instance_null`, `ignore_stop` 등)으로 바꾼다.
+hub 쪽 계약(H9·H10·H14·H15·H16)은 hub B1에서 들어온다. 그 전에는 `Himari.Workbench.FakeHub`(시험용 가짜 hub 명령: `runner status|start|stop`(`--json` 있이·없이), 실행기 자신(자기 Job, 전이 잠금), 상태 파일, 멈춤 요청 폴더를 문서 §5.3·§5.4·§9대로)로 시험한다. 손으로 해 보려면 설정의 hub 실행 파일을 그 exe로, 인자를 비우고, hub 홈을 빈 폴더로 둔다. 가짜의 동작은 hub 홈의 `fake-hub.json`(`registration`(없으면 hub처럼 `runner.json`·`runner.token`으로 판단), `status_fail`, `old_hub`, `instance_null`, `ignore_stop` 등)으로 바꾼다.
 
 단위 시험은 §10의 `RunnerSupervisor`·`WorkbenchSettings` 항목(상태 표 전부, pending·owned 규칙, 시작 중 종료, 종료 뒤 끝난 `start`, 이어 받기, 소유한 것만 끄기, 확인 불가면 끄지 않음, 직렬화, 셸 없는 인자 목록, 오류 줄 가리기, 공백·한글 경로)과 이동 규칙·마법사 판정을 덮는다. 실제 hub 실행기, 로그오프, 원격 데스크톱 세션, WebView2 Runtime 없는 PC는 실기 확인이 필요하다.

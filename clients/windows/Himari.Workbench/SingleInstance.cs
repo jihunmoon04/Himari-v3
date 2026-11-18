@@ -44,8 +44,12 @@ public sealed class SingleInstance : IDisposable
         return null;
     }
 
-    /// <summary>Listens for "show" from a second launch in this session; <paramref name="show"/> runs on a pool thread.</summary>
-    public void Listen(Action show) => _ = Task.Run(async () =>
+    /// <summary>
+    /// Listens for "show" from a second launch in this session. <paramref name="show"/> is called on a pool thread and
+    /// returns when the window was really shown; "ok" is sent only then, within the 5 s, so a hung first app is reported
+    /// as not answering (§3).
+    /// </summary>
+    public void Listen(Func<Task> show) => _ = Task.Run(async () =>
     {
         while (!stop.IsCancellationRequested)
         {
@@ -59,7 +63,7 @@ public sealed class SingleInstance : IDisposable
                 using var writer = new StreamWriter(server, new UTF8Encoding(false), 256, leaveOpen: true) { AutoFlush = true };
                 await writer.WriteLineAsync($"session {SessionId}".AsMemory(), talk.Token);
                 string? line = await reader.ReadLineAsync(talk.Token);
-                if (line == Show) { show(); await writer.WriteLineAsync("ok".AsMemory(), talk.Token); }
+                if (line == Show) { await show().WaitAsync(talk.Token); await writer.WriteLineAsync("ok".AsMemory(), talk.Token); }
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { return; }
             catch (Exception ex) when (ex is IOException or OperationCanceledException or UnauthorizedAccessException) { await Task.Delay(200); }

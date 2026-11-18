@@ -17,6 +17,9 @@ public sealed class FakeHubProcessTests : IDisposable
     {
         home = temp.Sub("hub 홈 (테스트)");
         work = temp.Sub("hub 폴더");
+        // A registered device (H14): runner.json with a server and a token file (test values only).
+        File.WriteAllText(Path.Combine(home, "runner.json"), "{\"server\": \"https://himari.example\"}");
+        File.WriteAllText(Path.Combine(home, "runner.token"), "test-token");
     }
 
     public void Dispose() => temp.Dispose();
@@ -71,6 +74,20 @@ public sealed class FakeHubProcessTests : IDisposable
         await Task.Delay(4500);
         Assert.False(RunnerProtocol.ParseStatus((await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).StdOut)!.Running);
         Assert.False(File.Exists(Path.Combine(home, RunnerProtocol.StateFileName)));
+    }
+
+    [Fact]
+    public async Task RegistrationComesFromTheHubFiles()
+    {
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        async Task<StatusReply> Status() => RunnerProtocol.ParseStatus((await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).StdOut)!;
+        Assert.Equal(Registration.Ok, (await Status()).Registration);
+        File.WriteAllText(Path.Combine(home, "runner.token"), "  ");
+        var empty = await Status();
+        Assert.Equal(Registration.Broken, empty.Registration);
+        Assert.Equal("토큰 파일이 비었습니다", empty.Why);
+        File.Delete(Path.Combine(home, "runner.json"));
+        Assert.Equal(Registration.Missing, (await Status()).Registration);
     }
 
     [Fact]

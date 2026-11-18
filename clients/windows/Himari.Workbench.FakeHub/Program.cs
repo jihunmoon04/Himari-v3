@@ -102,16 +102,17 @@ string? StartedAt(int pid) => Native.StartedAt(pid);
 // creation time matches started_at. Null when the transition lock stays busy: the status is a failure then.
 object? Status()
 {
+    var (registration, why) = Registration();
     using var transition = Transition();
     if (transition is null) return null;
     using (var probe = TryLock(LockPath(), TimeSpan.Zero))
-        if (probe is not null) return new { running = false, instance = (string?)null, pid = (int?)null, started_at = (string?)null, registration = config.Registration, why = config.Why };
+        if (probe is not null) return new { running = false, instance = (string?)null, pid = (int?)null, started_at = (string?)null, registration, why };
     var read = RunnerProtocol.ReadStateFile(home);
     string? instance = null; int? pid = null; string? started = null;
     if (read.File is { Pid: { } p } state && StartedAt(p) is { } created && created == state.StartedAt)
     { instance = state.Instance; pid = p; started = state.StartedAt; }
     if (config.InstanceNull) { instance = null; }
-    return new { running = true, instance, pid, started_at = started, registration = config.Registration, why = config.Why };
+    return new { running = true, instance, pid, started_at = started, registration, why };
 }
 
 async Task<int> Start()
@@ -240,6 +241,27 @@ async Task<int> StopLegacy()
     return 0;
 }
 
+// H14 registration, from the hub home's files as the hub reads them: runner.json with a server, and a non-empty
+// runner.token. fake-hub.json may override it ("registration", "why") to try the wizard's branches.
+(string, string?) Registration()
+{
+    if (config.Registration is { } forced) return (forced, config.Why);
+    string settings = Path.Combine(home, "runner.json");
+    if (!File.Exists(settings)) return ("missing", "이 기기는 실행기로 등록되지 않았습니다 (himari-hub runner setup)");
+    try
+    {
+        using var json = JsonDocument.Parse(File.ReadAllText(settings));
+        if (!json.RootElement.TryGetProperty("server", out var server) || server.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(server.GetString()))
+            return ("broken", "runner.json에 서버 주소가 없습니다");
+    }
+    catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException) { return ("broken", "runner.json을 읽지 못했습니다"); }
+    string token = Path.Combine(home, "runner.token");
+    if (!File.Exists(token)) return ("broken", "토큰 파일(runner.token)이 없습니다");
+    try { if (File.ReadAllText(token).Trim().Length == 0) return ("broken", "토큰 파일이 비었습니다"); }
+    catch (IOException) { return ("broken", "토큰 파일(runner.token)을 읽지 못했습니다"); }
+    return ("ok", null);
+}
+
 // The runner lock probed under the transition lock (null: the transition lock stayed busy).
 bool? RunnerLockFree()
 {
@@ -364,7 +386,7 @@ partial class Program
 
 sealed record FakeConfig
 {
-    public string Registration { get; init; } = "ok";
+    public string? Registration { get; init; }
     public string? Why { get; init; }
     public bool StatusFail { get; init; }
     public bool OldHub { get; init; }
