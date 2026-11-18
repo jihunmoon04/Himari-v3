@@ -47,6 +47,8 @@ public static class RunnerProtocol
         if (registration == Registration.Unknown || !Has(root, "instance", JsonValueKind.String) || !HasInt(root, "pid")
             || !Has(root, "started_at", JsonValueKind.String) || !Has(root, "why", JsonValueKind.String)) return null;
         string? instance = String(root, "instance");
+        // "Off" with an instance, pid or start time is a contradiction, not "off" (§5.2): unreadable.
+        if (!running.GetBoolean() && (instance is not null || Int(root, "pid") is not null || String(root, "started_at") is not null)) return null;
         if (instance is not null && !InstanceId.TryParse(instance, out _)) instance = null;
         return new StatusReply(running.GetBoolean(), running.GetBoolean() ? instance : null, Int(root, "pid"), String(root, "started_at"), registration, String(root, "why"));
     }

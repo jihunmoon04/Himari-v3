@@ -9,7 +9,12 @@ namespace Himari.Workbench;
 /// </summary>
 public partial class HubFields : System.Windows.Controls.UserControl
 {
-    public HubFields() => InitializeComponent();
+    public HubFields()
+    {
+        InitializeComponent();
+        // A typed or pasted hub folder sets up the default command too, not only the "찾아보기" button (§5.6).
+        HubFolder.LostFocus += (_, _) => ApplyHubFolder();
+    }
 
     public void Load(HubCommand? command, string home)
     {
@@ -23,6 +28,7 @@ public partial class HubFields : System.Windows.Controls.UserControl
     /// <summary>The command as entered, or why it cannot be used.</summary>
     public (HubCommand? Command, string? Home, string? Problem) Read()
     {
+        ApplyHubFolder();
         string executable = Executable.Text.Trim().Trim('"');
         string working = WorkingDirectory.Text.Trim().Trim('"');
         string home = HubHome.Text.Trim().Trim('"');
@@ -43,7 +49,21 @@ public partial class HubFields : System.Windows.Controls.UserControl
     {
         if (PickFolder("hub 폴더(pyproject.toml이 있는 곳)") is not { } folder) return;
         HubFolder.Text = folder;
-        string uv = Executable.Text.Trim().Length > 0 ? Executable.Text.Trim() : HubSetup.FindOnPath() ?? "";
+        ApplyHubFolder();
+    }
+
+    /// <summary>
+    /// The hub folder field, when it holds an absolute path, makes the command <c>uv run --project &lt;folder&gt; himari-hub</c>
+    /// working in that folder, unless the command is already exactly that. A command that is not a <c>uv</c> one (another
+    /// executable typed in by hand) is left alone.
+    /// </summary>
+    private void ApplyHubFolder()
+    {
+        string folder = HubFolder.Text.Trim().Trim('"');
+        if (folder.Length == 0 || !Path.IsPathFullyQualified(folder)) return;
+        string executable = Executable.Text.Trim().Trim('"');
+        string uv = executable.Length > 0 ? executable : HubSetup.FindOnPath() ?? "";
+        if (uv.Length > 0 && !string.Equals(Path.GetFileName(uv), "uv.exe", StringComparison.OrdinalIgnoreCase)) return;
         var command = HubSetup.UvCommand(uv, folder);
         Executable.Text = command.Executable;
         Arguments.Text = string.Join(Environment.NewLine, command.Arguments);
