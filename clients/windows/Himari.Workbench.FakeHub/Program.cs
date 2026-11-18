@@ -257,8 +257,13 @@ async Task<int> StopLegacy()
     catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException) { return ("broken", "runner.json을 읽지 못했습니다"); }
     string token = Path.Combine(home, "runner.token");
     if (!File.Exists(token)) return ("broken", "토큰 파일(runner.token)이 없습니다");
-    try { if (File.ReadAllText(token).Trim().Length == 0) return ("broken", "토큰 파일이 비었습니다"); }
-    catch (IOException) { return ("broken", "토큰 파일(runner.token)을 읽지 못했습니다"); }
+    // Never its contents (it may be a real hub home): only that it is not empty and can be opened for reading.
+    try
+    {
+        if (new FileInfo(token).Length == 0) return ("broken", "토큰 파일이 비었습니다");
+        using (new FileStream(token, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { }
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return ("broken", "토큰 파일(runner.token)을 읽지 못했습니다"); }
     return ("ok", null);
 }
 

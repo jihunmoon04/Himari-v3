@@ -84,7 +84,8 @@ public sealed class SettingsStore(string directory)
             WorkbenchSettings? value = null;
             try { value = JsonSerializer.Deserialize<WorkbenchSettings>(text, Json); }
             catch (Exception ex) when (ex is JsonException or NotSupportedException or ArgumentException) { }
-            if (value is null || value.Hub is { } hub && (hub.Executable is null || hub.Arguments is null || hub.WorkingDirectory is null))
+            // A hub command with a missing part, or a null argument, is a broken file too (§7): moved aside, wizard.
+            if (value is null || value.Hub is { } hub && (hub.Executable is null || hub.Arguments is null || hub.Arguments.Any(argument => argument is null) || hub.WorkingDirectory is null))
             {
                 try { return new SettingsLoad(SettingsLoadKind.Broken, null, MoveAside()); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return new SettingsLoad(SettingsLoadKind.Unreadable, null, Error: ex.Message); }

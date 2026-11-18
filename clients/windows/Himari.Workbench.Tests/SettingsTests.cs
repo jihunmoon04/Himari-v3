@@ -29,6 +29,18 @@ public sealed class SettingsTests : IDisposable
     }
 
     [Fact]
+    public void ANullHubArgumentMakesTheFileBroken()
+    {
+        var store = new SettingsStore(temp.Path);
+        string Settings(string arguments) =>
+            $"{{\"version\": 1, \"server\": \"https://himari.example\", \"hub\": {{\"executable\": \"C:/tools/uv.exe\", \"arguments\": {arguments}, \"working_directory\": \"C:/hub\"}}}}";
+        File.WriteAllText(store.PathName, Settings("[\"run\"]"));
+        Assert.Equal(SettingsLoadKind.Ok, store.Load().Kind);
+        File.WriteAllText(store.PathName, Settings("[\"run\", null]"));
+        Assert.Equal(SettingsLoadKind.Broken, store.Load().Kind);
+    }
+
+    [Fact]
     public void ABrokenFileNeverMovesOverAnEarlierOne()
     {
         var store = new SettingsStore(temp.Path);

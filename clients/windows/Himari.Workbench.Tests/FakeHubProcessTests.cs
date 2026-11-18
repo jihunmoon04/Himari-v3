@@ -82,7 +82,7 @@ public sealed class FakeHubProcessTests : IDisposable
         var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
         async Task<StatusReply> Status() => RunnerProtocol.ParseStatus((await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).StdOut)!;
         Assert.Equal(Registration.Ok, (await Status()).Registration);
-        File.WriteAllText(Path.Combine(home, "runner.token"), "  ");
+        File.WriteAllText(Path.Combine(home, "runner.token"), "");
         var empty = await Status();
         Assert.Equal(Registration.Broken, empty.Registration);
         Assert.Equal("토큰 파일이 비었습니다", empty.Why);
