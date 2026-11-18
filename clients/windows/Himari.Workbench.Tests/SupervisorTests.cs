@@ -400,6 +400,23 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task ExitKeepsWatchingWhileTheStateFileIsMissingForAMoment()
+    {
+        string owned = Id();
+        store.Update(s => s with { OwnedInstance = owned });
+        var supervisor = New();
+        var back = Task.Run(async () =>
+        {
+            await Wait.Until(() => StopFiles().Length == 1);
+            await Task.Delay(1000);
+            hub.WriteState(owned, "stopping", StopFiles().Single());
+        });
+        var outcome = supervisor.RequestStopForExit(RunnerSupervisor.ExitAckWait);
+        await back;
+        Assert.True(outcome.Acknowledged);
+    }
+
+    [Fact]
     public void ExitWaitsAtMostFiveSecondsForAnAcknowledgement()
     {
         string owned = Id();

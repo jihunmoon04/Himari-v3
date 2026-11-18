@@ -57,6 +57,43 @@ internal static partial class Native
         return job;
     }
 
+    /// <summary>
+    /// A Job without limits that <c>start</c> puts its child into, only to end the child with all its descendants and
+    /// to confirm they are gone. Closing it ends nothing (a started runner outlives <c>start</c>).
+    /// </summary>
+    public static SafeFileHandle TrackingJob(SafeProcessHandle child)
+    {
+        var job = CreateJobObjectW(IntPtr.Zero, null);
+        if (job.IsInvalid || !AssignProcessHandleToJobObject(job, child))
+        {
+            int error = Marshal.GetLastPInvokeError();
+            job.Dispose();
+            throw new Win32Exception(error);
+        }
+        return job;
+    }
+
+    /// <summary>Ends every process in the Job and waits until none is left; false when that is not seen in time.</summary>
+    public static bool TerminateAllAndWait(SafeFileHandle job, int waitMs)
+    {
+        TerminateJobObject(job, 1);
+        var until = Environment.TickCount64 + waitMs;
+        while (true)
+        {
+            if (QueryInformationJobObject(job, 1, out BasicAccountingInformation info, (uint)Marshal.SizeOf<BasicAccountingInformation>(), IntPtr.Zero)
+                && info.ActiveProcesses == 0) return true;
+            if (Environment.TickCount64 >= until) return false;
+            Thread.Sleep(50);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicAccountingInformation
+    {
+        public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct BasicLimitInformation
     {
@@ -115,4 +152,16 @@ internal static partial class Native
 
     [LibraryImport("kernel32.dll")]
     private static partial IntPtr GetCurrentProcess();
+
+    [LibraryImport("kernel32.dll", EntryPoint = "AssignProcessToJobObject", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AssignProcessHandleToJobObject(SafeFileHandle job, SafeProcessHandle process);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool TerminateJobObject(SafeFileHandle job, uint exitCode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryInformationJobObject(SafeFileHandle job, int infoClass, out BasicAccountingInformation info, uint length, IntPtr returnLength);
 }

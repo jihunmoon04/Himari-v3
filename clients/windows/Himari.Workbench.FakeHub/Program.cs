@@ -124,6 +124,8 @@ async Task<int> Start()
     info.Environment["HIMARI_RUNNER_INSTANCE"] = id;
     info.Environment["HIMARI_HUB_HOME"] = home;
     using var child = Process.Start(info)!;
+    // H10: the child and everything under it can be ended and confirmed gone through this Job (see the cancel below).
+    using var tracking = Native.TrackingJob(child.SafeHandle);
     var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(config.StartConfirmMs);
     while (DateTime.UtcNow < until)
     {
@@ -146,9 +148,8 @@ async Task<int> Start()
         }
         await Task.Delay(50);
     }
-    try { child.Kill(entireProcessTree: true); child.WaitForExit(5000); }
-    catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { }
-    Print(child.HasExited ? new { error = "cancelled" } : (object)new { error = "unconfirmed" });
+    // "cancelled" only once the child and all its descendants are seen gone; otherwise "unconfirmed".
+    Print(Native.TerminateAllAndWait(tracking, 5000) ? new { error = "cancelled" } : (object)new { error = "unconfirmed" });
     return 1;
 }
 

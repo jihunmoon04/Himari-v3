@@ -62,6 +62,18 @@ public sealed class FakeHubProcessTests : IDisposable
     }
 
     [Fact]
+    public async Task AStartThatCannotConfirmIsCancelledWithNothingLeft()
+    {
+        Configure(new { StartConfirmMs = 1000, RunnerDelayMs = 4000 });
+        var runner = new ProcessHubCommandRunner(FakeHubExe.Command(work), home);
+        var start = await runner.RunAsync(["runner", "start", "--json"], TimeSpan.FromSeconds(30));
+        Assert.Equal(StartError.Cancelled, RunnerProtocol.ParseStart(start.StdOut).Error);
+        await Task.Delay(4500);
+        Assert.False(RunnerProtocol.ParseStatus((await runner.RunAsync(["runner", "status", "--json"], TimeSpan.FromSeconds(30))).StdOut)!.Running);
+        Assert.False(File.Exists(Path.Combine(home, RunnerProtocol.StateFileName)));
+    }
+
+    [Fact]
     public async Task MissingExecutableIsReported()
     {
         var result = await new ProcessHubCommandRunner(new HubCommand(Path.Combine(work, "없음.exe"), [], work), home).RunAsync(["runner"], TimeSpan.FromSeconds(5));

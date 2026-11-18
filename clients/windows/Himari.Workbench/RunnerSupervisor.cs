@@ -331,19 +331,15 @@ public sealed class RunnerSupervisor
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         if (requests.Count == 0) return new ExitStopOutcome(0, false);
-        // A pending runner may still come up within the wait and acknowledge its request; with no pending request,
-        // a missing state file or another instance's means nothing will acknowledge.
-        bool pendingAsked = pending is not null && requests.ContainsKey(pending);
+        // The whole wait, whatever the state file says meanwhile (§5.5): a pending runner may still come up, and a state
+        // file that is missing or being replaced for a moment may come back with the acknowledgement.
         long until = system.UptimeMs + (long)ackWait.TotalMilliseconds;
         while (true)
         {
             StateFileRead read = RunnerProtocol.ReadStateFile(home);
             RunnerStateFile? state = read.File;
-            if (state?.Instance is { } shown && requests.TryGetValue(shown, out string? request))
-            {
-                if (state.StopAck == request) return new ExitStopOutcome(requests.Count, true);
-            }
-            else if (!pendingAsked && read.Kind != StateFileKind.Broken) break;
+            if (state?.Instance is { } shown && requests.TryGetValue(shown, out string? request) && state.StopAck == request)
+                return new ExitStopOutcome(requests.Count, true);
             if (system.UptimeMs >= until) break;
             Thread.Sleep(100);
         }
