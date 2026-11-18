@@ -60,6 +60,9 @@ public partial class SetupWizard : Window
         RegistrationResult.Text = "";
         var (command, home, problem) = Hub.Read();
         if (problem is not null) { Say(HubResult, problem, false); return; }
+        // §5.1: a changed executable or home is confirmed (and refused while the app holds a runner) before the wizard
+        // runs it at all, not only when it is saved. Finish does not ask again for the command checked here.
+        if (SettingsChanges.Check(store.Current, command!, home!, holdsRunner(), this) is { } refusal) { Say(HubResult, refusal, false); return; }
         CheckHubButton.IsEnabled = false;
         Say(HubResult, "확인하는 중… (처음에는 몇 분 걸릴 수 있습니다)", null);
         try
@@ -89,7 +92,7 @@ public partial class SetupWizard : Window
         var (command, home, problem) = Hub.Read();
         if (problem is not null || checkedCommand is null || !command!.SameAs(checkedCommand) || home != checkedHome)
         { Say(HubResult, "hub 명령을 바꿨습니다. 다시 \"hub 확인\"을 누르세요.", false); FinishButton.IsEnabled = false; return; }
-        if (SettingsChanges.Check(store.Current, command, home!, holdsRunner(), this) is { } refusal) { Say(HubResult, refusal, false); return; }
+        // Confirmed at "hub 확인" for exactly this command and home; the queue still refuses it while a runner is held.
         bool linked = Linked.IsChecked == true, atLogin = StartAtLogin.IsChecked == true;
         saving = true; IsEnabled = false;
         try
