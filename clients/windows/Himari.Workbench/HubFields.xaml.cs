@@ -9,6 +9,9 @@ namespace Himari.Workbench;
 /// </summary>
 public partial class HubFields : System.Windows.Controls.UserControl
 {
+    // The hub folder the command was last built from (or loaded with): only a change of the folder rebuilds it.
+    private string appliedFolder = "";
+
     public HubFields()
     {
         InitializeComponent();
@@ -22,6 +25,7 @@ public partial class HubFields : System.Windows.Controls.UserControl
         Arguments.Text = command is null ? "" : string.Join(Environment.NewLine, command.Arguments);
         WorkingDirectory.Text = command?.WorkingDirectory ?? "";
         HubFolder.Text = command is not null && HubSetup.UsesUv(command) ? command.Arguments[2] : "";
+        appliedFolder = HubFolder.Text.Trim().Trim('"');
         HubHome.Text = home;
     }
 
@@ -49,22 +53,24 @@ public partial class HubFields : System.Windows.Controls.UserControl
     {
         if (PickFolder("hub 폴더(pyproject.toml이 있는 곳)") is not { } folder) return;
         HubFolder.Text = folder;
+        appliedFolder = ""; // picking a folder is asking for its default command, even the same folder again
         ApplyHubFolder();
     }
 
     /// <summary>
-    /// The hub folder field, when it holds an absolute path, makes the command <c>uv run --project &lt;folder&gt; himari-hub</c>
-    /// working in that folder, unless the command is already exactly that. A command that is not a <c>uv</c> one (another
-    /// executable typed in by hand) is left alone.
+    /// A new absolute path in the hub folder field makes the command <c>uv run --project &lt;folder&gt; himari-hub</c> working
+    /// in that folder. Only a change of the folder does: arguments or a working folder edited by hand afterwards are kept
+    /// (§5.1), and a command that is not a <c>uv</c> one is left alone.
     /// </summary>
     private void ApplyHubFolder()
     {
         string folder = HubFolder.Text.Trim().Trim('"');
-        if (folder.Length == 0 || !Path.IsPathFullyQualified(folder)) return;
+        if (folder.Length == 0 || !Path.IsPathFullyQualified(folder) || string.Equals(folder, appliedFolder, StringComparison.OrdinalIgnoreCase)) return;
         string executable = Executable.Text.Trim().Trim('"');
         string uv = executable.Length > 0 ? executable : HubSetup.FindOnPath() ?? "";
         if (uv.Length > 0 && !string.Equals(Path.GetFileName(uv), "uv.exe", StringComparison.OrdinalIgnoreCase)) return;
         var command = HubSetup.UvCommand(uv, folder);
+        appliedFolder = folder;
         Executable.Text = command.Executable;
         Arguments.Text = string.Join(Environment.NewLine, command.Arguments);
         WorkingDirectory.Text = command.WorkingDirectory;
