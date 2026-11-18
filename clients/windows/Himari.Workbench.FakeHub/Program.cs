@@ -125,7 +125,12 @@ async Task<int> Start()
     info.Environment["HIMARI_HUB_HOME"] = home;
     using var child = Process.Start(info)!;
     // H10: the child and everything under it can be ended and confirmed gone through this Job (see the cancel below).
-    using var tracking = Native.TrackingJob(child.SafeHandle);
+    // A child that already ended cannot join; it then has nothing left to end and the results below still follow.
+    System.ComponentModel.Win32Exception? notTracked = null;
+    Microsoft.Win32.SafeHandles.SafeFileHandle? tracking = null;
+    try { tracking = Native.TrackingJob(child.SafeHandle); }
+    catch (System.ComponentModel.Win32Exception ex) { notTracked = ex; }
+    using var trackingHandle = tracking;
     var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(config.StartConfirmMs);
     while (DateTime.UtcNow < until)
     {
@@ -149,7 +154,8 @@ async Task<int> Start()
         await Task.Delay(50);
     }
     // "cancelled" only once the child and all its descendants are seen gone; otherwise "unconfirmed".
-    Print(Native.TerminateAllAndWait(tracking, 5000) ? new { error = "cancelled" } : (object)new { error = "unconfirmed" });
+    bool gone = tracking is not null ? Native.TerminateAllAndWait(tracking, 5000) : child.HasExited && notTracked is not null;
+    Print(gone ? new { error = "cancelled" } : (object)new { error = "unconfirmed" });
     return 1;
 }
 

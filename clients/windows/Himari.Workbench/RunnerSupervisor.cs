@@ -246,7 +246,10 @@ public sealed class RunnerSupervisor
     public Task<HubResult?> ProbeAsync(HubCommand command, string home, TimeSpan timeout) => Queue<HubResult?>(async () =>
     {
         if (hubFor(store.Current with { Hub = command, HubHome = home }) is not { } candidate) return null;
-        return Launch(candidate, ["runner", "status", "--json"], timeout) is { } running ? await running.ConfigureAwait(false) : null;
+        if (Launch(candidate, ["runner", "status", "--json"], timeout) is not { } running) return null;
+        HubResult result = await running.ConfigureAwait(false);
+        LogCommand("status (setup)", result); // §5.1: exit code and masked last line, like every hub command
+        return result;
     }, null);
 
     /// <summary>The last <c>runner status</c> run, for explaining a failure (the wizard, §5.6).</summary>
