@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <!-- The UI-free parts of the app, compiled in as the companion's contract tests do. -->
+    <Compile Include="..\Himari.Workbench\HubProcess.cs" Link="App\HubProcess.cs" />
+    <Compile Include="..\Himari.Workbench\InstanceId.cs" Link="App\InstanceId.cs" />
+    <Compile Include="..\Himari.Workbench\RunnerProtocol.cs" Link="App\RunnerProtocol.cs" />
+    <Compile Include="..\Himari.Workbench\RunnerSupervisor.cs" Link="App\RunnerSupervisor.cs" />
+    <Compile Include="..\Himari.Workbench\WorkbenchSettings.cs" Link="App\WorkbenchSettings.cs" />
+    <Compile Include="..\Himari.Workbench\WorkbenchLog.cs" Link="App\WorkbenchLog.cs" />
+    <Compile Include="..\Himari.Workbench\OriginPolicy.cs" Link="App\OriginPolicy.cs" />
+    <Compile Include="..\Himari.Workbench\HubSetup.cs" Link="App\HubSetup.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Built first; the tests run its exe as the hub command. -->
+    <ProjectReference Include="..\Himari.Workbench.FakeHub\Himari.Workbench.FakeHub.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+</Project>
