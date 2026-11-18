@@ -257,8 +257,10 @@ public sealed class SupervisorTests : IDisposable
         string id = hub.CallsOf("start").Single().Split(' ')[3];
         Assert.Equal(id, store.Current.PendingInstance);
         Assert.Null(store.Current.OwnedInstance);
-        Assert.Equal(RunnerPhase.Error, supervisor.View.Phase);
+        // §5.3: the start is unsettled, so it shows as awaiting confirmation (with what went wrong) and cannot start again.
+        Assert.Equal(RunnerPhase.AwaitingConfirm, supervisor.View.Phase);
         Assert.Equal(message, supervisor.View.Detail);
+        Assert.False(supervisor.View.CanStart);
     }
 
     [Fact]
@@ -425,6 +427,20 @@ public sealed class SupervisorTests : IDisposable
         store.Update(s => s with { Linked = false, OwnedInstance = owned });
         var outcome = New().RequestStopForExit(TimeSpan.Zero, sessionEnding: true);
         Assert.Equal(1, outcome.RequestsWritten);
+        Assert.StartsWith(owned + ".", Assert.Single(StopFiles()));
+    }
+
+    [Fact]
+    public async Task ALogoffDuringAnUnlinkedTrayExitStillWritesItsRequests()
+    {
+        string owned = Id();
+        store.Update(s => s with { Linked = false, OwnedInstance = owned });
+        var supervisor = New();
+        var tray = Task.Run(() => supervisor.RequestStopForExit(TimeSpan.FromSeconds(1)));
+        await Task.Delay(50);
+        var logoff = supervisor.RequestStopForExit(TimeSpan.Zero, sessionEnding: true);
+        await tray;
+        Assert.Equal(1, logoff.RequestsWritten);
         Assert.StartsWith(owned + ".", Assert.Single(StopFiles()));
     }
 

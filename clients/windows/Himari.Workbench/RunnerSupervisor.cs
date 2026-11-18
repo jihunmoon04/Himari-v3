@@ -26,7 +26,7 @@ public sealed record RunnerView(RunnerPhase Phase, RunnerConnection Connection =
             _ => "",
         },
         RunnerPhase.Starting => "실행기: 켜는 중…",
-        RunnerPhase.AwaitingConfirm => "실행기: 켜는 중(확인 대기)",
+        RunnerPhase.AwaitingConfirm => "실행기: 켜는 중(확인 대기)" + (Detail is { Length: > 0 } ? $" · {Detail}" : ""),
         RunnerPhase.Stopping => "실행기: 끄는 중(작업 정리, 최대 1분 45초)",
         RunnerPhase.Unverifiable => $"실행기: 확인 불가 · {Detail}",
         RunnerPhase.Error => $"실행기: 오류 · {Detail}",
@@ -88,6 +88,8 @@ public sealed class RunnerSupervisor
     private int exitRequested;
     private readonly ManualResetEventSlim exitDone = new(false);
     private ExitStopOutcome? exitOutcome;
+    private volatile bool exitPassWasSession;
+    private int sessionPass;
 
     private StatusReply? status;
     private string? statusFailure;
@@ -296,8 +298,12 @@ public sealed class RunnerSupervisor
             // Another caller (tray exit, WPF's or SystemEvents' SessionEnding) is writing the requests and waiting
             // already: return only when it is done, so Windows is not told too early that this app is ready to end.
             exitDone.Wait(ackWait + TimeSpan.FromSeconds(1));
+            // An unlinked tray exit writes nothing; a logoff that comes meanwhile still writes its requests (§5.5).
+            if (sessionEnding && !exitPassWasSession && Interlocked.Exchange(ref sessionPass, 1) == 0) return ExitCore(ackWait, true);
             return exitOutcome ?? new ExitStopOutcome(0, false);
         }
+        exitPassWasSession = sessionEnding;
+        if (sessionEnding) Interlocked.Exchange(ref sessionPass, 1);
         try { return exitOutcome = ExitCore(ackWait, sessionEnding); }
         finally { exitDone.Set(); }
     }
@@ -546,11 +552,14 @@ public sealed class RunnerSupervisor
         if (exiting) return new RunnerView(RunnerPhase.Exiting);
         if (operation is { } op) return new RunnerView(op);
         Registration registration = status?.Registration ?? Registration.Unknown;
+        // §5.3: while a start of ours is unsettled it is "켜는 중(확인 대기)", its error shown with it, and nothing starts.
+        if (operationError is not null && status is not null && s.PendingInstance is { } unsettled && status.Instance != unsettled)
+            return new RunnerView(RunnerPhase.AwaitingConfirm, Detail: operationError);
         if (operationError is not null) return new RunnerView(RunnerPhase.Error, Detail: operationError, Registration: registration, RegistrationWhy: status?.Why);
         if (status is null)
             return statusFailure is not null ? new RunnerView(RunnerPhase.Unverifiable, Detail: statusFailure)
                 : hubFor(s) is null ? new RunnerView(RunnerPhase.NotConfigured) : new RunnerView(RunnerPhase.Checking);
-        if (s.PendingInstance is { } pending && status.Instance != pending) return new RunnerView(RunnerPhase.AwaitingConfirm);
+        if (s.PendingInstance is { } pending && status.Instance != pending) return new RunnerView(RunnerPhase.AwaitingConfirm, Detail: operationError);
         if (!status.Running) return new RunnerView(RunnerPhase.Off, Registration: registration, RegistrationWhy: status.Why);
         if (status.Instance is null) return new RunnerView(RunnerPhase.Running, RunnerConnection.UnknownIdentity, Pid: status.Pid, Registration: registration);
         RunnerStateFile? state = file.File;
