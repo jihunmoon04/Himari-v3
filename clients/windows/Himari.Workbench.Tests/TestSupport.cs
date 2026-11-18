@@ -52,6 +52,9 @@ public sealed class ScriptedHub : IHubCommandRunner
     public string StatusStdOut { get; set; } = "";
     /// <summary>How long a status takes to answer, in ms.</summary>
     public int StatusDelay { get; set; }
+    /// <summary>When set, status calls from number <see cref="HoldStatusFrom"/> (1-based) on wait for it.</summary>
+    public TaskCompletionSource? StatusGate { get; set; }
+    public int HoldStatusFrom { get; set; } = 1;
     /// <summary>The next start's reply; null = start succeeds with the id it was given.</summary>
     public Func<string, string>? StartReply { get; set; }
     public TaskCompletionSource? StartGate { get; set; }
@@ -75,6 +78,7 @@ public sealed class ScriptedHub : IHubCommandRunner
             {
                 case "status":
                     await Task.Delay(StatusDelay);
+                    if (StatusGate is { } statusGate && CallsOf("status").Length >= HoldStatusFrom) await statusGate.Task;
                     if (StatusFails) return new HubResult(HubOutcome.Exited, 1, StatusStdOut, StatusStdErr);
                     return Ok(StatusExitCode, new { running = Running, instance = Running && !HideInstance ? Instance : null, pid = Running ? 4242 : (int?)null,
                         started_at = Running ? "2026-11-18T00:00:00Z" : null, registration = Registration, why = Why });

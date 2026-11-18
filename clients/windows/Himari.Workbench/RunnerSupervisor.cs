@@ -100,6 +100,9 @@ public sealed class RunnerSupervisor
     private long lastCheckMs = long.MinValue;
     private bool checkQueued;
     private HubResult? lastStatusResult;
+    // The instance a successful start confirmed, until the next status answers (or fails): tray exit counts it as
+    // confirmed (§5.3), so a start that just succeeded still gets its stop request.
+    private string? startConfirmed;
 
     public RunnerSupervisor(SettingsStore store, Func<WorkbenchSettings, IHubCommandRunner?> hubFor, ISystemInfo system, WorkbenchLog log)
     {
@@ -328,8 +331,8 @@ public sealed class RunnerSupervisor
         // "instance: null"). Logoff writes it anyway (§5.5), and a pending id always gets its request (§5.3).
         if (!sessionEnding)
         {
-            StatusReply? last; lock (gate) last = status;
-            if (owned is not null && !(last is { Running: true } && last.Instance == owned)) owned = null;
+            StatusReply? last; string? started; lock (gate) { last = status; started = startConfirmed; }
+            if (owned is not null && owned != started && !(last is { Running: true } && last.Instance == owned)) owned = null;
         }
         var requests = new Dictionary<string, string>();
         foreach (string target in new[] { owned, pending }.OfType<string>().Distinct())
@@ -394,7 +397,7 @@ public sealed class RunnerSupervisor
         HubResult result = await running.ConfigureAwait(false);
         // Only a clean exit with a complete reply counts (§5.2): anything else is "확인 불가", never "off".
         StatusReply? reply = result is { Outcome: HubOutcome.Exited, ExitCode: 0 } ? RunnerProtocol.ParseStatus(result.StdOut) : null;
-        lock (gate) { lastCheckMs = system.UptimeMs; lastStatusResult = result; }
+        lock (gate) { lastCheckMs = system.UptimeMs; lastStatusResult = result; startConfirmed = null; }
         if (reply is null)
         {
             LogCommand("status", result);
@@ -477,8 +480,8 @@ public sealed class RunnerSupervisor
         if (reply is { Error: StartError.None } && reply.Instance == id)
         {
             // Even when the app is exiting by now, this only records the result: the runner has its stop request already.
+            lock (gate) { startConfirmed = id; operationError = null; }
             SafeUpdate(s => s with { OwnedInstance = id, PendingInstance = s.PendingInstance == id ? null : s.PendingInstance });
-            lock (gate) operationError = null;
             // What the status bar shows comes from runner status (§5.2), not from the start's own reply.
             if (!exiting) await CheckCore(); else Publish();
             return null;

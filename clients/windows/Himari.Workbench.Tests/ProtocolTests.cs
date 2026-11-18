@@ -55,6 +55,7 @@ public sealed class ProtocolTests
     [InlineData("{\"running\": false}")]
     [InlineData("{\"running\": false, \"instance\": null, \"pid\": null, \"started_at\": null, \"registration\": \"later\", \"why\": null}")]
     [InlineData("{\"running\": false, \"registration\": \"ok\"}")]
+    [InlineData("{\"running\": false, \"instance\": null, \"pid\": 1.5, \"started_at\": null, \"registration\": \"ok\", \"why\": null}")]
     [InlineData("{\"running\": true, \"instance\": \"7.5.abc\", \"pid\": \"12\", \"started_at\": \"x\", \"registration\": \"ok\", \"why\": null}")]
     public void UnreadableStatusIsAFailure(string stdout) => Assert.Null(RunnerProtocol.ParseStatus(stdout));
 

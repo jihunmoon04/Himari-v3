@@ -44,7 +44,7 @@ public static class RunnerProtocol
         };
         // H14 names six keys; a reply missing one, or with a value of the wrong kind, or without a known registration
         // is incomplete: a failed status, never "off" (§5.2).
-        if (registration == Registration.Unknown || !Has(root, "instance", JsonValueKind.String) || !Has(root, "pid", JsonValueKind.Number)
+        if (registration == Registration.Unknown || !Has(root, "instance", JsonValueKind.String) || !HasInt(root, "pid")
             || !Has(root, "started_at", JsonValueKind.String) || !Has(root, "why", JsonValueKind.String)) return null;
         string? instance = String(root, "instance");
         if (instance is not null && !InstanceId.TryParse(instance, out _)) instance = null;
@@ -151,6 +151,10 @@ public static class RunnerProtocol
 
     private static string? String(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    /// <summary>The key is there, with a whole number (Int32) or null.</summary>
+    private static bool HasInt(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out _));
 
     /// <summary>The key is there, with a value of this kind or null.</summary>
     private static bool Has(JsonElement root, string name, JsonValueKind kind) =>

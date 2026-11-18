@@ -480,6 +480,23 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task TrayExitRightAfterASuccessfulStartStillAsksThatRunnerToStop()
+    {
+        // The first status passes and the start succeeds; the follow-up status is held, so the last status still says off.
+        hub.StatusGate = new TaskCompletionSource(); hub.HoldStatusFrom = 2;
+        var supervisor = New();
+        Task init = supervisor.InitializeAsync();
+        await Wait.Until(() => hub.CallsOf("status").Length == 2);
+        string owned = store.Current.OwnedInstance!;
+        Assert.False(supervisor.LastStatus!.Running);
+        var outcome = supervisor.RequestStopForExit(TimeSpan.Zero);
+        Assert.Equal(1, outcome.RequestsWritten);
+        Assert.StartsWith(owned + ".", Assert.Single(StopFiles()));
+        hub.StatusGate.SetResult();
+        await init;
+    }
+
+    [Fact]
     public async Task ABrokenStateFileWhileOffIsAskedAboutOnce()
     {
         store.Update(s => s with { Linked = false });
