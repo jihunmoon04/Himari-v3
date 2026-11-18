@@ -514,6 +514,19 @@ public sealed class SupervisorTests : IDisposable
     }
 
     [Fact]
+    public async Task AnUnreadableBootIdKeepsPendingInsteadOfFailing()
+    {
+        string pending = Id();
+        store.Update(s => s with { PendingInstance = pending });
+        system.BootIdFails = true;
+        var supervisor = New();
+        await supervisor.InitializeAsync();
+        Assert.Equal(pending, store.Current.PendingInstance);
+        Assert.Empty(hub.CallsOf("start"));
+        Assert.Equal(RunnerPhase.AwaitingConfirm, supervisor.View.Phase);
+    }
+
+    [Fact]
     public async Task ABrokenStateFileWhileOffIsAskedAboutOnce()
     {
         store.Update(s => s with { Linked = false });

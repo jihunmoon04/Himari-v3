@@ -24,7 +24,14 @@ public sealed class TempFolder : IDisposable
 public sealed class FakeSystem : ISystemInfo
 {
     private readonly Stopwatch clock = Stopwatch.StartNew();
-    public long BootId { get; set; } = 7;
+    private long bootId = 7;
+    /// <summary>When true, reading BootId fails as WindowsSystemInfo does when the registry value is missing.</summary>
+    public bool BootIdFails { get; set; }
+    public long BootId
+    {
+        get => BootIdFails ? throw new InvalidOperationException("no BootId") : bootId;
+        set => bootId = value;
+    }
     public long Offset { get; set; } = 1_000_000;
     public long UptimeMs => Offset + clock.ElapsedMilliseconds;
     public DateTimeOffset Now => DateTimeOffset.Now;

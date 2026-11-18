@@ -429,7 +429,7 @@ public sealed class RunnerSupervisor
                 if (!InstanceId.TryParse(pending, out var id)) pending = null;
                 else if (reply.Instance == pending) { owned = pending; pending = null; }
                 // Another boot: a runner with this id can never come up.
-                else if (id.BootId != system.BootId) pending = null;
+                else if (CurrentBootId() is { } boot && id.BootId != boot) pending = null;
                 // A status asked after the deadline that is off or a confirmed other instance settles it; "instance: null"
                 // never does, nor does one asked before the deadline that only came back after it.
                 else if (askedAtMs >= id.DeadlineMs && (!reply.Running || reply.Instance is not null)) pending = null;
@@ -510,6 +510,13 @@ public sealed class RunnerSupervisor
         Registration.Broken => $"실행기 등록에 문제가 있습니다: {reply.Why ?? "이유 모름"}",
         _ => null,
     };
+
+    /// <summary>Windows BootId, or null when it cannot be read: then no pending id is dropped for "another boot" (§5.3).</summary>
+    private long? CurrentBootId()
+    {
+        try { return system.BootId; }
+        catch (InvalidOperationException) { return null; }
+    }
 
     /// <summary>§5.1: the app log holds the hub command's exit code and its masked last stderr line, nothing else.</summary>
     private void LogCommand(string verb, HubResult result)
