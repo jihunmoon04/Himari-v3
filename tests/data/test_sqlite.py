@@ -272,6 +272,7 @@ _ADDED_IN = {
          *(f"ALTER TABLE memories DROP COLUMN {c}" for c in ("reminded_at", "remind_attempts", "remind_wake",
                                                                "remind_state", "remind_instant", "remind_at"))),
     18: ("ALTER TABLE wakes DROP COLUMN held_run_id",),
+    19: (),  # V3-P107 §2: data only (told reminders become delivered)
 }
 
 
@@ -286,13 +287,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 18
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 19
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -321,10 +322,32 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v18 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v19 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+def test_a_v18_told_reminder_is_delivered_after_the_upgrade(tmp_path: Path) -> None:
+    """V3-P107 §2: ``told`` is no more — said in its Conversation, so delivered; the rest stays."""
+    path = tmp_path / "h.db"
+    old_database(path, 18)
+    store = SqliteStore(path)
+    data = SqliteData(store)
+    told = asyncio.run(data.save_memory(SCOPE.principal_id, MemoryCategory.LOOP, "약 먹기"))
+    kept = asyncio.run(data.save_memory(SCOPE.principal_id, MemoryCategory.LOOP, "물 마시기"))
+    store.close()
+    tamper(path, f"UPDATE memories SET remind_state='told', remind_wake='wake_1' WHERE memory_id={told.memory_id}",
+           f"UPDATE memories SET remind_state='scheduled' WHERE memory_id={kept.memory_id}",
+           "PRAGMA user_version=18")
+    store = SqliteStore(path)
+    try:
+        rows = dict(((r[0], (r[1], r[2])) for r in store.connection.execute(
+            "SELECT memory_id, remind_state, remind_wake FROM memories")))
+        assert rows[told.memory_id] == ("delivered", None)
+        assert rows[kept.memory_id] == ("scheduled", None)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"

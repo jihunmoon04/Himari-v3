@@ -188,7 +188,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -626,10 +626,15 @@ CREATE TABLE wake_keys (
 _V18_ADDITIONS = """
 ALTER TABLE wakes ADD COLUMN held_run_id TEXT;
 """
+# v19 (V3-P107 §2): no reminder is ``told`` any more — one told to a sleeping device was said in
+# its Conversation, so it counts as delivered. Data only: the tables stay as they are.
+_V19_ADDITIONS = """
+UPDATE memories SET remind_state='delivered', remind_wake=NULL WHERE remind_state='told';
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
-              _V18_ADDITIONS)  # what each version from v3 added
+              _V18_ADDITIONS, _V19_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -2667,9 +2672,9 @@ class SqliteData:
                     raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"wake key {key!r} was taken")
                 tx.execute("INSERT INTO wake_keys (owner, key, wake_id, created_at) VALUES (?, ?, ?, ?)",
                            scope.principal_id, key, wake_id, now)
-            for memory_id in reminders:  # V3-P90 §5.1: a told one is told again
+            for memory_id in reminders:
                 claimed = tx.execute("UPDATE memories SET remind_state='claimed', remind_wake=? WHERE owner=?"
-                                     " AND memory_id=? AND remind_state IN ('scheduled', 'told')"
+                                     " AND memory_id=? AND remind_state='scheduled'"
                                      " AND retired_at IS NULL", wake_id, scope.principal_id, memory_id)
                 if claimed.rowcount != 1:
                     raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"reminder m{memory_id} is not waiting")
@@ -2694,18 +2699,9 @@ class SqliteData:
             tx.execute("UPDATE wakes SET status=?, ended_at=? WHERE wake_id=?", status.value, now, wake_id)
             # §5.3 (re-review P2): only reminders still claimed by this very wake
             if status is WakeStatus.ANSWERED:
-                asleep = [r.memory_id for r in _wake(row).reasons
-                          if r.kind is WakeKind.REMINDER and r.asleep]
-                for memory_id in asleep:  # V3-P90 §5.1: told to a sleeping device, not seen yet
-                    tx.execute("UPDATE memories SET remind_state='told', reminded_at=? WHERE owner=?"
-                               " AND memory_id=? AND remind_state='claimed' AND remind_wake=?",
-                               now, principal, memory_id, wake_id)
                 tx.execute("UPDATE memories SET remind_state='delivered', reminded_at=?, remind_wake=NULL"
                            " WHERE owner=? AND remind_state='claimed' AND remind_wake=?", now, principal, wake_id)
             else:
-                tx.execute("UPDATE memories SET remind_state='told', remind_wake=NULL WHERE owner=?"
-                           " AND remind_state='claimed' AND remind_wake=? AND reminded_at IS NOT NULL",
-                           principal, wake_id)  # V3-P90 §5.1: told before, its teller and moment kept
                 tx.execute("UPDATE memories SET remind_attempts=remind_attempts+1, remind_wake=NULL,"
                            " remind_state=CASE WHEN remind_attempts+1 >= ? THEN 'missed' ELSE 'scheduled' END"
                            " WHERE owner=? AND remind_state='claimed' AND remind_wake=?",
@@ -2817,41 +2813,8 @@ class SqliteData:
     async def miss_reminders(self, principal: PrincipalId, before: datetime) -> int:
         with self._tx() as tx:
             return tx.execute("UPDATE memories SET remind_state='missed' WHERE owner=?"
-                              " AND remind_state IN ('scheduled', 'told')"  # V3-P90 §5.1: told, never seen
+                              " AND remind_state='scheduled'"
                               " AND remind_instant<? AND retired_at IS NULL", principal, _timestamp(before)).rowcount
-
-    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str | None, datetime], ...]:
-        with self._tx() as tx:
-            # PR #163 review P1-3: the wake that told it ended at its reminded_at (one moment, one
-            # transaction); a wake that tried to tell it again and failed is not its teller.
-            # Re-review P2: a teller purged with its Conversation leaves it with none.
-            rows = tx.all("SELECT m.memory_id, w.wake_id, m.reminded_at FROM memories m LEFT JOIN wakes w"
-                          " ON w.owner=m.owner AND w.ended_at=m.reminded_at AND w.status='answered'"
-                          " WHERE m.owner=? AND m.remind_state='told' AND m.retired_at IS NULL"
-                          " AND m.reminded_at IS NOT NULL ORDER BY m.memory_id, w.wake_id", principal)
-            told: dict[int, tuple[int, str | None, datetime]] = {}
-            for r in rows:
-                told.setdefault(int(r["memory_id"]), (int(r["memory_id"]), r["wake_id"],
-                                                      datetime.fromisoformat(r["reminded_at"])))
-            return tuple(told.values())
-
-    async def see_answered_reminders(self, principal: PrincipalId) -> int:
-        with self._tx() as tx:
-            return tx.execute(
-                "UPDATE memories SET remind_state='delivered', remind_wake=NULL WHERE owner=?"
-                " AND remind_state='told' AND retired_at IS NULL AND EXISTS (SELECT 1 FROM wakes w"
-                " JOIN events e ON e.conversation_id=w.conversation_id AND e.sequence>w.event_sequence"
-                " AND e.kind='user_message' WHERE w.owner=memories.owner AND w.ended_at=memories.reminded_at"
-                " AND w.status='answered')", principal).rowcount
-
-    async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
-        wanted = list(dict.fromkeys(memory_ids))
-        if not wanted:
-            return 0
-        with self._tx() as tx:
-            return tx.execute(f"UPDATE memories SET remind_state='delivered', remind_wake=NULL WHERE owner=?"
-                              f" AND remind_state='told' AND memory_id IN ({', '.join('?' * len(wanted))})",
-                              principal, *wanted).rowcount
 
     async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
         with self._tx() as tx:
@@ -3475,7 +3438,7 @@ class SqliteData:
         with self._tx() as tx:
             loops = tx.execute(
                 "DELETE FROM memories WHERE category='loop' AND retired_at IS NULL"
-                " AND (remind_state IS NULL OR remind_state NOT IN ('scheduled', 'claimed', 'told'))"  # V3-P87, P90
+                " AND (remind_state IS NULL OR remind_state NOT IN ('scheduled', 'claimed'))"  # V3-P87
                 " AND ((due_instant IS NOT NULL AND due_instant < ?) OR (due_instant IS NULL AND updated_at < ?))",
                 _timestamp(now - STALE_DUE), _timestamp(now - STALE_UNDATED)).rowcount
             expired = tx.execute("DELETE FROM memories WHERE valid_instant IS NOT NULL AND valid_instant < ?",

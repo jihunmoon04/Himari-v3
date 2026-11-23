@@ -108,13 +108,11 @@ SCENES = [
     Scene("fullscreen_video", (WakeReason(WakeKind.FOCUS, activity="video", minutes=50),),
           doing=NowDoing(activity="video", app="Chrome", for_minutes=50, fullscreen=True)),
     Scene("deleted_loop", (WakeReason(WakeKind.LOOP_DUE, memory_id=15),), {}),
-    # V3-P90 §5.3, §5.1: the ends the app tells, and a reminder told to a sleeping device, not seen
+    # V3-P90 §5.3: the ends the app tells (V3-P107 §2: a reminder is no longer told again)
     Scene("task_ended_game", (WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95),),
           doing=NowDoing(activity="browsing", app="Chrome", for_minutes=1)),
     Scene("task_ended_video", (WakeReason(WakeKind.TASK_ENDED, group="video", minutes=70),),
           doing=NowDoing(activity="chat", app="KakaoTalk", for_minutes=1)),
-    Scene("reminder_again", (WakeReason(WakeKind.REMINDER, memory_id=21, again=True),), {21: PILLS},
-          mentions=("약",)),
     Scene("user_after", (WakeReason(WakeKind.LOOP_DUE, memory_id=15),), {15: LOOP},
           after="그건 됐고, 점심 뭐 먹을지 하나만 골라 줘.",
           mentions=("점심", "먹", "추천", "어때", "어떠", "드시", "드세")),

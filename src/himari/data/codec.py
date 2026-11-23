@@ -248,9 +248,8 @@ def wake_reasons(reasons: tuple[WakeReason, ...] | list[WakeReason]) -> list[dic
             value = getattr(r, name)
             if value is not None:
                 item[name] = value
-        for flag in ("late", "asleep", "again"):
-            if getattr(r, flag):
-                item[flag] = True
+        if r.late:
+            item["late"] = True
         out.append(item)
     return out
 
@@ -262,10 +261,12 @@ def wake_reasons_from(value: object) -> tuple[WakeReason, ...]:
     def opt_str(v: object) -> str | None:
         return None if v is None else str(v)
 
-    return tuple(WakeReason(WakeKind(str(d["kind"])), opt_int(d.get("memory_id")), opt_int(d.get("away_minutes")),
-                            opt_str(d.get("via")), opt_str(d.get("activity")), opt_int(d.get("minutes")),
-                            bool(d.get("late", False)), bool(d.get("asleep", False)),
-                            bool(d.get("again", False)), opt_str(d.get("group")), opt_int(d.get("step")))
+    # V3-P107 §2: a reason stored with V3-P90's ``asleep``/``again`` reads without them
+    return tuple(WakeReason(WakeKind(str(d["kind"])), memory_id=opt_int(d.get("memory_id")),
+                            away_minutes=opt_int(d.get("away_minutes")), via=opt_str(d.get("via")),
+                            activity=opt_str(d.get("activity")), minutes=opt_int(d.get("minutes")),
+                            late=bool(d.get("late", False)), group=opt_str(d.get("group")),
+                            step=opt_int(d.get("step")))
                  for d in (_obj(v) for v in cast(list[object], value)))
 
 
