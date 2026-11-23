@@ -5,8 +5,6 @@ used for is a profile. Bootstrap builds the backends and hands them to their
 consumers, which see only this module (or, for the MCP connector, a Protocol
 of their own with the same shape: V3-059).
 
-- **Machine** (``machine/run_command``, :mod:`himari.sandbox.machine`): one
-  bounded command as the user, run by ``himari-runner`` (V3-P74 §6).
 - **Server** (stdio MCP servers, V3-P59 §4): a long-lived process with pipes,
   the operator's ``read_only`` and ``writable`` directories bound at their
   host paths, no network. It has its own self-test and state.
@@ -28,14 +26,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-TOOLKIT_MOUNT = "/run/himari/documents"  # the documents toolkit, read-only (V3-P70 §6.3)
-
 # V3-051
 MAX_ARGV = 64
 MAX_ARG_CHARS = 4096
-DEFAULT_TIMEOUT_SECONDS = 120
-MAX_TIMEOUT_SECONDS = 600
-MAX_OUTPUT_BYTES = 256 * 1024  # acquisition per stream
 
 # V3-P59 §4
 MAX_LINE_BYTES = 4 * 1024 * 1024  # one stdout line of a server process (the MCP HTTP response bound)
@@ -73,17 +66,6 @@ class SandboxProfileError(ValueError):
 class ProcessGone(RuntimeError):
     """The isolated process has ended or was shut down (or its stdout broke
     the line bound); no more lines go in or come out."""
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    exit_code: int | None  # None when killed on timeout
-    timed_out: bool
-    stdout: bytes  # at most MAX_OUTPUT_BYTES
-    stderr: bytes
-    stdout_total: int  # bytes the command actually wrote
-    stderr_total: int
-    elapsed_ms: int
 
 
 def validate_argv(argv: object) -> list[str]:

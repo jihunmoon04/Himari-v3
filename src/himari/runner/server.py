@@ -1,57 +1,38 @@
-"""``himari-runner``: commands and file operations as the user (V3-P74 §4, §5).
+"""``himari-runner``: file operations as the user (V3-P74 §4, §5).
 
 One request per connection. The peer must be HIMARI's service user
 (``SO_PEERCRED``, checked again whatever the socket's mode says). Blocking
-file work runs in threads; a command runs in the machine sandbox, and the
-client closing the connection cancels it (the tree is killed). The
-connection is closed only once the work has ended — a thread returned, a
-command reaped — even when the runner itself is stopping: a client that
-cancelled waits for that close before it lets go of its locks (§9.1, PR #87
-review C1).
+file work runs in threads. The connection is closed only once the work has
+ended — its thread returned — even when the client cancelled or the runner
+itself is stopping: a client that cancelled waits for that close before it
+lets go of its locks (§9.1, PR #87 review C1).
 
-The runner knows no Conversation or principal: each call names its
-Workspaces, and the runner checks them against its own configuration —
-the hidden list, ``writable_under`` — before anything is done (§5.3).
+The runner knows no Conversation or principal: each write names its write
+roots (the Conversation's folder), and the runner checks them against its
+own configuration — the hidden list, ``writable_under`` — before anything
+is done (§5.3).
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import concurrent.futures
 import logging
 import os
 import posixpath
-import secrets
-import shutil
 import socket
 import struct
-import tempfile
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 from himari.runner import api
-from himari.runner.cgroups import Commands
 from himari.runner.config import RunnerConfig
-from himari.runner.hidden import under
 from himari.runner.hostfs import Host
-from himari.runner.proxy import Door, Proxy
-from himari.sandbox.api import (
-    MAX_ARGV,
-    MAX_TIMEOUT_SECONDS,
-    CommandResult,
-    SandboxSetupError,
-    SandboxState,
-    SandboxUnavailableError,
-    validate_argv,
-)
-from himari.sandbox.machine import MachineLayout, MachineSandbox
-from himari.sandbox.machine_self_test import probe
 
 log = logging.getLogger("himari.runner")
 MAX_LIST = 1000
 MAX_CONTENT_BYTES = 256 * 1024  # a write Tool's content (V3-051)
-READ_SECONDS = 15.0  # a listing, stat or open answers within this, or is given up (V3-P75 §5.1, PR #92 review B1)
+READ_SECONDS = 15.0  # a listing or open answers within this, or is given up (V3-P75 §5.1, PR #92 review B1)
 MAX_READS = 4  # reads under way, given-up ones included: a stuck mount holds at most these threads
 _PEERCRED = struct.Struct("3i")
 T = TypeVar("T")
@@ -70,58 +51,12 @@ def _text(args: dict[str, Any], name: str, default: str | None = None) -> str:
 
 
 class Runner:
-    def __init__(self, config: RunnerConfig, sandbox: MachineSandbox, host: Host,
-                 commands: Commands | None = None) -> None:
+    def __init__(self, config: RunnerConfig, host: Host) -> None:
         self.config = config
-        self.sandbox = sandbox
         self.host = host
-        self.commands = commands
-        self.report_failures: list[str] = []
-        self.proxy: Proxy | None = None  # commands' way out (§11); None: no network
         # Reads that can hang on a slow mount (PR #92 review B1): threads of their own, a bounded number.
         self._read_pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-read")
         self._reads = 0
-
-    async def start(self) -> SandboxState:
-        """The self-test (V3-050, §13), once; then the proxy, if configured."""
-        config = self.config
-        os.makedirs(os.path.join(config.himari_home, "conversations"), mode=0o755, exist_ok=True)
-        os.makedirs(config.cache_dir, mode=0o700, exist_ok=True)
-        os.makedirs(config.state_dir, mode=0o700, exist_ok=True)  # also where the web editor's copies are made
-
-        async def self_test(sandbox: MachineSandbox) -> bool:
-            # The bridge and the rules are checked through a proxy of the self-test's own: "localhost" is
-            # allowed by name there, and must still be refused for its address (§13).
-            folder = tempfile.mkdtemp(prefix="himari-runner-")
-            checked = Proxy(("localhost",))
-            try:
-                door = await checked.open(os.path.join(folder, "proxy.sock"))
-                report = await probe(sandbox, config.himari_home, home=config.home,
-                                     real_masks=self.host.rules.masks(), runner_socket=config.socket,
-                                     cache=config.cache_dir, proxy=door.path,
-                                     cgroup_procs=None if self.commands is None else self.commands.procs)
-            finally:
-                await checked.close()
-                shutil.rmtree(folder, ignore_errors=True)
-            self.report_failures = report.failures + ([report.error] if report.error else [])
-            return report.passed
-
-        state = await self.sandbox.start(self_test)
-        if state is not SandboxState.ENFORCED:
-            log.error("the machine sandbox is %s: %s", state.value, self.report_failures)
-        elif config.network is not None:
-            try:
-                os.makedirs(config.state_dir, mode=0o700, exist_ok=True)
-            except OSError:
-                log.exception("the network proxy has no state folder; commands have no network")
-            else:
-                self.proxy = Proxy(config.network)
-        return state
-
-    async def close(self) -> None:
-        if self.proxy is not None:
-            await self.proxy.close()
-            self.proxy = None
 
     async def serve(self, listener: socket.socket, stop: asyncio.Event) -> None:
         listener.setblocking(False)
@@ -144,7 +79,6 @@ class Runner:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self.close()
 
     async def handle(self, conn: socket.socket) -> None:
         conn.setblocking(False)
@@ -163,7 +97,7 @@ class Runner:
                 await api.send_frame(conn, api.failed(api.INVALID, "malformed request"))
                 return
             try:
-                result, out = await self.dispatch(op, args, fds, conn)
+                result, out = await self.dispatch(op, args, fds)
             except api.RunnerError as error:
                 await api.send_frame(conn, api.failed(error.category, str(error)))
                 return
@@ -173,8 +107,7 @@ class Runner:
                 log.exception("%s failed", op)
                 await api.send_frame(conn, api.failed(api.OTHER))
                 return
-            if result is not None:  # None: the client went away during a command
-                await api.send_frame(conn, api.ok(result), out)
+            await api.send_frame(conn, api.ok(result), out)
         except (OSError, api.ProtocolError, api.RunnerUnavailable):
             pass
         finally:
@@ -221,20 +154,12 @@ class Runner:
         await _ended(work)
         return work.result()
 
-    async def dispatch(self, op: str, args: dict[str, Any], fds: Sequence[int],
-                       conn: socket.socket) -> tuple[dict[str, Any] | None, list[int]]:
+    async def dispatch(self, op: str, args: dict[str, Any], fds: Sequence[int]) -> tuple[dict[str, Any], list[int]]:
         host, config = self.host, self.config
         if op == api.HELLO:
             masks = await self._blocking(host.rules.masks)
-            return {"version": api.PROTOCOL_VERSION, "state": self.sandbox.state.value, "home": config.home,
-                    "himari_home": config.himari_home, "hidden": len(masks), "cgroup": config.cgroup,
-                    "memory_max": config.memory_max if self.commands else None,
-                    "pids_max": config.pids_max if self.commands else None,
-                    "toolkit": config.documents_toolkit is not None,
-                    "network": None if self.proxy is None else list(self.proxy.allow)}, []
-        if self.sandbox.state is not SandboxState.ENFORCED:
-            # §13 (PR #87 review B1): without a passed self-test nothing but hello is done — files included.
-            raise api.RunnerError(api.UNAVAILABLE)
+            return {"version": api.PROTOCOL_VERSION, "home": config.home, "himari_home": config.himari_home,
+                    "hidden": len(masks)}, []
         if op == api.CONVERSATION_FOLDER:
             path = await self._blocking(lambda: host.conversation_folder(args.get("conversation")))
             return {"path": path}, []
@@ -244,14 +169,9 @@ class Runner:
         if op == api.LIST:
             limit = args.get("limit", MAX_LIST)
             limit = limit if isinstance(limit, int) and 1 <= limit <= MAX_LIST else MAX_LIST
-            real, entries, following = await self._read(
-                lambda: host.listing(args.get("path", "."), _text(args, "cwd"), limit, args.get("after")))
-            return {"path": real, "entries": entries, "truncated": following is not None, "next": following}, []
-        if op == api.STAT:
-            return await self._read(lambda: host.stat_path(args.get("path"), _text(args, "cwd"))), []
-        if op == api.VISIBLE:
-            return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd"),
-                                                                       follow=args.get("follow") is True))}, []
+            real, entries, truncated = await self._read(
+                lambda: host.listing(args.get("path", "."), _text(args, "cwd"), limit))
+            return {"path": real, "entries": entries, "truncated": truncated}, []
         if op == api.OPEN:
             fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
                                               abandoned=lambda opened: os.close(opened[0]))
@@ -261,31 +181,9 @@ class Runner:
             if not isinstance(size, int) or not isinstance(digest, str):
                 raise api.RunnerError(api.INVALID)
             return {"holds": await self._blocking(lambda: host.holds(args.get("path"), size, digest))}, []
-        if op == api.CHECK_WORKSPACE:
-            return await self._blocking(lambda: host.check_workspace(args.get("path"), args.get("others", []),
-                                                                     config.writable_under)), []
-        roots =await self._blocking(lambda: host.roots(args.get("write_roots"), config.writable_under))
-        if op == api.WRITE and args.get("mode") == "replace":
-            return await self._replace(args, fds, roots)
-        if op == api.WRITE and args.get("mode") == "install":
-            return await self._install(args, fds, roots), []
-        if op in (api.WRITE, api.DELETE) and args.get("keep") is True:
-            return await self._kept(op, args, roots)
+        roots = await self._blocking(lambda: host.roots(args.get("write_roots"), config.writable_under))
         if op == api.WRITE:
             return await self._write(args, fds, roots), []
-        if op == api.DELETE and args.get("expected") is not None:
-            return await self._delete_checked(args, roots)
-        if op in (api.CREATE_FILE, api.MKDIR):
-            def make() -> dict[str, Any]:
-                parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
-                try:
-                    if op == api.MKDIR:
-                        host.make_folder(parent_fd, name)
-                        return {"path": posixpath.join(parent, name)}
-                    return {"path": posixpath.join(parent, name), "identity": host.create_file(parent_fd, name)}
-                finally:
-                    os.close(parent_fd)
-            return await self._blocking(make), []
         if op == api.DELETE:
             def delete() -> str:
                 parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
@@ -295,96 +193,9 @@ class Runner:
                     os.close(parent_fd)
                 return posixpath.join(parent, name)
             return {"path": await self._blocking(delete)}, []
-        if op == api.RUN:
-            return await self._run(args, roots, conn), []
         if op in (api.COPY_IN, api.FREE_PATH, api.COMMIT_COPY, api.DISCARD_COPY):
             return await self._blocking(lambda: self._upload(op, args, fds, roots)), []
         raise api.RunnerError(api.INVALID, f"unknown operation {op}")
-
-    @staticmethod
-    def _expected(args: dict[str, Any]) -> list[int]:
-        expected = args.get("expected")
-        if not (isinstance(expected, list) and len(expected) == 4 and all(isinstance(v, int) for v in expected)):
-            raise api.RunnerError(api.INVALID, "the file's identity, as it was read, is required")
-        return expected
-
-    async def _replace(self, args: dict[str, Any], fds: Sequence[int],
-                       roots: list[str]) -> tuple[dict[str, Any], list[int]]:
-        """V3-P75 §7.4: the web editor's save; the content comes as an fd."""
-        host, expected = self.host, self._expected(args)
-        if len(fds) != 1:
-            raise api.RunnerError(api.INVALID, "the content comes as one file")
-
-        def replace() -> tuple[dict[str, Any], list[int]]:
-            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
-            try:
-                identity, copy = host.replace(parent_fd, name, fds[0], expected)
-            finally:
-                os.close(parent_fd)
-            return ({"path": posixpath.join(parent, name), "identity": identity, "previous": copy is not None},
-                    [] if copy is None else [copy])
-
-        return await self._blocking(replace)
-
-    async def _delete_checked(self, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
-        """§7.4: a checked delete, its copy up to 1 MiB."""
-        host, expected = self.host, self._expected(args)
-
-        def delete() -> tuple[dict[str, Any], list[int]]:
-            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
-            try:
-                copy = host.delete_checked(parent_fd, name, expected)
-            finally:
-                os.close(parent_fd)
-            return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
-
-        return await self._blocking(delete)
-
-    async def _kept(self, op: str, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
-        """V3-P76 §4.1: an agent's write or delete, with a copy of what the file held (an fd, when there is one)."""
-        host = self.host
-        expected = args.get("expected")
-        if expected is not None and not (isinstance(expected, list) and len(expected) == 4
-                                         and all(isinstance(v, int) for v in expected)):
-            raise api.RunnerError(api.INVALID)
-        content, data = args.get("content"), b""
-        if op == api.WRITE:
-            if not isinstance(content, str):
-                raise api.RunnerError(api.INVALID, "content is required")
-            data = content.encode("utf-8")
-            if len(data) > MAX_CONTENT_BYTES:
-                raise api.RunnerError(api.TOO_LARGE)
-
-        def kept() -> tuple[dict[str, Any], list[int]]:
-            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=op == api.WRITE,
-                                                  create_parents=bool(args.get("create_parents", False)))
-            try:
-                if op == api.WRITE:
-                    result, copy = host.kept_write(parent_fd, name, data, expected)
-                else:
-                    result, copy = host.kept_delete(parent_fd, name)
-            finally:
-                os.close(parent_fd)
-            return {"path": posixpath.join(parent, name), "previous": copy is not None, **result}, \
-                [] if copy is None else [copy]
-
-        return await self._blocking(kept)
-
-    async def _install(self, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
-        """V3-P76 §4.1: a file put back in one step, where its name is free (its content as an fd)."""
-        host = self.host
-        if len(fds) != 1:
-            raise api.RunnerError(api.INVALID, "the content comes as one file")
-
-        def install() -> dict[str, Any]:
-            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
-            try:
-                identity = host.install(parent_fd, name, fds[0])
-            finally:
-                os.close(parent_fd)
-            return {"path": posixpath.join(parent, name), "identity": identity}
-
-        return await self._blocking(install)
 
     async def _write(self, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
         host = self.host
@@ -412,77 +223,6 @@ class Runner:
                     "bytes": len(data) if isinstance(data, bytes) else None}
 
         return await self._blocking(write)
-
-    async def _run(self, args: dict[str, Any], roots: list[str], conn: socket.socket) -> dict[str, Any] | None:
-        try:
-            argv = validate_argv(args.get("argv"))
-        except ValueError:
-            raise api.RunnerError(api.INVALID, f"argv is 1..{MAX_ARGV} non-empty strings") from None
-        timeout = args.get("timeout")
-        if not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
-            raise api.RunnerError(api.INVALID, f"timeout is 1..{MAX_TIMEOUT_SECONDS} seconds")
-        host, config = self.host, self.config
-        cwd = await self._blocking(lambda: host.directory(_text(args, "cwd"), "/"))
-        masks = await self._blocking(host.rules.masks)
-        toolkit_fd = cache_fd = None
-        door: Door | None = None
-        try:
-            if self.proxy is not None:  # a socket of the command's own: its connections, its limit (§22.5)
-                try:
-                    door = await self.proxy.open(config.proxy_socket(secrets.token_hex(8)))
-                except OSError:
-                    log.exception("the network proxy could not open; this command has no network")
-            cache_fd = os.open(config.cache_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            if config.documents_toolkit is not None:
-                toolkit_fd = os.open(config.documents_toolkit, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-            with host.open_roots(roots) as opened:
-                layout = MachineLayout(home=config.home, cwd=cwd, writable=tuple(opened), masks=masks,
-                                       cache=(config.cache_dir, cache_fd), toolkit_fd=toolkit_fd,
-                                       cgroup_procs=None if self.commands is None else self.commands.procs,
-                                       proxy=None if door is None else door.path)
-                before = 0 if self.commands is None else self.commands.oom_kills()
-                command = await self._unless_cancelled(self._sandboxed(argv, layout, timeout), conn)
-                if command is None:
-                    return None
-                result = command.result()
-                oom = self.commands is not None and self.commands.oom_kills() > before
-        finally:
-            for fd in (cache_fd, toolkit_fd):
-                if fd is not None:
-                    os.close(fd)
-            if door is not None:
-                await door.close()
-        return {"exit_code": result.exit_code, "timed_out": result.timed_out,
-                "stdout": base64.b64encode(result.stdout).decode(), "stderr": base64.b64encode(result.stderr).decode(),
-                "stdout_total": result.stdout_total, "stderr_total": result.stderr_total,
-                "elapsed_ms": result.elapsed_ms, "oom": oom}
-
-    async def _unless_cancelled(self, work: Coroutine[Any, Any, T], conn: socket.socket) -> asyncio.Future[T] | None:
-        """``work`` run to its end; or, when the client closes the connection,
-        stopped and waited for (a command's tree is killed and reaped): None."""
-        task = asyncio.ensure_future(work)
-        closed = asyncio.ensure_future(api.wait_closed(conn))
-        try:
-            done, _ = await asyncio.wait({task, closed}, return_when=asyncio.FIRST_COMPLETED)
-        except asyncio.CancelledError:  # the runner is stopping: the work goes first
-            await _stopped(task)
-            raise
-        finally:
-            closed.cancel()
-        if task not in done:
-            await _stopped(task)
-            return None
-        return task
-
-    async def _sandboxed(self, argv: list[str], layout: MachineLayout, timeout: float) -> CommandResult:
-        try:
-            return await self.sandbox.run(argv, layout, timeout)
-        except SandboxUnavailableError:
-            raise api.RunnerError(api.UNAVAILABLE) from None
-        except SandboxSetupError:
-            log.error("a command's sandbox could not be set up; the machine sandbox is now %s",
-                      self.sandbox.state.value)
-            raise api.RunnerError(api.SETUP_FAILED) from None
 
     def _upload(self, op: str, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
         host = self.host
@@ -515,8 +255,7 @@ class Runner:
 
 async def _ended(work: asyncio.Future[Any]) -> None:
     """Return once ``work`` has ended, waiting through cancellations of the
-    caller (re-raised then): a thread cannot be stopped, and a killed
-    command is still being reaped."""
+    caller (re-raised then): a thread cannot be stopped."""
     interrupted = False
     while not work.done():
         try:
@@ -525,14 +264,6 @@ async def _ended(work: asyncio.Future[Any]) -> None:
             interrupted = True
     if interrupted:
         raise asyncio.CancelledError
-
-
-async def _stopped(command: asyncio.Future[Any]) -> None:
-    """Cancel a command (its tree is killed) and wait until it is reaped."""
-    command.cancel()
-    await _ended(command)
-    if not command.cancelled():
-        command.exception()  # retrieved: a failure while stopping is not reported
 
 
 def listener(config: RunnerConfig) -> socket.socket:

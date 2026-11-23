@@ -29,7 +29,7 @@ default 30: a file unused this long expires). None of them can be turned off.
 
 Documents (V3-P70 §6.2): ``HIMARI_DOCUMENTS_DIR`` names the documents
 toolkit's folder (installed by root with scripts/install_documents.py). Unset,
-read_document is not offered and run_command has no document libraries.
+read_document is not offered.
 
 Memory (V3-P71 §9): ``HIMARI_MEMORY=0`` turns the memory Tools and notes off
 (the notes stay and can be seen); on by default. Automatic memory (V3-P85

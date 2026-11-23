@@ -1,5 +1,5 @@
 // A HIMARI conversation's own tools (V3-P102 W6a, the classic page's conversation menu): rename it, choose which Tool
-// servers it uses, summarize its older history now, close what was left waiting, move it to the trash (Undo from
+// servers it uses, summarize its older history now, close a turn left unfinished, move it to the trash (Undo from
 // the notice). What the trash confirmation says comes from the server's delete notice (V3-P65 §6.1).
 import { useQueryClient } from "@tanstack/react-query";
 import { Archive, Ellipsis, PencilLine, Shrink, Wrench, XCircle } from "lucide-react";
@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { ApiError } from "@/api/client";
 import {
-  compactConversation, dismissWaiting, readDeleteNotice, readToolSources, renameConversation, restoreConversation,
+  compactConversation, dismissUnfinished, readDeleteNotice, readToolSources, renameConversation, restoreConversation,
   setToolSource, trashConversation, type DeleteNotice, type ToolSource,
 } from "@/api/himari";
 import { keys } from "@/app/queries";
@@ -167,8 +167,8 @@ function TrashDialog({ id, name, notice, open, onOpenChange }: {
   );
 }
 
-export function ConversationMenu({ id, title, waiting, running }: {
-  id: string; title: string; waiting: boolean; running: boolean;
+export function ConversationMenu({ id, title, unfinished, running }: {
+  id: string; title: string; unfinished: boolean; running: boolean;
 }) {
   const client = useQueryClient();
   const [open, setOpen] = useState<"rename" | "tools" | "trash" | null>(null);
@@ -185,7 +185,7 @@ export function ConversationMenu({ id, title, waiting, running }: {
   const compact = () => compactConversation(id)
     .then(() => { toast("Summarizing the older history…", "info"); refresh(); })
     .catch((failure: unknown) => toast(message(failure, "Could not summarize it now."), "error"));
-  const dismiss = () => dismissWaiting(id)
+  const dismiss = () => dismissUnfinished(id)
     .then(refresh)
     .catch((failure: unknown) => toast(message(failure, "Could not close it."), "error"));
   return (
@@ -198,7 +198,7 @@ export function ConversationMenu({ id, title, waiting, running }: {
           <MenuItem onSelect={() => setOpen("rename")}><PencilLine className="size-3.5" /> Rename…</MenuItem>
           <MenuItem onSelect={() => setOpen("tools")}><Wrench className="size-3.5" /> Tool servers…</MenuItem>
           <MenuItem disabled={running} onSelect={() => void compact()}><Shrink className="size-3.5" /> Summarize older history</MenuItem>
-          {waiting && <MenuItem disabled={running} onSelect={() => void dismiss()}><XCircle className="size-3.5" /> Dismiss the question</MenuItem>}
+          {unfinished && <MenuItem disabled={running} onSelect={() => void dismiss()}><XCircle className="size-3.5" /> Close the unfinished turn</MenuItem>}
           <MenuSeparator />
           <MenuItem className="text-danger" onSelect={askTrash}><Archive className="size-3.5" /> Move to trash…</MenuItem>
         </MenuContent>

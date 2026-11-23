@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/Shell";
 import { DevicesSettings } from "@/components/settings/Devices";
 import { InstructionsSettings } from "@/components/settings/Instructions";
 import { MemorySettings } from "@/components/settings/Memory";
-import { FolderSettings, ToolServerSettings } from "@/components/settings/ToolsAndFolders";
+import { ToolServerSettings } from "@/components/settings/ToolServers";
 import { cn } from "@/lib/cn";
 
 const SECTIONS = [
@@ -12,7 +12,6 @@ const SECTIONS = [
   { id: "memory", label: "Memory", body: <MemorySettings /> },
   { id: "devices", label: "Devices", body: <DevicesSettings /> },
   { id: "tools", label: "Tool servers", body: <ToolServerSettings /> },
-  { id: "folders", label: "Folders", body: <FolderSettings /> },
 ] as const;
 
 export function Settings() {

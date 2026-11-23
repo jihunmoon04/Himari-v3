@@ -318,7 +318,6 @@ class SystemSpec(DeepFrozen):
     companion: bool = False
     memory: bool = False
     attachments: bool = False  # uploads work: the <attachment> line is explained
-    file_references: bool = False  # the machine Environment: the <file_reference> line is explained
     turn_guidance: bool = False  # the turn guards are on
     documents: tuple[str, ...] = ()
     proactive: bool = False  # V3-P87 §8.2: HIMARI may speak first (with the companion on)
@@ -815,24 +814,12 @@ SCREEN_MOVE_NOTE = (
 )
 
 
-# V3-P70 §7: one sentence when read_document is offered, one when run_command
-# has the documents toolkit; both fixed for the server's life (cache-safe).
+# V3-P70 §7: one sentence when read_document is offered, fixed for the server's life (cache-safe).
 DOCUMENTS_READ_NOTE = (
     "Read PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx) and HWPX files with read_document. A page marked "
     "[drawings] or with no text may hold a chart or a scan: view it. These marks are a guess; when the text mentions "
     "a figure or chart on an unmarked page, view that page too. Tell the user about content marked [hidden]."
 )
-
-
-def documents_script_note(modules: Sequence[str], fonts: Sequence[str]) -> str:
-    """The run_command sentence, naming only what the toolkit's check found."""
-    note = ("To create or change documents, write a Python script and run it with run_command as `python3 "
-            f"script.py` (not with -I or -E): it can import {', '.join(modules)}, which PYTHONPATH puts ahead of "
-            "packages in any virtual environment you make.")
-    if fonts:
-        note += (f" For Korean or other non-Latin text in a PDF, register {' and '.join(fonts)} from the folder in "
-                 "$HIMARI_FONTS with reportlab.")
-    return note + " Prepare finished files in the conversation with present_file; interface capabilities govern delivery."
 
 
 # V3-P69 §4: the user's instructions go after the operator's and the notes
@@ -885,14 +872,6 @@ def attachment_line(ref: AttachmentRef, attachments: Mapping[str, AttachmentInfo
     if reason is not None:
         data["not_shown"] = reason
     return "<attachment>" + json_data(data) + "</attachment>"
-
-
-# V3-P76 §3.3: the fixed sentence for a message that points at part of a file, and the line it becomes.
-FILE_REFERENCE_NOTE = (
-    "A <file_reference> line is part of a file (or a whole file) the user pointed at in the editor, as it was when "
-    "the message was sent (cut short when truncated); read the file for its content now. Lines are 1-based; a "
-    "whole-file reference has no excerpt."
-)
 
 
 def file_reference_line(ref: FileReference) -> str:
@@ -1116,13 +1095,7 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                     place["working_directory"] = view.working_directory
                     if view.readable:
                         place["read"] = view.readable
-                    if view.network:
-                        place["network"] = view.network
-                    if view.workspaces:
-                        place["workspaces"] = [{"path": w.path, "label": w.label, **({"note": w.note} if w.note else {}),
-                                                **({"notice": w.notice} if w.notice else {})}
-                                               for w in view.workspaces]
-                    elif view.writable:
+                    if view.writable:
                         place["writable"] = list(view.writable)
                 elif binding.cwd_relative is not None:
                     entry["default_binding"]["working_directory"] = f"/workspace/{binding.cwd_relative}"  # type: ignore[index]
@@ -1155,7 +1128,6 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
             "kind": state.interface.kind.value,
             "capabilities": {
                 "file_download": state.interface.capabilities.file_download,
-                "workspace_browser": state.interface.capabilities.workspace_browser,
             },
         }
     return data

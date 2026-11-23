@@ -38,8 +38,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import posixpath
-import re
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -62,8 +60,6 @@ from himari.bootstrap.operator import check_private_dir, ensure_operator_secret,
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict, read_defaults, write_defaults
 from himari.common import (
     AttachmentRef,
-    ContentBlock,
-    BindingId,
     CallId,
     CallRef,
     ConversationId,
@@ -100,7 +96,6 @@ from himari.data.api import (
     memory_from_record,
     MessageOrigin,
     OriginKind,
-    MAX_LIST_LIMIT,
     ConversationSummary,
     DEFAULT_FILE_MAX_BYTES,
     DEFAULT_KEEP_DAYS,
@@ -117,7 +112,6 @@ from himari.data.api import (
     Memory,
     MemoryCategory,
     MemoryOrigin,
-    RegisteredWorkspace,
     ViewMaker,
     ViewState,
     InitialActivation,
@@ -150,21 +144,15 @@ from himari.presence.hub import PresenceHub
 from himari.proactive import ProactiveSettings
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.imaging import ImageViews, runtime_roots
-from himari.bootstrap.explorer import Explorer, ExplorerRefused
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.machine import WorkspaceBusy as WorkspaceBusy
-# For the interfaces (V3-P74 §14): which registered folders are cloud-synced.
-from himari.environment.machine import CLOUD_FILESYSTEMS as CLOUD_FILESYSTEMS
 from himari.environment.machine import (
     MACHINE,
-    OWN_LABEL,
     MachineEnvironment,
     MachineUnavailable,
     machine_workspace_for,
 )
 from himari.environment.machine.results import ToolFiles
-from himari.runner import api as runner_api
-from himari.runner.api import RunnerError
 from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
 from himari.sandbox.backend import discover_capability, supports_tmp_size
@@ -179,7 +167,6 @@ from himari.prompt.api import (
     ContextBudget,
     SourceNote,
     SystemSpec,
-    documents_script_note,
 )
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
@@ -312,66 +299,6 @@ async def _then(head: bytes, chunks: AsyncIterator[bytes]) -> AsyncIterator[byte
     yield head
     async for chunk in chunks:
         yield chunk
-
-
-class WorkspaceRefused(ValueError):
-    """V3-P74 §10: a folder was not registered, attached or detached;
-    ``message`` is for the user. ``code``: ``unavailable`` (folders are not
-    offered to this principal, or the runner does not answer),
-    ``not_usable`` (the runner's check refused the folder), ``duplicate``
-    (registered or attached already), ``not_machine`` (this Conversation does
-    not use the machine Environment), ``own_folder`` (it cannot be detached)."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-
-
-NOT_MACHINE = "This conversation does not work on this server's folders (it was started before they were offered)."
-
-
-@dataclass(frozen=True)
-class AttachedFolder:
-    """One of a Conversation's folders as a client shows it (V3-P74 §10.3)."""
-
-    binding_id: str
-    path: str | None  # the own folder's is None while the runner does not answer
-    label: str
-    note: str | None
-    working: bool  # the working directory (§10.4)
-    own: bool  # the Conversation's own folder: cannot be detached
-    workspace_id: str | None  # the registration; None for the own folder
-
-
-@dataclass(frozen=True)
-class ReferenceRequest:
-    """V3-P76 §3.2: what the browser sends for a reference — never the text
-    itself. ``start``/``end`` (UTF-16) and ``sha256`` (of the selection's
-    UTF-8) for a selection; all None for the whole file."""
-
-    path: str
-    identity: tuple[int, ...]
-    start: int | None = None
-    end: int | None = None
-    sha256: str | None = None
-
-
-@dataclass(frozen=True)
-class FolderConversations:
-    """V3-P75 §6.1: the Conversations working in a folder, most recent first.
-    ``workspace``: its registration, if any. ``own``: it is one
-    Conversation's own folder (that one is the list). ``refused``: why it
-    cannot be a workspace (then nothing can be opened in it). ``above``:
-    registered folders above it with Conversations of their own (Q2: shown
-    as links, not mixed in), nearest first, with how many."""
-
-    path: str
-    workspace: RegisteredWorkspace | None
-    conversations: tuple[ConversationSummary, ...]
-    own: bool = False
-    refused: str | None = None
-    above: tuple[tuple[RegisteredWorkspace, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -606,17 +533,12 @@ async def _image_views(root: Path, sandbox: bool) -> ImageViews:
     return views
 
 
-# The toolkit's dist names and what a script imports (V3-P70 §7).
-_MODULES = {"pypdf": "pypdf", "pypdfium2": "pypdfium2", "python-docx": "docx", "openpyxl": "openpyxl",
-            "python-pptx": "pptx", "reportlab": "reportlab", "pillow": "PIL"}
-
-
 async def _documents(root: Path, sandbox: bool, documents_dir: str | None,
                      owners: frozenset[int]) -> tuple[Toolkit | None, DocumentReader | None, str]:
     """V3-P70 §6.4 steps 1-2: the toolkit checked on its descriptor, then
     the reader in its own server sandbox, checked with the probe documents.
-    The toolkit comes back only with a working reader (run_command binds it
-    only then); the text says why there is none."""
+    The toolkit comes back only with a working reader; the text says why
+    there is none."""
     if not documents_dir:
         return None, None, "HIMARI_DOCUMENTS_DIR is not set"
     if not sandbox:
@@ -656,18 +578,11 @@ async def _documents(root: Path, sandbox: bool, documents_dir: str | None,
     return toolkit, reader, "on"
 
 
-def _documents_notes(reader: DocumentReader | None, toolkit: Toolkit | None, scripts: bool) -> tuple[str, ...]:
-    """V3-P70 §6.4 step 5: each sentence only while its tool can do it."""
+def _documents_notes(reader: DocumentReader | None, toolkit: Toolkit | None) -> tuple[str, ...]:
+    """V3-P70 §6.4 step 5: the sentence only while read_document can do it."""
     if reader is None or toolkit is None:
         return ()
-    notes = [DOCUMENTS_READ_NOTE]
-    if scripts:
-        modules = [_MODULES[name] for name in _MODULES if name in reader.versions]
-        fonts = toolkit.manifest.get("fonts")
-        fonts = [f for f in fonts if isinstance(f, str) and re.fullmatch(r"[\w.-]{1,60}\.ttf", f)] if isinstance(
-            fonts, list) else []
-        notes.append(documents_script_note(modules, fonts))
-    return tuple(notes)
+    return (DOCUMENTS_READ_NOTE,)
 
 
 async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None:
@@ -777,7 +692,6 @@ class Application:
     data: SqliteData
     runtime: Runtime
     runner: BackgroundRunner
-    sandbox_state: SandboxState  # the runner's, at startup; ``current_sandbox_state`` follows later changes
     model_id: str
     context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
@@ -809,12 +723,6 @@ class Application:
     # the principals whose new Conversations use it (Q1); the others only talk (V3-P101).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
-    # One registration at a time (§10.1): the runner's same-folder check and
-    # Data's insert together, so two paths to one folder cannot both pass.
-    _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-    _explorer: Explorer | None = field(default=None, repr=False)
-    # One "open this folder's conversation" at a time per folder (PR #93 review B1): by real path.
-    _opening: dict[str, tuple[asyncio.Lock, int]] = field(default_factory=dict, repr=False)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -953,28 +861,20 @@ class Application:
             mcp.statuses = tuple(replace(s, enabled_by_default=saved_defaults.get(s.source, s.enabled_by_default))
                                  for s in mcp.statuses)
             toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
-            scripts = "off"
             machine = None
             if machine_socket is not None:
                 machine = MachineEnvironment(machine_socket,
                                              files=ToolFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                             documents=reader, registry=SqliteData(store))
+                                             documents=reader)
                 try:
                     hello = await machine.hello()
-                    log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
-                    if hello.get("toolkit") is True:  # the runner binds its own toolkit in every command
-                        scripts = "on"
+                    log.info("machine runner: HIMARI home %s", hello.get("himari_home"))
                 except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
                     log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
             else:
-                log.warning("HIMARI_MACHINE_SOCKET is not set: Conversations only talk (no files, commands or "
-                            "uploads; V3-P101)")
-            if reader is not None:
-                reader.scripts = scripts == "on"
-            log.info("documents: read_document %s; run_command toolkit %s%s", documents_reason,
-                     scripts if reader is not None else "off",
+                log.warning("HIMARI_MACHINE_SOCKET is not set: Conversations only talk (no files or uploads; V3-P101)")
+            log.info("documents: read_document %s%s", documents_reason,
                      f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
-            state = machine.sandbox_state if machine is not None else SandboxState.UNAVAILABLE
             uploads_work = machine is not None
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
@@ -988,9 +888,8 @@ class Application:
                                     models=catalog,
                                     instructions=base,  # V3-P89: the base; the sections are the Prompt module's
                                     system=SystemSpec(companion=companion, attachments=uploads_work,
-                                                      file_references=machine is not None,
                                                       proactive=companion and speaking_first.enabled,
-                                                      documents=_documents_notes(reader, toolkit, scripts == "on")
+                                                      documents=_documents_notes(reader, toolkit)
                                                       if machine is not None else ()),  # read_document is the machine's (V3-P101)
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
@@ -1003,8 +902,6 @@ class Application:
                                     presence=presence, screen=screens,
                                     # Stored-blob downloads do not require upload placement (renameat2).
                                     interfaces=ConfiguredInterfaces(file_download=True,
-                                                                    workspace_browser=machine is not None,
-                                                                    workspace_principals=machine_allowed,
                                                                     hub=hub,
                                                                     companion_enabled=companion))
         except BaseException:
@@ -1022,7 +919,7 @@ class Application:
         listeners = _JobListeners(events, wake_events)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
                                   listener=listeners)
-        application = cls(root, store, runtime.data, runtime, runner, state, model_id,
+        application = cls(root, store, runtime.data, runtime, runner, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models),
                           tuple(companion_models), resolved_companion_default, companion_models_only, reader, toolkit,
@@ -1075,12 +972,6 @@ class Application:
         """A client read this Conversation (V3-P62 §5): call only after the
         read was authorized."""
         self.runner.seen(scope)
-
-    @property
-    def current_sandbox_state(self) -> SandboxState:
-        """The runner's sandbox as it last said (each turn asks): a setup
-        failure latches SETUP_FAILED there, and commands are refused from then on."""
-        return self.machine.sandbox_state if self.machine is not None else SandboxState.UNAVAILABLE
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
@@ -1136,252 +1027,6 @@ class Application:
         if default is None:
             raise UnknownToolSource(source)
         await self.data.set_external_setting(scope, source, None if enabled == default else enabled)
-
-    # --- Folders on this server as Workspaces (V3-P74 §10) ---------------------------------
-
-    def _machine_for(self, principal: PrincipalId) -> MachineEnvironment:
-        if self.machine is None or principal not in self.machine_principals:
-            raise WorkspaceRefused("unavailable", "Folders on this server are not offered to you.")
-        return self.machine
-
-    def explorer(self, principal: PrincipalId) -> Explorer:
-        """The web's file explorer (V3-P75 §5), for a principal folders are offered to."""
-        try:
-            machine = self._machine_for(principal)
-        except WorkspaceRefused:
-            raise ExplorerRefused("not_found", "Not available.") from None
-        if self._explorer is None:
-            self._explorer = Explorer(machine, self.views)
-        return self._explorer
-
-    # --- conversations in a folder (V3-P75 §6) ----------------------------------------
-
-    async def folder_conversations(self, principal: PrincipalId, path: str) -> FolderConversations:
-        """The folder's real path, its registration and the Conversations
-        working in it (§6.1). ExplorerRefused (not_found): folders are not
-        offered (§4). WorkspaceRefused: the runner does not answer, or the
-        path is not a folder the user can see."""
-        try:
-            machine = self._machine_for(principal)
-        except WorkspaceRefused:
-            raise ExplorerRefused("not_found", "Not available.") from None
-        try:
-            found, _ = await machine.call(runner_api.STAT, {"path": path, "cwd": "/"})
-            himari_home = str((await machine.hello())["himari_home"])
-        except RunnerError as error:
-            raise WorkspaceRefused("not_usable", f"{path}: {error}") from None
-        except runner_api.RunnerUnavailable:
-            raise WorkspaceRefused("unavailable", "The machine runner does not answer; try again later.") from None
-        real = str(found["path"])
-        if found["kind"] != "directory":
-            raise WorkspaceRefused("not_usable", f"{real} is not a folder.")
-        conversations_root = posixpath.join(himari_home, "conversations")
-        if posixpath.dirname(real) == conversations_root:  # one Conversation's own folder: that one
-            scope = TrustedScope(principal, ConversationId(posixpath.basename(real)))
-            try:
-                summary = await self.data.read_conversation(scope)
-            except DataError:
-                return FolderConversations(real, None, (), own=True, refused="This folder belongs to a conversation "
-                                           "that is gone.")
-            return FolderConversations(real, None, () if summary.trashed_at else (summary,), own=True)
-        known = await self.data.list_workspaces(principal, MACHINE)
-        workspace = next((w for w in known if w.location == real), None)
-        refused = None
-        if workspace is None:
-            try:  # the same folder registered at another path (a bind mount) counts as this one
-                _, _, workspace = await self._check_folder(machine, real, known)
-            except WorkspaceRefused as error:
-                refused = error.message
-        conversations: tuple[ConversationSummary, ...] = ()
-        if workspace is not None:
-            conversations = tuple(await self.data.list_conversations_working_in(principal, workspace.workspace_id,
-                                                                                 limit=MAX_LIST_LIMIT))
-        above: list[tuple[RegisteredWorkspace, int]] = []
-        for other in sorted((w for w in known if real.startswith(w.location.rstrip("/") + "/")),
-                            key=lambda w: len(w.location), reverse=True):
-            count = len(await self.data.list_conversations_working_in(principal, other.workspace_id,
-                                                                       limit=MAX_LIST_LIMIT))
-            if count:
-                above.append((other, count))
-        return FolderConversations(real, workspace, conversations, refused=refused, above=tuple(above))
-
-    async def open_folder_conversation(self, principal: PrincipalId, path: str, *,
-                                       new: bool = False) -> tuple[ConversationId, bool]:
-        """§6.1–6.2: the folder's most recent Conversation, or (none, or
-        ``new``) a new one working in it: registered first if it is not
-        (reused if it is, at any path), then created, attached and made the
-        working folder. A Conversation made here whose folder could not be
-        attached is deleted again; the registration stays. Whether one was made."""
-        folder = await self.folder_conversations(principal, path)
-        if new or folder.own:
-            return await self._open_in(principal, folder, new)
-        # Two at once for the same folder must not both find none and both make one (PR #93 review B1):
-        # one at a time per folder, and the folder read again once it is this one's turn.
-        async with self._opening_folder(folder.path):
-            return await self._open_in(principal, await self.folder_conversations(principal, folder.path), new)
-
-    @asynccontextmanager
-    async def _opening_folder(self, real: str) -> AsyncIterator[None]:
-        lock, users = self._opening.get(real, (asyncio.Lock(), 0))
-        self._opening[real] = (lock, users + 1)
-        try:
-            async with lock:
-                yield
-        finally:
-            lock, users = self._opening[real]
-            if users == 1:
-                del self._opening[real]
-            else:
-                self._opening[real] = (lock, users - 1)
-
-    async def _open_in(self, principal: PrincipalId, folder: FolderConversations,
-                       new: bool) -> tuple[ConversationId, bool]:
-        if folder.own:
-            if not folder.conversations:
-                raise WorkspaceRefused("not_usable", folder.refused or "That conversation is in the trash.")
-            if new:
-                raise WorkspaceRefused("not_usable", "This is a conversation's own folder; open that conversation, or "
-                                                     "start a new one in a folder of your own.")
-            return folder.conversations[0].conversation_id, False
-        if folder.conversations and not new:
-            return folder.conversations[0].conversation_id, False
-        if folder.refused is not None:
-            raise WorkspaceRefused("not_usable", folder.refused)
-        workspace = folder.workspace or await self._register(principal, folder.path, None, None, reuse=True)
-        conversation = await self.create_conversation(principal)
-        scope = TrustedScope(principal, conversation)
-        try:
-            await self.attach_workspace(scope, workspace_id=workspace.workspace_id)
-        except BaseException:
-            try:
-                await self.trash(scope)
-                await self.purge(scope)
-            except Exception:  # noqa: BLE001 — the trash keeps it, and its regular purge
-                log.exception("a conversation made for %s could not be removed again", folder.path)
-            raise
-        return conversation, True
-
-    async def machine_workspaces(self, principal: PrincipalId) -> tuple[RegisteredWorkspace, ...]:
-        """The principal's registered folders, oldest first."""
-        self._machine_for(principal)
-        return await self.data.list_workspaces(principal, MACHINE)
-
-    async def register_workspace(self, principal: PrincipalId, path: str, label: str | None = None,
-                                 note: str | None = None) -> RegisteredWorkspace:
-        """The runner checks the folder first (§10.1): it exists, the user may
-        write it, it is not hidden; Data keeps its real path and its
-        filesystem (a cloud-synced one is told to the model, §14)."""
-        return await self._register(principal, path, label, note, reuse=False)
-
-    async def _register(self, principal: PrincipalId, path: str, label: str | None, note: str | None, *,
-                        reuse: bool) -> RegisteredWorkspace:
-        """Registers the folder, or (``reuse``) gives the registration that is
-        already this folder at any path."""
-        machine = self._machine_for(principal)
-        async with self._registering:
-            known = await self.data.list_workspaces(principal, MACHINE)
-            real, filesystem, same = await self._check_folder(machine, path, known)
-            if same is not None:
-                if reuse:
-                    return same
-                raise WorkspaceRefused("duplicate", f"This folder is registered already, as {same.location}.")
-            try:
-                return await self.data.register_workspace(principal, MACHINE, real,
-                                                          label or posixpath.basename(real) or real, note, filesystem)
-            except DataError as error:
-                if error.code is DataErrorCode.DUPLICATE_IDENTITY:
-                    raise WorkspaceRefused("duplicate", f"{real} is registered already.") from None
-                raise
-
-    async def _check_folder(self, machine: MachineEnvironment, path: str, known: Sequence[RegisteredWorkspace]
-                            ) -> tuple[str, str | None, RegisteredWorkspace | None]:
-        """The runner's check: the real path, its filesystem, and the
-        registration that is already this folder (at that path, or another)."""
-        if not isinstance(path, str) or not path.strip():
-            raise WorkspaceRefused("not_usable", "Give the folder's path.")
-        try:
-            checked = await machine.check_workspace(path.strip(), [w.location for w in known])
-        except MachineUnavailable:
-            raise WorkspaceRefused("unavailable", "The machine runner does not answer; try again later.") from None
-        except RunnerError as error:
-            raise WorkspaceRefused("not_usable", f"{path.strip()}: {error}") from None
-        real = str(checked["path"])
-        same_as = checked.get("same_as")
-        same = next((w for w in known if w.location == real or w.location == same_as), None)
-        filesystem = checked.get("filesystem")
-        return real, filesystem if isinstance(filesystem, str) else None, same
-
-    async def update_workspace(self, principal: PrincipalId, workspace_id: str, label: str,
-                               note: str | None) -> RegisteredWorkspace:
-        self._machine_for(principal)
-        return await self.data.update_workspace(principal, WorkspaceId(workspace_id), label=label, note=note)
-
-    async def unregister_workspace(self, principal: PrincipalId, workspace_id: str) -> None:
-        """Only while no Conversation has it attached; the folder stays."""
-        self._machine_for(principal)
-        await self.data.unregister_workspace(principal, WorkspaceId(workspace_id))
-
-    async def conversation_workspaces(self, scope: TrustedScope) -> tuple[AttachedFolder, ...]:
-        """This Conversation's folders (its own first); empty when it does not
-        use the machine Environment. Authorizes like any read."""
-        try:
-            found = await self.data.read_conversation_workspaces(scope, MACHINE)
-        except DataError as error:
-            if error.code is DataErrorCode.NOT_FOUND:
-                await self.data.read_conversation(scope)  # NOT_AUTHORIZED stays that
-                return ()
-            raise
-        folders: list[AttachedFolder] = []
-        for item in found.attached:
-            working = item.binding.binding_id == found.working
-            if item.workspace is not None:
-                w = item.workspace
-                folders.append(AttachedFolder(item.binding.binding_id, w.location, w.label, w.note, working, False,
-                                              w.workspace_id))
-                continue
-            path = None
-            if self.machine is not None:
-                try:
-                    path = await self.machine.folder(scope.conversation_id, item.binding.cwd_relative or "")
-                except MachineUnavailable:
-                    path = None
-            folders.append(AttachedFolder(item.binding.binding_id, path, OWN_LABEL, None, working, True, None))
-        return tuple(folders)
-
-    async def attach_workspace(self, scope: TrustedScope, *, workspace_id: str | None = None, path: str | None = None,
-                               label: str | None = None) -> tuple[AttachedFolder, ...]:
-        """Attach a registered folder, or a path (registered first unless it
-        is already); it becomes the working directory (§10.4). Takes effect
-        from the next Tool call: one running keeps its folders."""
-        self._machine_for(scope.principal_id)
-        if not await self.conversation_workspaces(scope):  # NOT_AUTHORIZED first; nothing registered for nothing
-            raise WorkspaceRefused("not_machine", NOT_MACHINE)
-        if workspace_id is None:
-            if path is None:
-                raise WorkspaceRefused("not_usable", "Give a registered workspace or a folder's path.")
-            workspace_id = (await self._register(scope.principal_id, path, label, None, reuse=True)).workspace_id
-        try:
-            await self.data.attach_workspace(scope, WorkspaceId(workspace_id))
-        except DataError as error:
-            if error.code is DataErrorCode.INVALID_STATE_TRANSITION:
-                raise WorkspaceRefused("not_machine", NOT_MACHINE) from None
-            if error.code is DataErrorCode.DUPLICATE_IDENTITY:
-                raise WorkspaceRefused("duplicate", "That folder is attached to this conversation already.") from None
-            raise
-        return await self.conversation_workspaces(scope)
-
-    async def detach_workspace(self, scope: TrustedScope, binding_id: str) -> tuple[AttachedFolder, ...]:
-        try:
-            await self.data.detach_workspace(scope, BindingId(binding_id))
-        except DataError as error:
-            if error.code is DataErrorCode.INVALID_STATE_TRANSITION:
-                raise WorkspaceRefused("own_folder", "The conversation's own folder stays attached.") from None
-            raise
-        return await self.conversation_workspaces(scope)
-
-    async def set_working_workspace(self, scope: TrustedScope, binding_id: str) -> tuple[AttachedFolder, ...]:
-        await self.data.set_working_workspace(scope, BindingId(binding_id))
-        return await self.conversation_workspaces(scope)
 
     # --- Models (V3-P64) ---------------------------------------------------------------
 
@@ -1734,12 +1379,10 @@ class Application:
 
     @property
     def documents_status(self) -> dict[str, Any]:
-        """V3-P70 §9: read_document offered, run_command with the toolkit, and the toolkit's libraries."""
+        """V3-P70 §9: read_document offered, and the toolkit's libraries."""
         reader = self.documents
         read = reader is not None and reader.available
-        return {"read": read, "scripts": read and reader is not None and reader.scripts
-                and self.current_sandbox_state is SandboxState.ENFORCED,
-                "libraries": dict(reader.versions) if read and reader is not None else {}}
+        return {"read": read, "libraries": dict(reader.versions) if read and reader is not None else {}}
 
     async def _workspace(self, scope: TrustedScope) -> tuple[WorkspaceId, str]:
         if not self.uploads_work:
@@ -1774,16 +1417,13 @@ class Application:
             return await self.data.stage_upload(scope, blob, name, image.image_type or "", image)
 
     async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),
-                   references: Sequence[ReferenceRequest] = (), origin: MessageOrigin | None = None,
+                   origin: MessageOrigin | None = None,
                    screen: FileId | None = None, *, connection_generation: str | None = None,
                    client_file_download: bool | None = None) -> JobStatus:
         """A user message. With attachments (§5.1, under the lifecycle lock):
         1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
         placed in ``uploads/`` under the Workspace write lock (waited for at
         most PLACE_LOCK_SECONDS); 4 the message submitted, attaching them.
-        ``references`` (V3-P76 §3): parts of files the user pointed at, each
-        read again and checked by the explorer before anything is sent; a
-        stale one refuses the message (ExplorerRefused ``reference_stale``).
         ``origin``: where it was sent from (V3-P83 §4.2), kept on the message.
         ``screen`` (V3-P84 §4.2): a staged PNG or JPEG upload, attached as the
         user's screen and never placed in the Workspace (§4.4); attached once,
@@ -1807,14 +1447,8 @@ class Application:
                         raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
                     said = ((TextBlock(text),) if text else ()) + (AttachmentRef(record.file_id, 1, screen=True),)
                     return await self.runner.submit(scope, UserMessage(said, origin=origin))
-            pointed: tuple[ContentBlock, ...] = ()
-            if references:
-                explorer = self.explorer(scope.principal_id)
-                pointed = tuple([await explorer.reference(r.path, r.identity, r.start, r.end, r.sha256)
-                                 for r in references])
             if not attachments:
-                return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed,
-                                                                   origin=origin))
+                return await self.runner.submit(scope, UserMessage((TextBlock(text),) if text else (), origin=origin))
             async with self._exclusive(scope.conversation_id):
                 records = await self.data.check_attachments(scope, attachments)
                 if self.runner.status(scope).running:
@@ -1833,8 +1467,7 @@ class Application:
                             await self._place(scope, placer, record, first=index == 0)
                 except MachineUnavailable:
                     raise FilesUnavailable(scope.conversation_id) from None
-                blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records) \
-                    + pointed
+                blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records)
                 return await self.runner.submit(scope, UserMessage(blocks, origin=origin))
 
     async def _place(self, scope: TrustedScope, placer: _Placer, record: FileRecord, *, first: bool) -> None:

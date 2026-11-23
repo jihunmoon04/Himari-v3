@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                                              machine_principals=config.machine_principals,
                                              proactive=config.proactive)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
-              f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
+              f"{application.data_root / 'control' / 'operator.secret'} ("
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",
               file=sys.stderr, flush=True)
         for model in application.models:

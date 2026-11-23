@@ -4,19 +4,12 @@ import { setNonce } from "get-nonce";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
-import { clearProjectsDoubt, queryClient, useSession } from "@/app/queries";
+import { queryClient, useSession } from "@/app/queries";
 import { Shell } from "@/components/Shell";
-import { resetFollowed } from "@/features/hub/follow";
-import { requests } from "@/features/hub/requests";
-import { resetPointed } from "@/features/references";
 import { moveLegacyDrafts } from "@/lib/drafts";
 import { applyAppearance, watchAppearance } from "@/lib/appearance";
-import { Agents } from "@/routes/Agents";
-import { Approvals } from "@/routes/Approvals";
 import { Conversation } from "@/routes/Conversation";
 import { Home } from "@/routes/Home";
-import { HubSession } from "@/routes/HubSession";
-import { Project } from "@/routes/Project";
 import { Login } from "@/routes/Login";
 import { Settings } from "@/routes/Settings";
 import { Trash } from "@/routes/Trash";
@@ -40,12 +33,8 @@ function Root() {
       void moveLegacyDrafts().finally(() => setDrafted(true));
       return;
     }
-    // signed out or the sign-in ended: what it was following goes (the drafts stay for the same person signing
-    // back in; the user's own Sign out wipes them, lib/drafts.ts)
-    resetFollowed();
-    resetPointed();
-    requests.reset(false); // the followed ids stay in this tab, as the drafts do
-    clearProjectsDoubt();
+    // signed out or the sign-in ended: the drafts stay for the same person signing back in (the user's own Sign out
+    // wipes them, lib/drafts.ts)
     setDrafted(false);
   }, [known, signedIn]);
   if (session.isLoading) return null;
@@ -62,10 +51,6 @@ const router = createBrowserRouter(
       children: [
         { index: true, element: <Home /> },
         { path: "c/:id", element: <Conversation /> },
-        { path: "s/:id", element: <HubSession /> },
-        { path: "agents", element: <Agents /> },
-        { path: "approvals", element: <Approvals /> },
-        { path: "project", element: <Project /> }, // V3-P103 §6.2: the name is a query value, never a path
         { path: "trash", element: <Trash /> },
         { path: "settings", element: <Settings /> },
         { path: "settings/:section", element: <Settings /> },

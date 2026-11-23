@@ -16,7 +16,7 @@ from himari.data.api import (
     MessageOrigin, OriginKind, UserMessage, Wake, WakeKind, WakeReason,
 )
 
-WEB = InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True))
+WEB = InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True))
 DESK = InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION)
 TRY = (WakeReason(WakeKind.TRY),)
 
@@ -84,8 +84,7 @@ def test_legacy_payloads_remain_readable_without_a_snapshot(message: UserMessage
 
 @pytest.mark.parametrize("change", [
     {"version": 2}, {"version": True}, {"kind": "invented"},
-    {"capabilities": {"file_download": "true", "workspace_browser": False}},
-    {"capabilities": {"file_download": True, "workspace_browser": 1}},
+    {"capabilities": {"file_download": "true"}},
     {"kind": "unknown"},
 ])
 def test_invalid_persisted_snapshots_fail_closed(change: dict[str, object]) -> None:

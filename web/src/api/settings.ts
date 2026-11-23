@@ -1,6 +1,6 @@
 // The settings the classic page manages (V3-P102 W6c), on the same routes: instructions and the companion persona
 // (V3-P69, V3-P89), memory, its suggestions and timeline (V3-P71, V3-P85), devices and quiet (V3-P83, V3-P88), the
-// Tool servers' defaults (V3-P53), and the registered folders (V3-P74 §10.3).
+// Tool servers' defaults (V3-P53).
 import { del, enc, get, post, put, api } from "./client";
 
 export interface InstructionsText {
@@ -118,26 +118,3 @@ export interface McpSettings {
 export const readMcpSettings = () => get<McpSettings>("/api/settings/mcp");
 export const setMcpDefault = (source: string, enabled: boolean, revision: string) =>
   put<McpSettings>(`/api/settings/mcp/${enc(source)}`, { enabled, revision });
-
-export interface Workspace {
-  id: string;
-  path: string;
-  label: string | null;
-  note: string | null;
-  created_at: string;
-  attached: boolean;
-  cloud_synced: boolean;
-}
-
-export const readWorkspaces = () => get<{ available: boolean; items: Workspace[] }>("/api/workspaces");
-export const registerWorkspace = (path: string, label: string | null, note: string | null) =>
-  post<Workspace>("/api/workspaces", { path, label, note });
-export const editWorkspace = (id: string, label: string | null, note: string | null) =>
-  api<Workspace>("PATCH", `/api/workspaces/${enc(id)}`, { label, note });
-export const unregisterWorkspace = (id: string) => del<void>(`/api/workspaces/${enc(id)}`);
-export const attachWorkspace = (conversation: string, workspaceId: string) =>
-  post<unknown>(`/api/conversations/${enc(conversation)}/workspaces`, { workspace_id: workspaceId });
-export const detachWorkspace = (conversation: string, bindingId: string) =>
-  del<unknown>(`/api/conversations/${enc(conversation)}/workspaces/${enc(bindingId)}`);
-export const setWorkingWorkspace = (conversation: string, bindingId: string) =>
-  put<unknown>(`/api/conversations/${enc(conversation)}/workspaces/working`, { binding_id: bindingId });

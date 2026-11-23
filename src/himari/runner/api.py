@@ -9,14 +9,10 @@ Request: ``{"op": <name>, "args": {...}}``. Answer: ``{"ok": true,
 "result": {...}}`` or ``{"ok": false, "error": {"category": <category>,
 "message": <text safe to show the model>}}``.
 
-While ``run`` is under way the client sends nothing more; closing the
-connection (or only its sending side) cancels the command (the runner kills
-its tree).
-
-The runner closes a connection only once the request's work has ended: a
-cancelled command is killed and reaped first, a file operation's thread has
-returned. A client that cancels one of the ``WRITES`` waits for that close
-before it gives up the paths it holds (PR #87 review C1).
+The runner closes a connection only once the request's work has ended (a
+file operation's thread has returned), even when the client closed its
+sending side. A client that cancels one of the ``WRITES`` waits for that
+close before it gives up the paths it holds (PR #87 review C1).
 
 Standard library and ``himari.common`` only: both processes import it.
 """
@@ -32,10 +28,13 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROTOCOL_VERSION = 6  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
+PROTOCOL_VERSION = 7  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
 # 3 and 4 had ``copy_max``, ``delete_copied``, ``append`` and ``truncate`` (a PDF's writes from the web: V3-P77,
-# V3-P82); 5 is without them (V3-P96); 6 is without ``git_push`` and hello's ``push`` (V3-P100)
-KEEP_PROTOCOL = 2  # a runner older than this ignores ``keep`` and ``install`` (it would write plainly)
+# V3-P82); 5 is without them (V3-P96); 6 is without ``git_push`` and hello's ``push`` (V3-P100); 7 is files only:
+# without ``run``, the machine sandbox (hello's ``state``, ``cgroup``, ``memory_max``, ``pids_max``, ``toolkit``,
+# ``network``), the explorer's and the editor's operations (``stat``, ``visible``, ``check_workspace``,
+# ``create_file``, ``mkdir``, ``list``'s ``after`` and ``next``) and the kept writes (``keep``, ``mode``,
+# ``delete`` with ``expected``)
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_FDS = 4
 _HEADER = struct.Struct(">I")
@@ -43,33 +42,17 @@ _HEADER = struct.Struct(">I")
 # Operations
 HELLO = "hello"
 CONVERSATION_FOLDER = "conversation_folder"
-LIST = "list"  # a page of a folder, sorted, after a cursor (V3-P75 §5.1)
-STAT = "stat"  # what open checks, nothing handed over (V3-P75 §5.3)
-VISIBLE = "visible"  # a path whose folder resolves and which is not hidden; it need not exist (V3-P75 §7.4);
-# with ``follow: true``, where a write lands (a final link followed, missing folders allowed: V3-P76 §8)
+LIST = "list"  # the first ``limit`` entries of a folder, sorted (V3-P75 §5.1)
 OPEN = "open"
-WRITE = "write"
+WRITE = "write"  # ``content`` (a string) or one fd; ``expected``: the identity it must still have
 DELETE = "delete"
-RUN = "run"
 COPY_IN = "copy_in"
 FREE_PATH = "free_path"
 COMMIT_COPY = "commit_copy"
 DISCARD_COPY = "discard_copy"
 HOLDS = "holds"
 REMOVE_CONVERSATION_FOLDER = "remove_conversation_folder"
-CHECK_WORKSPACE = "check_workspace"  # a folder the user registers (§10.1): nothing is written
-CREATE_FILE = "create_file"  # a new empty file, never over one (V3-P75 §7.7)
-MKDIR = "mkdir"  # one new folder (V3-P75 §7.5)
-WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER,
-                    CREATE_FILE, MKDIR})
-# ``write`` with ``mode: "replace"`` (V3-P75 §7.4): ``expected`` required; the answer carries a copy of the
-# replaced file as an fd (none over 1 MiB). ``delete`` with ``expected``: the same for the deleted file.
-# ``write`` and ``delete`` with ``keep: true`` (V3-P76 §4.1, an agent's write): the same copy, never over a file
-# that changed meanwhile, and a new file never over one made meanwhile; the answer says ``prior_identity`` (``[]``:
-# there was none), ``after_identity`` (``[]``: deleted; null: unknown), ``complete`` and ``partial`` (a new file
-# whose writing did not finish). Errors come only before the file was changed: after it, the answer is a success
-# with ``complete: false``. ``write`` with ``mode: "install"``: the content (an fd) given a name that is free,
-# in one step, or nothing (CHANGED: taken; UNSUPPORTED: the file system cannot).
+WRITES = frozenset({WRITE, DELETE, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER})
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told
@@ -83,16 +66,12 @@ TOO_LARGE = "too_large"
 CHANGED = "changed"
 INVALID = "invalid"
 LINKS = "links"
-UNAVAILABLE = "unavailable"  # the sandbox is not enforced
 TIMED_OUT = "timed_out"  # a read did not answer in time (a slow mount, V3-P75 §5.1)
-SETUP_FAILED = "setup_failed"  # the sandbox could not be built; nothing ran
-UNSUPPORTED = "unsupported"  # the file system cannot do this in one step; nothing was done (V3-P76 §4.1)
 OTHER = "other"
 
 MESSAGES = {
     NOT_FOUND: "no such file or directory",
-    OUTSIDE_WORKSPACES: "outside this conversation's workspaces: you can write only there; "
-                        "ask the user to attach the folder as a workspace",
+    OUTSIDE_WORKSPACES: "outside this conversation's folder: you can write only there",
     IS_DIRECTORY: "is a directory",
     NOT_DIRECTORY: "not a directory",
     NOT_REGULAR: "not a regular file",
@@ -102,10 +81,7 @@ MESSAGES = {
     CHANGED: "file changed while it was being edited; nothing written",
     INVALID: "invalid path",
     LINKS: "too many levels of symbolic links",
-    UNAVAILABLE: "the machine sandbox is not enforced on this server; nothing was done",
     TIMED_OUT: "this did not answer in time (a slow or unresponsive mount?); try again or use a folder inside it",
-    SETUP_FAILED: "the sandbox could not be set up; nothing was run",
-    UNSUPPORTED: "this file system cannot put a file in place in one step; nothing was done",
     OTHER: "file operation failed",
 }
 
@@ -214,19 +190,6 @@ async def recv_frame(sock: socket.socket, *, max_fds: int = MAX_FDS) -> tuple[di
         for fd in fds:
             os.close(fd)
         raise
-
-
-async def wait_closed(sock: socket.socket) -> None:
-    """Return when the peer closes the connection (or sends anything: the
-    protocol has nothing more to say during an operation)."""
-    while True:
-        try:
-            sock.recv(1, socket.MSG_PEEK)
-            return
-        except BlockingIOError:
-            await _ready(sock, write=False)
-        except OSError:
-            return
 
 
 def ok(result: Mapping[str, Any]) -> dict[str, Any]:

@@ -310,8 +310,7 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         found = asyncio.run(data.search_events(SCOPE.principal_id, ["FROM V"], current=ConversationId("conv_none"),
                                                current_through=None, per_conversation=3, limit=10))
         assert [h.text for h in found.hits] == [f"from v{version}"]  # v12: the Events already there were filled
-        assert asyncio.run(data.register_workspace(SCOPE.principal_id, EnvironmentKind("machine"), "/srv/x", "x")
-                           ).location == "/srv/x"  # the v13 table
+        assert store.connection.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 0  # the v13 table
         assert asyncio.run(data.add_device(SCOPE.principal_id, "Desk", b"code", datetime.now(UTC) + timedelta(minutes=10))
                            ).device_id == "d1"  # the v14 tables
         if version < 15:  # v15: the Conversation reads from its last Event, which is also its backfill baseline

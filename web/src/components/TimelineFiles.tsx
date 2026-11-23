@@ -81,11 +81,10 @@ const WORDS: Record<string, string> = {
 };
 
 export function MemoryLine({ conversation, run, call, action, text, undo }: {
-  conversation: string | null | undefined; run: string; call: string; action: string; text: string; undo: boolean;
+  conversation: string; run: string; call: string; action: string; text: string; undo: boolean;
 }) {
   const [state, setState] = useState<"can" | "busy" | "done" | "gone">(undo ? "can" : "gone");
   const back = async () => {
-    if (!conversation) return;
     setState("busy");
     try {
       await undoMemory(conversation, run, call);
@@ -107,7 +106,7 @@ export function MemoryLine({ conversation, run, call, action, text, undo }: {
       <span className="font-medium">{WORDS[action] ?? action}</span>
       {text && <span className="min-w-0 break-words">“{text}”</span>}
       {state === "can" || state === "busy" ? (
-        <button type="button" disabled={state === "busy" || !conversation} onClick={() => void back()}
+        <button type="button" disabled={state === "busy"} onClick={() => void back()}
           className="rounded px-1 text-accent hover:underline disabled:opacity-50">Undo</button>
       ) : state === "done" ? <span className="text-faint">Undone</span> : null}
     </p>

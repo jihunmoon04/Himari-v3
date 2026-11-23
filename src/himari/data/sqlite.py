@@ -53,7 +53,7 @@ import sqlite3
 import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from himari.common import (
     ASK_USER_TOOL_ID,
@@ -97,12 +97,10 @@ from himari.data.api import (
     AssistantFinal,
     AssistantOutput,
     AssistantToolCalls,
-    AttachedWorkspace,
     BindingAuthority,
     ConversationEvent,
     ConversationSummary,
     ConversationWorkspace,
-    ConversationWorkspaces,
     DataError,
     DataErrorCode,
     EnvironmentActivation,
@@ -115,11 +113,9 @@ from himari.data.api import (
     ImageView,
     Instructions,
     InstructionScope,
-    MAX_ATTACHED_WORKSPACES,
     MAX_DEVICES,
     MAX_MEMORIES,
     PAIRING_FAILURE_LIMIT,
-    MAX_WORKSPACES,
     Device,
     DevicePairing,
     Memory,
@@ -168,7 +164,6 @@ from himari.data.api import (
     RawRunOutcome,
     RawUncertain,
     RecoveryReport,
-    RegisteredWorkspace,
     RunPreparation,
     RunPurpose,
     RunRecord,
@@ -1363,9 +1358,8 @@ def _refused(file_id: str, why: str) -> DataError:
 class SqliteData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
-    FileCatalog, FileRetention, InstructionsStore (V3-P69), MemoryStore
-    (V3-P71) and WorkspaceRegistry (V3-P74); ``blobs`` is the BlobStore
-    (V3-P66)."""
+    FileCatalog, FileRetention, InstructionsStore (V3-P69) and MemoryStore
+    (V3-P71); ``blobs`` is the BlobStore (V3-P66)."""
 
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
@@ -2032,148 +2026,6 @@ class SqliteData:
                 raise DataError(DataErrorCode.NOT_FOUND, "conversation workspace")
             return workspace
 
-    # --- WorkspaceRegistry (V3-P74 §10) ----------------------------------------------
-
-    @staticmethod
-    def _registered(tx: _Tx, row: sqlite3.Row) -> RegisteredWorkspace:
-        used = tx.one("SELECT count(DISTINCT conversation_id) AS n FROM bindings WHERE workspace_id=?",
-                      row["workspace_id"])
-        assert used is not None
-        return RegisteredWorkspace(WorkspaceId(row["workspace_id"]), EnvironmentKind(row["environment_kind"]),
-                                   row["location"], row["label"], row["note"],
-                                   datetime.fromisoformat(row["created_at"]), int(used["n"]), row["filesystem"])
-
-    @staticmethod
-    def _workspace_row(tx: _Tx, principal: PrincipalId, workspace_id: object) -> sqlite3.Row:
-        row = tx.one("SELECT * FROM workspaces WHERE workspace_id=? AND owner=?", workspace_id, principal)
-        if row is None:  # another principal's is a missing one
-            raise DataError(DataErrorCode.NOT_FOUND, f"no workspace {workspace_id}")
-        return row
-
-    @staticmethod
-    def _activation_row(tx: _Tx, scope: TrustedScope, kind: object) -> sqlite3.Row | None:
-        return tx.one("SELECT * FROM activations WHERE conversation_id=? AND environment_kind=? ORDER BY seq LIMIT 1",
-                      scope.conversation_id, kind)
-
-    @staticmethod
-    def _registered_binding(tx: _Tx, row: sqlite3.Row) -> bool:
-        return tx.one("SELECT 1 FROM workspaces WHERE workspace_id=?", row["workspace_id"]) is not None
-
-    async def list_workspaces(self, principal: PrincipalId, kind: EnvironmentKind) -> tuple[RegisteredWorkspace, ...]:
-        with self._tx() as tx:
-            rows = tx.all("SELECT * FROM workspaces WHERE owner=? AND environment_kind=? ORDER BY seq", principal, kind)
-            return tuple(self._registered(tx, r) for r in rows)
-
-    async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
-                                 note: str | None = None, filesystem: str | None = None) -> RegisteredWorkspace:
-        location = rules.check_workspace_location(location)
-        label, note = rules.check_workspace_label(label), rules.check_workspace_note(note)
-        filesystem = rules.check_workspace_filesystem(filesystem)
-        with self._tx() as tx:
-            if tx.one("SELECT 1 FROM workspaces WHERE owner=? AND environment_kind=? AND location=?",
-                      principal, kind, location):
-                raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{location} is registered already")
-            count = tx.one("SELECT count(*) AS n FROM workspaces WHERE owner=? AND environment_kind=?", principal, kind)
-            assert count is not None
-            if count["n"] >= MAX_WORKSPACES:
-                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_WORKSPACES} workspaces")
-            workspace_id = tx.new_id("wsp")
-            tx.execute("INSERT INTO workspaces (workspace_id, owner, environment_kind, location, label, note, filesystem,"
-                       " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", workspace_id, principal, kind, location, label,
-                       note, filesystem, _timestamp(datetime.now(UTC)))
-            return self._registered(tx, self._workspace_row(tx, principal, workspace_id))
-
-    async def update_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId, *, label: str,
-                               note: str | None) -> RegisteredWorkspace:
-        label, note = rules.check_workspace_label(label), rules.check_workspace_note(note)
-        with self._tx() as tx:
-            self._workspace_row(tx, principal, workspace_id)
-            tx.execute("UPDATE workspaces SET label=?, note=? WHERE workspace_id=?", label, note, workspace_id)
-            return self._registered(tx, self._workspace_row(tx, principal, workspace_id))
-
-    async def unregister_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId) -> None:
-        with self._tx() as tx:
-            self._workspace_row(tx, principal, workspace_id)
-            if tx.one("SELECT 1 FROM bindings WHERE workspace_id=?", workspace_id):
-                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{workspace_id} is attached to a conversation")
-            tx.execute("DELETE FROM workspaces WHERE workspace_id=?", workspace_id)
-
-    async def read_conversation_workspaces(self, scope: TrustedScope,
-                                           kind: EnvironmentKind) -> ConversationWorkspaces:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            activation = self._activation_row(tx, scope, kind)
-            if activation is None:
-                raise DataError(DataErrorCode.NOT_FOUND, f"{kind} is not active in this conversation")
-            attached: list[AttachedWorkspace] = []
-            for row in tx.all("SELECT * FROM bindings WHERE conversation_id=? AND environment_instance_id=?"
-                              " ORDER BY seq", scope.conversation_id, activation["environment_instance_id"]):
-                registered = tx.one("SELECT * FROM workspaces WHERE workspace_id=? AND owner=?", row["workspace_id"],
-                                    scope.principal_id)
-                attached.append(AttachedWorkspace(_binding(row),
-                                                  None if registered is None else self._registered(tx, registered)))
-            attached.sort(key=lambda a: a.workspace is not None)  # the own folder first; stable otherwise
-            default = activation["default_binding_id"]
-            return ConversationWorkspaces(None if default is None else BindingId(default), tuple(attached))
-
-    async def attach_workspace(self, scope: TrustedScope, workspace_id: WorkspaceId) -> BindingAuthority:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            workspace = self._workspace_row(tx, scope.principal_id, workspace_id)
-            kind = EnvironmentKind(workspace["environment_kind"])
-            activation = self._activation_row(tx, scope, kind)
-            if activation is None:
-                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{kind} is not active in this conversation")
-            if tx.one("SELECT 1 FROM bindings WHERE conversation_id=? AND workspace_id=?", scope.conversation_id,
-                      workspace_id):
-                raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{workspace_id} is attached already")
-            instance = EnvironmentInstanceId(activation["environment_instance_id"])
-            count = tx.one("SELECT count(*) AS n FROM bindings b WHERE conversation_id=? AND environment_instance_id=?"
-                           " AND EXISTS (SELECT 1 FROM workspaces w WHERE w.workspace_id=b.workspace_id)",
-                           scope.conversation_id, instance)
-            assert count is not None
-            if count["n"] >= MAX_ATTACHED_WORKSPACES:
-                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_ATTACHED_WORKSPACES} attached workspaces")
-            binding = BindingAuthority(BindingId(tx.new_id("bind")), instance, kind, workspace_id, 1, "")
-            tx.execute("INSERT INTO bindings (conversation_id, binding_id, environment_instance_id, environment_kind,"
-                       " workspace_id, revision, cwd_relative) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                       scope.conversation_id, binding.binding_id, instance, kind, workspace_id, 1, "")
-            tx.execute("UPDATE activations SET default_binding_id=? WHERE seq=?", binding.binding_id, activation["seq"])
-            tx.bump_state(scope)
-            return binding
-
-    def _conversation_binding(self, tx: _Tx, scope: TrustedScope, binding_id: object) -> sqlite3.Row:
-        tx.authorized(scope)
-        row = tx.one("SELECT * FROM bindings WHERE conversation_id=? AND binding_id=?", scope.conversation_id,
-                     binding_id)
-        if row is None:
-            raise DataError(DataErrorCode.NOT_FOUND, f"no binding {binding_id}")
-        return row
-
-    async def detach_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
-        with self._tx() as tx:
-            row = self._conversation_binding(tx, scope, binding_id)
-            if not self._registered_binding(tx, row):
-                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "the conversation's own folder stays attached")
-            tx.execute("DELETE FROM bindings WHERE binding_id=?", binding_id)
-            instance = row["environment_instance_id"]
-            if tx.one("SELECT 1 FROM activations WHERE environment_instance_id=? AND default_binding_id=?",
-                      instance, binding_id):
-                left = tx.all("SELECT * FROM bindings WHERE conversation_id=? AND environment_instance_id=? ORDER BY seq",
-                              scope.conversation_id, instance)
-                attached = [r for r in left if self._registered_binding(tx, r)]
-                working = attached[-1] if attached else (left[0] if left else None)
-                tx.execute("UPDATE activations SET default_binding_id=? WHERE environment_instance_id=?",
-                           None if working is None else working["binding_id"], instance)
-            tx.bump_state(scope)
-
-    async def set_working_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
-        with self._tx() as tx:
-            row = self._conversation_binding(tx, scope, binding_id)
-            tx.execute("UPDATE activations SET default_binding_id=? WHERE environment_instance_id=?", binding_id,
-                       row["environment_instance_id"])
-            tx.bump_state(scope)
-
     # --- ConversationCatalog ----------------------------------------------------
 
     async def create_conversation(
@@ -2220,17 +2072,6 @@ class SqliteData:
                 codec.payload_from(EventKind.USER_MESSAGE, first).blocks),  # type: ignore[union-attr]
             trashed_at=None if row["trashed_at"] is None else datetime.fromisoformat(row["trashed_at"]),
         )
-
-    async def list_conversations_working_in(self, principal: PrincipalId, workspace_id: WorkspaceId, *,
-                                            limit: int = 50) -> Sequence[ConversationSummary]:
-        rules.check_page(limit, 0)
-        with self._tx() as tx:
-            rows = tx.all(f"{self._SUMMARY} WHERE c.owner=? AND c.trashed_at IS NULL AND EXISTS ("
-                          "SELECT 1 FROM activations a JOIN bindings b ON b.binding_id=a.default_binding_id"
-                          " JOIN workspaces w ON w.workspace_id=b.workspace_id AND w.owner=c.owner"
-                          " WHERE a.conversation_id=c.conversation_id AND b.workspace_id=?)"
-                          " ORDER BY last_activity DESC, c.rowid DESC LIMIT ?", principal, workspace_id, limit)
-            return tuple(self._summary(r) for r in rows)
 
     async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
         with self._tx() as tx:

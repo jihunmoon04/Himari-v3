@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import json
 import threading
 import time
 from collections.abc import Iterator
@@ -32,7 +31,6 @@ from himari.bootstrap.application import (  # noqa: E402
 )
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
-from himari.sandbox.api import SandboxState  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.control.turn import MIN_OUTPUT_RESERVE  # noqa: E402
@@ -254,7 +252,7 @@ def test_sign_in_cookie_and_sign_out(server: Server) -> None:
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=strict" in cookie and "Path=/" in cookie and server.secret not in cookie
     session = server.client.get("/api/session").json()
-    assert session == {"authenticated": True, "model": "scripted-model", "sandbox": "enforced"}
+    assert session == {"authenticated": True, "model": "scripted-model"}
     assert server.client.get("/api/conversations").status_code == 200
     assert server.client.delete("/api/session", headers={"origin": ORIGIN}).status_code == 204
     assert server.client.get("/api/conversations").status_code == 401
@@ -264,34 +262,17 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     assert server.client.get("/api/server").status_code == 401
     server.sign_in()
     info = server.client.get("/api/server").json()
-    assert info == {"model": "scripted-model", "sandbox": "enforced", "context_budget": 128_000, "trash_days": 30,
+    assert info == {"model": "scripted-model", "context_budget": 128_000, "trash_days": 30,
                     "images": False,  # V3-P67: no image sandbox in this test
-                    "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
+                    "documents": {"read": False, "libraries": {}},  # V3-P70: no toolkit
                     "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
                     "auto_memory": "off (no HIMARI_MEMORY_MODEL)",  # V3-P85 §12
                     "conversation_search": True,  # V3-P72 §9: on unless HIMARI_CONVERSATION_SEARCH=0
                     "streaming": True,  # V3-P73 §9: on unless HIMARI_STREAMING=0
-                    "hub_source": None,  # V3-P102 §5.1: no hub set up here
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False, "companion": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
                              "no_progress_runs": 3, "seen_seconds": 60.0}}  # V3-P62's defaults
-
-
-def test_the_server_info_follows_a_sandbox_that_broke_after_startup(server: Server) -> None:
-    # PR #24 review B1: a setup failure while running a command latches
-    # SETUP_FAILED in the backend; the startup value must not be shown instead.
-    server.sign_in()
-    application = server.application
-    assert application is not None
-
-    assert application.machine is not None  # the runner's sandbox, as its last hello said (V3-P101)
-    application.machine.sandbox_state = SandboxState.ENFORCED
-    assert server.client.get("/api/server").json()["sandbox"] == "enforced"
-    application.machine.sandbox_state = SandboxState.SETUP_FAILED
-    assert server.client.get("/api/server").json()["sandbox"] == "setup_failed"
-    assert server.client.get("/api/session").json()["sandbox"] == "setup_failed"
-    assert application.sandbox_state is SandboxState.ENFORCED  # the startup value (the kit's) is kept as such
 
 
 def test_cookie_mutations_need_an_allowed_origin(server: Server) -> None:

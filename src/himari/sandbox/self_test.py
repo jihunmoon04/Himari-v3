@@ -1,8 +1,7 @@
 """What the sandbox self-tests share (V3-050): the report, the host paths
 that must stay invisible, and the check of the mount table a probe read
 inside the sandbox. The server profile's own test is
-:mod:`himari.sandbox.server_self_test`; the machine profile's,
-:mod:`himari.sandbox.machine_self_test`.
+:mod:`himari.sandbox.server_self_test`.
 """
 
 from __future__ import annotations

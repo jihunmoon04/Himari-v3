@@ -230,7 +230,7 @@ def test_clients_cannot_supply_an_interface_snapshot(server: Server) -> None:
     cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
     token = server.paired()
     spoofed = {"text": "hi", "interface": {"version": 1, "kind": "web", "capabilities": {
-        "file_download": True, "workspace_browser": True}}}
+        "file_download": True}}}
     assert server.client.post(f"/api/conversations/{cid}/messages", json=spoofed, headers=SEND).status_code == 400
     assert server.device.post(f"/api/conversations/{cid}/messages", json=spoofed,
                               headers=server.as_device(token)).status_code == 400
@@ -240,11 +240,9 @@ def test_clients_cannot_supply_an_interface_snapshot(server: Server) -> None:
 def test_a_device_sends_text_only_and_sees_no_trash(server: Server) -> None:
     me = server.as_device(server.paired())
     cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
-    for body in ({"text": "x", "references": [{"path": "/etc/hostname", "identity": [1, 2, 3, 4], "start": 1, "end": 1,
-                                                "sha256": "0" * 64}]},
-                 {"text": "x", "attachments": ["f_1"]}):
-        response = server.device.post(f"/api/conversations/{cid}/messages", json=body, headers=me)
-        assert (response.status_code, error_code(response)) == (403, "device_scope"), body  # B3
+    response = server.device.post(f"/api/conversations/{cid}/messages", json={"text": "x", "attachments": ["f_1"]},
+                                  headers=me)
+    assert (response.status_code, error_code(response)) == (403, "device_scope")  # B3
     response = server.device.get("/api/conversations?trashed=true", headers=me)
     assert (response.status_code, error_code(response)) == (403, "device_scope")
     assert server.device.get("/api/conversations", headers=me).status_code == 200
@@ -258,8 +256,7 @@ def test_every_route_but_the_allowed_ones_refuses_a_device(server: Server) -> No
     assert ALLOWED <= routes and PUBLIC <= routes
     for method, path in sorted(routes - ALLOWED - PUBLIC):
         url = path.replace("{conversation_id}", cid)
-        for name in ("{device_id}", "{run_id}", "{call_id}", "{file_id}", "{version}", "{binding_id}",
-                     "{workspace_id}", "{version_id}", "{name}"):
+        for name in ("{device_id}", "{run_id}", "{call_id}", "{file_id}", "{version}", "{version_id}", "{name}"):
             url = url.replace(name, "x1")
         response = server.device.request(method, url, headers=me, json={})
         assert (response.status_code, error_code(response)) == (403, "device_scope"), (method, path)
@@ -933,7 +930,7 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     snap = server.provider.prepared_inputs[-1].current_state.interface
     assert snap is not None
     assert snap.kind.value == "windows_companion"
-    assert snap.capabilities.file_download is True and snap.capabilities.workspace_browser is False
+    assert snap.capabilities.file_download is True
 
     # Replacing sub1 immediately resets wake capability to False and rejects me_gen.
     sub1_next = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]

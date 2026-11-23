@@ -9,23 +9,12 @@ deny every TCP bind/connect, as a second layer under the network namespace.
 Fail-closed order (exit ``SETUP_FAILURE_EXIT``; the argv never runs and
 nothing is written to the sync fd):
 
-0. the machine profile only (V3-P74 §6.1): every hidden path is masked as
-   the policy says — an empty read-only folder or an empty read-only file,
-   on another device than the host's original;
 1. Landlock ABI >= ``MIN_LANDLOCK_ABI`` (6: scoped abstract sockets/signals);
-2. ruleset handling every filesystem right, TCP bind+connect (unless the
-   policy's ``tcp`` is ``"allow"``: the machine profile's private loopback,
-   V3-P74 Q8), and scopes;
+2. ruleset handling every filesystem right, TCP bind+connect, and scopes;
 3. every path rule added (a missing root is a failure); no network rule is
-   added, so all TCP bind/connect is denied when TCP is handled;
+   added, so all TCP bind/connect is denied;
 4. ``PR_SET_NO_NEW_PRIVS``, then ``landlock_restrict_self``;
-5. the machine profile with a proxy only (V3-P74 §11.2): the bridge from
-   ``127.0.0.1:<port>`` to the proxy's socket starts — bound before the
-   payload exists, not its child, not dumpable, outside the seccomp filter;
-6. the machine profile only (V3-P74 §6.6): the seccomp filter that refuses
-   ``socket(AF_UNIX)``, ``socketpair(AF_UNIX)`` other than ``SOCK_STREAM``
-   and io_uring, and ends a process of another architecture;
-7. write ``SYNC_OK`` to the sync fd, close every fd >= 3, ``execvp``.
+5. write ``SYNC_OK`` to the sync fd, close every fd >= 3, ``execvp``.
 """
 
 from __future__ import annotations
@@ -33,11 +22,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-import socket
-import stat
-import struct
 import sys
-import threading
 
 SETUP_FAILURE_EXIT = 125
 SYNC_OK = b"HIMARI_SANDBOX_ENFORCED\n"
@@ -69,195 +54,6 @@ HANDLED_NET = NET_BIND_TCP | NET_CONNECT_TCP  # handled with no allow rule: all 
 SCOPE_ABSTRACT_UNIX_SOCKET = 1 << 0
 SCOPE_SIGNAL = 1 << 1
 SCOPED = SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL
-
-
-# --- seccomp (V3-P74 §6.6) ----------------------------------------------------------
-_PR_SET_SECCOMP = 22
-_SECCOMP_MODE_FILTER = 2
-_RET_KILL_PROCESS = 0x80000000
-_RET_ERRNO = 0x00050000
-_RET_ALLOW = 0x7FFF0000
-_EACCES = 13
-_ENOSYS = 38
-_AF_UNIX = 1
-_SOCK_STREAM = 1
-_SOCK_FLAGS = 0o4000 | 0o2000000  # SOCK_NONBLOCK | SOCK_CLOEXEC
-_LD_ABS_W, _JEQ_K, _JGE_K, _AND_K, _RET_K = 0x20, 0x15, 0x35, 0x54, 0x06
-# struct seccomp_data: nr, arch, instruction_pointer, args[6] (each 64-bit, low half first)
-_NR, _ARCH, _ARG0, _ARG1 = 0, 4, 16, 24
-# machine -> (AUDIT_ARCH, socket, socketpair, first number of a foreign ABI or None)
-ARCHES = {
-    "aarch64": (0xC00000B7, 198, 199, None),
-    "x86_64": (0xC000003E, 41, 53, 0x40000000),  # x32 numbers start here
-}
-IO_URING = (425, 426, 427)  # setup, enter, register: the same numbers on every 64-bit architecture
-
-
-def unix_filter(machine: str) -> bytes:
-    """The BPF program as packed ``sock_filter`` entries. ValueError for an
-    architecture it does not know (the helper then fails closed)."""
-    if machine not in ARCHES:
-        raise ValueError(f"no seccomp filter for {machine}")
-    arch, socket_nr, pair_nr, foreign = ARCHES[machine]
-    program: list[tuple[int, int, int, int]] = []
-
-    def op(code: int, k: int, jt: int = 0, jf: int = 0) -> None:
-        program.append((code, jt, jf, k))
-
-    op(_LD_ABS_W, _ARCH)
-    op(_JEQ_K, arch, 1, 0)
-    op(_RET_K, _RET_KILL_PROCESS)
-    op(_LD_ABS_W, _NR)
-    if foreign is not None:
-        op(_JGE_K, foreign, 0, 1)
-        op(_RET_K, _RET_KILL_PROCESS)
-    for number in IO_URING:
-        op(_JEQ_K, number, 0, 1)
-        op(_RET_K, _RET_ERRNO | _ENOSYS)
-    op(_JEQ_K, socket_nr, 2, 0)
-    op(_JEQ_K, pair_nr, 5, 0)
-    op(_RET_K, _RET_ALLOW)
-    # socket(domain, ...): AF_UNIX refused
-    op(_LD_ABS_W, _ARG0)
-    op(_JEQ_K, _AF_UNIX, 0, 1)
-    op(_RET_K, _RET_ERRNO | _EACCES)
-    op(_RET_K, _RET_ALLOW)
-    # socketpair(domain, type, ...): AF_UNIX only as SOCK_STREAM (a SOCK_DGRAM pair reaches host sockets)
-    op(_LD_ABS_W, _ARG0)
-    op(_JEQ_K, _AF_UNIX, 1, 0)
-    op(_RET_K, _RET_ALLOW)
-    op(_LD_ABS_W, _ARG1)
-    op(_AND_K, 0xFFFFFFFF & ~_SOCK_FLAGS)
-    op(_JEQ_K, _SOCK_STREAM, 0, 1)
-    op(_RET_K, _RET_ALLOW)
-    op(_RET_K, _RET_ERRNO | _EACCES)
-    return b"".join(struct.pack("=HBBI", *entry) for entry in program)
-
-
-class _SockFprog(ctypes.Structure):
-    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
-
-
-def install_unix_filter() -> None:
-    """After no_new_privs: the filter for this process and everything it runs."""
-    try:
-        program = unix_filter(os.uname().machine)
-    except ValueError as error:
-        raise SetupError(str(error)) from None
-    buffer = ctypes.create_string_buffer(program, len(program))
-    prog = _SockFprog(len(program) // 8, ctypes.cast(buffer, ctypes.c_void_p))
-    if _libc().prctl(_PR_SET_SECCOMP, _SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:
-        raise SetupError("seccomp filter refused")
-
-
-# --- the proxy bridge (V3-P74 §11.2) ---------------------------------------------------
-_PR_SET_DUMPABLE = 4
-_MAX_TUNNELS = 64
-
-
-def start_bridge(proxy: object) -> None:
-    """Listen on ``127.0.0.1:<port>`` here, then leave the listening to a
-    grandchild: reparented to the namespace's init, so the payload (this
-    process after exec) is not its parent; not dumpable, so the payload,
-    the same user without capabilities, cannot ptrace it or read its memory."""
-    if not (isinstance(proxy, dict) and isinstance(proxy.get("socket"), str)
-            and isinstance(proxy.get("port"), int) and not isinstance(proxy.get("port"), bool)):
-        raise SetupError("malformed proxy policy")
-    path, port = proxy["socket"], proxy["port"]
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        listener.bind(("127.0.0.1", port))
-        listener.listen(64)
-        child = os.fork()
-        if child == 0:
-            try:
-                if _libc().prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
-                    os._exit(1)
-                if os.fork() == 0:
-                    _bridge(listener, path)
-            finally:
-                os._exit(0)
-        _, status = os.waitpid(child, 0)
-        if status != 0:
-            raise SetupError("the proxy bridge did not start")
-    except OSError as error:
-        raise SetupError("the proxy bridge did not start") from error
-    finally:
-        listener.close()
-
-
-def _bridge(listener: socket.socket, path: str) -> None:
-    null = os.open("/dev/null", os.O_RDWR)
-    for fd in (0, 1, 2):  # the command's output pipes are not held open by the bridge
-        os.dup2(null, fd)
-    keep = listener.fileno()
-    os.closerange(3, keep)
-    os.closerange(keep + 1, 65536)
-    slots = threading.BoundedSemaphore(_MAX_TUNNELS)
-    while True:
-        conn, _ = listener.accept()
-        if not slots.acquire(blocking=False):
-            conn.close()
-            continue
-        threading.Thread(target=_carry, args=(conn, path, slots), daemon=True).start()
-
-
-def _carry(conn: socket.socket, path: str, slots: threading.BoundedSemaphore) -> None:
-    upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        upstream.connect(path)
-        back = threading.Thread(target=_copy, args=(upstream, conn), daemon=True)
-        back.start()
-        _copy(conn, upstream)
-        back.join()
-    except OSError:
-        pass
-    finally:
-        conn.close()
-        upstream.close()
-        slots.release()
-
-
-def _copy(source: socket.socket, sink: socket.socket) -> None:
-    try:
-        while data := source.recv(65536):
-            sink.sendall(data)
-    except OSError:
-        pass
-    finally:
-        try:
-            sink.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
-
-
-# --- hidden paths (V3-P74 §6.1) --------------------------------------------------------
-_ST_RDONLY = 1
-
-
-def check_hidden(hidden: object) -> None:
-    """Every hidden path is masked in the final mount tree: a folder is an
-    empty read-only mount, a file an empty read-only file, each on another
-    device than the host's original. Anything else: the payload must not run."""
-    if not isinstance(hidden, list):
-        raise SetupError("malformed hidden list")
-    for entry in hidden:
-        if not (isinstance(entry, list) and len(entry) == 3):
-            raise SetupError("malformed hidden entry")
-        path, kind, host_device = entry
-        try:
-            info = os.lstat(path)
-            read_only = os.statvfs(path).f_flag & _ST_RDONLY
-        except OSError as error:
-            raise SetupError("a hidden path is not masked") from error
-        if kind == "dir":
-            masked = stat.S_ISDIR(info.st_mode) and not os.listdir(path)
-        elif kind == "file":
-            masked = stat.S_ISREG(info.st_mode) and info.st_size == 0
-        else:
-            masked = False
-        if not (masked and read_only and info.st_dev != host_device):
-            raise SetupError("a hidden path is not masked")
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -307,10 +103,7 @@ def enforce(policy: dict[str, object]) -> None:
     if landlock_abi() < MIN_LANDLOCK_ABI:
         raise SetupError("Landlock ABI below minimum")
     libc = _libc()
-    tcp = policy.get("tcp", "deny")
-    if tcp not in ("deny", "allow"):
-        raise SetupError("malformed tcp policy")
-    attr = _RulesetAttr(HANDLED_FS, HANDLED_NET if tcp == "deny" else 0, SCOPED)
+    attr = _RulesetAttr(HANDLED_FS, HANDLED_NET, SCOPED)
     ruleset = libc.syscall(
         ctypes.c_long(_SYS_CREATE_RULESET), ctypes.byref(attr), ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0)
     )
@@ -355,16 +148,7 @@ def main(argv: list[str]) -> None:
         if separator != 2 or not payload or not isinstance(policy, dict):
             raise SetupError("malformed helper invocation")
         sync_fd = int(policy["sync_fd"])
-        if "hidden" in policy:
-            check_hidden(policy["hidden"])
-        seccomp = policy.get("seccomp")
-        if seccomp not in (None, "unix"):
-            raise SetupError("malformed seccomp policy")
         enforce(policy)
-        if "proxy" in policy:
-            start_bridge(policy["proxy"])
-        if seccomp == "unix":
-            install_unix_filter()
     except Exception:
         _fail()
         return

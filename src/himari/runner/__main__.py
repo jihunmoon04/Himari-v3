@@ -5,15 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 
-from himari.runner.cgroups import CgroupError, Commands, delegate
 from himari.runner.config import ConfigError, load
 from himari.runner.hidden import HiddenRules
 from himari.runner.hostfs import Host
 from himari.runner.server import Runner, listener
-from himari.sandbox.machine import MachineSandbox
 
 
 async def main(path: str) -> int:
@@ -22,17 +21,9 @@ async def main(path: str) -> int:
     except (OSError, ConfigError) as error:
         print(f"himari-runner: {error}", file=sys.stderr)
         return 2
-    commands: Commands | None = None
-    if config.cgroup == "delegated":
-        try:
-            commands = delegate(config.memory_max, config.pids_max, config.runner_memory_low)
-        except CgroupError as error:
-            print(f"himari-runner: {error}", file=sys.stderr)
-            return 2
-    host = Host(HiddenRules(config.home, config.visible, config.hidden), config.himari_home, config.state_dir)
-    runner = Runner(config, MachineSandbox.discover(), host, commands)
-    state = await runner.start()
-    logging.getLogger("himari.runner").info("machine sandbox %s; serving uid %s", state.value, config.client_uid)
+    os.makedirs(os.path.join(config.himari_home, "conversations"), mode=0o755, exist_ok=True)
+    runner = Runner(config, Host(HiddenRules(config.home, config.visible, config.hidden), config.himari_home))
+    logging.getLogger("himari.runner").info("serving uid %s", config.client_uid)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):

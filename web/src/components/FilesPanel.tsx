@@ -1,208 +1,33 @@
-// A HIMARI conversation's folders, to look at (V3-P102 §4.4; the classic page's file panel, V3-P75, V3-P99): its own
-// folder first, then the folders attached to it. It only shows: a text file as text, an image as the copy the
-// server's image sandbox made, anything else as a download. Names, paths and texts are shown as text only.
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, File, Folder } from "lucide-react";
-import { useState } from "react";
+// A HIMARI conversation's own files (V3-P66): what was uploaded to it and what its Tools gave the user,
+// as the server lists them. An image shows the copy the server made; anything else downloads.
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { ApiError } from "@/api/client";
-import {
-  browseFolder, conversationFolders, machineDownloadUrl, machineImageUrl, showMachineFile, statMachinePath,
-} from "@/api/himari";
-import { attachWorkspace, detachWorkspace, readWorkspaces, setWorkingWorkspace } from "@/api/settings";
-import { pointAt } from "@/features/references";
-import { toast } from "@/features/toast";
-import { cn } from "@/lib/cn";
+import { listFiles } from "@/api/himari";
+import { shownFile } from "@/features/himari/items";
+import { Files } from "./TimelineFiles";
 
-function size(bytes: number | null | undefined) {
-  if (bytes == null) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-const why = (error: unknown) => (error instanceof ApiError ? error.message : "Could not read it.");
-
-/** How a file is shown is the server's call (its ``kind``), never its name's. */
-function FileView({ path, onBack, conversation }: { path: string; onBack: () => void; conversation: string }) {
-  const shown = useQuery({ queryKey: ["machine", "file", path], queryFn: () => showMachineFile(path), retry: false });
-  return (
-    <div className="space-y-2">
-      <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-xs text-muted hover:text-ink">
-        <ChevronLeft className="size-3.5" /> Back
-      </button>
-      <p className="break-all font-mono text-xs text-muted">{path}</p>
-      {shown.isLoading ? (
-        <p className="text-faint">Loading…</p>
-      ) : shown.data?.kind === "image" ? (
-        <img src={machineImageUrl(path)} alt={path.split("/").pop() ?? "image"} className="max-w-full rounded-md border border-line" />
-      ) : shown.error ? (
-        <p role="alert" className="text-danger">{why(shown.error)}</p>
-      ) : shown.data?.kind === "text" && typeof shown.data.text === "string" ? (
-        <>
-          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-md bg-code p-2 font-mono text-xs">
-            {shown.data.text}
-          </pre>
-          {shown.data.truncated && <p className="text-xs text-faint">Only the start of the file is shown.</p>}
-        </>
-      ) : (
-        <p className="text-muted">This file is not text.</p>
-      )}
-      <div className="flex gap-3 text-xs">
-        <a href={machineDownloadUrl(path)} className="underline">Download</a>
-        {shown.data?.identity && (
-          <button type="button" className="underline" onClick={() => {
-            const name = path.split("/").pop() || path;
-            toast(pointAt(conversation, { path: shown.data!.path, identity: shown.data!.identity!, name })
-              ? `The next message asks about ${name}.` : "The message points at as many files as it can.",
-            "info");
-          }}>Ask about this file</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function FolderView({ path, onOpen }: { path: string; onOpen: (path: string, kind: string) => void }) {
+export function FilesPanel({ conversation }: { conversation: string }) {
   const pages = useInfiniteQuery({
-    queryKey: ["machine", "list", path],
-    queryFn: ({ pageParam }) => browseFolder(path, pageParam),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.next ?? undefined,
+    queryKey: ["conversation", conversation, "files"],
+    queryFn: ({ pageParam }) => listFiles(conversation, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (last) => last.next_offset ?? undefined,
     retry: false,
   });
   if (pages.isLoading) return <p className="text-faint">Loading…</p>;
-  if (pages.error) return <p role="alert" className="text-danger">{why(pages.error)}</p>;
-  const listing = { data: pages.data?.pages[0] };
-  const entries = pages.data?.pages.flatMap((page) => page.entries) ?? [];
+  if (pages.error) {
+    return <p role="alert" className="text-danger">{pages.error instanceof ApiError ? pages.error.message : "Could not read them."}</p>;
+  }
+  const files = pages.data?.pages.flatMap((page) => page.items) ?? [];
+  if (!files.length) return <p className="text-faint">No files in this conversation yet.</p>;
   return (
-    <div className="space-y-2">
-      {listing.data?.parent && (
-        <button type="button" onClick={() => onOpen(listing.data!.parent!, "directory")}
-          className="inline-flex items-center gap-1 text-xs text-muted hover:text-ink">
-          <ChevronLeft className="size-3.5" /> Up
-        </button>
-      )}
-      <p className="break-all font-mono text-xs text-muted">{listing.data?.path}</p>
-      {entries.length === 0 && <p className="text-faint">This folder is empty.</p>}
-      <ul className="space-y-0.5" aria-label="Folder">
-        {entries.map((entry) => {
-          const full = `${(listing.data?.path ?? path).replace(/\/$/, "")}/${entry.name}`;
-          const folder = entry.kind === "directory";
-          return (
-            <li key={entry.name}>
-              <button type="button" onClick={() => onOpen(full, entry.kind)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-raised">
-                {folder ? <Folder className="size-4 shrink-0 text-muted" aria-hidden />
-                  : <File className="size-4 shrink-0 text-faint" aria-hidden />}
-                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-                {!folder && <span className="text-xs text-faint">{size(entry.size)}</span>}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+    <div className="space-y-3">
+      <Files files={files.map((file) => shownFile(file, conversation))} />
       {pages.hasNextPage && (
         <button type="button" disabled={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}
           className="text-xs text-muted underline hover:text-ink">
           {pages.isFetchingNextPage ? "Loading…" : "Show more"}
         </button>
-      )}
-    </div>
-  );
-}
-
-/** The attached folder ``path`` is in: itself, else the deepest one holding it (folders may be nested). */
-export function innermost(folders: string[], path: string): string | null {
-  return folders.filter((f) => path === f || path.startsWith(`${f.replace(/\/$/, "")}/`))
-    .sort((a, b) => b.length - a.length)[0] ?? null;
-}
-
-/** Attach a registered folder, and for the folder shown: make it the working one, or detach it. */
-function FolderControls({ conversation, items, shown }: {
-  conversation: string; items: { binding_id?: string | null; path: string; own?: boolean; working?: boolean }[]; shown: string | null;
-}) {
-  const client = useQueryClient();
-  const registered = useQuery({ queryKey: ["settings", "workspaces"], queryFn: readWorkspaces, retry: false });
-  const attached = new Set(items.map((i) => i.path));
-  const offer = (registered.data?.items ?? []).filter((w) => !attached.has(w.path));
-  const current = items.find((i) => i.path === shown);
-  const act = async (run: () => Promise<unknown>, done: string) => {
-    try {
-      await run();
-      toast(done);
-    } catch (failure) {
-      toast(why(failure), "error");
-    } finally {
-      void client.invalidateQueries({ queryKey: ["conversation", conversation, "folders"] });
-      void client.invalidateQueries({ queryKey: ["settings", "workspaces"] });
-    }
-  };
-  return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      {offer.length > 0 && (
-        <select aria-label="Attach a folder" value="" className="rounded-md border border-line bg-transparent px-1.5 py-1"
-          onChange={(event) => event.target.value && void act(() => attachWorkspace(conversation, event.target.value), "Attached.")}>
-          <option value="">Attach a folder…</option>
-          {offer.map((w) => <option key={w.id} value={w.id}>{w.label || w.path}</option>)}
-        </select>
-      )}
-      {current && current.binding_id && !current.own && (
-        <>
-          {!current.working && (
-            <button type="button" className="underline" onClick={() => void act(() => setWorkingWorkspace(conversation, current.binding_id!), "Made the working folder.")}>
-              Make working folder
-            </button>
-          )}
-          <button type="button" className="text-danger underline" onClick={() => void act(() => detachWorkspace(conversation, current.binding_id!), "Detached.")}>
-            Detach
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
-export function FilesPanel({ conversation }: { conversation: string }) {
-  const folders = useQuery({ queryKey: ["conversation", conversation, "folders"],
-    queryFn: () => conversationFolders(conversation), retry: false });
-  const [at, setAt] = useState<{ path: string; kind: string } | null>(null);
-  // every hook before the first early return: a render that returns early must call the same hooks (React #310)
-  const [problem, setProblem] = useState<string | null>(null);
-  if (folders.isLoading) return <p className="text-faint">Loading…</p>;
-  if (folders.error) return <p role="alert" className="text-danger">{why(folders.error)}</p>;
-  const items = folders.data?.items ?? [];
-  if (!items.length) {
-    return <p className="text-faint">This conversation has no folders here (it only talks, or the machine is off).</p>;
-  }
-  const open =(path: string, kind: string) => {
-    setProblem(null);
-    if (kind === "directory" || kind === "file") return setAt({ path, kind });
-    // a link (or anything else): where it leads decides how it opens
-    statMachinePath(path)
-      .then((found) => setAt({ path: found.path, kind: found.kind === "directory" ? "directory" : "file" }))
-      .catch((failure: unknown) => setProblem(why(failure)));
-  };
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap gap-1" role="group" aria-label="Folders">
-        {items.map((item) => (
-          <button key={item.binding_id ?? item.path} type="button" onClick={() => open(item.path, "directory")}
-            className={cn("rounded-md border border-line px-2 py-0.5 text-xs hover:bg-raised",
-              at?.path === item.path && "bg-raised text-ink")}>
-            {item.own ? "This conversation" : item.label || item.path.split("/").pop() || item.path}
-            {item.working ? " · working" : ""}
-          </button>
-        ))}
-      </div>
-      <FolderControls conversation={conversation} items={items}
-        shown={at === null ? items[0]!.path : innermost(items.map((i) => i.path), at.path)} />
-      {problem && <p role="alert" className="text-danger">{problem}</p>}
-      {at === null ? (
-        <FolderView path={items[0]!.path} onOpen={open} />
-      ) : at.kind === "directory" ? (
-        <FolderView path={at.path} onOpen={open} />
-      ) : (
-        <FileView conversation={conversation} path={at.path} onBack={() => setAt({ path: at.path.replace(/\/[^/]*$/, "") || "/", kind: "directory" })} />
       )}
     </div>
   );

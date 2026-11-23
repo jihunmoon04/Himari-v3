@@ -3,11 +3,10 @@
     python3 scripts/install_documents.py /opt/himari-v3/documents
     python3 scripts/install_documents.py /opt/himari-v3/documents --prune
 
-The toolkit is the libraries and fonts the documents worker and
-``run_command`` share: exact versions with wheel hashes
-(``scripts/documents-requirements.txt``), installed for ``/usr/bin/python3``
-— the interpreter both sandboxes run — and NanumGothic from a pinned
-google/fonts commit, checked by SHA-256.
+The toolkit is the libraries and fonts the documents worker uses: exact
+versions with wheel hashes (``scripts/documents-requirements.txt``),
+installed for ``/usr/bin/python3`` — the interpreter its sandbox runs — and
+NanumGothic from a pinned google/fonts commit, checked by SHA-256.
 
 A new version goes into its own folder ``BASE/<version>`` and only then
 does the ``current`` link move to it (one rename). An existing version

@@ -56,7 +56,7 @@ class WorkspaceRequirement(Enum):
 class EffectProfile(Enum):
     READ = "read"  # safe to re-run if left PENDING after a crash
     SCOPED_WRITE = "scoped_write"
-    UNKNOWN = "unknown"  # e.g. run_command: serialized per Workspace
+    UNKNOWN = "unknown"  # e.g. an MCP tool that declares no effect: serialized per Workspace
 
 
 class ToolOrigin(Enum):

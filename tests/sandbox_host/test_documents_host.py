@@ -1,7 +1,7 @@
 """Real-host gate for documents (V3-P70 §5, §6.3; opt-in: HIMARI_SANDBOX_HOST=1
 and HIMARI_DOCUMENTS_TOOLKIT naming an installed toolkit's ``current``, which
 this user owns). The worker's sandbox isolates; the Application offers
-read_document. run_command with the toolkit is the runner's (V3-P101)."""
+read_document."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_the_application_opens_the_toolkit_and_tells_nothing_without_the_runner(
         app = await Application.open(tmp_path / "data", ScriptedAdapter([]), model_id="m", cleanup_seconds=None,
                                      documents_dir=BASE, documents_owners=ME)
         try:
-            assert app.documents is not None and not app.documents.scripts  # no runner here (V3-P101)
+            assert app.documents is not None  # no runner here (V3-P101)
             # read_document is the machine Environment's: without the runner the model is not told of it.
             assert DOCUMENTS_READ_NOTE not in app.runtime.driver._loader._system.documents  # type: ignore[attr-defined]
         finally:

@@ -3,8 +3,8 @@
 ``open_toolkit`` checks the documents toolkit once at startup: the folder
 ``current`` names under ``HIMARI_DOCUMENTS_DIR``, opened and walked on its
 descriptor (owners, write bits, no links), apart from HIMARI's data. The
-server keeps that descriptor to the end: ``run_command`` binds it, and the
-reader makes sure the path it launches with is still that folder.
+server keeps that descriptor to the end, and the reader makes sure the
+path it launches with is still that folder.
 
 ``DocumentReader`` runs ``worker.py`` in its own server sandbox (not the
 images' one, so neither's setup failure turns the other off), with the
@@ -247,7 +247,6 @@ class DocumentReader:
         self.available = False
         self.versions: dict[str, str] = {}
         self.split_rule = 0
-        self.scripts = False  # set by Bootstrap once run_command has the toolkit (§6.4)
 
     @property
     def salt(self) -> bytes:

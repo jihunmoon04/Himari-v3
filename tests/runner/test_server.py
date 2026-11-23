@@ -1,9 +1,9 @@
-"""The runner's wire contract and server (V3-P74 §5), with a fake sandbox."""
+"""The runner's wire contract and server (V3-P74 §5)."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
+import hashlib
 import os
 import socket
 import threading
@@ -78,9 +78,9 @@ def test_oversized_frames_are_refused() -> None:
 
 def test_hello_and_conversation_folder(kit: RunnerKit) -> None:
     hello, _ = call(kit, api.HELLO, {})
-    assert hello["state"] == "enforced" and hello["himari_home"] == str(kit.himari_home)
-    assert hello["version"] == api.PROTOCOL_VERSION
-    assert hello["network"] is None  # no proxy without a started (self-tested) sandbox
+    hidden = hello.pop("hidden")
+    assert hello == {"version": api.PROTOCOL_VERSION, "home": str(kit.home), "himari_home": str(kit.himari_home)}
+    assert isinstance(hidden, int) and hidden >= 1  # ~/.ssh at least
     folder, _ = call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})
     assert folder["path"] == f"{kit.himari_home}/conversations/c1"
     assert (kit.himari_home / "conversations/c1").is_dir()
@@ -108,13 +108,14 @@ def test_refusals_carry_a_category(kit: RunnerKit) -> None:
     assert caught.value.category == api.NOT_FOUND
     with pytest.raises(api.RunnerError) as caught:
         call(kit, api.WRITE, {"path": "~/projects/a/x", "cwd": folder, "write_roots": [folder], "content": "x"})
-    assert caught.value.category == api.OUTSIDE_WORKSPACES and "attach" in str(caught.value)
+    assert caught.value.category == api.OUTSIDE_WORKSPACES and "folder" in str(caught.value)
     with pytest.raises(api.RunnerError) as caught:
         call(kit, api.WRITE, {"path": "x", "cwd": folder, "write_roots": [str(kit.home / ".ssh")], "content": "x"})
     assert caught.value.category == api.ACCESS
-    with pytest.raises(api.RunnerError) as caught:
-        call(kit, "nope", {"write_roots": [folder]})
-    assert caught.value.category == api.INVALID
+    for removed in ("run", "stat", "visible", "check_workspace", "create_file", "mkdir", "nope"):
+        with pytest.raises(api.RunnerError) as caught:
+            call(kit, removed, {"path": "x", "cwd": folder, "write_roots": [folder]})
+        assert caught.value.category == api.INVALID, removed
 
 
 def test_open_passes_the_file(kit: RunnerKit) -> None:
@@ -126,39 +127,40 @@ def test_open_passes_the_file(kit: RunnerKit) -> None:
         os.close(fds[0])
 
 
-def test_run_gives_the_sandbox_the_checked_layout(kit: RunnerKit) -> None:
+def test_writes_deletes_and_listing(kit: RunnerKit) -> None:
     folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
-    result, _ = call(kit, api.RUN, {"argv": ["make"], "cwd": folder, "write_roots": [folder], "timeout": 30})
-    assert base64.b64decode(str(result["stdout"])) == b"out\n" and result["exit_code"] == 0 and result["oom"] is False
-    argv, layout, timeout = kit.sandbox.calls[-1]
-    assert argv == ["make"] and timeout == 30 and layout.cwd == folder and layout.home == str(kit.home)
-    assert [path for path, _ in layout.writable] == [folder]
-    assert {m.path for m in layout.masks} >= {str(kit.home / ".ssh")}
-    assert layout.cache is not None and layout.cache[0] == str(kit.home / ".cache/himari-runner")
+    base = {"cwd": folder, "write_roots": [folder]}
+    written, _ = call(kit, api.WRITE, {**base, "path": "notes/a.txt", "content": "one", "create_parents": True})
+    assert written == {"path": f"{folder}/notes/a.txt", "created": True, "bytes": 3}
+    opened, fds = call(kit, api.OPEN, {"path": "notes/a.txt", "cwd": folder})
+    os.close(fds[0])
+    r, w = os.pipe()
+    os.write(w, b"two")
+    os.close(w)
+    try:  # the content as an fd, over the file as it was read
+        written, _ = call(kit, api.WRITE, {**base, "path": "notes/a.txt", "expected": opened["identity"]}, (r,))
+    finally:
+        os.close(r)
+    assert written == {"path": f"{folder}/notes/a.txt", "created": False, "bytes": None}
+    assert (Path(folder) / "notes/a.txt").read_bytes() == b"two"
+    with pytest.raises(api.RunnerError) as caught:  # changed since it was read: nothing written
+        call(kit, api.WRITE, {**base, "path": "notes/a.txt", "content": "three", "expected": opened["identity"]})
+    assert caught.value.category == api.CHANGED and (Path(folder) / "notes/a.txt").read_bytes() == b"two"
     with pytest.raises(api.RunnerError) as caught:
-        call(kit, api.RUN, {"argv": ["make"], "cwd": folder, "write_roots": [folder], "timeout": 0})
-    assert caught.value.category == api.INVALID
+        call(kit, api.WRITE, {**base, "path": "x.txt", "content": "x" * (256 * 1024 + 1)})
+    assert caught.value.category == api.TOO_LARGE
+    call(kit, api.WRITE, {**base, "path": "b.txt", "content": ""})
+    listed, _ = call(kit, api.LIST, {"path": ".", "cwd": folder, "limit": 2})
+    entries = listed["entries"]
+    assert isinstance(entries, list) and [e["name"] for e in entries] == ["notes", "b.txt"]
+    assert listed["truncated"] is False
+    listed, _ = call(kit, api.LIST, {"path": ".", "cwd": folder, "limit": 1})
+    assert listed == {"path": folder, "entries": listed["entries"], "truncated": True}
+    assert call(kit, api.DELETE, {**base, "path": "b.txt"})[0] == {"path": f"{folder}/b.txt"}
+    assert not (Path(folder) / "b.txt").exists()
     with pytest.raises(api.RunnerError) as caught:
-        call(kit, api.RUN, {"argv": ["ls"], "cwd": str(kit.home / ".ssh"), "write_roots": [folder], "timeout": 5})
-    assert caught.value.category == api.NOT_FOUND
-
-
-def test_closing_the_connection_cancels_the_command(kit: RunnerKit) -> None:
-    folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
-    kit.sandbox.gate = threading.Event()
-
-    async def cancel() -> None:
-        task = asyncio.create_task(RunnerClient(kit.socket).call(
-            api.RUN, {"argv": ["sleep", "100"], "cwd": folder, "write_roots": [folder], "timeout": 600}))
-        deadline = time.monotonic() + 5
-        while not kit.sandbox.calls and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(cancel())
-    assert kit.sandbox.cancelled.wait(5)
+        call(kit, api.DELETE, {**base, "path": "notes"})
+    assert caught.value.category == api.IS_DIRECTORY
 
 
 def _slow_writes(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
@@ -199,25 +201,6 @@ def test_a_cancelled_write_returns_once_the_runner_is_done(kit: RunnerKit, monke
     asyncio.run(cancel())
 
 
-def test_a_cancelled_command_returns_once_it_is_reaped(kit: RunnerKit) -> None:
-    folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
-    kit.sandbox.gate = threading.Event()
-    kit.sandbox.reap_seconds = 0.3
-
-    async def cancel() -> None:
-        task = asyncio.create_task(RunnerClient(kit.socket).call(
-            api.RUN, {"argv": ["sleep", "100"], "cwd": folder, "write_roots": [folder], "timeout": 600}))
-        deadline = time.monotonic() + 5
-        while not kit.sandbox.calls and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert kit.sandbox.events == ["reaped"]
-
-    asyncio.run(cancel())
-
-
 def test_a_stopping_runner_closes_only_after_the_work(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
     folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
     entered, gate = _slow_writes(kit, monkeypatch)
@@ -237,51 +220,6 @@ def test_a_stopping_runner_closes_only_after_the_work(kit: RunnerKit, monkeypatc
     asyncio.run(stop())
 
 
-def test_not_enforced_refuses_everything_but_hello(tmp_path: Path) -> None:
-    """§13 (PR #87 review B1): a failed self-test stops files too, not only commands."""
-    kit = start_runner(tmp_path, enforced=False)
-    try:
-        assert call(kit, api.HELLO, {})[0]["state"] == "setup_failed"
-        folder = str(kit.himari_home / "conversations")
-        roots = {"write_roots": [folder]}
-        r, w = os.pipe()
-        os.close(w)
-        requests: list[tuple[str, dict[str, object], tuple[int, ...]]] = [
-            (api.CONVERSATION_FOLDER, {"conversation": "c1"}, ()),
-            (api.LIST, {"path": "~", "cwd": "/"}, ()),
-            (api.OPEN, {"path": "~/projects/a/main.c", "cwd": "/"}, ()),
-            (api.HOLDS, {"path": "~/projects/a/main.c", "size": 1, "sha256": "x"}, ()),
-            (api.WRITE, {"path": "x", "cwd": folder, "content": "x", **roots}, ()),
-            (api.DELETE, {"path": "x", "cwd": folder, **roots}, ()),
-            (api.RUN, {"argv": ["true"], "cwd": folder, "timeout": 5, **roots}, ()),
-            (api.COPY_IN, {"folder": f"{folder}/u", "clear": True, **roots}, (r,)),
-            (api.FREE_PATH, {"folder": f"{folder}/u", "name": "a", **roots}, ()),
-            (api.REMOVE_CONVERSATION_FOLDER, {"conversation": "c1"}, ()),
-            (api.CHECK_WORKSPACE, {"path": "~/projects/a", "others": []}, ()),
-        ]
-        try:
-            for op, args, fds in requests:
-                with pytest.raises(api.RunnerError) as caught:
-                    call(kit, op, args, fds)
-                assert caught.value.category == api.UNAVAILABLE, op
-        finally:
-            os.close(r)
-        assert not (kit.home / "HIMARI/conversations/x").exists() and not (kit.home / "HIMARI/conversations/u").exists()
-        assert not kit.sandbox.calls
-    finally:
-        kit.close()
-
-
-def test_check_workspace(kit: RunnerKit) -> None:
-    """V3-P74 §10.1: a read-only check of a folder to register."""
-    checked, _ = call(kit, api.CHECK_WORKSPACE, {"path": "~/projects/a", "others": [str(kit.home / "projects/a")]})
-    assert checked["path"] == str(kit.home / "projects/a") and checked["same_as"] is None  # its own path is not "another"
-    with pytest.raises(api.RunnerError) as caught:
-        call(kit, api.CHECK_WORKSPACE, {"path": "~/.ssh", "others": []})
-    assert caught.value.category == api.NOT_FOUND
-    assert api.CHECK_WORKSPACE not in api.WRITES
-
-
 def test_upload_steps(kit: RunnerKit) -> None:
     folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
     uploads = f"{folder}/uploads"
@@ -297,8 +235,6 @@ def test_upload_steps(kit: RunnerKit) -> None:
     assert path == f"{uploads}/a.txt"
     assert call(kit, api.COMMIT_COPY, {**base, "temp": temp, "path": path})[0]["placed"] is True
     assert Path(path).read_bytes() == b"data"
-    import hashlib
-
     digest = hashlib.sha256(b"data").hexdigest()
     assert call(kit, api.HOLDS, {"path": path, "size": 4, "sha256": digest})[0]["holds"] is True
     assert call(kit, api.FREE_PATH, {**base, "name": "a.txt", "preferred": path})[0]["path"] == f"{uploads}/a (2).txt"
@@ -308,7 +244,7 @@ def test_upload_steps(kit: RunnerKit) -> None:
 
 
 def test_slow_reads_are_given_up_and_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """PR #92 review B1: a listing, stat or open that hangs (a stuck mount) answers TIMED_OUT in time; at most
+    """PR #92 review B1: a listing or open that hangs (a stuck mount) answers TIMED_OUT in time; at most
     MAX_READS threads wait on it, a further read is refused at once; an open given up closes its fd."""
     from himari.runner import server as runner_server
 
@@ -338,7 +274,7 @@ def test_slow_reads_are_given_up_and_bounded(tmp_path: Path, monkeypatch: pytest
                 call(kit, op, args)
             assert given_up.value.category == api.TIMED_OUT and time.monotonic() - started < 3
         with pytest.raises(api.RunnerError, match="earlier slow reads") as busy:
-            call(kit, api.STAT, {"path": "~", "cwd": "/"})  # both read threads still wait on the mount
+            call(kit, api.LIST, {"path": "~", "cwd": "/"})  # both read threads still wait on the mount
         assert busy.value.category == api.TIMED_OUT
         gate.set()
         deadline = time.monotonic() + 5

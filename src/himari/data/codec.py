@@ -172,8 +172,7 @@ def _origin_from(value: object) -> MessageOrigin:
 
 def interface_snapshot(value: InterfaceSnapshot) -> dict[str, object]:
     return {"version": value.version, "kind": value.kind.value,
-            "capabilities": {"file_download": value.capabilities.file_download,
-                             "workspace_browser": value.capabilities.workspace_browser}}
+            "capabilities": {"file_download": value.capabilities.file_download}}
 
 
 def _interface_from(value: object) -> InterfaceSnapshot | None:
@@ -181,10 +180,10 @@ def _interface_from(value: object) -> InterfaceSnapshot | None:
         return None
     data = _obj(value)
     caps = _obj(data["capabilities"])
-    if type(data["version"]) is not int or type(caps["file_download"]) is not bool or type(caps["workspace_browser"]) is not bool:
+    # Snapshots written before V3-P106 also carry ``workspace_browser``; it is no longer read.
+    if type(data["version"]) is not int or type(caps["file_download"]) is not bool:
         raise ValueError("malformed interface snapshot")
-    return InterfaceSnapshot(InterfaceKind(data["kind"]),
-                             InterfaceCapabilities(caps["file_download"], caps["workspace_browser"]), data["version"])
+    return InterfaceSnapshot(InterfaceKind(data["kind"]), InterfaceCapabilities(caps["file_download"]), data["version"])
 
 
 def payload(value: EventPayload) -> str:

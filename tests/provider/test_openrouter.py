@@ -108,7 +108,7 @@ ADAPTER = OpenRouterAdapter(KEY)
 def test_interface_state_follows_the_same_cache_breakpoint_and_tools() -> None:
     mi = model_input((UserTurn(EventId("e1"), (TextBlock("hi"),)),), model=CACHING)
     web = dataclasses.replace(mi, current_state=dataclasses.replace(mi.current_state, interface=InterfaceSnapshot(
-        InterfaceKind.WEB, InterfaceCapabilities(True, True))))
+        InterfaceKind.WEB, InterfaceCapabilities(True))))
     desk = dataclasses.replace(mi, current_state=dataclasses.replace(mi.current_state, interface=InterfaceSnapshot(
         InterfaceKind.WINDOWS_COMPANION)))
     web_wire, desk_wire = body(ADAPTER, web), body(ADAPTER, desk)

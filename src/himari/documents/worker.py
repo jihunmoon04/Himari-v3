@@ -591,7 +591,7 @@ def _heading(name: str) -> int:
 SML = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 XDR = "{http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing}"
 PKG = "{http://schemas.openxmlformats.org/package/2006/relationships}"
-MAX_COLUMNS = 100  # columns shown per sheet; the rest is said, for run_command
+MAX_COLUMNS = 100  # columns shown per sheet; the rest is said
 _CELL = re.compile(r"([A-Z]{1,3})(\d{1,7})")
 
 

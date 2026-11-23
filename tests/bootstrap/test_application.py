@@ -29,7 +29,6 @@ from himari.common import EnvironmentKind, PrincipalId, TrustedScope
 from himari.control.api import DriveState
 from himari.data.api import DataError, ModelSetting
 from himari.data.sqlite import StoreLockedError
-from himari.sandbox.api import SandboxState
 from himari.provider.api import ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
 
@@ -51,7 +50,6 @@ def test_layout_is_private_and_reused(tmp_path: Path) -> None:
     async def scenario() -> None:
         app, _ = await open_app(root)
         secret = app.operator_secret
-        assert app.sandbox_state is SandboxState.UNAVAILABLE
         tools = {str(d.tool_id) for d in app.runtime.registry.catalog(frozenset({EnvironmentKind("inside")}))}
         assert not any(t.startswith(("inside/", "machine/")) for t in tools)  # V3-P101: no runner, no files
         with pytest.raises(StoreLockedError):  # one server per data root

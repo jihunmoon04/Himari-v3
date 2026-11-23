@@ -96,11 +96,6 @@ class DocumentReading(Protocol):
         version and the worker's split rule (§4)."""
         ...
 
-    @property
-    def scripts(self) -> bool:
-        """Whether run_command has the toolkit (hints may name it)."""
-        ...
-
     async def read(self, data: bytes, *, pages: tuple[Piece, ...] | None,
                    pictures: tuple[tuple[int, int | None], ...] | None, view: bool, text_budget: int) -> Reading:
         """DocumentRefused or DocumentsUnavailable; the answer is checked."""
