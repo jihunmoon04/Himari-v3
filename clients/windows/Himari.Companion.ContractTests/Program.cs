@@ -209,13 +209,10 @@ await foreach (var item in client.StreamAsync("/api/events", CancellationToken.N
 Check(events.Count == 2 && events[0] == ("hello", "안녕😀") && events[1] == ("current", "끝"), "SSE parsing");
 try { await client.SendAsync(HttpMethod.Get, "/unauthorized", null, CancellationToken.None); throw new Exception("error accepted"); }
 catch (ApiException ex) { Check(ex.Status == HttpStatusCode.Forbidden && ex.Code == "device_scope", "error envelope"); }
-using (var detail = JsonDocument.Parse("{\"waiting\":{\"question\":{\"display\":{\"text\":\"어느 쪽?\"}}},\"job\":{\"running\":true}}"))
-{
-    Check(ConversationView.Question(detail.RootElement) == "어느 쪽?", "nested question");
+using (var detail = JsonDocument.Parse("{\"job\":{\"running\":true}}"))
     Check(ConversationView.IsRunning(detail.RootElement), "busy status");
-}
-using (var detail = JsonDocument.Parse("{\"waiting\":{\"question\":\"raw\",\"display\":{\"text\":\"clean\"}},\"job\":{\"running\":false}}"))
-    Check(ConversationView.Question(detail.RootElement) == "clean" && !ConversationView.IsRunning(detail.RootElement), "display wins and question completion");
+using (var detail = JsonDocument.Parse("{\"job\":{\"running\":false}}"))
+    Check(!ConversationView.IsRunning(detail.RootElement), "idle status");
 
 var declinedVault = new FakeVault { ActiveValue = new DeviceCredential("https://old.example/", "old-token", null) };
 var declinedServer = new PairHandler();
@@ -314,11 +311,6 @@ await foreach (var item in scenarioClient.StreamAsync("/api/events", Cancellatio
     seen.Add(item.Event);
 }
 Check(seen.SequenceEqual(new[] { "hello" }) && displayed == "연결 중단 중 완료", "SSE reconnect reads authoritative final display");
-var waiting = await scenarioClient.SendAsync(HttpMethod.Get, "/api/conversations/c1", null, CancellationToken.None);
-Check(ConversationView.Question(waiting) == "어떻게 할까요?", "ask_user question received");
-await scenarioClient.SendAsync(HttpMethod.Post, "/api/conversations/c1/messages", new { text = "계속해" }, CancellationToken.None);
-waiting = await scenarioClient.SendAsync(HttpMethod.Get, "/api/conversations/c1", null, CancellationToken.None);
-Check(scenario.Answer == "계속해" && ConversationView.Question(waiting) is null, "question answer and completion");
 using (var marks = JsonDocument.Parse("[{\"at\":0,\"mood\":\"happy\"},{\"at\":2,\"mood\":\"worried\"}]"))
 using (var emptyMarks = JsonDocument.Parse("[]"))
 using (var unknown = JsonDocument.Parse("[{\"at\":0,\"mood\":\"unknown\"}]"))
@@ -1356,8 +1348,7 @@ sealed class PairHandler
 }
 sealed class ScenarioHandler : HttpMessageHandler
 {
-    private bool completed, answered;
-    public string? Answer;
+    private bool completed;
     public void FinishWhileOffline() => completed = true;
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
@@ -1369,12 +1360,7 @@ sealed class ScenarioHandler : HttpMessageHandler
             return new(HttpStatusCode.OK) { Content = new StringContent(sse, Encoding.UTF8, "text/event-stream") };
         }
         if (path.EndsWith("/events")) return Json("{\"items\":[{\"kind\":\"assistant_final\",\"display\":{\"text\":\"연결 중단 중 완료\"}}]}");
-        if (path.EndsWith("/messages"))
-        {
-            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
-            Answer = body.RootElement.GetProperty("text").GetString(); answered = true; return Json("{}");
-        }
-        return Json(answered ? "{\"waiting\":null}" : "{\"waiting\":{\"question\":{\"display\":{\"text\":\"어떻게 할까요?\"}}}}" );
+        return Json("{}");
     }
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
 }

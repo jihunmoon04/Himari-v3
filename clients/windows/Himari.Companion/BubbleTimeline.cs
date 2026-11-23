@@ -104,7 +104,7 @@ public partial class MainWindow
         if (BubblePanel.Visibility != Visibility.Visible || StopButton.Visibility == Visibility.Visible || string.IsNullOrWhiteSpace(Message.Text)) return false;
         AddHistory(Message.Text, false, Remaining(bubbleTimer, assistantBubbleCloseDue, assistantBubbleDueAt, Message.Text));
         // A question moved into the stack is never shown again as a live bubble.
-        bubbleTimer.Stop(); assistantBubbleCloseDue = false; assistantBubbleKey = null; awaitingAnswer = false;
+        bubbleTimer.Stop(); assistantBubbleCloseDue = false; assistantBubbleKey = null;
         BubblePanel.Visibility = Visibility.Collapsed;
         return true;
     }
@@ -320,7 +320,7 @@ public partial class MainWindow
         else if (oldest == BubblePanel)
         {
             if (!assistantBubbleCloseDue) return;
-            if (BubblePanel.IsMouseOver || awaitingAnswer || HasActiveFileCardInteraction || liveStreams.ContainsKey(currentConversation ?? "") || moveVerifications.ContainsValue(currentConversation ?? ""))
+            if (BubblePanel.IsMouseOver || HasActiveFileCardInteraction || liveStreams.ContainsKey(currentConversation ?? "") || moveVerifications.ContainsValue(currentConversation ?? ""))
             { RetryExpiry(bubbleTimer); return; }
             CloseBubble();
         }
@@ -356,9 +356,9 @@ public partial class MainWindow
             if (UserSent.Visibility == Visibility.Visible && !string.IsNullOrEmpty(UserSent.Text))
             {
                 // History precedes every live bubble. Move an older finished reply first,
-                // keeping a question or a reply still being written live with its controls.
+                // keeping a reply still being written live with its controls.
                 if (BubblePanel.Visibility == Visibility.Visible && assistantBubbleSequence < userBubbleSequence
-                    && (awaitingAnswer || !FreezeReply())) return;
+                    && !FreezeReply()) return;
                 FreezeSent();
             }
             HideUserBubble();

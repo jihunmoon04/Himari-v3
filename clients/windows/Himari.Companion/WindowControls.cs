@@ -24,7 +24,6 @@ public partial class MainWindow
     private bool captureFromWorkWindow;
     private bool screenSharingReset;  // V3-P91 §14 Q9, saved
     private bool screenOnce;  // V3-P91 §7.3: the composer's button puts the screen on the next message only
-    private bool awaitingAnswer;
     private readonly DispatcherTimer saveTimer = new() { Interval = TimeSpan.FromMilliseconds(750) };
     private readonly DispatcherTimer bubbleTimer = new();
     private readonly DispatcherTimer userBubbleTimer = new();
@@ -234,14 +233,14 @@ public partial class MainWindow
     private void ShowSentMessage(string text)
     {
         // Typing or a reply already moved it into the stack while it was on its way.
-        if (frozenSent is { } past && past.Text == text && history.Contains(past)) { awaitingAnswer = false; return; }
+        if (frozenSent is { } past && past.Text == text && history.Contains(past)) return;
         UserSent.Text = string.IsNullOrEmpty(text) ? "화면을 보냈습니다." : text;
         bool hasDraft = !string.IsNullOrEmpty(Input.Text);
         UserSent.Visibility = hasDraft ? Visibility.Collapsed : Visibility.Visible;
         ShowSentOnly(hasDraft);
         // A late 202 must not move this request below a reply already received.
         if (userBubbleSequence == 0) PresentUserBubble();
-        UserBubble.Visibility = Visibility.Visible; awaitingAnswer = false;
+        UserBubble.Visibility = Visibility.Visible;
         ScheduleUserBubbleClose(); ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void ScheduleUserBubbleClose()

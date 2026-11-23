@@ -125,7 +125,6 @@ public partial class MainWindow : Window
     {
         WakeFromUser();  // V3-P90 §2.3: clicking HIMARI wakes it at once
         int version = ++chatFocusVersion;
-        if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) ShowAssistantBubble(assistantBubbleKey);
         OpenComposer();
         if (dialogueHost is not null && IsVisible) dialogueHost.Activate();
         // The first time the composer appears its editor is not laid out yet and refuses focus.
