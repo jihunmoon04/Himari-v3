@@ -423,36 +423,26 @@ def test_an_already_placed_upload_needs_no_stored_bytes(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_a_refused_attachment_leaves_a_paused_turn_as_it_was(tmp_path: Path) -> None:
-    from testkit import RecordingTool
-
-    from himari.data.api import ToolExecutionStatus
-
-    hold = asyncio.Event()
-
-    class Slow(RecordingTool):
-        async def run(self, invocation, ctx):  # type: ignore[no-untyped-def]
-            await hold.wait()
-            return await super().run(invocation, ctx)
+def test_a_refused_attachment_leaves_an_unfinished_turn_as_it_was(tmp_path: Path) -> None:
+    from himari.common import CallId, RawRepresentation, ToolCall, ToolId
+    from himari.data.api import AssistantToolCalls, PromptBasis, RawReceived, RunPreparation, ToolExecutionStatus
 
     async def scenario() -> None:
-        adapter = ScriptedAdapter([calls(("slow", {}), ("later", {}))])
-        app = await open_app(tmp_path / "data", adapter, tools=[Slow("slow"), RecordingTool("later")])
+        app = await open_app(tmp_path / "data")
         try:
             scope, _ = await conversation(app)
             other, _ = await conversation(app)
-            await app.send(scope, "go")
-            while not adapter.sent:
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.05)
-            app.runner.request_pause(scope)
-            hold.set()
-            await app.runner.wait(scope)
+            # a turn left with a call not started (here an older server's open ask_user question)
+            await app.data.append_event(scope, UserMessage((TextBlock("go"),)))
+            run_id = await app.data.prepare_run(scope, RunPreparation(
+                b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+            await app.data.mark_dispatch(scope, run_id)
+            await app.data.record_raw_outcome(scope, run_id, RawReceived(b"{}", "application/json"))
+            await app.data.project_model_output(scope, run_id, AssistantToolCalls(
+                (ToolCall(CallId("q"), 0, ToolId("ask_user"), {"question": "?"}),)))
             events = await app.data.read_events(scope)
-            run_id = events[1].origin_run_id
-            assert run_id is not None
             before = [e.status for e in await app.data.read_tool_executions(scope, run_id)]
-            assert ToolExecutionStatus.PENDING in before  # a paused turn with a call not started
+            assert before == [ToolExecutionStatus.PENDING]
             foreign = await app.upload(other, "a.txt", None, chunks(b"a"))
             with pytest.raises(DataError):
                 await app.send(scope, "x", [foreign.file_id])

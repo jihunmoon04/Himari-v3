@@ -1,7 +1,7 @@
 """The machine Environment's Tools (V3-P74 §8, §9): ``machine/<name>``.
 
-The file Tools, a command and documents on the user's real paths, through
-the runner; results are formatted by :mod:`.results`. A refusal about the
+The file Tools and documents on the user's real paths, through the runner;
+results are formatted by :mod:`.results`. A refusal about the
 boundary (outside the Workspaces, permission, hidden) is DENIED; other
 problems are FAILED. A request the runner never received is DENIED (nothing
 happened); one whose answer was lost raises, and the Dispatcher records the
@@ -10,13 +10,12 @@ call's outcome as unknown (V3-047).
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from himari.common import CallId, EnvironmentKind, JsonValue, TextBlock, ToolId
+from himari.common import CallId, EnvironmentKind, JsonValue, ToolId
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, MAX_DOCUMENT_BYTES, DataError
 from himari.documents.api import DocumentReading
 from himari.environment.machine.blocking import run_blocking
@@ -26,7 +25,6 @@ from himari.environment.machine.results import (
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
     Entry,
-    _command_outcome,
     _schema,
     _size,
     _text,
@@ -38,7 +36,6 @@ from himari.environment.machine.results import (
     read_outcome,
 )
 from himari.runner import api as runner
-from himari.sandbox.api import DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, CommandResult, validate_argv
 from himari.tool.api import (
     EffectProfile,
     ToolContext,
@@ -55,14 +52,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("himari.environment.machine")
 
-_DENIED = {runner.OUTSIDE_WORKSPACES, runner.ACCESS, runner.UNAVAILABLE, runner.SETUP_FAILED}
+_DENIED = {runner.OUTSIDE_WORKSPACES, runner.ACCESS}
 _PATHS = ("Paths are absolute, relative to the working directory, or start with ~ (the user's home). ")
-# V3-P94, V3-P100: the attached folders are only read.
-_WRITE_SCOPE = ("You can write only inside this conversation's own folder (the first workspace in the runtime "
-                "state); attached workspaces are read-only for you, and writing elsewhere is refused. ")
-_COMMAND_SCOPE = "write only inside this conversation's own folder and /tmp (attached workspaces are read-only)"
-_READ_ONLY = ("outside this conversation's own folder: attached workspaces are read-only for you, nothing was "
-              "changed; to change files there, hand the work to a coding agent")
+_WRITE_SCOPE = ("You can write only inside this conversation's own folder (the working directory in the runtime "
+                "state); writing elsewhere is refused. ")
+_READ_ONLY = "outside this conversation's own folder, which is the only place you can write; nothing was changed"
 _UNREACHABLE = "the machine runner is not reachable; nothing was done"
 
 
@@ -215,10 +209,6 @@ class WriteFile(_MachineTool):
             "cwd": cwd, "write_roots": roots, "content": str(args["content"]),
             "create_parents": bool(args.get("create_parents", True))})
         path = str(result["path"])
-        if result.get("partial"):  # V3-P76 §4.1: a new file taken in place, whose writing did not finish
-            return ToolOutcome(ToolStatus.SUCCEEDED, _text(
-                f"created {path}, but writing it did not finish; its content may be partial — read it and write it "
-                "again", error=True), raw_result={"path": path, "created": True, "partial": True})
         return ToolOutcome(ToolStatus.SUCCEEDED,
                            _text(f"{'created' if result['created'] else 'updated'} {path} ({len(data)} bytes)"),
                            raw_result={"path": path, "bytes": len(data), "created": bool(result["created"])})
@@ -321,58 +311,6 @@ class PresentFile(_MachineTool):
         return await present(files, ctx, args.get("path"), fetch)
 
 
-class RunCommand(_MachineTool):
-    """``machine/run_command`` (§9): one command as the user, in the machine sandbox."""
-
-    name = "run_command"
-    description = (
-        "Run one command as the user in a Linux sandbox on this server. It can read what the user can read, "
-        f"except hidden locations, and {_COMMAND_SCOPE} (each command "
-        "gets its own /tmp). Network: HTTPS only, to the hosts the current state lists (others get 403 from "
-        "the proxy); no SSH, so use https:// git remotes; commands have no credentials, so they cannot push. argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
-        "syntax. Unix domain sockets cannot be created: use TCP on 127.0.0.1, and the 'fork' start method for "
-        "Python multiprocessing. Use a virtual environment in the project for Python packages (the home folder "
-        f"is read-only). Runs in the working directory; timeout {DEFAULT_TIMEOUT_SECONDS}s by default "
-        f"(max {MAX_TIMEOUT_SECONDS}s)."
-    )
-    effect = EffectProfile.UNKNOWN  # may touch any file in the own folder
-    properties = {
-        "argv": {"type": "array", "items": {"type": "string"}, "description": "Program and arguments."},
-        "timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds."},
-    }
-    required = ["argv"]
-
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
-        try:
-            argv = validate_argv(args.get("argv"))
-        except ValueError as error:
-            return ToolOutcome(ToolStatus.DENIED, _text(str(error), error=True))
-        timeout = args.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
-        if not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
-            return ToolOutcome(ToolStatus.DENIED, _text(f"timeout_seconds must be 1..{MAX_TIMEOUT_SECONDS}",
-                                                        error=True))
-        try:
-            result, _ = await self._env.call(runner.RUN, {"argv": argv, "cwd": cwd, "write_roots": roots,
-                                                          "timeout": timeout})
-        except runner.RunnerError as error:
-            if error.category in (runner.UNAVAILABLE, runner.SETUP_FAILED):
-                return ToolOutcome(ToolStatus.DENIED, _text(f"command execution is unavailable: {error}", error=True),
-                                   raw_result={"category": error.category})
-            raise
-        outcome = _command_outcome(argv, timeout, CommandResult(
-            exit_code=result["exit_code"], timed_out=bool(result["timed_out"]),
-            stdout=base64.b64decode(result["stdout"]), stderr=base64.b64decode(result["stderr"]),
-            stdout_total=int(result["stdout_total"]), stderr_total=int(result["stderr_total"]),
-            elapsed_ms=int(result["elapsed_ms"])))
-        if result.get("oom"):
-            note = "\n[the command ran out of memory: a process was killed (memory limit)]"
-            text = "".join(b.text for b in outcome.model_result.blocks if isinstance(b, TextBlock))
-            raw = dict(outcome.raw_result) if isinstance(outcome.raw_result, Mapping) else {}
-            return ToolOutcome(outcome.status, _text(text + note, error=True), raw_result={**raw, "oom": True})
-        return outcome
-
-
 class MachineReadDocument(ReadDocument):
     """``machine/read_document`` (V3-P70 on the user's paths)."""
 
@@ -405,7 +343,7 @@ class MachineReadDocument(ReadDocument):
         try:
             if size > limit:
                 return ToolOutcome(ToolStatus.FAILED, _text(
-                    f"{shown}: too large for read_document ({_size(size)}, limit {_size(limit)}); use run_command",
+                    f"{shown}: too large for read_document ({_size(size)}, limit {_size(limit)})",
                     error=True))
             data = await run_blocking(_read_all, fd, limit + 1)
         finally:
@@ -416,8 +354,7 @@ class MachineReadDocument(ReadDocument):
 
 
 def machine_tools(env: MachineEnvironment) -> list[ToolHandler]:
-    tools: list[ToolHandler] = [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env),
-                                RunCommand(env)]
+    tools: list[ToolHandler] = [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env)]
     if env.files is not None:
         tools.append(PresentFile(env))
     if env.documents is not None:

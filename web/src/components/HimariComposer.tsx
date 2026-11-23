@@ -1,14 +1,13 @@
 // A HIMARI conversation's composer (V3-P102 W6b, the classic page's): files attached by the button, pasted or dropped
-// (each uploaded as it is added, with its progress; sent with the message once ready), files pointed at from the
-// Files panel, and "/" for the prompts of the Tool servers this conversation uses (V3-P60 §4): one with arguments
-// asks for them first; either way the prompt comes into the composer as text to review and send.
+// (each uploaded as it is added, with its progress; sent with the message once ready), and "/" for the prompts of
+// the Tool servers this conversation uses (V3-P60 §4): one with arguments asks for them first; either way the prompt
+// comes into the composer as text to review and send.
 import { useQuery } from "@tanstack/react-query";
-import { Link2, Paperclip, X } from "lucide-react";
+import { Paperclip, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ApiError } from "@/api/client";
 import { expandPrompt, listPrompts, sendMessage, uploadFile, type PromptInfo } from "@/api/himari";
 import { matchPrompts } from "@/features/prompts";
-import { unpoint, usePointed } from "@/features/references";
 import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
 import { Composer, type ComposerHandle } from "./Composer";
@@ -54,10 +53,9 @@ function PromptForm({ prompt, onDone }: { prompt: PromptInfo | null; onDone: (ar
   );
 }
 
-export function HimariComposer({ conversation, running, waiting, onStop, onSent, onError }: {
+export function HimariComposer({ conversation, running, onStop, onSent, onError }: {
   conversation: string;
   running: boolean;
-  waiting: boolean;
   onStop: () => void;
   onSent: () => Promise<unknown> | void;
   onError: (message: string | null) => void;
@@ -66,7 +64,6 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
   const input = useRef<HTMLInputElement>(null);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const live = useRef(new Set<AbortController>()); // uploads under way, aborted directly when the composer goes
-  const pointed = usePointed(conversation);
   const [text, setText] = useState("");
   const latest = useRef("");
   latest.current = text;
@@ -148,13 +145,10 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
   const send = async (message: string) => {
     onError(null);
     const ready = uploads.filter((u) => u.state === "ready" && u.fileId);
-    const refs = pointed;
     try {
       await modelSettled(conversation);
-      await sendMessage(conversation, message, ready.map((u) => u.fileId!),
-        refs.map((r) => ({ path: r.path, identity: r.identity })));
+      await sendMessage(conversation, message, ready.map((u) => u.fileId!));
       setUploads((now) => now.filter((u) => !ready.includes(u)));
-      unpoint(conversation, refs.map((r) => r.path));
     } catch (failure) {
       onError(failure instanceof ApiError ? failure.message : "Something went wrong.");
       throw failure; // the draft stays
@@ -163,7 +157,7 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
     }
   };
 
-  const chips = (uploads.length > 0 || pointed.length > 0) && (
+  const chips = uploads.length > 0 && (
     <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="To send with the message">
       {uploads.map((u) => (
         <span key={u.key} className={cn("inline-flex max-w-full items-center gap-1.5 rounded-lg border px-2 py-1 text-xs",
@@ -176,14 +170,6 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
           <button type="button" aria-label={`Remove ${u.name}`} onClick={() => drop(u.key)} className="text-faint hover:text-ink">
             <X className="size-3" />
           </button>
-        </span>
-      ))}
-      {pointed.map((r) => (
-        <span key={r.path} className="inline-flex max-w-60 items-center gap-1.5 rounded-lg bg-raised px-2 py-1 font-mono text-xs" title={r.path}>
-          <Link2 className="size-3" aria-hidden />
-          <span className="min-w-0 truncate">{r.name}</span>
-          <button type="button" aria-label={`Remove ${r.name}`} onClick={() => unpoint(conversation, [r.path])}
-            className="text-faint hover:text-ink"><X className="size-3" /></button>
         </span>
       ))}
     </div>
@@ -214,8 +200,8 @@ export function HimariComposer({ conversation, running, waiting, onStop, onSent,
         autoFocus
         running={running}
         disabled={uploading}
-        allowEmpty={uploads.some((u) => u.state === "ready") || pointed.length > 0}
-        placeholder={waiting ? "Answer HIMARI" : "Message HIMARI (/ for prompts)"}
+        allowEmpty={uploads.some((u) => u.state === "ready")}
+        placeholder="Message HIMARI (/ for prompts)"
         onStop={onStop}
         onSend={send}
         onFiles={add}

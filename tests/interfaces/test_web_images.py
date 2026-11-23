@@ -22,7 +22,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap import application as application_module  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, ConversationId, FileId, TrustedScope  # noqa: E402
+from himari.common import ConversationId, FileId, TrustedScope  # noqa: E402
 from himari.data.api import PreparedView  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
@@ -262,17 +262,3 @@ def test_too_many_pixels_have_no_preview(server: Server) -> None:
     cid = server.new()
     up = server.upload(cid, "huge.png", bytes(huge), "image/png")
     assert up["image"]["state"] == "too_large" and server.preview(cid, up).status_code == 404
-
-
-def test_an_answers_attachments_are_not_tool_images(server: Server) -> None:
-    """PR #63 review C2: an ask_user answer is stored as that call's result, with its attachments."""
-    cid = server.new()
-    server.provider.extend([calls((ASK_USER_TOOL_ID, {"question": "Which file?"})), final("thanks")])
-    server.client.post(f"/api/conversations/{cid}/messages", json={"text": "help"}, headers={"origin": ORIGIN})
-    server.events(cid)
-    up = server.upload(cid, "photo.png", encoded((40, 30), "PNG"), "image/png")
-    answered = server.client.post(f"/api/conversations/{cid}/messages",  # a message while asked is the answer
-                                  json={"text": "this one", "attachments": [up["file_id"]]}, headers={"origin": ORIGIN})
-    assert answered.status_code == 202, answered.text
-    result = next(e for e in server.events(cid) if e["kind"] == "tool_result")
-    assert result["images"] == []

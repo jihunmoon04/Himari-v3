@@ -3,8 +3,8 @@
 - Wire-exact raw capture (V3-048): ``prepare_native_request`` builds the exact
   request bytes; ``invoke_prepared`` sends exactly those bytes with httpx. No
   SDK, no implicit retries. Credentials live only in transport headers.
-- Tool ids such as ``inside/run_command`` are encoded reversibly as
-  ``inside__run_command`` (OpenRouter function names allow ``[A-Za-z0-9_-]``),
+- Tool ids such as ``machine/read_file`` are encoded reversibly as
+  ``machine__read_file`` (OpenRouter function names allow ``[A-Za-z0-9_-]``),
   so a stored response can be re-normalized after a restart without any
   adapter state.
 - Current State is rendered as a trailing user-role message *after* the last

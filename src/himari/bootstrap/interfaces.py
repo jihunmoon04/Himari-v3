@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from himari.common import PrincipalId, TrustedScope
+from himari.common import TrustedScope
 from himari.data.api import (
     InterfaceCapabilities,
     InterfaceKind,
@@ -52,8 +52,6 @@ def device_input_negotiation(connection_generation: str | None = None,
 @dataclass(frozen=True)
 class ConfiguredInterfaces:
     file_download: bool = False
-    workspace_browser: bool = False
-    workspace_principals: frozenset[PrincipalId] = frozenset()
     hub: Presence | None = None
     companion_enabled: bool = True
 
@@ -80,7 +78,4 @@ class ConfiguredInterfaces:
                 file_download = False
         else:
             file_download = False
-        return InterfaceSnapshot(kind, InterfaceCapabilities(
-            file_download=file_download,
-            workspace_browser=(self.workspace_browser and kind is InterfaceKind.WEB
-                               and scope.principal_id in self.workspace_principals)))
+        return InterfaceSnapshot(kind, InterfaceCapabilities(file_download=file_download))

@@ -1,10 +1,10 @@
 """bubblewrap + Landlock protected spawn (adapted from HIMARI-v2
 ``sandbox/linux_backend.py``; no v2 import, no Task/Work authority).
 
-The shared mechanics of the profiles (machine, server): the host
-capability, the bwrap arguments, and ``protected_run``, which spawns,
-waits for the helper's report and never lets the command outlive it.
-There is no unsandboxed fallback in any state.
+The server profile's mechanics: the host capability, the bwrap arguments,
+and the steps of a spawn that never lets the process outlive its call
+(waiting for the helper's report, killing and reaping the tree). There is
+no unsandboxed fallback in any state.
 """
 
 from __future__ import annotations
@@ -16,34 +16,17 @@ import signal
 import stat
 import subprocess
 import sys
-import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 from dataclasses import dataclass
 
 from himari.sandbox import landlock_helper
-# Re-exported: the backend module still answers for the names it held before
-# the move to himari.sandbox (V3-P59 §3: tests change only their imports).
-from himari.sandbox.api import (
-    DEFAULT_TIMEOUT_SECONDS as DEFAULT_TIMEOUT_SECONDS,
-    MAX_ARG_CHARS as MAX_ARG_CHARS,
-    MAX_ARGV as MAX_ARGV,
-    MAX_OUTPUT_BYTES as MAX_OUTPUT_BYTES,
-    MAX_TIMEOUT_SECONDS as MAX_TIMEOUT_SECONDS,
-    TOOLKIT_MOUNT as TOOLKIT_MOUNT,
-    CommandResult as CommandResult,
-    SandboxSetupError as SandboxSetupError,
-    SandboxState as SandboxState,
-    SandboxUnavailableError as SandboxUnavailableError,
-    validate_argv as validate_argv,
-)
 
 BWRAP_CANDIDATES = ("/usr/bin/bwrap", "/bin/bwrap")
 INTERPRETER = "/usr/bin/python3"  # system interpreter, visible inside the /usr view
 HELPER_IN_SANDBOX = "/run/himari/landlock_helper.py"
 
 SETUP_TIMEOUT_SECONDS = 15.0
-_DRAIN_GRACE_SECONDS = 5.0
 SANDBOX_ENV = {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "HOME": "/tmp/home",
@@ -133,13 +116,6 @@ def sandbox_arguments(capability: HostCapability, *, env: Mapping[str, str], bin
     return args
 
 
-def toolkit_env() -> dict[str, str]:
-    """What a profile adds when the documents toolkit is bound
-    (V3-P70 §6.3) — never part of SANDBOX_ENV, which server profiles may
-    not override (review N1)."""
-    return {"PYTHONPATH": f"{TOOLKIT_MOUNT}/site-packages", "HIMARI_FONTS": f"{TOOLKIT_MOUNT}/fonts"}
-
-
 def supports_tmp_size(capability: HostCapability) -> bool:
     """Whether this bwrap knows --size (0.9.0 does, 0.6 does not: V3-P70 re-review N4)."""
     try:
@@ -169,20 +145,6 @@ def discover_capability() -> HostCapability | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return HostCapability(bwrap, abi, helper) if completed.returncode == 0 else None
-
-
-async def _drain(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes, int]:
-    """Keep the first ``limit`` bytes, count (and discard) the rest so the
-    command never blocks on a full pipe."""
-    if stream is None:
-        return b"", 0
-    kept = bytearray()
-    total = 0
-    while chunk := await stream.read(65536):
-        total += len(chunk)
-        if len(kept) < limit:
-            kept += chunk[: limit - len(kept)]
-    return bytes(kept), total
 
 
 async def _wait_sync(fd: int, timeout: float) -> bytes:
@@ -230,7 +192,14 @@ async def _abandon(spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
     """After a cancelled spawn: wait for the creation to finish (no grace
     period — returning earlier would release the Workspace lock while the
     process may still start), then kill the group and reap it. A spawn that
-    never completes keeps the call, and so the lock, held: fail closed."""
+    never completes keeps the call, and so the lock, held: fail closed.
+
+    The spawn itself is never interrupted: asyncio's own cleanup of a
+    cancelled spawn SIGKILLs only the outer bwrap, which can orphan its
+    child while that still waits for the uid map (before --die-with-parent
+    applies) and then hang on the child's copy of the pipes. Instead the
+    spawn finishes and the whole process group, which the child still
+    shares, is killed."""
     await _settle(spawn)
     if not spawn.cancelled() and spawn.exception() is None:
         process = spawn.result()
@@ -253,95 +222,3 @@ def _kill_tree(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
-
-
-async def protected_run(build: Callable[[int], list[str]], pass_fds: Sequence[int], timeout: float, *,
-                        max_output: int = MAX_OUTPUT_BYTES) -> CommandResult:
-    """Spawn ``build(sync_w)`` (bwrap arguments around the helper) with only
-    ``pass_fds`` and the sync pipe passed, wait for the helper's report and
-    supervise the command: the tree never outlives this call (V3-P41).
-    Every profile's spawn goes through here."""
-    sync_r, sync_w = os.pipe()
-    try:
-        os.set_blocking(sync_r, False)
-        started = time.monotonic()
-        spawn = asyncio.ensure_future(asyncio.create_subprocess_exec(
-            *build(sync_w),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={},
-            pass_fds=(sync_w, *pass_fds),
-            start_new_session=True,
-        ))
-        try:
-            # The spawn itself is never interrupted: asyncio's own cleanup
-            # of a cancelled spawn SIGKILLs only the outer bwrap, which can
-            # orphan its child while that still waits for the uid map
-            # (before --die-with-parent applies) and then hang on the
-            # child's copy of the pipes. Instead let the spawn finish and
-            # kill the whole process group, which the child still shares.
-            process = await asyncio.shield(spawn)
-        except asyncio.CancelledError:
-            await _abandon(spawn)
-            raise
-        except OSError as error:
-            raise SandboxSetupError("bwrap could not start") from error
-        finally:
-            # Both ends are closed on every path, cancellation included.
-            os.close(sync_w)
-        return await _supervise(process, sync_r, timeout, started, max_output)
-    finally:
-        os.close(sync_r)
-
-
-async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: float, started: float,
-                     max_output: int) -> CommandResult:
-    tasks: list[asyncio.Task[tuple[bytes, int]]] = []
-    finished = False
-    try:
-        sync = await _wait_sync(sync_r, SETUP_TIMEOUT_SECONDS)
-        if sync != landlock_helper.SYNC_OK:
-            raise SandboxSetupError("the sandbox did not report enforcement")
-
-        tasks = [
-            asyncio.create_task(_drain(process.stdout, max_output)),
-            asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES)),
-        ]
-        timed_out = False
-        try:
-            await asyncio.wait_for(process.wait(), timeout)
-        except TimeoutError:
-            timed_out = True
-            _kill_tree(process.pid)
-            await process.wait()
-        try:
-            (stdout, stdout_total), (stderr, stderr_total) = await asyncio.wait_for(
-                asyncio.gather(*tasks), _DRAIN_GRACE_SECONDS
-            )
-        except TimeoutError:
-            stdout = stderr = b""
-            stdout_total = stderr_total = 0
-        finished = True
-    finally:
-        if not finished:
-            # Cancellation, setup failure or any error after spawn: the
-            # command must not outlive this call (it could keep writing
-            # after the Workspace lock is released).
-            _kill_tree(process.pid)
-            await _reap(process)
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        # Returned only once the output's tasks have ended.
-        if tasks and await _settle(asyncio.gather(*tasks, return_exceptions=True)):
-            raise asyncio.CancelledError
-    return CommandResult(
-        exit_code=None if timed_out else process.returncode,
-        timed_out=timed_out,
-        stdout=stdout,
-        stderr=stderr,
-        stdout_total=stdout_total,
-        stderr_total=stderr_total,
-        elapsed_ms=int((time.monotonic() - started) * 1000),
-    )

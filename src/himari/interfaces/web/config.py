@@ -29,7 +29,7 @@ default 30: a file unused this long expires). None of them can be turned off.
 
 Documents (V3-P70 §6.2): ``HIMARI_DOCUMENTS_DIR`` names the documents
 toolkit's folder (installed by root with scripts/install_documents.py). Unset,
-read_document is not offered and run_command has no document libraries.
+read_document is not offered.
 
 Memory (V3-P71 §9): ``HIMARI_MEMORY=0`` turns the memory Tools and notes off
 (the notes stay and can be seen); on by default. Automatic memory (V3-P85
@@ -59,19 +59,11 @@ Conversations only talk, with no files, commands or uploads (V3-P101). HIMARI's 
 Conversation's own folder only: attached Workspaces are read, and changed
 by the hub's coding agents (V3-P94, V3-P100).
 
-Hub (V3-P95): ``HIMARI_HUB_URL`` (``http://127.0.0.1:8791``) and
-``HIMARI_HUB_USER_TOKEN_FILE`` (the hub's ``user.token``, readable by this
-service only) let the signed-in operator answer the approvals and
-questions of the hub's coding agents on the Web. Both or neither.
-``HIMARI_HUB_MCP_SOURCE`` (default ``hub``) names the server in
-``mcp.json`` that is the hub: the page draws HIMARI's calls of its
-``hub_delegate`` as cards that follow the task (V3-P102 §5.1).
 """
 
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -90,9 +82,7 @@ MODELS_VAR = "HIMARI_MODELS"  # V3-P64: the offered models
 REASONING_VAR = "HIMARI_REASONING_EFFORT"
 SANDBOX_VAR = "HIMARI_SANDBOX"
 CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
-TURN_BUDGET_VAR = "HIMARI_TURN_TOKEN_BUDGET"  # V3-P62: 0 turns it off
-UNATTENDED_RUNS_VAR = "HIMARI_UNATTENDED_RUNS"  # 0 turns it off
-MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # 0 (default): no Run limit
+MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # V3-P106: a turn's Run limit, 1..1000
 TRASH_DAYS_VAR = "HIMARI_TRASH_DAYS"  # V3-P65: days in the trash before a permanent delete
 FILE_MAX_VAR = "HIMARI_FILE_MAX_BYTES"  # V3-P66: one uploaded or presented file
 FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file store
@@ -111,14 +101,6 @@ COMPANION_MODELS_ONLY_VAR = "HIMARI_COMPANION_MODELS_ONLY"  # 1: only companion-
 TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
-HUB_URL_VAR = "HIMARI_HUB_URL"  # V3-P95: the hub server; unset: its requests are not shown here
-HUB_USER_TOKEN_FILE_VAR = "HIMARI_HUB_USER_TOKEN_FILE"  # V3-P95: the hub's user.token
-HUB_MCP_SOURCE_VAR = "HIMARI_HUB_MCP_SOURCE"  # V3-P102 §5.1: which mcp.json server is the hub
-DEFAULT_HUB_MCP_SOURCE = "hub"
-# what mcp.json takes as a server name (himari.mcp.config: _SOURCE, MAX_SOURCE_CHARS); the MCP client is wired by the
-# composition root only, so the rule is repeated here rather than imported
-_MCP_SOURCE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-_MCP_SOURCE_CHARS = 24
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
@@ -131,11 +113,7 @@ PROACTIVE_ENDED_VAR = "HIMARI_PROACTIVE_ENDED_MINUTES"  # V3-P90 §8 (was _FOCUS
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
-DEFAULT_TURN_BUDGET = 3_000_000
-# Each request keeps 8,192 tokens for its answer (control.turn.MIN_OUTPUT_RESERVE),
-# so a smaller budget could refuse even the first request (PR #48 review C2).
-MIN_TURN_BUDGET = 16_384
-DEFAULT_UNATTENDED_RUNS = 20
+DEFAULT_MAX_RUNS = 12  # as control.driver.MAX_RUNS
 DEFAULT_TRASH_DAYS = 30  # as bootstrap.application.DEFAULT_TRASH_DAYS
 DEFAULT_TIME_ZONE = "Asia/Seoul"  # as bootstrap.application.DEFAULT_TIME_ZONE
 
@@ -165,10 +143,7 @@ class WebConfig:
     reasoning_effort: str | None
     sandbox: bool
     context_tokens: int | None = None  # None: the model's window, capped (Application)
-    # One turn's guards (V3-P62); None turns one off.
-    turn_budget: int | None = DEFAULT_TURN_BUDGET
-    unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS
-    max_runs: int | None = None
+    max_runs: int = DEFAULT_MAX_RUNS  # one turn's Run limit (V3-P106)
     # The offered models and their default efforts (V3-P64); empty: model_id alone.
     models: tuple[tuple[str, str | None], ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
@@ -189,9 +164,6 @@ class WebConfig:
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
-    hub_url: str | None = None  # V3-P95
-    hub_user_token_file: str | None = None
-    hub_mcp_source: str = DEFAULT_HUB_MCP_SOURCE  # V3-P102 §5.1
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
     @classmethod
@@ -230,10 +202,7 @@ class WebConfig:
         if not data_root:
             raise WebConfigError(f"{DATA_ROOT_VAR} must name the private data directory")
         effort = source.get(REASONING_VAR, "").strip() or None
-        turn_budget = _optional(source.get(TURN_BUDGET_VAR), TURN_BUDGET_VAR, DEFAULT_TURN_BUDGET, MIN_TURN_BUDGET,
-                                10**9)
-        unattended = _optional(source.get(UNATTENDED_RUNS_VAR), UNATTENDED_RUNS_VAR, DEFAULT_UNATTENDED_RUNS, 1, 1000)
-        max_runs = _optional(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, None, 1, 1000)
+        max_runs = _required(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, DEFAULT_MAX_RUNS, 1, 1000)
         trash_days = _optional(source.get(TRASH_DAYS_VAR), TRASH_DAYS_VAR, DEFAULT_TRASH_DAYS, 1, 365)
         if trash_days is None:
             raise WebConfigError(f"{TRASH_DAYS_VAR} must be between 1 and 365 (there is no keeping forever)")
@@ -242,8 +211,6 @@ class WebConfig:
         keep_days = _required(source.get(FILE_KEEP_DAYS_VAR), FILE_KEEP_DAYS_VAR, DEFAULT_FILE_KEEP_DAYS, 1, 365)
         if file_max > store_max:
             raise WebConfigError(f"{FILE_MAX_VAR} must not be larger than {FILE_STORE_MAX_VAR}")
-        if turn_budget is None and max_runs is None:
-            raise WebConfigError(f"{TURN_BUDGET_VAR}=0 needs {MAX_RUNS_VAR}: a turn needs a token budget or a Run limit")
         model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
         models_raw = source.get(MODELS_VAR)
         models = _models(models_raw, model_id) if models_raw is not None and models_raw.strip() else ()
@@ -256,18 +223,6 @@ class WebConfig:
         principals = source.get(MACHINE_PRINCIPALS_VAR)
         machine_principals = (("operator",) if principals is None
                               else tuple(p.strip() for p in principals.split(",") if p.strip()))
-        hub_url = source.get(HUB_URL_VAR, "").strip() or None
-        hub_user_token_file = source.get(HUB_USER_TOKEN_FILE_VAR, "").strip() or None
-        if (hub_url is None) != (hub_user_token_file is None):
-            raise WebConfigError(f"{HUB_URL_VAR} and {HUB_USER_TOKEN_FILE_VAR} are set together")
-        if hub_url is not None and not hub_url.startswith(("http://", "https://")):
-            raise WebConfigError(f"{HUB_URL_VAR} must be an http(s) URL")
-        if hub_user_token_file is not None and not os.path.isabs(hub_user_token_file):
-            raise WebConfigError(f"{HUB_USER_TOKEN_FILE_VAR} must be an absolute path")
-        hub_mcp_source = source.get(HUB_MCP_SOURCE_VAR, "").strip() or DEFAULT_HUB_MCP_SOURCE
-        if not _MCP_SOURCE.fullmatch(hub_mcp_source) or len(hub_mcp_source) > _MCP_SOURCE_CHARS:  # or no server matches
-            raise WebConfigError(f"{HUB_MCP_SOURCE_VAR} must be an mcp.json server name "
-                                 "(lowercase letters, digits and single '-')")
         return cls(
             host=host,
             port=port,
@@ -279,8 +234,6 @@ class WebConfig:
             reasoning_effort=effort,
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
             context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
-            turn_budget=turn_budget,
-            unattended_runs=unattended,
             max_runs=max_runs,
             models=models,
             trash_days=trash_days,
@@ -301,9 +254,6 @@ class WebConfig:
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,
             machine_principals=machine_principals,
-            hub_url=hub_url,
-            hub_user_token_file=hub_user_token_file,
-            hub_mcp_source=hub_mcp_source,
             proactive=_proactive(source),
         )
 

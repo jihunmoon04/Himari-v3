@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 from datetime import datetime
 import json
-import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
@@ -24,9 +23,6 @@ from himari.data.api import (
     MAX_LIST_LIMIT,
     MAX_MODEL_ID_CHARS,
     MAX_TITLE_CHARS,
-    MAX_WORKSPACE_LABEL_CHARS,
-    MAX_WORKSPACE_LOCATION_BYTES,
-    MAX_WORKSPACE_NOTE_CHARS,
     PREVIEW_CHARS,
     RESERVED_DEVICE_NAMES,
     AssistantFinal,
@@ -203,56 +199,6 @@ def check_wake(reasons: object, device_id: object, keys: object = (), reminders:
             or not all(isinstance(m, int) and not isinstance(m, bool) for m in reminders) \
             or None in noted or len(set(noted)) != len(noted) or sorted(reminders) != sorted(noted):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake claims exactly the notes of its reminder reasons")
-
-
-def check_workspace_location(location: object) -> str:
-    """V3-P74 §10.1: an absolute, normalized path (no ``.``/``..``/empty
-    component, no trailing ``/`` but for the root itself), as the
-    Environment's check gave it."""
-    if not isinstance(location, str) or not location.startswith("/"):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a workspace location is an absolute path")
-    if (len(location.encode("utf-8", errors="replace")) > MAX_WORKSPACE_LOCATION_BYTES
-            or any(unicodedata.category(c) in ("Cc", "Cs") for c in location)):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a usable workspace location")
-    parts = location.split("/")[1:]
-    if location != "/" and any(p in ("", ".", "..") for p in parts):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a workspace location is a normalized path")
-    return location
-
-
-def check_workspace_label(label: object) -> str:
-    if not isinstance(label, str):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a workspace label is text")
-    label = " ".join(label.split())
-    if not label or len(label) > MAX_WORKSPACE_LABEL_CHARS or any(unicodedata.category(c) in ("Cc", "Cs")
-                                                                  for c in label):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT,
-                        f"a workspace label is 1..{MAX_WORKSPACE_LABEL_CHARS} characters of one line")
-    return label
-
-
-def check_workspace_filesystem(filesystem: object) -> str | None:
-    """A filesystem kind as mountinfo names it (``ext4``, ``fuse.rclone``)."""
-    if filesystem is None:
-        return None
-    if not isinstance(filesystem, str) or not re.fullmatch(r"[!-~]{1,64}", filesystem):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a filesystem kind")
-    return filesystem
-
-
-def check_workspace_note(note: object) -> str | None:
-    """The note as stored; only whitespace is none."""
-    if note is None:
-        return None
-    if not isinstance(note, str):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a workspace note is text")
-    note = note.replace("\r\n", "\n").replace("\r", "\n")
-    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in note):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a workspace note may not contain control characters")
-    note = note.strip()
-    if len(note) > MAX_WORKSPACE_NOTE_CHARS:
-        raise DataError(DataErrorCode.TOO_LARGE, f"a workspace note is at most {MAX_WORKSPACE_NOTE_CHARS} characters")
-    return note or None
 
 
 def check_memory_category(category: object) -> MemoryCategory:

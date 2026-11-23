@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from himari.common import ASK_USER_TOOL_ID, EnvironmentKind, ToolId, UnknownOutcomePolicy, tool_id_problem
-from himari.tool.api import Completion, ToolDefinition, ToolHandler, ToolOrigin, WorkspaceRequirement
+from himari.common import EnvironmentKind, ToolId, UnknownOutcomePolicy, tool_id_problem
+from himari.tool.api import ToolDefinition, ToolHandler, ToolOrigin, WorkspaceRequirement
 from himari.tool.schema import check_tool_input_schema
 
 
@@ -39,8 +39,6 @@ class ToolRegistry:
                 raise ValueError(f"{d.tool_id}: namespace {namespace} already belongs to {owner.value} Tools")
         if d.origin is ToolOrigin.EXTERNAL and d.workspace_requirement is not WorkspaceRequirement.NONE:
             raise ValueError(f"{d.tool_id}: an External Tool cannot require a Workspace")
-        if d.completion is Completion.SUSPENDING and d.tool_id != ASK_USER_TOOL_ID:
-            raise ValueError(f"{d.tool_id}: only ask_user may be suspending (P0)")
         if d.unknown_outcome is UnknownOutcomePolicy.REQUIRE_USER and not self._allow_require_user:
             raise ValueError(f"{d.tool_id}: REQUIRE_USER Tools are disabled (no user-resolution API in P0)")
         check_tool_input_schema(d.input_schema)

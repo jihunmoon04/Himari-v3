@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-import posixpath
 import re
 from himari.common import EnvironmentKind, JsonValue, ToolId
 from himari.documents.api import (
@@ -45,10 +44,6 @@ _FINGERPRINT = re.compile(r"[0-9a-f]{%d}" % FINGERPRINT_CHARS)
 _STRUCTURE = ("===", "[shown", "[view", "[images", "[note", "[not shown")  # every tail line's start (review B3)
 _FORMAT_NAMES = {"pdf": "PDF", "docx": "Word", "xlsx": "Excel", "pptx": "PowerPoint", "hwpx": "HWPX"}
 _AT_A_LIMIT = ("timed_out", "out_of_memory", "worker_processgone")  # the worker's time, memory or CPU ran out
-_LIBRARIES = {".pdf": "pypdf", **dict.fromkeys((".docx", ".docm", ".dotx", ".dotm"), "python-docx"),
-              **dict.fromkeys((".xlsx", ".xlsm", ".xltx", ".xltm"), "openpyxl"),
-              **dict.fromkeys((".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"), "python-pptx"),
-              ".hwpx": "zipfile and xml.etree"}
 GRAMMAR = ('use unit numbers like "1-5,8" or "12-", or pass the next value of an earlier result as given')
 
 DESCRIPTION = (
@@ -318,9 +313,8 @@ class ReadDocument:
         if reason in ("position_past_end", "bad_position"):
             return "not a valid position; pass the next value of an earlier result as given"
         why = f"could not read this document ({reason.replace('_', ' ')})"
-        if reason in _AT_A_LIMIT and self._reader.scripts:  # §4.2: a huge sheet read on from far into it
-            library = _LIBRARIES.get(posixpath.splitext(shown)[1].lower(), "a Python script")
-            why += f"; it may be too large to read this way: use run_command with {library}"
+        if reason in _AT_A_LIMIT:  # §4.2: a huge sheet read on from far into it
+            why += "; it may be too large to read this way"
         return why
 
     def _pages(self, head: str, shown: str, reading: Reading, pieces: tuple[Piece, ...], view: bool,

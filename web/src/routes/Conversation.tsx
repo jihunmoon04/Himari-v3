@@ -1,11 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, PanelRight, PanelRightClose } from "lucide-react";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { useParams } from "react-router";
 import { ApiError } from "@/api/client";
 import { cancelJob, resumeTurn } from "@/api/himari";
-import { keys, useDetail, useEvents, useServer } from "@/app/queries";
-import { DelegationCard } from "@/components/DelegationCard";
+import { keys, useDetail, useEvents } from "@/app/queries";
 import { FilesPanel } from "@/components/FilesPanel";
 import { SidePanel } from "@/components/SidePanel";
 import { ConversationMenu } from "@/components/ConversationMenu";
@@ -52,18 +51,10 @@ export function Conversation() {
   const events = useEvents(id);
   const running = detail.data?.job.running ?? false;
   const live = useLive(id, running ? (detail.data?.job.job_id ?? "") : null);
-  const hubSource = useServer(true).data?.hub_source ?? null;
-  const items = useMemo(() => toItems(events.data?.items ?? [], hubSource, id), [events.data, hubSource, id]);
-  const delegations = items.flatMap((item) => (item.kind === "delegation" ? [item] : []));
+  const items = useMemo(() => toItems(events.data?.items ?? [], id), [events.data, id]);
   const { box, onScroll, atBottom, jump } = useStickToBottom(`${items.length}:${live.text.length}:${running}`);
   const [panel, setPanel] = useState(false);
   const closePanel = useCallback(() => setPanel(false), []);
-  // a turn ended: what it wrote may be in the folders open in the panel, read them again
-  const wasRunning = useRef(running);
-  useEffect(() => {
-    if (wasRunning.current && !running) void client.invalidateQueries({ queryKey: ["machine"] });
-    wasRunning.current = running;
-  }, [client, running]);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = () => client.invalidateQueries({ queryKey: keys.detail(id) });
@@ -91,8 +82,7 @@ export function Conversation() {
 
   const conversation = detail.data?.conversation;
   const job = detail.data?.job;
-  const waiting = detail.data?.waiting ?? null;
-  const QUIET = ["completed", "waiting_for_user", "idle", "compacted", "cancelled"];
+  const QUIET = ["completed", "idle", "compacted", "cancelled"];
   // why the last job stopped, when it did not end well; Continue whenever the server says a turn can go on
   // (also after a restart or a stop, when there is no such job to show)
   const stopped = !running && job ? job.error ?? (job.state && !QUIET.includes(job.state)
@@ -105,7 +95,7 @@ export function Conversation() {
         <PageHeader
           actions={
             <>
-              <ConversationMenu key={id} id={id} title={conversation?.title || conversation?.preview || ""} waiting={Boolean(waiting)}
+              <ConversationMenu key={id} id={id} title={conversation?.title || conversation?.preview || ""}
                 running={running} />
               <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
                 {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
@@ -136,7 +126,6 @@ export function Conversation() {
             key={id}
             conversation={id}
             running={running}
-            waiting={Boolean(waiting)}
             onStop={() => void act(() => cancelJob(id)).catch(() => undefined)}
             onSent={refresh}
             onError={setError}
@@ -151,17 +140,9 @@ export function Conversation() {
         tabs={[
           { id: "files", label: "Files", content: <FilesPanel key={id} conversation={id} /> },
           {
-            id: "handed", label: delegations.length ? `Hub (${delegations.length})` : "Hub",
-            content: delegations.length ? (
-              <div className="space-y-2" aria-label="Handed to the hub in this conversation">
-                {delegations.map((item) => <DelegationCard key={item.key} delegation={item.delegation} />)}
-              </div>
-            ) : <p className="text-faint">Nothing handed to the hub in this conversation.</p>,
-          },
-          {
             id: "info", label: "Info", content: (
               <dl className="space-y-2 text-muted">
-                <div><dt className="text-xs text-faint">State</dt><dd>{running ? "Working" : waiting ? "Waiting for you" : job?.state ?? "Idle"}</dd></div>
+                <div><dt className="text-xs text-faint">State</dt><dd>{running ? "Working" : job?.state ?? "Idle"}</dd></div>
                 <div><dt className="text-xs text-faint">Started</dt><dd>{conversation ? new Date(conversation.created_at).toLocaleString() : "—"}</dd></div>
                 <div><dt className="text-xs text-faint">Conversation</dt><dd className="break-all font-mono text-xs">{id}</dd></div>
               </dl>

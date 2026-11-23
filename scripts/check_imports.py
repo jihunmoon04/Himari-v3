@@ -15,10 +15,9 @@ Rules:
    ``common`` only (V3-P59 §3); the image copies use ``common``,
    ``sandbox`` and ``data`` (V3-P67); presence uses ``common`` and ``data``
    (V3-P83); memory passes use ``common``, ``data``, ``prompt`` and
-   ``provider`` (V3-P85), never Control.
-7. ``himari.runner`` is the composition root of its own process (V3-P74):
-   it may import the sandbox's modules, not only its api, and nothing but
-   ``common`` and ``sandbox``. Others reach it through ``runner.api``.
+   ``provider`` (V3-P85), never Control; ``himari.runner``, a process of
+   its own (V3-P74), uses ``common`` only, and others reach it through
+   ``runner.api``.
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -34,7 +33,7 @@ from pathlib import Path
 LAYERS = {
     "common": 0,
     "sandbox": 1,  # the isolation mechanism: imports common only (rule 6), used by consumers via its api
-    "runner": 2,  # the machine runner's process (V3-P74): the sandbox's profiles; others use runner.api
+    "runner": 1,  # the machine runner's process (V3-P74): imports common only; others use runner.api
     "data": 1,
     "presence": 2,  # devices and the current device (V3-P83 §2.2): Data's types and nothing else
     "tool": 2,
@@ -56,13 +55,11 @@ ONLY_FROM = {
     "sandbox": frozenset({"common"}),
     "imaging": frozenset({"common", "sandbox", "data"}),
     "documents": frozenset({"common", "sandbox", "data"}),
-    "runner": frozenset({"common", "sandbox"}),
+    "runner": frozenset({"common"}),
     "presence": frozenset({"common", "data"}),
     "proactive": frozenset({"common", "data", "presence"}),
     "memory": frozenset({"common", "data", "prompt", "provider"}),
 }
-# Packages that may import another package's private modules (rule 7).
-PRIVATE_FROM = {"runner": frozenset({"sandbox"})}
 
 
 def module_name(src_root: Path, path: Path) -> str:
@@ -131,7 +128,7 @@ def check(src_root: Path) -> list[str]:
                 allowed = ", ".join(sorted(ONLY_FROM[pkg]))
                 errors.append(f"{where} ({pkg} may import only {allowed})")
                 continue
-            if not target_is_public and tpkg not in PRIVATE_FROM.get(pkg, frozenset()):
+            if not target_is_public:
                 errors.append(f"{where} (private import across modules)")
             elif LAYERS[tpkg] >= LAYERS[pkg]:
                 errors.append(f"{where} (upward or sideways import)")

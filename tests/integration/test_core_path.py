@@ -29,9 +29,7 @@ from testkit import (
 )
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     CallId,
-    CallRef,
     JsonValue,
     ProviderContinuation,
     TextBlock,
@@ -41,7 +39,6 @@ from himari.common import (
 )
 from himari.control.api import ControlError, ControlErrorCode, DriveState
 from himari.data.api import (
-    AssistantToolCalls,
     CompletedGroupRef,
     DataError,
     EventRef,
@@ -49,7 +46,6 @@ from himari.data.api import (
     EventKind,
     RunStatus,
     ToolExecutionStatus,
-    UserMessage,
     InterfaceKind,
     InterfaceSnapshot,
 )
@@ -129,47 +125,6 @@ def test_internal_tool_artifact_commits_with_result() -> None:
     assert [n.content for n in notes] == ["remember"]
 
 
-def test_ask_user_waits_survives_restart_and_replays_answer_once() -> None:
-    rt, provider = runtime([calls((ASK_USER_TOOL_ID, {"question": "Which file?"}))])
-    first = asyncio.run(rt.driver.drive(SCOPE, user("edit it")))
-    assert first.state is DriveState.WAITING_FOR_USER
-    assert first.waiting_call == CallRef(first.run_ids[0], CallId("c0"))
-
-    # Restart: new runtime over the same store. The wait is derived from Data.
-    provider2 = ScriptedAdapter([final("editing main.py")])
-    rt2, _ = runtime(store=restart(rt.store), provider=provider2)
-    assert asyncio.run(rt2.data.find_waiting_call(SCOPE)) == first.waiting_call
-
-    second = asyncio.run(rt2.driver.drive(SCOPE, user("main.py")))
-    assert second.state is DriveState.COMPLETED
-
-    events = asyncio.run(rt2.data.read_events(SCOPE))
-    answer = [e for e in events if isinstance(e.payload, UserMessage) and e.payload.answers_call]
-    assert len(answer) == 1 and answer[0].payload.answers_call == first.waiting_call  # type: ignore[union-attr]
-    assert EventKind.TOOL_RESULT in [e.kind for e in events]
-
-    model_input = provider2.prepared_inputs[0]
-    assert model_input.trigger_refs == (CompletedGroupRef(first.run_ids[0]),)
-    group = model_input.conversation[-1]
-    assert isinstance(group, ToolGroupTurn)
-    assert group.results[CallId("c0")] == text_result("main.py")
-    user_turns = [p for p in model_input.conversation if isinstance(p, UserTurn)]
-    assert [t.blocks for t in user_turns] == [(TextBlock("edit it"),)]
-    assert provider2.sent[0].body.count(b'"main.py"') == 1  # answer appears exactly once
-
-
-def test_input_after_answer_is_an_ordinary_message() -> None:
-    rt, _ = runtime([calls((ASK_USER_TOOL_ID, {"question": "?"})), final("a"), final("b")])
-    asyncio.run(rt.driver.drive(SCOPE, user("start")))
-    asyncio.run(rt.driver.drive(SCOPE, user("answer")))
-    third = asyncio.run(rt.driver.drive(SCOPE, user("thanks")))
-
-    assert third.state is DriveState.COMPLETED
-    events = asyncio.run(rt.data.read_events(SCOPE))
-    results = [e for e in events if e.kind is EventKind.TOOL_RESULT]
-    assert len(results) == 1  # never a second ToolResult for the same call
-
-
 def test_crash_after_dispatch_is_outcome_unknown_and_never_resent() -> None:
     rt, provider = runtime([SimulatedCrash("provider call")])
     with pytest.raises(SimulatedCrash):
@@ -208,8 +163,8 @@ def test_never_claimed_pending_calls_resume_exactly_once() -> None:
 
 
 def test_a_new_message_closes_never_started_calls_instead_of_running_them() -> None:
-    # V3-P55: a new message redirects; the group left behind (by a pause or,
-    # as here, a crash) is closed with CANCELLED results, never run.
+    # V3-P55: a new message redirects; the group left behind (by an interruption,
+    # here a crash) is closed with CANCELLED results, never run.
     read = RecordingTool("fake/read", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
     write = RecordingTool("fake/write", effect=EffectProfile.SCOPED_WRITE, environment_kind=FAKE,
                           workspace=WorkspaceRequirement.DEFAULT)
@@ -258,7 +213,6 @@ def test_environment_tools_hidden_until_activated() -> None:
     before = {d.tool_id for d in provider.prepared_inputs[0].tool_catalog}
     after = {d.tool_id for d in provider.prepared_inputs[1].tool_catalog}
     assert "fake/write" not in before and "fake/write" in after
-    assert ASK_USER_TOOL_ID in before
 
 
 @pytest.mark.parametrize(
@@ -276,25 +230,6 @@ def test_provider_failures_are_recorded_not_retried(step: object, state: DriveSt
     assert result.state is state
     assert len(provider.sent) == 1
     assert asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0])).status is status
-
-
-def test_ask_user_mixed_with_other_calls_is_rejected_without_effects() -> None:
-    echo = RecordingTool("echo")
-    body = json.dumps({
-        "kind": "tool_calls",
-        "calls": [
-            {"call_id": "q", "ordinal": 0, "tool_id": "ask_user", "arguments": {}},
-            {"call_id": "e", "ordinal": 1, "tool_id": "echo", "arguments": {}},
-        ],
-    }).encode()
-    rt, _ = runtime([RawBody(body)], tools=[echo])
-    result = asyncio.run(rt.driver.drive(SCOPE, user("hi")))
-
-    assert result.state is DriveState.INVALID_MODEL_OUTPUT
-    assert echo.invocations == []
-    assert not any(
-        isinstance(e.payload, AssistantToolCalls) for e in asyncio.run(rt.data.read_events(SCOPE))
-    )
 
 
 def test_concurrent_drive_on_same_conversation_is_busy() -> None:
@@ -476,14 +411,11 @@ def test_resume_finishes_unclaimed_calls_then_continues() -> None:
     assert isinstance(trigger, CompletedGroupRef)
 
 
-def test_resume_is_idle_after_final_and_waits_while_asking() -> None:
-    rt, provider = runtime([final("hi"), calls((ASK_USER_TOOL_ID, {"question": "?"}))])
+def test_resume_is_idle_after_final() -> None:
+    rt, provider = runtime([final("hi")])
     asyncio.run(rt.driver.drive(SCOPE, user("hello")))
     assert asyncio.run(rt.driver.resume(SCOPE)).state is DriveState.IDLE
-    asyncio.run(rt.driver.drive(SCOPE, user("ask me")))
-    waiting = asyncio.run(rt.driver.resume(SCOPE))
-    assert waiting.state is DriveState.WAITING_FOR_USER and waiting.waiting_call is not None
-    assert len(provider.sent) == 2
+    assert len(provider.sent) == 1
 
 
 # --- Re-review B2: raw tool result is preserved, never shown to the model ------

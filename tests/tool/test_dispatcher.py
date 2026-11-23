@@ -18,7 +18,6 @@ from himari.data.memory import InMemoryData, InMemoryStore
 from himari.tool.api import (
     EffectProfile,
     GroupState,
-    RefusalRule,
     ToolContext,
     ToolDefinition,
     ToolInvocation,
@@ -133,7 +132,6 @@ def test_a_read_only_group_runs_only_tools_that_read() -> None:
         assert [r.status for r in records] == [ToolExecutionStatus.DENIED, ToolExecutionStatus.SUCCEEDED,
                                                ToolExecutionStatus.DENIED]
         assert "not run" in records[0].model_result.blocks[0].text  # type: ignore[union-attr]
-        assert {str(c) for c in result.refusals} == {"a", "c"}
 
     asyncio.run(scenario())
 
@@ -154,10 +152,8 @@ def test_a_tool_the_model_was_not_offered_does_not_run() -> None:
         group = (ToolCall(CallId("a"), 0, ToolId("look_at_screen"), {}),)
         await data.project_model_output(SCOPE, run_id, AssistantToolCalls(group))
         screen.run_id = run_id
-        result = await dispatcher.dispatch_group(SCOPE, run_id, group, capabilities=capabilities)
+        await dispatcher.dispatch_group(SCOPE, run_id, group, capabilities=capabilities)
         assert (screen.seen == []) is (not capabilities)
-        if not capabilities:
-            assert result.refusals == {CallId("a"): RefusalRule.UNKNOWN_TOOL}
         (record,) = await data.read_tool_executions(SCOPE, run_id)
         return record.status
 

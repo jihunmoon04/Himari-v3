@@ -1,5 +1,7 @@
 # Environment Sandbox v3 — Implementation Contract Candidate v0.2
 
+> **명령용 Sandbox 제거됨(2026-11-23, V3-P106):** 명령 실행용 sandbox(machine)는 코드에 없다. server sandbox(문서·이미지 처리, stdio MCP 서버)만 남는다.
+
 > 2026-10-13. **REVIEW CANDIDATE; NOT IMPLEMENTED, NOT FROZEN.** Binding decisions V3-030, V3-032~037; all proposed DTO names, activation mechanics, limits, component filenames and packetization below remain design proposals.
 >
 > References: [Sandbox v0.1](sandbox-execution-v0.1.md), [Default Workspace v0.2](default-workspace-files-v0.2.md), [unified contracts](contracts.md), [Data contract v0.2](data-contract-v0.2.md), [pytest policy](testing-policy.md).

@@ -5,7 +5,7 @@ from types import ModuleType
 
 import pytest
 
-from himari.common import ASK_USER_TOOL_ID, CallId, RawRepresentation, TextBlock, ToolCall, ToolId
+from himari.common import CallId, RawRepresentation, TextBlock, ToolCall, ToolId
 from himari.prompt.api import ModelInput
 from himari.provider import api
 from himari.provider.api import (
@@ -60,7 +60,7 @@ def test_fake_adapter_satisfies_spi() -> None:
     [
         [call("a", 0)],
         [call("a", 0), call("b", 1)],
-        [call("q", 0, ASK_USER_TOOL_ID)],
+        [call("q", 0, "ask_user"), call("b", 1)],  # V3-P106: once refused (V3-P15), now any Tool's id
     ],
 )
 def test_valid_tool_call_groups(calls: list[ToolCall]) -> None:
@@ -77,7 +77,6 @@ def test_valid_tool_call_groups(calls: list[ToolCall]) -> None:
         [call("a", 1)],
         [call("a", 1), call("b", 0)],  # listed order disagrees with ordinal
         [call("a", 0), call("b", 2)],
-        [call("q", 0, ASK_USER_TOOL_ID), call("b", 1)],  # V3-P15
     ],
 )
 def test_invalid_tool_call_groups(calls: list[ToolCall]) -> None:

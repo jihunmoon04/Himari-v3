@@ -1,17 +1,16 @@
-"""The hidden list (V3-P74 §7): what neither commands nor file Tools see.
+"""The hidden list (V3-P74 §7): what the file Tools do not see.
 
 - In the user's home, every entry whose name starts with "." is hidden,
   except the visible ones (``.gitconfig``, ``.local/bin``, ``.local/lib``
-  and the runner's tool cache by default). A folder that only *holds*
-  visible entries (``.local``, ``.cache``) stays, and its other children
-  are hidden one by one.
+  by default). A folder that only *holds* visible entries (``.local``)
+  stays, and its other children are hidden one by one.
 - The operator's extra paths (HIMARI's data and settings, the runner's own).
 
-Masks are computed from the filesystem as it is now, for every command
-and every file operation. A hidden entry that is a symbolic link is
-masked at its target: a mount over the link would land there anyway.
-Other users' homes are left to the OS permissions: hiding them wholesale
-would also hide the cloud folders mounted under them (V3-P74 §14).
+Masks are computed from the filesystem as it is now, for every file
+operation. A hidden entry that is a symbolic link is masked at its target:
+a path reached through another link to it stays hidden. Other users'
+homes are left to the OS permissions: hiding them wholesale would also
+hide the cloud folders mounted under them (V3-P74 §14).
 """
 
 from __future__ import annotations
@@ -19,8 +18,6 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
-
-from himari.sandbox.machine import Mask
 
 
 def _parts(relative: str) -> tuple[str, ...]:
@@ -56,14 +53,15 @@ class HiddenRules:
                 return False  # inside a visible entry, or a folder that holds one
         return True
 
-    def is_hidden(self, real: str, masks: tuple[Mask, ...] | None = None) -> bool:
+    def is_hidden(self, real: str, masks: tuple[str, ...] | None = None) -> bool:
         """``real`` is a real path (no link in it)."""
         if self.by_rule(real):
             return True
-        return any(under(real, m.path) for m in (self.masks() if masks is None else masks))
+        return any(under(real, m) for m in (self.masks() if masks is None else masks))
 
-    def masks(self) -> tuple[Mask, ...]:
-        found: dict[str, Mask] = {}
+    def masks(self) -> tuple[str, ...]:
+        """The real paths of every hidden entry that exists, a link's at its target."""
+        found: set[str] = set()
 
         def mask(path: str) -> None:
             try:
@@ -72,16 +70,12 @@ class HiddenRules:
                 return
             if stat.S_ISLNK(info.st_mode):
                 target = os.path.realpath(path)
-                try:
-                    info = os.stat(target)
-                except OSError:
+                if not os.path.exists(target):
                     return  # a dangling link shows nothing
                 path = target
-            kind = "dir" if stat.S_ISDIR(info.st_mode) else "file"
             if path not in found and not any(under(path, m) for m in found):
-                for inner in [m for m in found if under(m, path)]:
-                    del found[inner]  # a mask over a folder covers the masks inside it
-                found[path] = Mask(path, kind, info.st_dev)
+                found.difference_update([inner for inner in found if under(inner, path)])  # a folder covers them
+                found.add(path)
 
         visible = self._visible_parts()
 
@@ -111,4 +105,4 @@ class HiddenRules:
                 walk((entry,))
         for path in self.extra:
             mask(path)
-        return tuple(sorted(found.values(), key=lambda m: m.path))
+        return tuple(sorted(found))

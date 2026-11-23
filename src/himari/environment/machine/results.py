@@ -1,6 +1,6 @@
 """What the machine Tools' results look like to the model (FILE-03, V3-051).
 
-Listing, reading, a command's output and giving a file are formatted here
+Listing, reading and giving a file are formatted here
 from what the runner answered. Every result is at most
 MAX_OBSERVATION_BYTES of UTF-8, whatever produced it.
 """
@@ -8,7 +8,6 @@ MAX_OBSERVATION_BYTES of UTF-8, whatever produced it.
 from __future__ import annotations
 
 import posixpath
-import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,7 +28,6 @@ from himari.data.api import (
     clean_media_type,
     sniff_image,
 )
-from himari.sandbox.api import CommandResult
 from himari.tool.api import ResultImage, ToolContext, ToolOutcome, ToolStatus
 
 MAX_READ_BYTES = 256 * 1024  # acquisition (V3-051)
@@ -202,52 +200,6 @@ def read_outcome(shown: str, data: bytes, size: int, offset: int, whole: Callabl
             "chars_shown": len(visible),
             "truncated": truncated,
             "invalid_utf8": invalid_utf8,
-        },
-    )
-
-
-def _command_outcome(argv: list[str], timeout: int, result: object) -> ToolOutcome:
-    """Final model text <= MAX_OBSERVATION_BYTES (header, both streams, notices)."""
-    assert isinstance(result, CommandResult)
-    command = _fit("$ " + shlex.join(argv), 2048)
-    if result.timed_out:
-        status_line = f"timed out after {timeout}s; the command was killed and may have changed files"
-    else:
-        status_line = f"exit code: {result.exit_code}"
-    header = f"{command}\n{status_line}\n"
-    streams = [("stdout", result.stdout, result.stdout_total), ("stderr", result.stderr, result.stderr_total)]
-    labels = {
-        name: f"--- {name} ({total} bytes{', truncated' if total > len(kept) else ''}) ---\n"
-        for name, kept, total in streams
-    }
-    notice = "\n[output truncated]"
-    budget = MAX_OBSERVATION_BYTES - len(header.encode()) - sum(len(v.encode()) for v in labels.values()) - 2 * len(notice.encode())
-    texts = {name: kept.decode("utf-8", errors="replace") for name, kept, _ in streams}
-    shares = {"stdout": budget // 2, "stderr": budget - budget // 2}
-    for name in ("stdout", "stderr"):  # give unused share of one stream to the other
-        other = "stderr" if name == "stdout" else "stdout"
-        need = len(texts[name].encode())
-        if need < shares[name]:
-            shares[other] += shares[name] - need
-            shares[name] = need
-    parts = [header]
-    truncated = {}
-    for name, kept, total in streams:
-        shown = _fit(texts[name], shares[name])
-        truncated[name] = len(shown) < len(texts[name]) or total > len(kept)
-        parts.append(labels[name] + shown + (notice if truncated[name] else "") + "\n")
-    failed = result.timed_out or result.exit_code != 0
-    return ToolOutcome(
-        ToolStatus.FAILED if result.timed_out else ToolStatus.SUCCEEDED,
-        _text("".join(parts).rstrip("\n"), error=failed),
-        raw_result={
-            "exit_code": result.exit_code,
-            "timed_out": result.timed_out,
-            "elapsed_ms": result.elapsed_ms,
-            "stdout_bytes": result.stdout_total,
-            "stderr_bytes": result.stderr_total,
-            "stdout_truncated": truncated["stdout"],
-            "stderr_truncated": truncated["stderr"],
         },
     )
 

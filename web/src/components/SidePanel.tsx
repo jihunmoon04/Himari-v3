@@ -12,7 +12,7 @@ const MIN = 280;
 const MAX = 760;
 const DEFAULT = 340;
 
-export interface PanelTab {
+interface PanelTab {
   id: string;
   label: string;
   content: ReactNode;

@@ -88,7 +88,8 @@ def test_upload_send_and_download(server: Server) -> None:
     up = server.upload(cid, "notes.txt", big, "text/plain; charset=utf-8")
     assert up.status_code == 201, up.text
     body = up.json()
-    assert (body["name"], body["media_type"], body["size"], body["commands"]) == ("notes.txt", "text/plain", 300_000, True)  # the runner can run commands
+    assert (body["name"], body["media_type"], body["size"]) == ("notes.txt", "text/plain", 300_000)
+    assert "commands" not in body
     server.provider.extend([final("got it")])
     sent = server.send(cid, "", body["file_id"])
     assert sent.status_code == 202, sent.text

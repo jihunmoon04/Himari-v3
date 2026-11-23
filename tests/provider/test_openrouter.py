@@ -13,7 +13,6 @@ import pytest
 from testkit import assert_chat_structure
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     ArtifactId,
     AttachmentRef,
     BindingId,
@@ -108,7 +107,7 @@ ADAPTER = OpenRouterAdapter(KEY)
 def test_interface_state_follows_the_same_cache_breakpoint_and_tools() -> None:
     mi = model_input((UserTurn(EventId("e1"), (TextBlock("hi"),)),), model=CACHING)
     web = dataclasses.replace(mi, current_state=dataclasses.replace(mi.current_state, interface=InterfaceSnapshot(
-        InterfaceKind.WEB, InterfaceCapabilities(True, True))))
+        InterfaceKind.WEB, InterfaceCapabilities(True))))
     desk = dataclasses.replace(mi, current_state=dataclasses.replace(mi.current_state, interface=InterfaceSnapshot(
         InterfaceKind.WINDOWS_COMPANION)))
     web_wire, desk_wire = body(ADAPTER, web), body(ADAPTER, desk)
@@ -130,10 +129,10 @@ def test_satisfies_spi_and_hides_key() -> None:
     assert KEY not in repr(ADAPTER)
 
 
-def test_r1_ask_user_answer_is_rendered_once_as_tool_result() -> None:
+def test_r1_an_older_ask_user_answer_is_rendered_once_as_tool_result() -> None:
+    """V3-P106: the Tool is gone from the catalog; its calls in history are replayed as any other."""
     mi = model_input(
-        (UserTurn(EventId("e1"), (TextBlock("edit it"),)), group(("q", 0, ASK_USER_TOOL_ID, "ANSWER-main.py"))),
-        tools=(ASK_USER_TOOL_ID,),
+        (UserTurn(EventId("e1"), (TextBlock("edit it"),)), group(("q", 0, "ask_user", "ANSWER-main.py"))),
     )
     prepared = ADAPTER.prepare_native_request(mi)
     messages = json.loads(prepared.body)["messages"]
@@ -403,8 +402,6 @@ def test_normalize_final_and_tool_calls_with_commentary() -> None:
         {"content": None},
         {"tool_calls": [{"id": "c", "function": {"name": "echo", "arguments": "{not json"}}]},
         {"tool_calls": [{"id": "c", "function": {"name": "echo", "arguments": "[1]"}}]},
-        {"tool_calls": [{"id": "q", "function": {"name": "ask_user", "arguments": "{}"}},
-                        {"id": "e", "function": {"name": "echo", "arguments": "{}"}}]},
     ],
 )
 def test_normalize_rejects_invalid_output(message: dict[str, Any]) -> None:

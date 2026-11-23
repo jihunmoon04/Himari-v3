@@ -3,10 +3,8 @@
 import { PanelLeftOpen } from "lucide-react";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Outlet, useLocation } from "react-router";
-import { useHubPending, useHubProjects, usePrincipalEvents } from "@/app/queries";
-import { openRequests, useHubRequests } from "@/features/hub/requests";
+import { usePrincipalEvents } from "@/app/queries";
 import { cn } from "@/lib/cn";
-import { ProjectDialogHost } from "./ProjectDialog";
 import { Sidebar } from "./Sidebar";
 import { Toasts } from "./Toasts";
 import { IconButton } from "./ui/button";
@@ -48,20 +46,8 @@ export function PageHeader({ children, actions }: { children?: ReactNode; action
   );
 }
 
-/** "(2) HIMARI" while two agent requests (and HIMARI's project requests, V3-P103 §6.7) wait for the user. */
-function useWaitingTitle() {
-  const hub = useHubProjects();
-  const pending = useHubPending(hub.status === "on");
-  const asked = openRequests(useHubRequests()).filter((r) => r.state === "waiting_user").length;
-  const count = (pending.data?.pending.length ?? 0) + (hub.status === "on" ? asked : 0);
-  useEffect(() => {
-    document.title = count > 0 ? `(${count}) HIMARI` : "HIMARI";
-  }, [count]);
-}
-
 export function Shell() {
   usePrincipalEvents(true);
-  useWaitingTitle();
   const narrow = useNarrow();
   const [wide, setWide] = useState(true); // the list's state on a wide screen
   const [drawer, setDrawer] = useState(false); // and on a narrow one
@@ -92,7 +78,6 @@ export function Shell() {
           <Outlet />
         </main>
         <Toasts />
-        <ProjectDialogHost />
       </div>
     </SidebarToggle.Provider>
   );

@@ -11,7 +11,6 @@ from himari.data.api import PersistedStateBasis
 from himari.prompt import api
 from himari.prompt.api import (
     COMPANION_HEAD,
-    FILE_REFERENCE_NOTE,
     MEMORY_SECTION,
     NOTES_HEADER,
     PERSONA_HEADER,
@@ -30,7 +29,7 @@ from himari.prompt.api import state_data
 from himari.prompt.composer import Composer
 from himari.prompt.system import BASE_INSTRUCTIONS, principle_section, system_text
 
-ALL = SystemSpec(companion=True, memory=True, attachments=True, file_references=True, turn_guidance=True,
+ALL = SystemSpec(companion=True, memory=True, attachments=True, turn_guidance=True,
                  documents=("Read documents with read_document.",))
 
 
@@ -47,9 +46,9 @@ def text(given: PromptInputs) -> str:
 
 def test_interface_switch_only_changes_runtime_state_and_its_key() -> None:
     web = inputs(companion_persona="Call me 선생님.", interface=InterfaceSnapshot(
-        InterfaceKind.WEB, InterfaceCapabilities(True, True)))
+        InterfaceKind.WEB, InterfaceCapabilities(True)))
     desk = replace(web, interface=InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION))
-    cli = replace(web, interface=InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True, False)))
+    cli = replace(web, interface=InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True)))
     assert system_text(web) == system_text(desk) == system_text(cli)
     assert context_key(web) == context_key(desk) == context_key(cli)
     assert len({state_key(web), state_key(desk), state_key(cli)}) == 3
@@ -57,9 +56,9 @@ def test_interface_switch_only_changes_runtime_state_and_its_key() -> None:
     assert "Call me 선생님." in text(desk)  # P89 scope A: persona remains in every interface
     assert "different states" in text(web) and "same conversation on the Web" in text(desk)
     assert state_data(current_state(desk))["interface"] == {
-        "kind": "windows_companion", "capabilities": {"file_download": False, "workspace_browser": False}}
+        "kind": "windows_companion", "capabilities": {"file_download": False}}
     assert state_data(current_state(web))["interface"] == {
-        "kind": "web", "capabilities": {"file_download": True, "workspace_browser": True}}
+        "kind": "web", "capabilities": {"file_download": True}}
 
 
 def test_companion_may_prepare_files_for_web_while_local_download_is_unavailable() -> None:
@@ -79,14 +78,14 @@ def test_every_section_in_order_with_everything_on() -> None:
              "# Companion", NOTES_HEADER, PERSONA_HEADER, USER_INSTRUCTIONS_HEADER]
     at = [composed.index(mark) for mark in marks]
     assert at == sorted(at)
-    assert FILE_REFERENCE_NOTE in composed and TURN_GUIDANCE in composed and "read_document" in composed
+    assert TURN_GUIDANCE in composed and "read_document" in composed
     assert "standing instructions and companion persona below" in composed
 
 
 def test_each_section_follows_its_condition() -> None:
     plain = text(inputs(SystemSpec(), companion_persona="Call me 선생님."))
     assert "# What instructs you" in plain and "# Messages and time" in plain and "# Working with tools" in plain
-    for absent in (MEMORY_SECTION, COMPANION_HEAD, PERSONA_HEADER, FILE_REFERENCE_NOTE, TURN_GUIDANCE,
+    for absent in (MEMORY_SECTION, COMPANION_HEAD, PERSONA_HEADER, TURN_GUIDANCE,
                    "<attachment> line is a file"):
         assert absent not in plain, absent
     assert "companion persona" not in plain  # the principle names it only when it is told (review C2's spirit)

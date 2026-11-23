@@ -43,7 +43,6 @@ class Scripted:
     def __init__(self) -> None:
         self.answer: Reading | Exception | None = None
         self.calls: list[dict[str, Any]] = []
-        self.scripts = True
 
     async def read(self, data: bytes, *, pages: tuple[Piece, ...] | None,
                    pictures: tuple[tuple[int, int | None], ...] | None, view: bool, text_budget: int) -> Reading:
@@ -228,25 +227,16 @@ def test_refusals_say_why(env: Place, reader: Scripted, doc: bytes, reason: str,
     assert outcome.status is ToolStatus.FAILED and words in text(outcome)
 
 
-@pytest.mark.parametrize("scripts", [True, False])
-def test_a_worker_out_of_time_points_to_run_command(env: Place, reader: Scripted, scripts: bool) -> None:
-    # §4.2 (review N2): a huge sheet read on from far into it can use up the worker's CPU; the hint only when
-    # run_command has the toolkit.
+def test_a_worker_out_of_time_says_the_document_may_be_too_large(env: Place, reader: Scripted) -> None:
+    # §4.2 (review N2): a huge sheet read on from far into it can use up the worker's CPU.
     (env.folder / "big.xlsx").write_bytes(b"PK a workbook")
-    reader.scripts = scripts
     for reason in ("worker_processgone", "timed_out", "out_of_memory"):
         reader.answer = DocumentRefused(reason)
         body = text(run(env, path="big.xlsx"))
         assert "/big.xlsx: could not read this document (" in body
-        assert ("; it may be too large to read this way: use run_command with openpyxl" in body) is scripts
+        assert body.endswith("; it may be too large to read this way") and "run_command" not in body
     reader.answer = DocumentRefused("broken")
-    assert "run_command" not in text(run(env, path="big.xlsx"))
-    if scripts:  # review 2 N-new-5: templates, slideshows and macro files too
-        for name, library in (("t.xltm", "openpyxl"), ("s.ppsx", "python-pptx"), ("d.dotx", "python-docx"),
-                              ("h.hwpx", "zipfile and xml.etree"), ("x.bin", "a Python script")):
-            (env.folder / name).write_bytes(b"PK a document")
-            reader.answer = DocumentRefused("timed_out")
-            assert text(run(env, path=name)).endswith(f"use run_command with {library}")
+    assert "too large" not in text(run(env, path="big.xlsx"))
 
 
 def test_unavailable_is_denied_and_large_files_are_not_read(env: Place, reader: Scripted,

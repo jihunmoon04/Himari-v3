@@ -1,53 +1,10 @@
-// V3-P102 §7.4: what the timeline draws, from HIMARI's events (himari/items.ts) or a hub session's (hub/items.ts).
-// The timeline knows only these kinds.
-
-export interface Diff {
-  path: string;
-  old: string | null; // null: a new file
-  new: string;
-  cut: boolean; // the hub cut a side to fit
-  more: number; // further diffs of the call the hub left out
-}
+// V3-P102 §7.4: what the timeline draws, from HIMARI's events (himari/items.ts). The timeline knows only these kinds.
 
 export interface ToolStep {
   key: string;
-  toolId: string; // HIMARI: the tool's id; hub: its kind
-  title?: string; // hub: the agent's own title of the call
+  toolId: string;
   arguments: Record<string, unknown>;
-  input?: string; // hub: the call's input as the agent gave it
-  locations?: string[];
-  diffs?: Diff[];
-  status?: string; // hub: pending | in_progress | completed | failed
   result: { text: string; isError: boolean } | null;
-}
-
-export interface Turn {
-  outcome: string;
-  why: string;
-  seconds: number | null;
-}
-
-/** Work HIMARI handed to the hub (V3-P102 §5.1): what its ``hub_delegate`` call asked and what it answered. The
- *  card follows the task by its id from there. */
-export interface Delegation {
-  taskId: number | null; // null: the hub refused it (``error`` says why) or the answer could not be read
-  project: string;
-  agent: string | null;
-  prompt: string;
-  session: number | null; // the session it was sent to, when HIMARI named one
-  status: string | null; // as the hub answered the call (the card reads the task again)
-  error: string | null;
-}
-
-/** A project request HIMARI made (V3-P103 §6.6, its ``hub_project_request``): the card follows the request by its
- *  id, read from the user path (the tool's own answer leaves the device path and pairing code out). */
-export interface AskedProject {
-  requestId: number | null; // null: the hub refused it (``error`` says why), or no answer yet
-  kind: string;
-  project: string;
-  runner: string;
-  error: string | null;
-  answered: boolean;
 }
 
 /** A file shown in the timeline: what a message attached, or what a Tool gave the user (V3-P66, V3-P67). */
@@ -62,16 +19,9 @@ export interface Shown {
 }
 
 export type Item =
-  | { kind: "user"; key: string; text: string; answers: boolean; meta?: string[]; files?: Shown[]; references?: string[] }
+  | { kind: "user"; key: string; text: string; files?: Shown[]; references?: string[] }
   | { kind: "answer"; key: string; text: string; model: string | null }
-  | { kind: "thought"; key: string; text: string }
   | { kind: "work"; key: string; notes: string[]; steps: ToolStep[]; model: string | null }
-  | { kind: "plan"; key: string; entries: { content: string; status: string }[] }
-  | { kind: "question"; key: string; text: string; callKey: string }
-  | { kind: "request"; key: string; interaction: string; ask: string; options: string[]; outcome: string | null }
-  | { kind: "turn"; key: string; turn: Turn }
-  | { kind: "delegation"; key: string; delegation: Delegation }
-  | { kind: "project_request"; key: string; asked: AskedProject }
   | { kind: "files"; key: string; files: Shown[] }
   | { kind: "memory"; key: string; run: string; call: string; action: string; text: string; undo: boolean }
   | { kind: "notice"; key: string; text: string };

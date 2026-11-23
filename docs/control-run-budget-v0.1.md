@@ -1,5 +1,7 @@
 # 한 턴의 예산과 비용 — v0.1 (V3-P62)
 
+> **바뀜(2026-11-23, V3-P106):** 토큰 예산, 진척 없음, 자리 비움 일시정지를 뺐다. 한 턴은 Run 수 상한 `HIMARI_MAX_RUNS`(기본 12) 하나로 지킨다. 사용량 표시와 대화별 캐시 경로는 남는다.
+
 > 2026-10-16 · **Proposed, rev. 4** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15), 재검수 NOT_READY(R1·R2, C3) 반영(§16), 재검수 READY(비차단 권고 둘, §17). 구현: 1단계 §18(PR #47), 2단계와 측정 §13·§19. V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
 >
 > 관련: [V3-005](decisions.md)(Tool 실패는 모델에게), [V3-047](decisions.md)(결과 불명은 모델이 확인), [V3-P55](decisions.md)(Pause·Cancel·Continue), [prompt-composition](prompt-composition.md) §5(prefix 캐시), [open-questions](open-questions.md) Q-25(캐시 성능), [mcp-context-v0.1](mcp-context-v0.1.md) §14.5(실제 모델 시험).

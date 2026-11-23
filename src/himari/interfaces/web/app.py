@@ -39,7 +39,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import posixpath
 import re
 import secrets
@@ -47,14 +46,14 @@ import threading
 import time
 import unicodedata
 from urllib.parse import quote
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
-from typing import Annotated, Any, BinaryIO, Literal
+from typing import Any, BinaryIO, Literal
 
-from fastapi import Depends, FastAPI, Path, Query, Request, Response
+from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
@@ -62,7 +61,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from himari.bootstrap.application import (
-    CLOUD_FILESYSTEMS,
     Application,
     ConnectionGenerationRequired,
     ConversationStillStopping,
@@ -84,15 +82,10 @@ from himari.bootstrap.application import (
     ToolSourceView,
     UnknownToolSource,
     WorkspaceBusy,
-    WorkspaceRefused,
-    AttachedFolder,
-    FolderConversations,
-    ReferenceRequest,
 )
 from himari.bootstrap.companion import origin_view
 from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
-from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
 from himari.presence.api import (
@@ -112,8 +105,8 @@ from himari.presence.api import (
     is_device_token,
 )
 from himari.common import (
+    LEGACY_ASK_USER,
     ACTIVITIES,
-    ASK_USER_TOOL_ID,
     MOODS,
     AttachmentRef,
     FileReference,
@@ -134,15 +127,11 @@ from himari.data.api import (
     IMAGE_HEAD_BYTES,
     sniff_image,
     ALREADY_SENT,
-    MAX_ATTACHED_WORKSPACES,
     MAX_ATTACHMENTS,
     MAX_INSTRUCTIONS_CHARS,
     MAX_LIST_LIMIT,
     MAX_MEMORIES,
     MAX_MEMORY_CHARS,
-    MAX_WORKSPACE_LABEL_CHARS,
-    MAX_WORKSPACE_NOTE_CHARS,
-    MAX_WORKSPACES,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -159,7 +148,6 @@ from himari.data.api import (
     MemoryCategory,
     MessageOrigin,
     OriginKind,
-    RegisteredWorkspace,
     ToolResultRecord,
     UserMessage,
     view_state,
@@ -176,19 +164,7 @@ from himari.data.api import (
 )
 from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
-from himari.interfaces.web import hub_stream, next_page
-from himari.interfaces.web.hub import (
-    MAX_IDS as MAX_PROJECT_REQUEST_IDS,
-    MAX_PROMPT as HUB_MAX_PROMPT,
-    HubBusy,
-    HubClient,
-    HubMisconfigured,
-    HubNotFound,
-    HubRefused,
-    HubUnavailable,
-    HubUnknown,
-)
-from himari.sandbox.api import SandboxState
+from himari.interfaces.web import next_page
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
     STYLE_NONCE_STATE,
@@ -428,19 +404,6 @@ class RenameBody(_Body):
     title: str | None = Field(max_length=1000)
 
 
-MAX_REFERENCES = 10  # a message's file references (V3-P76 §3.1)
-
-
-class ReferenceBody(_Body):
-    """V3-P76 §3.2: a reference as the browser sends it — the range and its text's hash, never the text."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    identity: IdentityIn
-    start: int | None = Field(default=None, ge=0)
-    end: int | None = Field(default=None, ge=1)
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-
 class ClientFeaturesBody(_Body):
     """V3-P93 §3.2, §6.1.2: capabilities the sending app declares for this input."""
 
@@ -450,7 +413,6 @@ class ClientFeaturesBody(_Body):
 class MessageBody(_Body):
     text: str
     attachments: list[str] = Field(default_factory=list)  # staged uploads' file ids (V3-P66)
-    references: list[ReferenceBody] = Field(default_factory=list, max_length=MAX_REFERENCES)  # V3-P76
     screen: str | None = Field(default=None, max_length=200)  # a device's staged screen (V3-P84 §4.2)
     client_features: ClientFeaturesBody | None = None
 
@@ -503,145 +465,9 @@ class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
 
 
-class HubAnswerBody(_Body):
-    """V3-P95: exactly one of them, as the hub takes it."""
-
-    option_id: str | None = Field(default=None, min_length=1, max_length=200)  # a permission's choice
-    content: dict[str, Any] | None = None  # a question's answer, by field name
-    refuse: StrictBool = False
-
-
-class HubSendBody(_Body):
-    """V3-P102 §6: a prompt for one of the hub's sessions; the model, effort and mode for it alone."""
-
-    prompt: str = Field(min_length=1, max_length=HUB_MAX_PROMPT)
-    model: str | None = Field(default=None, min_length=1, max_length=200)
-    effort: str | None = Field(default=None, min_length=1, max_length=200)
-    mode: str | None = Field(default=None, min_length=1, max_length=200)
-
-
-class HubNewBody(HubSendBody):
-    """V3-P102 §6: another session of a project's lane; the hub picks what is left out."""
-
-    project: str = Field(min_length=1, max_length=200)
-    agent: str | None = Field(default=None, min_length=1, max_length=200)
-    runner: str | None = Field(default=None, min_length=1, max_length=200)
-    profile: str | None = Field(default=None, min_length=1, max_length=200)
-
-
-class HubPresetBody(_Body):
-    preset: str = Field(max_length=200)  # empty: none
-
-
-class HubRenameBody(_Body):
-    """H2: a session's name; the hub checks it (one line, 80 characters). Empty or null clears it."""
-
-    title: str | None = Field(max_length=400)
-
-
-_HUB_PATH_LIMIT = 4000  # a folder's path on a device
-
-
-class HubClientKey(_Body):
-    """V3-P103 H13: the key this server gave (``POST /api/hub/client-key``) and the time it gave it."""
-
-    client_key: str | None = Field(default=None, min_length=1, max_length=64)
-    key_time: str | None = Field(default=None, min_length=1, max_length=64)
-
-
-class HubProjectRequestBody(HubClientKey):
-    """V3-P103 §4: a project made on a device, or a device's folder added to one. Names travel in a body, never in a
-    URL path (the hub's names may hold ``/``, ``?``, ``#``)."""
-
-    kind: Literal["create", "add_folder"]
-    project: str = Field(min_length=1, max_length=200)
-    runner: str = Field(min_length=1, max_length=200)
-    path: str | None = Field(default=None, min_length=1, max_length=_HUB_PATH_LIMIT)
-    create_dir: StrictBool | None = None
-    agent: str | None = Field(default=None, min_length=1, max_length=200)
-
-
-class HubProjectAnswerBody(_Body):
-    approve: StrictBool
-
-
-class HubResolveBody(_Body):
-    """``force`` only when the device is lost, with what the user says happened there."""
-
-    force: StrictBool = False
-    outcome: Literal["applied", "not_applied"] | None = None
-
-
-class HubProjectSetBody(_Body):
-    """Only the settings given are changed; null clears one."""
-
-    project: str = Field(min_length=1, max_length=200)
-    agent: str | None = Field(default=None, max_length=200)
-    profile: str | None = Field(default=None, max_length=200)
-    preset: str | None = Field(default=None, max_length=200)
-
-
-class HubFolderRemoveBody(HubClientKey):
-    project: str = Field(min_length=1, max_length=200)
-    runner: str = Field(min_length=1, max_length=200)
-
-
-class HubAdoptBody(_Body):
-    project: str = Field(min_length=1, max_length=200)
-    runner: str = Field(min_length=1, max_length=200)
-
-
-class HubRunnerDirsBody(_Body):
-    """A path in the body: it never lands in an access log's URL."""
-
-    runner: str = Field(min_length=1, max_length=200)
-    path: str | None = Field(default=None, min_length=1, max_length=_HUB_PATH_LIMIT)
-
-
 class McpDefaultBody(_Body):
     enabled: StrictBool
     revision: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-# A file's identity as the browser holds it: [dev, ino, size, mtime_ns] as decimal strings, since an mtime in
-# nanoseconds is past what a JavaScript number keeps exactly (V3-P75 §7.2).
-IdentityIn = Annotated[list[Annotated[str, Field(pattern=r"^[0-9]{1,20}$")] | int], Field(min_length=4, max_length=4)]
-
-
-def identity_out(identity: Iterable[object]) -> list[str]:
-    return [str(v) for v in identity]
-
-
-class FolderConversationBody(_Body):
-    """Open a conversation in a folder (V3-P75 §6): its latest, or ``new`` one."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    new: bool = False
-
-
-class WorkspaceBody(_Body):
-    """A folder to register (V3-P74 §10.3): absolute, or under the user's home."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    label: str | None = Field(default=None, max_length=MAX_WORKSPACE_LABEL_CHARS)  # null: the folder's name
-    note: str | None = Field(default=None, max_length=MAX_WORKSPACE_NOTE_CHARS)
-
-
-class WorkspaceEditBody(_Body):
-    label: str = Field(max_length=MAX_WORKSPACE_LABEL_CHARS)
-    note: str | None = Field(max_length=MAX_WORKSPACE_NOTE_CHARS)
-
-
-class AttachBody(_Body):
-    """One of the two: a registered folder, or a path (registered first)."""
-
-    workspace_id: str | None = Field(default=None, max_length=64)
-    path: str | None = Field(default=None, min_length=1, max_length=4096)
-    label: str | None = Field(default=None, max_length=MAX_WORKSPACE_LABEL_CHARS)
-
-
-class WorkingBody(_Body):
-    binding_id: str = Field(max_length=64)
 
 
 class PromptExpandBody(_Body):
@@ -662,12 +488,6 @@ def _time(value: datetime | None) -> str | None:
 def _text(blocks: tuple[ContentBlock, ...]) -> str:
     """The text blocks; attachments are listed apart (``attachments``)."""
     return "\n\n".join(b.text for b in blocks if isinstance(b, TextBlock))
-
-
-def _question(arguments: Mapping[str, Any]) -> str:
-    """An ask_user call's question, as the model wrote it."""
-    asked = arguments.get("question")
-    return asked if isinstance(asked, str) else ""
 
 
 def display_view(text: str) -> dict[str, Any]:
@@ -811,9 +631,6 @@ def event_view(event: ConversationEvent,
     payload = event.payload
     if isinstance(payload, UserMessage):
         view["text"] = _text(payload.blocks)
-        # A call is identified by (run_id, call_id): call ids repeat across Runs.
-        view["answers_call"] = None if payload.answers_call is None else payload.answers_call.call_id
-        view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
         view["attachments"] = [_attachment(b, files) for b in payload.blocks if isinstance(b, AttachmentRef)]
         view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
         # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
@@ -828,9 +645,7 @@ def event_view(event: ConversationEvent,
         view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
-        view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
-                          **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
-                             else {})}
+        view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
     elif isinstance(payload, Wake):  # V3-P87 §9: a dim line, not a bubble
         view["wake"] = {"id": payload.wake_id, "device_id": payload.device_id,
@@ -845,7 +660,7 @@ def event_view(event: ConversationEvent,
         line = memory.get(payload.call)
         view["memory"] = None if line is None else {"action": line.action, "id": line.memory_id, "text": line.text,
                                                     "undo": line.undo}
-        # V3-P67 §8: the images the call returned (kept as files of the call) — never an
+        # V3-P67 §8: the images the call returned (kept as files of the call) — never an older
         # ask_user answer's attachments, which are its result too (PR #63 review C2).
         view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
                           if (found := files.get((b.file_id, b.version))) is not None
@@ -881,7 +696,7 @@ def turn_usage_view(usage: TurnUsage) -> dict[str, Any]:
     """What the job's drive used so far (V3-P62 §7)."""
     return {"runs": usage.runs, "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
             "cached_input_tokens": usage.cached_input_tokens, "cache_write_tokens": usage.cache_write_tokens,
-            "budget": usage.budget, "max_runs": usage.max_runs}
+            "max_runs": usage.max_runs}
 
 
 def context_view(status: ContextStatus | None) -> dict[str, Any]:
@@ -1168,65 +983,10 @@ UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SCREEN_PATH = re.compile(r"^/api/device/screens/[^/]+$")  # V3-P91 §4.2: a screen of at most SCREEN_MAX_BYTES
 GENERATION_HEADER = "X-Himari-Connection-Generation"  # V3-P93 §6.1.2: a device SSE stream's generation id
 
-def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
-    """V3-P74 §10.3: a registered folder."""
-    return {"id": workspace.workspace_id, "path": workspace.location, "label": workspace.label,
-            "note": workspace.note, "created_at": _time(workspace.created_at), "attached": workspace.attached,
-            "filesystem": workspace.filesystem, "cloud_synced": workspace.filesystem in CLOUD_FILESYSTEMS}
-
-
 def reference_view(ref: FileReference) -> dict[str, Any]:
     """V3-P76 §3.1: a reference chip in the timeline — where it points, not its excerpt."""
     return {"path": ref.path, "name": posixpath.basename(ref.path), "whole": ref.start is None,
             "start_line": ref.start_line, "end_line": ref.end_line}
-
-
-def listing_view(listing: Listing) -> dict[str, Any]:
-    """V3-P75 §5.1: a page of a folder; ``next`` is the cursor of the following page."""
-    return {"path": listing.path, "parent": listing.parent, "entries": list(listing.entries), "next": listing.next,
-            "workspace": None if listing.workspace is None else workspace_view(listing.workspace)}
-
-
-def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
-    """V3-P75 §6.1: the conversations working in a folder, and the folders above it that have some."""
-    return {"path": folder.path, "own": folder.own, "refused": folder.refused,
-            "workspace": None if folder.workspace is None else workspace_view(folder.workspace),
-            "conversations": [summary_view(c) for c in folder.conversations],
-            "above": [{"workspace": workspace_view(w), "count": n} for w, n in folder.above]}
-
-
-def shown_file_view(shown: ShownFile) -> dict[str, Any]:
-    """V3-P75 §5.2: text as text; an image or other file by its kind only."""
-    return {"path": shown.path, "size": shown.size, "identity": identity_out(shown.identity), "modified": shown.modified,
-            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated}
-
-
-# How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status. too_large is
-# 422, not 413: the body limit middleware turns every 413 into "request_too_large".
-EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 422,
-                   "changed": 409, "exists": 409, "reference_stale": 409,
-                   "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
-                   "not_directory": 400, "not_regular": 415, "links": 400, "other": 500,
-                   "unsupported": 422}
-
-
-def attached_view(folder: AttachedFolder) -> dict[str, Any]:
-    """One of a Conversation's folders (§10.3): the own one first."""
-    return {"binding_id": folder.binding_id, "path": folder.path, "label": folder.label, "note": folder.note,
-            "working": folder.working, "own": folder.own, "workspace_id": folder.workspace_id}
-
-
-# How a refused change of a registered folder answers (V3-P74 §10.3): status, code, message.
-WORKSPACE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
-    DataErrorCode.INVALID_STATE_TRANSITION: (409, "workspace_attached", "It is attached to a conversation; detach "
-                                             "it there first."),
-    DataErrorCode.DUPLICATE_IDENTITY: (409, "duplicate", "That folder is registered already."),
-    DataErrorCode.LIMIT_EXCEEDED: (422, "too_many_workspaces", f"At most {MAX_WORKSPACES} folders can be registered, "
-                                   f"and {MAX_ATTACHED_WORKSPACES} attached to one conversation."),
-    DataErrorCode.TOO_LARGE: (422, "too_large", f"A note is at most {MAX_WORKSPACE_NOTE_CHARS:,} characters."),
-    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_workspace", "A label is one line of at most "
-                                     f"{MAX_WORKSPACE_LABEL_CHARS} characters; notes have no control characters."),
-}
 
 
 # How a refused prompt answers (V3-P60 §4).
@@ -1323,10 +1083,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             yield
         finally:
             closing.set()
-            try:
-                await app.state.hub_close()  # V3-P102 §6: the hub's shared list stream
-            finally:
-                await application.close()
+            await application.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.closing = closing
@@ -1436,7 +1193,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.exception_handler(WorkspaceBusy)
     async def workspace_busy(request: Request, error: WorkspaceBusy) -> JSONResponse:
-        return JSONResponse({"error": {"code": "workspace_busy", "message": "A command is running in the workspace; "
+        return JSONResponse({"error": {"code": "workspace_busy", "message": "The conversation's folder is busy; "
                                        "send again shortly."}}, status_code=409)
 
     @app.exception_handler(PromptRefused)
@@ -1448,16 +1205,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def model_refused(request: Request, error: ModelRefused) -> JSONResponse:
         return JSONResponse({"error": {"code": error.code, "message": error.message}},
                             status_code=MODEL_REFUSAL_STATUS.get(error.code, 400))
-
-    @app.exception_handler(WorkspaceRefused)
-    async def workspace_refused(request: Request, error: WorkspaceRefused) -> JSONResponse:
-        return JSONResponse({"error": {"code": error.code, "message": error.message}},
-                            status_code=422 if error.code == "not_usable" else 409)
-
-    @app.exception_handler(ExplorerRefused)
-    async def explorer_refused(request: Request, error: ExplorerRefused) -> JSONResponse:
-        return JSONResponse({"error": {"code": error.category, "message": str(error)}},
-                            status_code=EXPLORER_STATUS.get(error.category, 400))
 
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
@@ -1485,8 +1232,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def read_session(request: Request) -> dict[str, Any]:
         application = himari(request)
         signed_in = sessions.principal(request.cookies.get(SESSION_COOKIE)) is not None
-        return {"authenticated": signed_in, "model": application.model_id if signed_in else None,
-                "sandbox": application.current_sandbox_state.value if signed_in else None}
+        return {"authenticated": signed_in, "model": application.model_id if signed_in else None}
 
     def mcp_settings(application: Application) -> dict[str, Any]:
         return {"revision": application.mcp_defaults_revision,
@@ -1516,10 +1262,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.get("/api/server")
     async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """What this server runs with: the model, whether commands can run, the budget."""
+        """What this server runs with: the models and the budgets."""
         application = himari(request)
         turn = application.turn
-        return {"model": application.model_id, "sandbox": application.current_sandbox_state.value,
+        return {"model": application.model_id,
                 "models": [model_view(m) for m in application.models],
                 "context_budget": application.context_tokens,  # the default model's
                 "trash_days": application.trash_days,  # V3-P65: then a trashed conversation is deleted for good
@@ -1529,11 +1275,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "auto_memory": application.auto_memory,  # V3-P85 §12: "on (…)" or "off (why)"
                 "conversation_search": application.conversation_search_enabled,  # V3-P72 §9
                 "streaming": application.streaming_enabled,  # V3-P73 §9
-                # V3-P102 §5.1: the mcp.json server that is the hub (its hub_delegate calls are drawn as cards)
-                "hub_source": config.hub_mcp_source if config.hub_url else None,
-                "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
-                         "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
-                         "seen_seconds": turn.seen_seconds}}
+                "turn": {"max_runs": turn.max_runs}}
 
     @app.post("/api/session", status_code=204)
     async def sign_in(body: LoginBody, request: Request, response: Response) -> None:
@@ -1548,159 +1290,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def sign_out(request: Request, response: Response) -> None:
         sessions.revoke(request.cookies.get(SESSION_COOKIE))
         response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict", secure=config.secure_cookie)
-
-    # -- folders on this server as Workspaces (V3-P74 §10.3) -----------------------------------
-
-    def _workspace_refusal(error: DataError, missing: str) -> ApiError | None:
-        if error.code is DataErrorCode.NOT_FOUND:
-            return ApiError(404, "not_found", missing)
-        found = WORKSPACE_REFUSALS.get(error.code)
-        return None if found is None else ApiError(*found)
-
-    @app.get("/api/workspaces")
-    async def list_workspaces(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """``available``: folders on this server are offered to this user."""
-        application = himari(request)
-        try:
-            items = await application.machine_workspaces(who)
-        except WorkspaceRefused:
-            return {"available": False, "items": []}
-        return {"available": True, "items": [workspace_view(w) for w in items]}
-
-    @app.post("/api/workspaces", status_code=201)
-    async def register_workspace(body: WorkspaceBody, request: Request,
-                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        try:
-            return workspace_view(await himari(request).register_workspace(who, body.path, body.label, body.note))
-        except DataError as error:
-            refusal = _workspace_refusal(error, "No such workspace.")
-            if refusal is None:
-                raise
-            raise refusal from None
-
-    @app.patch("/api/workspaces/{workspace_id}")
-    async def edit_workspace(workspace_id: str, body: WorkspaceEditBody, request: Request,
-                             who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        try:
-            return workspace_view(await himari(request).update_workspace(who, workspace_id, body.label, body.note))
-        except DataError as error:
-            refusal = _workspace_refusal(error, "No such workspace.")
-            if refusal is None:
-                raise
-            raise refusal from None
-
-    @app.delete("/api/workspaces/{workspace_id}", status_code=204)
-    async def unregister_workspace(workspace_id: str, request: Request, who: PrincipalId = Depends(principal)) -> None:
-        try:
-            await himari(request).unregister_workspace(who, workspace_id)
-        except DataError as error:
-            refusal = _workspace_refusal(error, "No such workspace.")
-            if refusal is None:
-                raise
-            raise refusal from None
-
-    @app.get("/api/conversations/{conversation_id}/workspaces")
-    async def conversation_workspaces(conversation_id: str, request: Request,
-                                      who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Empty for a Conversation that does not work on this server's folders."""
-        folders = await himari(request).conversation_workspaces(scope_of(conversation_id, who))
-        return {"items": [attached_view(f) for f in folders]}
-
-    @app.post("/api/conversations/{conversation_id}/workspaces")
-    async def attach_workspace(conversation_id: str, body: AttachBody, request: Request,
-                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        if (body.workspace_id is None) == (body.path is None):
-            raise ApiError(400, "invalid_request", "Give a registered workspace or a folder's path.")
-        try:
-            folders = await himari(request).attach_workspace(scope_of(conversation_id, who),
-                                                             workspace_id=body.workspace_id, path=body.path,
-                                                             label=body.label)
-        except DataError as error:
-            refusal = _workspace_refusal(error, "No such workspace.")  # a missing Conversation: NOT_AUTHORIZED, 404
-            if refusal is None:
-                raise
-            raise refusal from None
-        return {"items": [attached_view(f) for f in folders]}
-
-    @app.delete("/api/conversations/{conversation_id}/workspaces/{binding_id}")
-    async def detach_workspace(conversation_id: str, binding_id: str, request: Request,
-                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        try:
-            folders = await himari(request).detach_workspace(scope_of(conversation_id, who), binding_id)
-        except DataError as error:
-            if error.code is not DataErrorCode.NOT_FOUND:
-                raise
-            raise ApiError(404, "not_found", "No such folder in this conversation.") from None
-        return {"items": [attached_view(f) for f in folders]}
-
-    @app.put("/api/conversations/{conversation_id}/workspaces/working")
-    async def set_working_workspace(conversation_id: str, body: WorkingBody, request: Request,
-                                    who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        try:
-            folders = await himari(request).set_working_workspace(scope_of(conversation_id, who), body.binding_id)
-        except DataError as error:
-            if error.code is not DataErrorCode.NOT_FOUND:
-                raise
-            raise ApiError(404, "not_found", "No such folder in this conversation.") from None
-        return {"items": [attached_view(f) for f in folders]}
-
-    # -- conversations -----------------------------------------------------------------------
-
-    # -- the file explorer (V3-P75 §5): the owner's view of this server's files ----------
-
-    @app.get("/api/machine/list")
-    async def browse_folder(request: Request, path: str = "~", after: str | None = None,
-                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        application = himari(request)
-        explorer = application.explorer(who)
-        return listing_view(await explorer.browse(path, after, await application.machine_workspaces(who)))
-
-    @app.get("/api/machine/conversations")
-    async def folder_conversations(request: Request, path: str,
-                                   who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return folder_conversations_view(await himari(request).folder_conversations(who, path))
-
-    @app.post("/api/machine/conversations")
-    async def open_folder_conversation(body: FolderConversationBody, request: Request, response: Response,
-                                       who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """The folder's latest conversation, or a new one working in it (201)."""
-        application = himari(request)
-        conversation, created = await application.open_folder_conversation(who, body.path, new=body.new)
-        if created:
-            response.status_code = 201
-        return {"conversation": summary_view(await application.data.read_conversation(scope_of(conversation, who))),
-                "created": created}
-
-    # -- the editor (V3-P75 §7): the owner's own writes, anywhere but hidden paths ------------
-
-    @app.get("/api/machine/stat")
-    async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        found = await himari(request).explorer(who).stat(path)
-        return {**found, "identity": identity_out(found["identity"])}
-
-    @app.get("/api/machine/file")
-    async def show_file(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return shown_file_view(await himari(request).explorer(who).show(path))
-
-    @app.get("/api/machine/download")
-    async def download_machine_file(request: Request, path: str,
-                                    who: PrincipalId = Depends(principal)) -> Response:
-        """An attachment of type octet-stream, sandboxed: never rendered on this origin (V3-P75 §8.2)."""
-        real, size, fd = await himari(request).explorer(who).open(path)
-        return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
-            "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
-            "Content-Length": str(size),
-            "Content-Security-Policy": "sandbox",
-        })
-
-    @app.get("/api/machine/image")
-    async def show_image(request: Request, path: str, who: PrincipalId = Depends(principal)) -> Response:
-        """The image sandbox's copy (V3-P67), inline: HIMARI's JPEG or PNG, never the file's own bytes."""
-        made = await himari(request).explorer(who).image(path)
-        return Response(made.data, media_type=made.media_type, headers={
-            "Content-Disposition": "inline",
-            "Content-Security-Policy": "default-src 'none'; sandbox",
-        })
 
     @app.get("/api/conversations")
     async def list_conversations(request: Request, by: Caller = Depends(caller),
@@ -1718,11 +1307,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.get("/api/conversations/activity")  # before /api/conversations/{conversation_id}, which would take it
     async def conversation_activity(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
-        them: it never counts as the user being there (``seen``, V3-P62 §5)."""
+        """V3-P80 §3.2: which Conversations work now."""
         application, who = himari(request), by.principal
-        return {"working": sorted(application.runner.shown_running(who)),  # V3-P90 §7.3: not a hidden one
-                "waiting": sorted(await application.data.list_waiting_conversations(who))}
+        return {"working": sorted(application.runner.shown_running(who))}  # V3-P90 §7.3: not a hidden one
 
     @app.post("/api/conversations", status_code=201)
     async def create_conversation(body: CreateBody, request: Request,
@@ -1736,25 +1323,22 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         cid = await application.create_conversation(who, title=body.title, initial_model=initial_model)
         return summary_view(await application.data.read_conversation(scope_of(cid, who)))
 
+    def _legacy_question(event: ConversationEvent) -> bool:
+        """V3-P106: an older server's open ``ask_user`` question waits for the user's message, not Continue."""
+        return isinstance(event.payload, AssistantToolCalls) and any(
+            c.tool_id == LEGACY_ASK_USER for c in event.payload.calls)
+
     async def _detail(application: Application, scope: TrustedScope) -> dict[str, Any]:
         summary = await application.data.read_conversation(scope)  # authorizes first
-        application.seen(scope)  # a client is reading (V3-P62 §5)
-        waiting = await application.data.find_waiting_call(scope)
-        question = None
-        if waiting is not None:
-            for record in await application.data.read_tool_executions(scope, waiting.run_id):
-                if record.call == waiting and record.tool_id == ASK_USER_TOOL_ID:
-                    asked = _question(record.arguments)
-                    question = {"call_id": waiting.call_id, "question": asked, "display": display_view(asked)}
         job = application.runner.shown_status(scope)  # V3-P90 §7.3: a hidden free wake is not working
         # An accepted input (or finished Tool results) with no assistant
         # output after it — e.g. the server stopped before the job ran.
         last = await application.data.read_events(scope, after_sequence=summary.last_sequence - 1, limit=1) \
             if summary.last_sequence else ()
-        continuable = (not job.running and question is None and bool(last)
-                       and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls"))
-        return {"conversation": summary_view(summary), "job": job_view(job), "waiting": question,
-                "continuable": continuable}
+        continuable = (not job.running and bool(last)
+                       and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls")
+                       and not _legacy_question(last[-1]))
+        return {"conversation": summary_view(summary), "job": job_view(job), "continuable": continuable}
 
     @app.get("/api/conversations/{conversation_id}")
     async def read_conversation(conversation_id: str, request: Request,
@@ -1816,7 +1400,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         events = await application.data.read_events(scope, after_sequence=after, limit=limit)
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
             events = tuple(e for e in events if e.sequence not in unshown)
-        application.seen(scope)  # a client is reading (V3-P62 §5): only after the read was authorized
         writers = [e.origin_run_id for e in events
                    if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
         models = await application.run_models(scope, writers) if writers else {}
@@ -1847,7 +1430,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         if by.device is None:
             return _LiveResponse(live.stream(application.runner, scope, closing), release,
                                  media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
-        # V3-P83 §8.3: a device's open live stream is a connected client (seen); §8.1: revoking ends it.
+        # V3-P83 §8.1: revoking the device ends its open live stream.
         key, ended = (who, by.device.device_id), asyncio.Event()
         device_lives.setdefault(key, set()).add(ended)
 
@@ -1859,8 +1442,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 if not kept:
                     del device_lives[key]
 
-        return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended,
-                                         awake=lambda: application.seen(scope)), done,
+        return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended), done,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/conversations/{conversation_id}/context")
@@ -2177,7 +1759,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
                            by: Caller = Depends(caller)) -> dict[str, Any]:
         who = by.principal
-        if by.device is not None and (body.attachments or body.references):  # V3-P83 §4.3: text and a screen
+        if by.device is not None and body.attachments:  # V3-P83 §4.3: text and a screen
             raise ApiError(403, "device_scope", "A device sends text and a screen only.")
         if body.screen is not None and by.device is None:
             raise ApiError(400, "invalid_argument", "Only a device sends a screen.")
@@ -2199,7 +1781,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         text = body.text.strip()
         if len(body.attachments) > MAX_ATTACHMENTS:
             raise ApiError(400, "too_many_attachments", f"A message carries at most {MAX_ATTACHMENTS} files.")
-        if ((not text and not body.attachments and not body.references and body.screen is None)
+        if ((not text and not body.attachments and body.screen is None)
                 or len(text) > MAX_MESSAGE_CHARS):
             raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
         if body.screen is not None:
@@ -2212,10 +1794,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                     # §7.8: the earlier send of this screen was recorded; this one is not.
                     raise ApiError(409, "screen_already_sent", "This screen was sent already.") from None
                 raise
-        references = [ReferenceRequest(r.path, tuple(int(v) for v in r.identity), r.start, r.end, r.sha256)
-                      for r in body.references]
         return job_view(await application.send(
-            scope, text, [FileId(f) for f in body.attachments], references, origin=by.origin,
+            scope, text, [FileId(f) for f in body.attachments], origin=by.origin,
             connection_generation=connection_generation, client_file_download=client_file_download))
 
     # -- files (V3-P66 §9) ---------------------------------------------------------------------
@@ -2247,8 +1827,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             if error.code is DataErrorCode.BLOB_MISSING:  # swept while it stalled (§8.2)
                 raise ApiError(503, "upload_interrupted", "The upload was interrupted; upload it again.") from None
             raise
-        # §5.2 (review C2): without commands the model reads text files only.
-        return {**file_view(record), "commands": application.current_sandbox_state is SandboxState.ENFORCED}
+        return file_view(record)
 
     @app.get("/api/conversations/{conversation_id}/files")
     async def list_files(conversation_id: str, request: Request, who: PrincipalId = Depends(principal),
@@ -2292,27 +1871,12 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit(scope, None))
 
-    @app.post("/api/conversations/{conversation_id}/pause", status_code=202)
-    async def pause(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """Stop the running job at the next safe boundary (V3-P55); nothing if idle."""
-        application, scope = himari(request), scope_of(conversation_id, by.principal)
-        await application.data.read_conversation(scope)
-        return job_view(application.runner.request_pause(scope))
-
     @app.post("/api/conversations/{conversation_id}/cancel", status_code=202)
     async def cancel(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """Stop the running job now (V3-P55); nothing if idle."""
         application, scope = himari(request), scope_of(conversation_id, by.principal)
         await application.data.read_conversation(scope)
         return job_view(application.runner.cancel(scope))
-
-    @app.post("/api/conversations/{conversation_id}/dismiss", status_code=202)
-    async def dismiss(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """Close what was left waiting — a question, or never-started steps
-        of a paused or interrupted turn (V3-P55). Busy while a job runs."""
-        application, scope = himari(request), scope_of(conversation_id, by.principal)
-        await application.data.read_conversation(scope)
-        return job_view(await application.runner.submit_cancel(scope))
 
     @app.post("/api/conversations/{conversation_id}/compact", status_code=202)
     async def compact(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -2527,7 +2091,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 from None
         try:
             assert application.events is not None
-            hello = {**await device_state(application, by), "activity": await application.events.activity(by.principal)}
+            hello = {**await device_state(application, by), "activity": application.events.activity(by.principal)}
             if by.device is None:  # V3-P88 §8.1: the Web compares, and rereads the devices when it differs
                 hello["signals"] = {"epoch": application.presence.signals_epoch,
                                     "revision": application.presence.signals_revision(by.principal)}
@@ -2538,317 +2102,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise
         return _LiveResponse(event_stream.stream(subscription, hello, closing),
                              lambda: application.presence.unsubscribe(subscription),
-                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
-
-    # -- the hub (V3-P95 waiting requests, V3-P102 §6 the whole user path) ----------------------
-
-    hub = (HubClient(config.hub_url, config.hub_user_token_file)
-           if config.hub_url is not None and config.hub_user_token_file is not None else None)
-    hub_upstream = hub_stream.Upstream(hub) if hub is not None else None
-    hub_list = hub_stream.ListRelay(hub, hub_upstream) if hub is not None and hub_upstream is not None else None
-    hub_session_streams = hub_stream.SessionStreams(hub_upstream) if hub_upstream is not None else None
-
-    async def hub_close() -> None:
-        if hub_list is not None:
-            await hub_list.stop()
-        if hub_upstream is not None:
-            await hub_upstream.aclose()
-
-    app.state.hub_close = hub_close
-
-    def hub_for(who: PrincipalId) -> HubClient:
-        if who != OPERATOR:
-            raise ApiError(403, "not_authorized", "Only the operator can use the hub.")
-        if hub is None:
-            raise ApiError(404, "not_found", "The hub is not set up on this server.")
-        return hub
-
-    def hub_error(error: Exception) -> ApiError:
-        if isinstance(error, HubRefused):
-            if error.bad_cursor:
-                return ApiError(409, "hub_bad_cursor", "That cursor is past the session's end; read from 0.")
-            return ApiError(409, "hub_refused", str(error)[:500])
-        if isinstance(error, HubNotFound):
-            return ApiError(404, "not_found", "No such session on the hub.")
-        if isinstance(error, (hub_stream.HubStreamLimit, HubBusy)):
-            return ApiError(503, "hub_stream_limit", "Too many live views of hub sessions; read the events instead.")
-        if isinstance(error, HubUnknown):
-            return ApiError(503, "hub_unknown", "The hub did not answer; it may have done it. Check before trying "
-                                               "again (a prompt sent twice runs twice).")
-        if isinstance(error, HubMisconfigured):
-            log.warning("the hub refused this server: %s (check HIMARI_HUB_URL and the user token)", error)
-            return ApiError(503, "hub_misconfigured", "The hub refused this server's token or address.")
-        return ApiError(503, "hub_unavailable", "The hub could not be reached; nothing was sent.")
-
-    async def hub_call[T](work: Awaitable[T]) -> T:
-        try:
-            return await work
-        except (HubRefused, HubNotFound, HubUnavailable) as error:
-            raise hub_error(error) from None
-
-    def signed_in_check(request: Request) -> Callable[[], bool]:
-        """Whether the caller of a long stream still may (V3-P102 §6). Called first in the route, before anything
-        is awaited. The CLI's operator bearer holds for the server's life; anything else is the Web session it
-        came with, which must stay valid (a session that ended meanwhile never turns into "always")."""
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        if scheme.lower() == "bearer" and verify_operator_token(token.strip(), request.app.state.bearer):
-            return lambda: True
-        cookie = request.cookies.get(SESSION_COOKIE)
-        return lambda: sessions.principal(cookie) == OPERATOR
-
-    @app.get("/api/hub/pending")
-    async def hub_pending(who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """What the hub's coding agents wait on the user for. ``enabled`` false: not set up, never asked
-        again; ``reachable`` false: the hub did not answer this time."""
-        if who != OPERATOR or hub is None:
-            return {"enabled": False, "reachable": False, "pending": []}
-        try:
-            return {"enabled": True, "reachable": True, "pending": await hub.pending()}
-        except (HubUnavailable, HubRefused):
-            return {"enabled": True, "reachable": False, "pending": []}
-
-    @app.post("/api/hub/pending/{request_id}/answer", status_code=204)
-    async def hub_answer(body: HubAnswerBody, request_id: int = Path(ge=1, le=2**53),
-                         who: PrincipalId = Depends(principal)) -> None:
-        client = hub_for(who)
-        given = [name for name, value in (("option_id", body.option_id is not None),
-                                         ("content", body.content is not None), ("refuse", body.refuse)) if value]
-        if len(given) != 1:
-            raise ApiError(400, "invalid_request", "Give exactly one of option_id, content, refuse.")
-        answer: dict[str, Any] = ({"refuse": True} if body.refuse else {"option_id": body.option_id}
-                                  if body.option_id is not None else {"content": body.content})
-        await hub_call(client.answer(request_id, answer))
-
-    @app.post("/api/hub/tasks/{task_id}/cancel", status_code=204)
-    async def hub_cancel(task_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)) -> None:
-        await hub_call(hub_for(who).cancel(task_id))
-
-    @app.get("/api/hub/tasks/{task_id}")
-    async def hub_task(task_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A task the page sent (``send``, ``new``) or HIMARI handed over, followed to its end: its status, the
-        session it really runs in (null until it has one; a ``send`` whose session the agent lost moves), the start
-        of its result, and what it waits on (V3-P102 §5)."""
-        return {"task": await hub_call(hub_for(who).task(task_id))}
-
-    @app.get("/api/hub/projects")
-    async def hub_projects(who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Projects, profiles, agents and their modes, the models and efforts allowed, the hub's devices."""
-        return await hub_call(hub_for(who).projects())
-
-    @app.get("/api/hub/sessions")
-    async def hub_sessions(project: str | None = Query(default=None, min_length=1, max_length=200),
-                           runner: str | None = Query(default=None, min_length=1, max_length=200),
-                           closed: bool = False, state: Literal["closed"] | None = None,
-                           limit: int = Query(default=100, ge=1, le=500),
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """``state=closed``: the closed ones only, the latest closed first (H2: where a closed one is found)."""
-        sessions_now = await hub_call(hub_for(who).sessions(project=project, runner=runner, closed=closed,
-                                                            state=state, limit=limit))
-        return {"sessions": sessions_now}
-
-    @app.get("/api/hub/sessions/{session_id}")
-    async def hub_session(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
-                          ) -> dict[str, Any]:
-        return await hub_call(hub_for(who).session(session_id))
-
-    @app.get("/api/hub/sessions/{session_id}/events")
-    async def hub_events(session_id: int = Path(ge=1, le=2**53), after: int = Query(default=0, ge=0, le=2**53),
-                         limit: int = Query(default=200, ge=1, le=1000), who: PrincipalId = Depends(principal)
-                         ) -> dict[str, Any]:
-        """The events after ``after``, oldest first; ``next`` is the cursor to read on (never ``last_seq``)."""
-        return await hub_call(hub_for(who).events(session_id, after, limit))
-
-    @app.post("/api/hub/sessions/{session_id}/messages")
-    async def hub_send(body: HubSendBody, session_id: int = Path(ge=1, le=2**53),
-                       who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """The task it became; follow that task, not the session (the agent may go on in a new one)."""
-        task = await hub_call(hub_for(who).send(session_id, body.prompt, model=body.model, effort=body.effort,
-                                                mode=body.mode))
-        return {"task": task}
-
-    @app.post("/api/hub/sessions")
-    async def hub_new(body: HubNewBody, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Another session of the project's lane; the task (no session id until it runs)."""
-        task = await hub_call(hub_for(who).new(body.project, body.prompt, agent=body.agent, runner=body.runner,
-                                               profile=body.profile, model=body.model, effort=body.effort,
-                                               mode=body.mode))
-        return {"task": task}
-
-    @app.post("/api/hub/sessions/{session_id}/close")
-    async def hub_session_close(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
-                                ) -> dict[str, Any]:
-        return await hub_call(hub_for(who).close(session_id))
-
-    @app.post("/api/hub/sessions/{session_id}/reopen")
-    async def hub_session_reopen(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
-                                 ) -> dict[str, Any]:
-        """H2: a closed session, open again; the hub says why when it cannot be (its agent lost it, …)."""
-        return await hub_call(hub_for(who).reopen(session_id))
-
-    @app.put("/api/hub/sessions/{session_id}/title")
-    async def hub_session_rename(body: HubRenameBody, session_id: int = Path(ge=1, le=2**53),
-                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """H2: the session's name, open or closed; empty or null clears it."""
-        return await hub_call(hub_for(who).rename(session_id, body.title))
-
-    @app.put("/api/hub/projects/{project}/preset")
-    async def hub_preset(body: HubPresetBody, project: str = Path(min_length=1, max_length=200),
-                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return await hub_call(hub_for(who).preset(project, body.preset))
-
-    # -- projects and device folders (V3-P103 §4) ----------------------------------------------
-    # Names and paths travel in bodies (or a query value), never in a URL path. The log keeps a request's id, state
-    # and kind and the kind of a failure only: never a path, a pairing code or the hub's own words.
-
-    async def hub_project_call[T](op: str, work: Awaitable[T]) -> T:
-        try:
-            done = await work
-        except (HubRefused, HubNotFound, HubUnavailable) as error:
-            mapped = hub_error(error)
-            log.info("hub %s: %s", op, mapped.code)
-            raise mapped from None
-        if isinstance(done, dict) and isinstance(done.get("id"), int):
-            log.info("hub %s: request %s %s %s", op, done["id"], done.get("kind"), done.get("state"))
-        return done
-
-    def client_key_of(body: HubClientKey) -> dict[str, str]:
-        if (body.client_key is None) != (body.key_time is None):
-            raise ApiError(400, "invalid_request", "Give client_key and key_time together.")
-        return {} if body.client_key is None or body.key_time is None else {
-            "client_key": body.client_key, "key_time": body.key_time}
-
-    @app.get("/api/hub/project-requests")
-    async def hub_project_requests(open: bool = False, limit: int = Query(default=100, ge=1, le=500),
-                                   ids: str | None = Query(default=None, min_length=1, max_length=1000),
-                                   who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """The requests, the latest first; ``open``: every one not ended. ``ids`` (H12, comma-separated, at most
-        50): those whatever their state, and ``missing`` the ids the hub no longer has (null: the hub did not say)."""
-        client = hub_for(who)
-        asked: list[int] | None = None
-        if ids is not None:
-            parts = ids.split(",")
-            if len(parts) > MAX_PROJECT_REQUEST_IDS or not all(part.isdigit() and len(part) <= 16 for part in parts):
-                raise ApiError(400, "invalid_request", "ids: at most 50 request ids, comma-separated.")
-            asked = list(dict.fromkeys(int(part) for part in parts))
-            if any(not 1 <= item <= 2**53 for item in asked):
-                raise ApiError(400, "invalid_request", "ids: at most 50 request ids, comma-separated.")
-        return await hub_project_call("project_requests", client.project_requests(
-            open_only=open, limit=None if open or asked is not None else limit, ids=asked))
-
-    @app.post("/api/hub/project-requests")
-    async def hub_project_request(body: HubProjectRequestBody, who: PrincipalId = Depends(principal)
-                                  ) -> dict[str, Any]:
-        """A project made on a device (``create``) or a device's folder added (``add_folder``): the request."""
-        client = hub_for(who)
-        if body.agent is not None and body.kind != "create":
-            raise ApiError(400, "invalid_request", "agent is for a new project only.")
-        sent: dict[str, Any] = {"kind": body.kind, "project": body.project, "runner": body.runner}
-        sent.update({name: value for name, value in (("path", body.path), ("create_dir", body.create_dir),
-                                                     ("agent", body.agent)) if value is not None})
-        sent.update(client_key_of(body))
-        return {"request": await hub_project_call("project_request", client.project_request(sent))}
-
-    @app.post("/api/hub/project-requests/{request_id}/answer")
-    async def hub_project_request_answer(body: HubProjectAnswerBody, request_id: int = Path(ge=1, le=2**53),
-                                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """HIMARI's request allowed or refused (only the user path may)."""
-        client = hub_for(who)
-        return {"request": await hub_project_call("project_request_answer",
-                                                  client.project_request_answer(request_id, body.approve))}
-
-    @app.post("/api/hub/project-requests/{request_id}/cancel")
-    async def hub_project_request_cancel(request_id: int = Path(ge=1, le=2**53),
-                                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        client = hub_for(who)
-        return {"request": await hub_project_call("project_request_cancel",
-                                                  client.project_request_cancel(request_id))}
-
-    @app.post("/api/hub/project-requests/{request_id}/resolve")
-    async def hub_project_request_resolve(body: HubResolveBody, request_id: int = Path(ge=1, le=2**53),
-                                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A ``lost`` request settled: the hub asks the device (up to 30 s; this waits 40), or with ``force`` the
-        user says what happened there."""
-        client = hub_for(who)
-        if body.force != (body.outcome is not None):
-            raise ApiError(400, "invalid_request", "force goes with an outcome (applied, not_applied), and only it.")
-        return {"request": await hub_project_call("project_request_resolve", client.project_request_resolve(
-            request_id, force=body.force, outcome=body.outcome))}
-
-    @app.post("/api/hub/projects/settings")
-    async def hub_project_settings(body: HubProjectSetBody, who: PrincipalId = Depends(principal)
-                                   ) -> dict[str, Any]:
-        """The project's default agent, profile and permission preset: only those given (null clears one)."""
-        client = hub_for(who)
-        given: dict[str, Any] = {name: getattr(body, name) for name in ("agent", "profile", "preset")
-                                 if name in body.model_fields_set}
-        return await hub_project_call("project_set", client.project_set({"project": body.project, **given}))
-
-    @app.post("/api/hub/projects/remove-folder")
-    async def hub_project_folder_remove(body: HubFolderRemoveBody, who: PrincipalId = Depends(principal)
-                                        ) -> dict[str, Any]:
-        """Not removed at once: a ``remove_folder`` request the device ends when it takes the folder out."""
-        client = hub_for(who)
-        sent = {"project": body.project, "runner": body.runner, **client_key_of(body)}
-        return {"request": await hub_project_call("project_folder_remove", client.project_folder_remove(sent))}
-
-    @app.post("/api/hub/client-key")
-    async def hub_client_key(who: PrincipalId = Depends(principal)) -> dict[str, str]:
-        """H13: a key for one request the page may send again after ``hub_unknown``, with this server's time (the
-        hub judges its age by its own clock). Nothing goes to the hub."""
-        hub_for(who)
-        return {"client_key": secrets.token_hex(16),
-                "key_time": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")}
-
-    @app.post("/api/hub/projects/adopt")
-    async def hub_project_adopt(body: HubAdoptBody, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A device's held folder joins the project of its name (made when there is none)."""
-        client = hub_for(who)
-        return await hub_project_call("project_adopt", client.project_adopt(body.project, body.runner))
-
-    @app.post("/api/hub/runner-dirs")
-    async def hub_runner_dirs(body: HubRunnerDirsBody, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A ``user`` device's roots, or the folders under one (names only). A read, but a POST: the path stays out
-        of the URL."""
-        client = hub_for(who)
-        return await hub_project_call("runner_dirs", client.runner_dirs(body.runner, body.path))
-
-    @app.get("/api/hub/stream")
-    async def hub_list_stream(request: Request, who: PrincipalId = Depends(principal)) -> StreamingResponse:
-        """The hub's open sessions, live (V3-P102 §6): ``sessions`` replaces the list, ``changed`` merges by id,
-        ``hub`` says whether the hub is reachable. One upstream for every browser of this server."""
-        still = signed_in_check(request)
-        hub_for(who)
-        assert hub_list is not None
-        reader = hub_list.join()
-        return _LiveResponse(hub_stream.list_frames(hub_list, reader, still, closing),
-                             lambda: hub_list.leave(reader),
-                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
-
-    @app.get("/api/hub/sessions/{session_id}/stream")
-    async def hub_session_stream(request: Request, session_id: int = Path(ge=1, le=2**53),
-                                 after: int = Query(default=0, ge=0, le=2**53),
-                                 who: PrincipalId = Depends(principal)) -> StreamingResponse:
-        """One session's events, live, from ``after`` or the ``Last-Event-ID`` the browser reconnects with."""
-        still = signed_in_check(request)  # before the upstream is awaited (the session may end meanwhile)
-        hub_for(who)
-        assert hub_session_streams is not None
-        given = request.headers.get("last-event-id", "")
-        last_event_id = int(given) if given.isdigit() and len(given) <= 16 else None
-        try:
-            stack, stream = await hub_session_streams.open(session_id, after, last_event_id)
-        except (HubRefused, HubNotFound, HubUnavailable, hub_stream.HubStreamLimit) as error:
-            raise hub_error(error) from None
-        streams = hub_session_streams
-        if not still():  # signed out while the upstream opened: nothing of the session goes out
-            streams.release()
-            await stack.aclose()
-            raise ApiError(401, "unauthenticated", "Sign in first.")
-
-        def ended() -> None:  # however it ends, even when its body never started: the slot and the upstream
-            streams.release()
-            asyncio.ensure_future(stack.aclose())
-
-        return _LiveResponse(hub_stream.session_frames(stack, stream, still, closing), ended,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     # -- the new page beside the old one (V3-P102 §7.2, W1) -------------------------------------

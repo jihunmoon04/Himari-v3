@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import os
 from pathlib import Path
 
@@ -18,8 +16,8 @@ from himari.runner.hostfs import Host
 @pytest.fixture
 def home(tmp_path: Path) -> Path:
     home = tmp_path / "home"
-    for folder in (".ssh", ".config/gh", ".local/bin", ".local/share/code", ".cache/pip", ".cache/himari-runner",
-                   "projects/a", "HIMARI/conversations/c1", "outside"):
+    for folder in (".ssh", ".config/gh", ".local/bin", ".local/share/code", ".cache/pip", "projects/a",
+                   "HIMARI/conversations/c1", "outside"):
         (home / folder).mkdir(parents=True)
     (home / ".ssh/id").write_text("secret")
     (home / ".gitconfig").write_text("[user]\n")
@@ -33,8 +31,7 @@ def home(tmp_path: Path) -> Path:
 @pytest.fixture
 def rules(home: Path, tmp_path: Path) -> HiddenRules:
     (tmp_path / "srv").mkdir()
-    return HiddenRules(str(home), (".gitconfig", ".local/bin", ".local/lib", ".cache/himari-runner"),
-                       (str(tmp_path / "srv"),))
+    return HiddenRules(str(home), (".gitconfig", ".local/bin", ".local/lib"), (str(tmp_path / "srv"),))
 
 
 @pytest.fixture
@@ -47,28 +44,28 @@ def test_dot_entries_are_hidden_except_the_visible_ones(rules: HiddenRules, home
     assert hidden(f"{home}/.ssh/id") and hidden(f"{home}/.bashrc") and hidden(f"{home}/.config/gh")
     assert hidden(f"{home}/.local/share/code/ipc") and hidden(f"{home}/.cache/pip")
     assert not hidden(f"{home}/.gitconfig") and not hidden(f"{home}/.local/bin/tool")
-    assert not hidden(f"{home}/.local") and not hidden(f"{home}/.cache")  # they hold visible entries
-    assert not hidden(f"{home}/.cache/himari-runner") and not hidden(f"{home}/projects/a/.git")  # only home level
+    assert not hidden(f"{home}/.local")  # it holds visible entries
+    assert hidden(f"{home}/.cache") and not hidden(f"{home}/projects/a/.git")  # only home level
     assert not hidden(str(home)) and not hidden("/usr/bin")
-    masks = {m.path: m.kind for m in rules.masks()}
-    assert masks[f"{home}/.ssh"] == "dir" and masks[f"{home}/.bashrc"] == "file"
-    assert f"{home}/.local/share" in masks and f"{home}/.cache/pip" in masks
+    masks = rules.masks()
+    assert f"{home}/.ssh" in masks and f"{home}/.bashrc" in masks and f"{home}/.ssh/id" not in masks  # the folder
+    assert f"{home}/.local/share" in masks and f"{home}/.cache" in masks
     assert not any(p.startswith(f"{home}/.local/bin") or p == f"{home}/.local" or p == f"{home}/.gitconfig"
-                   or p.startswith(f"{home}/.cache/himari-runner") for p in masks)
+                   for p in masks)
 
 
 def test_a_hidden_link_is_masked_at_its_target(rules: HiddenRules, home: Path, tmp_path: Path) -> None:
     keys = tmp_path / "keys"
     keys.mkdir()
     (home / ".aws").symlink_to(keys)
-    masks = {m.path for m in rules.masks()}
-    assert str(keys) in masks
-    assert rules.is_hidden(str(keys / "credentials"))
+    (home / ".gone").symlink_to(tmp_path / "missing")  # a dangling link shows nothing
+    assert str(keys) in rules.masks()
+    assert rules.is_hidden(str(keys / "credentials")) and str(tmp_path / "missing") not in rules.masks()
 
 
 def test_extra_paths(rules: HiddenRules, tmp_path: Path) -> None:
     assert rules.is_hidden(str(tmp_path / "srv" / "db"))
-    assert str(tmp_path / "srv") in {m.path for m in rules.masks()}
+    assert str(tmp_path / "srv") in rules.masks()
 
 
 def read(host: Host, path: str, cwd: str) -> bytes:
@@ -116,7 +113,7 @@ def write(host: Host, path: str, roots: list[str], data: bytes = b"x", **kw: obj
     return os.path.join(parent, name)
 
 
-def test_writing_only_inside_the_workspaces(host: Host, home: Path, tmp_path: Path) -> None:
+def test_writing_only_inside_the_write_roots(host: Host, home: Path, tmp_path: Path) -> None:
     root = str(home / "HIMARI/conversations/c1")
     assert write(host, "notes/a.txt", [root], create_parents=True) == f"{root}/notes/a.txt"
     assert category(lambda: write(host, "~/projects/a/x.c", [root])) == api.OUTSIDE_WORKSPACES
@@ -132,7 +129,7 @@ def test_writing_only_inside_the_workspaces(host: Host, home: Path, tmp_path: Pa
     assert category(lambda: write(host, "dir-out/new.c", [root])) == api.OUTSIDE_WORKSPACES
     (Path(root) / "loop").symlink_to(Path(root) / "loop")
     assert category(lambda: write(host, "loop", [root])) in (api.LINKS, api.OUTSIDE_WORKSPACES)
-    # a Workspace that holds hidden paths: those stay out of reach
+    # a write root that holds hidden paths: those stay out of reach
     assert category(lambda: write(host, "~/.ssh/authorized_keys", [str(home)])) == api.NOT_FOUND
     assert category(lambda: write(host, "~/.bashrc", [str(home)])) == api.NOT_FOUND
     assert write(host, "~/projects/new.c", [str(home)]) == f"{home}/projects/new.c"
@@ -194,70 +191,10 @@ def test_missing_parents_are_judged_before_they_are_made(home: Path, tmp_path: P
     assert not (home / ".newdot").exists()
     assert write(host, f"{root}/fine/deep/a", [str(root)], create_parents=True) == f"{root}/fine/deep/a"
 
+# --- listing (V3-P75 §5.1) -----------------------------------------------------------------------------
 
-
-def test_check_workspace(host: Host, home: Path, tmp_path: Path) -> None:
-    """V3-P74 §10.1: a folder the user registers."""
-    checked = host.check_workspace("~/projects/a", [], ["/"])
-    assert checked["path"] == f"{home}/projects/a" and checked["same_as"] is None
-    assert isinstance(checked["filesystem"], str)  # whatever the test's disk is
-    (home / "alias").symlink_to(home / "projects/a")
-    assert host.check_workspace("~/alias", [f"{home}/projects/a"], ["/"])["path"] == f"{home}/projects/a"
-    os.mkdir(home / "projects/b")
-    assert host.check_workspace(f"{home}/projects/b", [f"{home}/projects/a", f"{home}/nowhere"], ["/"])["same_as"] \
-        is None
-    assert category(lambda: host.check_workspace("~/.ssh", [], ["/"])) == api.NOT_FOUND
-    assert category(lambda: host.check_workspace("~/projects/a/main.c", [], ["/"])) == api.NOT_DIRECTORY
-    assert category(lambda: host.check_workspace("~/missing", [], ["/"])) == api.NOT_FOUND
-    assert category(lambda: host.check_workspace("/proc", [], ["/"])) == api.NOT_REGULAR
-    assert category(lambda: host.check_workspace("~/projects/a", [], [f"{home}/HIMARI"])) == api.ACCESS
-    assert category(lambda: host.check_workspace("~/projects/a", "x", ["/"])) == api.INVALID
-    locked = home / "projects/locked"
-    locked.mkdir()
-    locked.chmod(0o555)
-    try:
-        if not os.access(locked, os.W_OK):  # not as root
-            assert category(lambda: host.check_workspace(str(locked), [], ["/"])) == api.ACCESS
-    finally:
-        locked.chmod(0o755)
-
-
-def test_the_same_folder_at_another_path_is_found(host: Host, home: Path) -> None:
-    """§9.1: a bind mount needs root, so a second name for the folder stands in: the (device, inode) test."""
-    other = home / "projects/a-again"
-    other.symlink_to(home / "projects/a")
-    checked = host.check_workspace(f"{home}/projects/a", [str(other)], ["/"])
-    assert checked["same_as"] == str(other)
-
-
-def test_mount_type_reads_the_deepest_mount(tmp_path: Path) -> None:
-    from himari.runner.hostfs import mount_type
-
-    table = tmp_path / "mountinfo"
-    table.write_text(
-        "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n"
-        "40 22 0:50 / /home/ubuntu/cloud\\040storage/drive rw,nosuid - fuse.rclone gdrive: rw,user_id=0\n"
-        "41 22 0:51 / /run rw - tmpfs tmpfs rw\n")
-    assert mount_type("/home/ubuntu/cloud storage/drive/대학", str(table)) == "fuse.rclone"
-    assert mount_type("/home/ubuntu/cloud storage", str(table)) == "ext4"
-    assert mount_type("/run/x", str(table)) == "tmpfs"
-    assert mount_type("/x", str(tmp_path / "missing")) is None
-
-
-# --- the explorer's listing and stat (V3-P75 §5.1, §5.3) ---------------------------------------------
-
-def pages(host: Host, path: str, size: int) -> list[str]:
-    names: list[str] = []
-    after = None
-    while True:
-        _, entries, after = host.listing(path, "/", size, after)
-        names += [str(e["name"]) for e in entries]
-        if after is None:
-            return names
-
-
-def test_a_folder_is_sorted_whole_then_paged(host: Host, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Review B3: the first page holds the first names, whatever order the folder lists them in."""
+def test_a_folder_is_sorted_whole_then_cut(host: Host, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review B3: the first entries are the first names, whatever order the folder lists them in."""
     big = home / "projects/big"
     big.mkdir()
     names = [f"n{i:04d}" for i in range(1200)]
@@ -265,367 +202,20 @@ def test_a_folder_is_sorted_whole_then_paged(host: Host, home: Path, monkeypatch
         (big / name).write_text("x")
     (big / "zdir").mkdir()
     (big / "adir").mkdir()
-    real, first, after = host.listing(str(big), "/", 500)
-    assert real == str(big) and [e["name"] for e in first][:3] == ["adir", "zdir", "n0000"]
+    real, first, truncated = host.listing(str(big), "/", 500)
+    assert real == str(big) and [e["name"] for e in first] == ["adir", "zdir", *names[:498]] and truncated
     assert first[0]["kind"] == "directory" and first[2]["kind"] == "file" and first[2]["size"] == 1
-    assert isinstance(first[2]["modified"], int) and after == "f/n0497"
-    assert pages(host, str(big), 500) == ["adir", "zdir", *names]
-    # Between pages: an entry added before the cursor waits for a refresh, a removed one is gone; no repeats.
-    _, page, after = host.listing(str(big), "/", 500)
-    (big / "a-new").write_text("x")
-    (big / "n0600").unlink()
-    rest: list[str] = []
-    while after is not None:
-        _, entries, after = host.listing(str(big), "/", 500, after)
-        rest += [str(e["name"]) for e in entries]
-    seen = [str(e["name"]) for e in page] + rest
-    assert len(seen) == len(set(seen)) and "n0600" not in seen and "a-new" not in seen
+    assert isinstance(first[2]["modified"], int)
+    _, whole, truncated = host.listing(str(big), "/", 1202)
+    assert [e["name"] for e in whole] == ["adir", "zdir", *names] and not truncated
     monkeypatch.setattr(hostfs, "MAX_ENUMERATED", 100)
     with pytest.raises(api.RunnerError, match="more than 100 entries") as refused:
         host.listing(str(big), "/", 500)
     assert refused.value.category == api.TOO_LARGE
 
 
-def test_listing_hides_and_checks_its_cursor(host: Host, home: Path) -> None:
-    names = pages(host, "~", 2)
+def test_listing_hides(host: Host, home: Path) -> None:
+    _, entries, _ = host.listing("~", "/", 100)
+    names = [str(e["name"]) for e in entries]
     assert ".ssh" not in names and ".bashrc" not in names and ".gitconfig" in names and "projects" in names
     assert names == sorted(names, key=lambda n: (not (home / n).is_dir(), n.encode()))
-    for bad in ("x/n", "f", 3):
-        with pytest.raises(api.RunnerError) as refused:
-            host.listing("~", "/", 2, bad)
-        assert refused.value.category == api.INVALID
-
-
-def test_stat_checks_as_open_does(host: Host, home: Path) -> None:
-    found = host.stat_path("~/projects/a/main.c", "/")
-    info = os.stat(home / "projects/a/main.c")
-    assert found["path"] == str(home / "projects/a/main.c") and found["kind"] == "file" and found["size"] == 13
-    assert found["identity"] == [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
-    assert host.stat_path("~/projects", "/")["kind"] == "directory"
-    (home / "projects/key").symlink_to(home / ".ssh/id")
-    for hidden in ("~/.ssh/id", "~/.bashrc", "~/projects/key", "~/missing"):
-        with pytest.raises(api.RunnerError) as refused:
-            host.stat_path(hidden, "/")
-        assert refused.value.category == api.NOT_FOUND
-
-
-# --- the web editor's writes (V3-P75 §7) --------------------------------------------------------------
-
-def parent(host: Host, home: Path, path: str) -> tuple[int, str]:
-    fd, _, name = host.target(str(home / path), "/", [str(home)], follow=False)
-    return fd, name
-
-
-def identity(path: Path) -> list[int]:
-    info = os.stat(path)
-    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
-
-
-def read_all(fd: int) -> bytes:
-    try:
-        return os.read(fd, 1 << 21)
-    finally:
-        os.close(fd)
-
-
-
-def test_replace_keeps_a_copy_taken_before_the_rename(host: Host, home: Path, tmp_path: Path) -> None:
-    target = home / "projects/a/main.c"
-    before = identity(target)
-    writer = open(target, "r+b")  # a process holding the old file open, to write into it later
-    fd, name = parent(host, home, "projects/a/main.c")
-    try:
-        now, copy = host.replace(fd, name, b"int main(){return 0;}\n", before)
-    finally:
-        os.close(fd)
-    assert target.read_bytes() == b"int main(){return 0;}\n" and now == identity(target) and now != before
-    writer.write(b"LATE")  # into the replaced (unnamed) file: the copy does not change (review C1)
-    writer.flush()
-    writer.close()
-    assert copy is not None and read_all(copy) == b"int main(){}\n"
-    assert not [n for n in os.listdir(home / "projects/a") if n.startswith(".himari-")]  # no temporary left
-
-
-def test_replace_refuses_a_changed_file_and_writes_nothing(host: Host, home: Path,
-                                                           monkeypatch: pytest.MonkeyPatch) -> None:
-    target = home / "projects/a/main.c"
-    stale = identity(target)
-    target.write_text("changed elsewhere\n")
-    fd, name = parent(host, home, "projects/a/main.c")
-    try:
-        with pytest.raises(api.RunnerError) as refused:
-            host.replace(fd, name, b"mine", stale)
-        assert refused.value.category == api.CHANGED and target.read_text() == "changed elsewhere\n"
-        # Written in place while the copy was taken: refused at the last check, nothing renamed.
-        fresh = identity(target)
-        copy_of = Host._copy_of
-
-        def copy_then_write(self: Host, held: int, size: int) -> int | None:
-            made = copy_of(self, held, size)
-            with open(target, "ab") as late:
-                late.write(b"more")
-            return made
-
-        monkeypatch.setattr(Host, "_copy_of", copy_then_write)
-        with pytest.raises(api.RunnerError) as refused:
-            host.replace(fd, name, b"mine", fresh)
-        assert refused.value.category == api.CHANGED and target.read_text() == "changed elsewhere\nmore"
-    finally:
-        os.close(fd)
-    assert not [n for n in os.listdir(home / "projects/a") if n.startswith(".himari-")]
-
-
-def test_create_file_never_takes_a_name_and_make_folder_one_level(host: Host, home: Path) -> None:
-    fd, _, _ = host.target(str(home / "projects/a/new.txt"), "/", [str(home)], follow=False)
-    try:
-        made = host.create_file(fd, "new.txt")
-        assert (home / "projects/a/new.txt").read_bytes() == b"" and made == identity(home / "projects/a/new.txt")
-        (home / "projects/a/link").symlink_to(home / "projects/a/elsewhere")
-        for taken in ("new.txt", "main.c", "link"):
-            with pytest.raises(api.RunnerError) as refused:
-                host.create_file(fd, taken)
-            assert refused.value.category == api.EXISTS
-        assert not (home / "projects/a/elsewhere").exists()  # a dangling link is not followed to make its target
-        host.make_folder(fd, "sub")
-        assert (home / "projects/a/sub").is_dir() and os.stat(home / "projects/a/sub").st_mode & 0o777 == 0o755
-        with pytest.raises(api.RunnerError) as refused:
-            host.make_folder(fd, "sub")
-        assert refused.value.category == api.EXISTS
-    finally:
-        os.close(fd)
-
-
-def test_delete_checked_keeps_a_copy_and_refuses_a_changed_file(host: Host, home: Path) -> None:
-    target = home / "projects/a/main.c"
-    fd, name = parent(host, home, "projects/a/main.c")
-    try:
-        with pytest.raises(api.RunnerError) as refused:
-            host.delete_checked(fd, name, [0, 0, 0, 0])
-        assert refused.value.category == api.CHANGED and target.exists()
-        copy = host.delete_checked(fd, name, identity(target))
-    finally:
-        os.close(fd)
-    assert not target.exists() and copy is not None and read_all(copy) == b"int main(){}\n"
-
-
-def test_a_file_over_the_copy_limit_is_not_replaced_and_deleted_without_a_copy(host: Host, home: Path) -> None:
-    """PR #94 review B1: no previous version could be kept, so the editor's replace refuses it; a delete
-    (after the editor's own warning) goes without a copy."""
-    big = home / "projects/a/big.bin"
-    big.write_bytes(b"x" * (hostfs.MAX_SNAPSHOT_BYTES + 1))
-    fd, name = parent(host, home, "projects/a/big.bin")
-    try:
-        with pytest.raises(api.RunnerError) as refused:
-            host.replace(fd, name, b"small", identity(big))
-        assert refused.value.category == api.TOO_LARGE and big.stat().st_size == hostfs.MAX_SNAPSHOT_BYTES + 1
-        assert host.delete_checked(fd, name, identity(big)) is None and not big.exists()
-    finally:
-        os.close(fd)
-
-
-def test_visible_path_resolves_the_folder_and_hides_as_open_does(host: Host, home: Path) -> None:
-    """PR #94 review B3: what a previous version is looked up by; the file itself may be gone."""
-    assert host.visible_path("~/projects/a/gone.txt", "/") == str(home / "projects/a/gone.txt")
-    (home / "projects/link").symlink_to(home / "projects/a")
-    assert host.visible_path("~/projects/link/main.c", "/") == str(home / "projects/a/main.c")
-    (home / "projects/to-ssh").symlink_to(home / ".ssh")
-    for hidden in ("~/.ssh/id", "~/.bashrc", "~/projects/to-ssh/id", "~/missing/x"):
-        with pytest.raises(api.RunnerError) as refused:
-            host.visible_path(hidden, "/")
-        assert refused.value.category == api.NOT_FOUND
-
-
-# --- an agent's writes, kept for review (V3-P76 §4.1) ---------------------------------------------
-
-
-def no_temporaries(folder: Path) -> bool:
-    return not [n for n in os.listdir(folder) if n.startswith(".himari-")]
-
-
-class _NoRenameat2:
-    """A file system without RENAME_NOREPLACE (some FUSE ones): renameat2 says EINVAL."""
-
-    real = hostfs._libc
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self.real, name)
-
-    @staticmethod
-    def renameat2(*args: object) -> int:
-        ctypes.set_errno(errno.EINVAL)
-        return -1
-
-
-def test_a_kept_write_copies_what_it_replaces(host: Host, home: Path) -> None:
-    target = home / "projects/a/main.c"
-    before = identity(target)
-    fd, name = parent(host, home, "projects/a/main.c")
-    try:
-        result, copy = host.kept_write(fd, name, b"int main(){return 1;}\n", None)
-    finally:
-        os.close(fd)
-    assert target.read_bytes() == b"int main(){return 1;}\n"
-    assert result == {"created": False, "prior_identity": before, "after_identity": identity(target),
-                      "complete": True, "partial": False}
-    assert copy is not None and read_all(copy) == b"int main(){}\n" and no_temporaries(target.parent)
-
-
-def test_a_kept_write_never_writes_over_a_change(host: Host, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = home / "projects/a/main.c"
-    fd, name = parent(host, home, "projects/a/main.c")
-    try:
-        with pytest.raises(api.RunnerError) as refused:  # edit_file's read is stale
-            host.kept_write(fd, name, b"mine", [0, 0, 0, 0])
-        assert refused.value.category == api.CHANGED and target.read_text() == "int main(){}\n"
-        copy_of = Host._copy_of
-
-        def copy_then_write(self: Host, held: int, size: int) -> int | None:
-            made = copy_of(self, held, size)
-            with open(target, "ab") as late:
-                late.write(b"// owner")
-            return made
-
-        monkeypatch.setattr(Host, "_copy_of", copy_then_write)
-        with pytest.raises(api.RunnerError) as refused:  # written in place between the copy and the rename
-            host.kept_write(fd, name, b"mine", None)
-        assert refused.value.category == api.CHANGED and target.read_text() == "int main(){}\n// owner"
-    finally:
-        os.close(fd)
-    assert no_temporaries(target.parent)
-
-
-def test_a_kept_write_makes_a_new_file_only_where_the_name_is_free(host: Host, home: Path,
-                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
-    folder = home / "projects/a"
-    fd, _ = parent(host, home, "projects/a/new.txt")
-    try:
-        result, copy = host.kept_write(fd, "new.txt", b"new\n", None)
-        assert copy is None and (folder / "new.txt").read_text() == "new\n"
-        assert result == {"created": True, "prior_identity": [], "after_identity": identity(folder / "new.txt"),
-                          "complete": True, "partial": False}
-        with pytest.raises(api.RunnerError) as refused:  # edit_file of a file gone since it was read
-            host.kept_write(fd, "gone.txt", b"x", [1, 2, 3, 4])
-        assert refused.value.category == api.CHANGED and not (folder / "gone.txt").exists()
-        write_temp = Host._write_temp
-
-        def temp_then_taken(parent_fd: int, data: bytes | int, mode: int) -> str:
-            made = write_temp(parent_fd, data, mode)
-            (folder / "raced.txt").write_text("the owner's\n")
-            return made
-
-        monkeypatch.setattr(Host, "_write_temp", staticmethod(temp_then_taken))
-        with pytest.raises(api.RunnerError) as refused:
-            host.kept_write(fd, "raced.txt", b"mine", None)
-        assert refused.value.category == api.CHANGED and (folder / "raced.txt").read_text() == "the owner's\n"
-    finally:
-        os.close(fd)
-    assert no_temporaries(folder)
-
-
-def test_without_renameat2_a_new_file_is_taken_with_o_excl(host: Host, home: Path,
-                                                           monkeypatch: pytest.MonkeyPatch) -> None:
-    folder = home / "projects/a"
-    monkeypatch.setattr(hostfs, "_libc", _NoRenameat2())
-    fd, _ = parent(host, home, "projects/a/new.txt")
-    try:
-        result, _ = host.kept_write(fd, "new.txt", b"new\n", None)
-        assert (folder / "new.txt").read_text() == "new\n" and result["complete"] and not result["partial"]
-        assert result["created"] and result["after_identity"] == identity(folder / "new.txt")
-        (folder / "taken.txt").write_text("the owner's\n")
-        write_temp = Host._write_temp
-
-        def temp_then_taken(parent_fd: int, data: bytes | int, mode: int) -> str:
-            made = write_temp(parent_fd, data, mode)
-            (folder / "raced.txt").write_text("the owner's\n")
-            return made
-
-        monkeypatch.setattr(Host, "_write_temp", staticmethod(temp_then_taken))
-        with pytest.raises(api.RunnerError) as refused:  # taken since it was looked at: never written over
-            host.kept_write(fd, "raced.txt", b"mine", None)
-        assert refused.value.category == api.CHANGED and (folder / "raced.txt").read_text() == "the owner's\n"
-        monkeypatch.setattr(Host, "_write_temp", staticmethod(write_temp))
-        # Its writing fails once the name is taken: a success that says the content may be partial.
-        syncs = []
-        real_fsync = os.fsync
-
-        def second_fails(target: int) -> None:
-            syncs.append(target)
-            if len(syncs) == 2:
-                raise OSError(errno.EIO, "I/O error")
-            real_fsync(target)
-
-        monkeypatch.setattr(os, "fsync", second_fails)
-        result, _ = host.kept_write(fd, "partial.txt", b"half\n", None)
-        assert result == {"created": True, "prior_identity": [], "after_identity": None, "complete": False,
-                          "partial": True}
-        assert (folder / "partial.txt").exists()  # this call's own file: not removed
-    finally:
-        os.close(fd)
-    assert no_temporaries(folder)
-
-
-def test_a_kept_write_over_the_copy_limit_goes_without_a_copy(host: Host, home: Path) -> None:
-    big = home / "projects/a/big.txt"
-    big.write_bytes(b"x" * (hostfs.MAX_SNAPSHOT_BYTES + 1))
-    fd, name = parent(host, home, "projects/a/big.txt")
-    try:
-        result, copy = host.kept_write(fd, name, b"small", None)
-    finally:
-        os.close(fd)
-    assert copy is None and result["complete"] and big.read_bytes() == b"small"
-
-
-def test_a_kept_delete_copies_a_file_and_not_a_link(host: Host, home: Path) -> None:
-    target = home / "projects/a/main.c"
-    before = identity(target)
-    (home / "projects/a/link").symlink_to(target)
-    link_identity = list(Host.identity(os.lstat(home / "projects/a/link")))
-    fd, name = parent(host, home, "projects/a/main.c")
-    try:
-        result, copy = host.kept_delete(fd, "link")
-        assert copy is None and result["prior_identity"] == link_identity and target.exists()
-        result, copy = host.kept_delete(fd, name)
-        assert result == {"prior_identity": before, "after_identity": [], "complete": True, "partial": False}
-        assert copy is not None and read_all(copy) == b"int main(){}\n" and not target.exists()
-        with pytest.raises(api.RunnerError) as refused:
-            host.kept_delete(fd, name)
-        assert refused.value.category == api.NOT_FOUND
-    finally:
-        os.close(fd)
-
-
-def test_install_places_a_file_only_where_the_name_is_free(host: Host, home: Path,
-                                                           monkeypatch: pytest.MonkeyPatch) -> None:
-    folder = home / "projects/a"
-    fd, _ = parent(host, home, "projects/a/back.c")
-    try:
-        assert host.install(fd, "back.c", b"restored\n") == identity(folder / "back.c")
-        with pytest.raises(api.RunnerError) as refused:
-            host.install(fd, "main.c", b"restored\n")
-        assert refused.value.category == api.CHANGED and (folder / "main.c").read_text() == "int main(){}\n"
-        monkeypatch.setattr(hostfs, "_libc", _NoRenameat2())
-        with pytest.raises(api.RunnerError) as refused:  # never a half-written file shown as put back
-            host.install(fd, "other.c", b"restored\n")
-        assert refused.value.category == api.UNSUPPORTED and not (folder / "other.c").exists()
-    finally:
-        os.close(fd)
-    assert no_temporaries(folder)
-
-
-def test_where_a_write_lands(host: Host, home: Path) -> None:
-    """V3-P76 §8: the path a change is recorded under, before it is written."""
-    folder = home / "projects/a"
-    (folder / "link.c").symlink_to("main.c")
-    (home / "projects/to-a").symlink_to(folder)
-    (folder / "to-key").symlink_to(home / ".ssh/id")
-
-    def land(path: str) -> str:
-        return host.visible_path(path, str(folder), follow=True)
-
-    assert land("link.c") == land("main.c") == land("~/projects/to-a/main.c") == str(folder / "main.c")
-    assert land("new/deeper/x.py") == str(folder / "new/deeper/x.py")  # folders the write would make
-    assert land("~/projects/to-a/missing/x") == str(folder / "missing/x")
-    for hidden in ("to-key", "~/.ssh/new", "~/.ssh/a/b"):
-        with pytest.raises(api.RunnerError) as refused:
-            land(hidden)
-        assert refused.value.category == api.NOT_FOUND

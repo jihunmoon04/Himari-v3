@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 from testkit import FAKE, RecordingTool
 
 from himari.common import JsonValue, deep_freeze
-from himari.tool.api import Completion, SchemaError, ToolOrigin, WorkspaceRequirement
+from himari.tool.api import SchemaError, ToolOrigin, WorkspaceRequirement
 from himari.tool.registry import ToolRegistry
 from himari.common import MAX_TOOL_NAME_CHARS
 from himari.tool.schema import (
@@ -22,13 +22,6 @@ from himari.tool.schema import (
     validate,
     validate_isolated,
 )
-
-
-def test_only_ask_user_may_suspend() -> None:
-    hold = RecordingTool("hold")
-    hold.definition = dataclasses.replace(hold.definition, completion=Completion.SUSPENDING)
-    with pytest.raises(ValueError, match="only ask_user"):
-        ToolRegistry([hold])
 
 
 def test_environment_tool_prefix_must_match_kind() -> None:

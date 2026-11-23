@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 
-from himari.common import PrincipalId, TrustedScope
+from himari.common import LEGACY_ASK_USER, PrincipalId, TrustedScope
 from himari.control.api import ControlError, DriveState, JobStatus
 from himari.control.driver import Driver
 from himari.control.runner import BackgroundRunner
@@ -78,37 +78,35 @@ def parse_quiet(value: str | None) -> tuple[time | None, time | None]:
     return time.fromisoformat(start.strip()), time.fromisoformat(end.strip())
 
 
-def wake_turn(after: Sequence[ConversationEvent]) -> tuple[list[ConversationEvent], bool]:
+def wake_turn(after: Sequence[ConversationEvent]) -> list[ConversationEvent]:
     """The wake's own Events: those after it up to the user's next message (the
-    user's turn is not the wake's, review of part 1) or the next wake. And
-    whether that message answered one of the wake's questions."""
+    user's turn is not the wake's, review of part 1) or the next wake (its turn
+    is its own, re-review P2-2)."""
     own: list[ConversationEvent] = []
     for event in after:
-        if isinstance(event.payload, UserMessage):
-            return own, event.payload.answers_call is not None
-        if isinstance(event.payload, Wake):  # the next wake's turn is its own (re-review P2-2)
-            return own, False
+        if isinstance(event.payload, (UserMessage, Wake)):
+            break
         own.append(event)
-    return own, False
+    return own
 
 
-def wake_outcome(status: JobStatus | None, after: Sequence[ConversationEvent],
-                 waiting: bool = False) -> tuple[WakeStatus, bool]:
-    """§4.2: ANSWERED when the wake's turn gave a final answer, or (``asked``) left an
-    ask_user question; CANCELLED when it was cancelled before saying anything (the
-    user won, §4.3); else FAILED. The wake job's own result decides first (``status``;
-    None at a restart), then its own Events (``after``: from the wake on; cut at the
-    user's next message) and, with no message after it, a question still ``waiting``."""
-    own, answered_question = wake_turn(after)
+def wake_outcome(status: JobStatus | None, after: Sequence[ConversationEvent]) -> WakeStatus:
+    """§4.2: ANSWERED when the wake's turn gave a final answer, or asked with an older
+    server's ``ask_user`` (the user saw it: V3-P106); CANCELLED when it was cancelled
+    before saying anything (the user won, §4.3); else FAILED. The wake job's own result
+    decides first (``status``; None at a restart), then its own Events (``after``: from
+    the wake on; cut at the user's next message)."""
+    own = wake_turn(after)
     state = None if status is None or status.result is None else status.result.state
     if state is DriveState.COMPLETED or any(isinstance(e.payload, AssistantFinal) for e in own):
-        return WakeStatus.ANSWERED, False
-    if state is DriveState.WAITING_FOR_USER or answered_question or (waiting and len(own) == len(after)):
-        return WakeStatus.ANSWERED, True
+        return WakeStatus.ANSWERED
+    if any(isinstance(e.payload, AssistantToolCalls) and any(c.tool_id == LEGACY_ASK_USER for c in e.payload.calls)
+           for e in own):
+        return WakeStatus.ANSWERED
     cancelled = state is DriveState.CANCELLED or (status is not None and status.error == "cancelled")
     if cancelled and not any(isinstance(e.payload, AssistantToolCalls) for e in own):
-        return WakeStatus.CANCELLED, False
-    return WakeStatus.FAILED, False
+        return WakeStatus.CANCELLED
+    return WakeStatus.FAILED
 
 
 async def end_wake_of(data: SqliteData, scope: TrustedScope, wake_id: str, status: JobStatus | None) -> WakeRecord:
@@ -119,9 +117,7 @@ async def end_wake_of(data: SqliteData, scope: TrustedScope, wake_id: str, statu
         # it — ends unseen (a pass ended so already: no change)
         return await data.end_wake(scope.principal_id, wake_id, WakeStatus.DROPPED)
     after = await data.read_events(scope, after_sequence=record.event_sequence)
-    waiting = await data.find_waiting_call(scope) is not None
-    outcome, asked = wake_outcome(status, after, waiting)
-    return await data.end_wake(scope.principal_id, wake_id, outcome, asked=asked)
+    return await data.end_wake(scope.principal_id, wake_id, wake_outcome(status, after))
 
 
 class WakeEvents:
@@ -159,10 +155,10 @@ class WakeEvents:
 
 
 async def settle_cut_wakes(data: SqliteData, driver: Driver) -> int:
-    """§4.4 at startup: a wake with a final answer or a waiting question after it is
-    ANSWERED; otherwise its unfinished tool group, if any, is closed — calls never
-    started are not run, finished ones keep their effects — and it FAILS (its
-    reminders go back to scheduled). None is resumed: no device is current this
+    """§4.4 at startup: a wake with a final answer after it is ANSWERED; otherwise
+    its unfinished tool group, if any, is closed — calls never started are not
+    run, finished ones keep their effects — and it FAILS (its reminders go back
+    to scheduled). None is resumed: no device is current this
     early, so §6.1 would not pass; a wake cut before it said anything gives its
     keys back instead, and the scheduler speaks again if a trigger is still in its
     window. How many were settled."""
@@ -182,13 +178,12 @@ async def settle_cut_wakes(data: SqliteData, driver: Driver) -> int:
             continue
         try:
             after = await data.read_events(scope, after_sequence=record.event_sequence)
-            waiting = await data.find_waiting_call(scope) is not None
-            outcome, asked = wake_outcome(None, after, waiting)
+            outcome = wake_outcome(None, after)
             if outcome is not WakeStatus.ANSWERED:
                 if await driver.close_cut_group(scope, CUT_REASON):
                     log.info("closed the tool group a restart cut in wake %s", record.wake_id)
                 outcome = WakeStatus.FAILED
-            await data.end_wake(record.principal, record.wake_id, outcome, asked=asked)
+            await data.end_wake(record.principal, record.wake_id, outcome)
             if outcome is WakeStatus.FAILED and not after:  # cut before a word: its triggers may come again
                 await data.release_keys(record.principal, record.wake_id)
             settled += 1
@@ -397,7 +392,7 @@ class ProactiveScheduler:
             except DataError:
                 said.add(record.wake_id)
                 continue
-            own, _ = wake_turn(after)
+            own = wake_turn(after)
             if any(isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) for e in own) or len(own) == TAIL_EVENTS:
                 said.add(record.wake_id)
         return frozenset(said)

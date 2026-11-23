@@ -1,23 +1,15 @@
-"""The machine Environment (V3-P74): work on this server as the user.
+"""The machine Environment (V3-P74): files on this server as the user.
 
-HIMARI runs as its service user; commands and file operations are done by
+HIMARI runs as its service user; file operations are done by
 ``himari-runner``, which runs as the user (``coder``), through
 :mod:`himari.runner.api` (§4, §5). Paths are the user's real paths.
 Reading reaches what the user can read except the runner's hidden list;
-writing reaches only the Conversation's own folder (V3-P94, V3-P100):
-the attached folders are only read, and their files are changed by the
-coding agents the hub runs, not by HIMARI.
+writing reaches only the Conversation's own folder,
+``<HIMARI home>/conversations/<conversation_id>`` — the T0 Binding's
+``cwd_relative`` under the runner's HIMARI home, and the working directory.
 
-A Conversation's own folder, ``<HIMARI home>/conversations/<conversation_id>``,
-is its first Workspace — the T0 Binding's ``cwd_relative`` under the
-runner's HIMARI home. The user attaches more (§10): each is a Binding of a
-registered folder, whose real path Data keeps (``WorkspaceRegistry``). A
-call reads in all of them and writes in the own folder only; its working
-directory is the activation's default Binding (§10.4).
-
-Writes and commands take path locks (§9.1) on all of the Conversation's
-folders at once: overlapping paths wait for each other, other
-Conversations' folders do not.
+Writes take a path lock (§9.1) on the Conversation's folder: other
+Conversations' folders do not wait for it.
 """
 
 from __future__ import annotations
@@ -35,44 +27,37 @@ from datetime import UTC, datetime
 from typing import Any, BinaryIO, TypeVar
 
 from himari.common import EnvironmentKind, PrincipalId, TrustedScope, WorkspaceId
-from himari.data.api import TEMP_PREFIX, BindingAuthority, WorkspaceRegistry
+from himari.data.api import TEMP_PREFIX, BindingAuthority
 from himari.documents.api import DocumentReading
-from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
+from himari.environment.api import BindingObservation, ConnectionStatus
 from himari.environment.machine.client import RunnerClient
 from himari.environment.machine.locks import PathLocks
 from himari.environment.machine.results import ToolFiles
 from himari.runner import api as runner
-from himari.sandbox.api import SandboxState
 from himari.tool.api import ToolHandler
 
 MACHINE = EnvironmentKind("machine")
 T = TypeVar("T")
 _PREFIX = "mws_"
 OBSERVE_SECONDS = 2.0
-OWN_LABEL = "this conversation"
 READ_SCOPE = ("everything the user can read on this server, except hidden locations (credentials, HIMARI's own "
               "data); the user's home is {home}")
-NETWORK = "HTTPS only, through a proxy, to these hosts (others are refused with 403): {hosts}"
-NO_NETWORK = "none: commands cannot reach the network"
-# §14: what the model is told of a cloud-synced folder, apart from the user's note.
-CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
-# V3-P94, V3-P100: what the model is told of an attached folder (it may not write it).
-READ_ONLY_NOTE = ("Read-only for you: your file tools and commands cannot change anything in it. To change its "
-                  "files, hand the work to a coding agent.")
-DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
-              "to appear, keep git repositories and build output on local disk.")
 
 
 @dataclass(frozen=True)
 class Places:
-    """A Conversation's folders as real paths (§3.2): its working directory,
-    its folders (its own first), each with its label, and the one it may
-    write (its own: V3-P100)."""
+    """A Conversation's own folder as a real path (§3.2): its working
+    directory and the one folder it may write."""
 
     cwd: str
-    roots: tuple[str, ...]
-    shown: tuple[ObservedWorkspace, ...]
-    writable: tuple[str, ...]
+
+    @property
+    def roots(self) -> tuple[str, ...]:
+        return (self.cwd,)
+
+    @property
+    def writable(self) -> tuple[str, ...]:
+        return (self.cwd,)
 
 
 def machine_workspace_for(principal: PrincipalId) -> WorkspaceId:
@@ -82,7 +67,7 @@ def machine_workspace_for(principal: PrincipalId) -> WorkspaceId:
 
 
 class MachineUnavailable(Exception):
-    """The runner could not be reached (or is not enforced); nothing was done."""
+    """The runner could not be reached; nothing was done."""
 
 
 class WorkspaceBusy(Exception):
@@ -91,17 +76,13 @@ class WorkspaceBusy(Exception):
 
 class MachineEnvironment:
     def __init__(self, socket_path: str, *, files: ToolFiles | None = None,
-                 documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None) -> None:
+                 documents: DocumentReading | None = None) -> None:
         from himari.environment.machine.tools import machine_tools
 
         self.client = RunnerClient(socket_path)
         self.files = files
         self.documents = documents
-        # The attached Workspaces (§10); None: each Conversation has its own folder only.
-        self.registry = registry
         self.locks = PathLocks()
-        # The runner's sandbox as it last said (V3-P101: what the interfaces show as the commands' state).
-        self.sandbox_state = SandboxState.UNAVAILABLE
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
 
     @property
@@ -119,15 +100,7 @@ class MachineEnvironment:
         return await self.client.call(op, args, fds)
 
     async def hello(self) -> dict[str, Any]:
-        try:
-            result, _ = await self.call(runner.HELLO, {})
-        except Exception:
-            self.sandbox_state = SandboxState.UNAVAILABLE  # not answering: commands cannot run (V3-P101)
-            raise
-        try:
-            self.sandbox_state = SandboxState(result.get("state"))
-        except ValueError:
-            self.sandbox_state = SandboxState.UNAVAILABLE
+        result, _ = await self.call(runner.HELLO, {})
         return result
 
     async def folder(self, conversation_id: str, cwd_relative: str) -> str:
@@ -142,49 +115,12 @@ class MachineEnvironment:
             raise MachineUnavailable(str(error)) from None
         return posixpath.normpath(posixpath.join(str(home), cwd_relative))
 
-    async def check_workspace(self, path: str, others: Sequence[str]) -> dict[str, Any]:
-        """The runner's check of a folder the user registers (§10.1):
-        ``path`` (real), ``filesystem``, ``same_as``. RunnerError: refused;
-        MachineUnavailable without the runner."""
-        try:
-            result, _ = await self.call(runner.CHECK_WORKSPACE, {"path": path, "others": list(others)})
-        except runner.RunnerUnavailable as error:
-            raise MachineUnavailable(str(error)) from None
-        return result
-
     async def places(self, scope: TrustedScope) -> Places:
-        """The Conversation's folders: its own (its T0 Binding's
-        ``cwd_relative`` under the HIMARI home) and the Workspaces attached
-        to it. A registered Workspace's location comes from Data only; the
-        runner checks it again on every call (§5.3). Not from the Tool's
-        Binding: that is the working one, which may be an attached folder.
-        MachineUnavailable without the runner; Data's refusal (DataError)
-        is raised, never taken for the own folder alone."""
-        found = None
-        if self.registry is not None:
-            found = await self.registry.read_conversation_workspaces(scope, MACHINE)
-        own_binding = None if found is None else next((a.binding for a in found.attached if a.workspace is None), None)
-        own_cwd = (own_binding.cwd_relative if own_binding is not None and own_binding.cwd_relative
-                   else f"conversations/{scope.conversation_id}")
-        own = await self.folder(scope.conversation_id, own_cwd)
-        cwd, roots, shown = own, [own], [ObservedWorkspace(own, OWN_LABEL)]
-        attached, working = ((), None) if found is None else (found.attached, found.working)
-        for item in attached:
-            if item.workspace is None:  # the own folder: first, as above
-                continue
-            path = item.workspace.location
-            if path not in roots:
-                roots.append(path)
-                notes = [READ_ONLY_NOTE] + ([DRIVE_NOTE] if item.workspace.filesystem in CLOUD_FILESYSTEMS else [])
-                shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note, " ".join(notes)))
-            if item.binding.binding_id == working:
-                cwd = path
-        return Places(cwd, tuple(roots), tuple(shown), (own,))
+        """The Conversation's own folder, made if missing. MachineUnavailable without the runner."""
+        return Places(await self.folder(scope.conversation_id, f"conversations/{scope.conversation_id}"))
 
     async def observe(self, scope: TrustedScope, bindings: Sequence[BindingAuthority]) -> Sequence[BindingObservation]:
-        """Every Binding is told online or offline; the working one (the
-        activation's default, which the Current State shows) carries the
-        Conversation's folders (§10.5)."""
+        """Every Binding is told online or offline, with the Conversation's folder (§10.5)."""
         now = datetime.now(UTC)
 
         async def look() -> tuple[Places, dict[str, Any]]:
@@ -199,11 +135,8 @@ class MachineEnvironment:
         except (MachineUnavailable, TimeoutError):
             return [BindingObservation(b.binding_id, ConnectionStatus.OFFLINE, now) for b in bindings]
         readable = READ_SCOPE.format(home=about["home"])
-        hosts = about.get("network")
-        network = NETWORK.format(hosts=", ".join(map(str, hosts))) if isinstance(hosts, list) and hosts else NO_NETWORK
         return [BindingObservation(b.binding_id, ConnectionStatus.ONLINE, now, working_directory=places.cwd,
-                                   writable=places.writable, workspaces=places.shown, readable=readable,
-                                   network=network)
+                                   writable=places.writable, readable=readable)
                 for b in bindings]
 
     # --- uploads (V3-P66 §5.2) ---------------------------------------------------------------

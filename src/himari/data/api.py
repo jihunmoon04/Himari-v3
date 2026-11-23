@@ -127,11 +127,10 @@ class InterfaceCapabilities(DeepFrozen):
     """User-interface support, never model capabilities or execution permissions."""
 
     file_download: bool = False
-    workspace_browser: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if type(self.file_download) is not bool or type(self.workspace_browser) is not bool:
+        if type(self.file_download) is not bool:
             raise ValueError("interface capabilities must be booleans")
 
 
@@ -165,7 +164,7 @@ def interface_kind(origin: MessageOrigin | None) -> InterfaceKind:
 @dataclass(frozen=True)
 class UserMessage(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
-    answers_call: CallRef | None = None  # set only via answer_pending_call (T7a)
+    answers_call: CallRef | None = None  # older history only: the ask_user call it answered (T7a, gone)
     origin: MessageOrigin | None = None  # V3-P83: set by the entry point; None for older messages
     interface: InterfaceSnapshot | None = None  # V3-P93: server-owned; None on legacy inputs
 
@@ -434,7 +433,7 @@ MAX_FILE_NAME_BYTES = 200  # UTF-8, after cleaning (§5.3)
 MAX_RAW_NAME_BYTES = 1000  # a name given longer than this is refused
 MAX_MEDIA_TYPE_CHARS = 127
 MAX_STAGED_UPLOADS = 50  # per Conversation
-MAX_ATTACHMENTS = 10  # per message (T1 and T7a)
+MAX_ATTACHMENTS = 10  # per message (T1)
 STAGED_KEEP = timedelta(hours=24)  # staged records older than this are dropped
 STAGED_SEND_CUTOFF = timedelta(hours=23)  # sending refuses older staged uploads (§4.2)
 BLOB_GRACE = timedelta(hours=1)  # a blob put this recently never expires or goes (§8.2, §8.5)
@@ -810,12 +809,6 @@ class ToolCompletion(DeepFrozen):
     # call as its source. Only with SUCCEEDED (INVALID_ARGUMENT otherwise);
     # MemoryStore's errors when the note cannot be written.
     memory_change: MemoryChange | None = None
-
-
-@dataclass(frozen=True)
-class AnswerCommit(DeepFrozen):
-    user_event: ConversationEvent
-    tool_result_event: ConversationEvent | None
 
 
 @dataclass(frozen=True)
@@ -1468,7 +1461,7 @@ REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered t
 class WakeStatus(Enum):
     OPENED = "opened"  # a free wake (V3-P90 §7.3): not shown yet
     SPEAKING = "speaking"  # V3-P90 §7.3: a free wake decided to speak, shown; still in progress
-    ANSWERED = "answered"  # a final answer, or an ask_user question left (``asked``)
+    ANSWERED = "answered"  # a final answer
     CANCELLED = "cancelled"  # no assistant output; the user won (§4.3)
     FAILED = "failed"
     PASSED = "passed"  # V3-P90 §7.3: a free wake the model passed — never shown
@@ -1494,7 +1487,6 @@ class WakeRecord(DeepFrozen):
     reasons: tuple[WakeReason, ...]
     device_id: str
     status: WakeStatus
-    asked: bool
     created_at: datetime
     ended_at: datetime | None
     # V3-P91 §8: the Run whose screen-Tool group a free wake ran unshown; its events are unshown and
@@ -1512,13 +1504,11 @@ class WakeStore(Protocol):
         was taken already), each reminder goes ``scheduled → claimed`` or, told
         again (V3-P90 §5.1), ``told → claimed`` (INVALID_STATE_TRANSITION when it
         is neither), the wake Event is
-        appended and its record written. Refused as an Event is (trash, an
-        ask_user call waiting). INVALID_ARGUMENT: no reason, or more than
-        MAX_WAKE_REASONS."""
+        appended and its record written. Refused as an Event is (trash).
+        INVALID_ARGUMENT: no reason, or more than MAX_WAKE_REASONS."""
         ...
 
-    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
-                       asked: bool = False) -> WakeRecord:
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus) -> WakeRecord:
         """``opened → status`` (V3-P90: ``speaking →`` answered, cancelled or failed), once (a later call
         changes nothing). The
         reminders it claimed (§5.3), only while still claimed by it: ANSWERED →
@@ -1948,8 +1938,8 @@ class ConversationLog(Protocol):
     async def append_event(
         self, scope: TrustedScope, message: UserMessage, *, idempotency_key: str | None = None
     ) -> ConversationEvent:
-        """T1: ordinary user input. While an ask_user call is waiting, Control
-        must use ``answer_pending_call`` instead (one path per input).
+        """T1: user input; one with ``answers_call`` (older history only) is
+        INVALID_STATE_TRANSITION.
         Same key + same message → the original Event; same key + a different
         message → DUPLICATE_IDENTITY."""
         ...
@@ -2039,19 +2029,6 @@ class ConversationLog(Protocol):
         ALREADY_COMMITTED if the call already has a model result."""
         ...
 
-    async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
-        """Derived wait state (V3-P17): the latest PROJECTED Run's group is a
-        single ``ask_user`` call still PENDING."""
-        ...
-
-    async def answer_pending_call(
-        self, scope: TrustedScope, call: CallRef, answer: UserMessage
-    ) -> AnswerCommit:
-        """T7a: ``user_message`` (with ``answers_call``) + ToolExecution
-        ``PENDING → SUCCEEDED`` + ``tool_result`` Event, atomically.
-        Raises ALREADY_COMMITTED if the call is no longer waiting."""
-        ...
-
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
         """T-R: DISPATCH_CLAIMED without response → OUTCOME_UNKNOWN,
         EXECUTION_CLAIMED without result → UNKNOWN, unclaimed PREPARED →
@@ -2133,114 +2110,6 @@ class WorkspaceState(Protocol):
     ) -> EnvironmentActivation | None:
         """Current activation of a kind in this Conversation (P0: ≤1).
         Every Environment Tool call is gated on this, binding or not."""
-        ...
-
-
-# --- Registered Workspaces (V3-P74 §10) ------------------------------------------
-
-MAX_WORKSPACES = 200  # a principal's registered folders, per Environment kind
-MAX_ATTACHED_WORKSPACES = 16  # attached to one Conversation, its own folder not counted
-MAX_WORKSPACE_LABEL_CHARS = 100
-MAX_WORKSPACE_NOTE_CHARS = 1_000
-MAX_WORKSPACE_LOCATION_BYTES = 4_096  # UTF-8, as PATH_MAX
-
-
-@dataclass(frozen=True)
-class RegisteredWorkspace(DeepFrozen):
-    """A folder a principal registered (V3-P74 §10.1): where a Conversation
-    it is attached to may write. ``location`` is the real path the
-    Environment checked when it was registered; Data keeps it as given and
-    never takes it from a Tool's arguments."""
-
-    workspace_id: WorkspaceId
-    environment_kind: EnvironmentKind
-    location: str
-    label: str
-    note: str | None  # the user's, shown to the model in the Current State
-    created_at: datetime
-    attached: int = 0  # Conversations it is attached to, the trash included
-    filesystem: str | None = None  # its kind when registered (e.g. ``fuse.rclone``); not the user's to edit
-
-
-@dataclass(frozen=True)
-class AttachedWorkspace(DeepFrozen):
-    binding: BindingAuthority
-    workspace: RegisteredWorkspace | None  # None: the Conversation's own folder (never registered)
-
-
-@dataclass(frozen=True)
-class ConversationWorkspaces(DeepFrozen):
-    """A Conversation's Workspaces of one Environment kind: its own folder
-    first, then the attached ones in the order they were attached.
-    ``working`` is the activation's default Binding: the working directory
-    (§10.4)."""
-
-    working: BindingId | None
-    attached: tuple[AttachedWorkspace, ...]
-
-
-class WorkspaceRegistry(Protocol):
-    """V3-P74 §10: the folders a principal registered, and which of them a
-    Conversation has attached. The principal comes from the trusted entry
-    point (Web, CLI), never from model output: no Tool writes here (Q4).
-
-    Attaching adds a Binding of the Workspace to the Conversation's
-    activation of its kind, and makes it the working one; detaching removes
-    it, and the last attached one left (else the Conversation's own folder)
-    becomes the working one. Both change ``state_revision``: the model is
-    told of its Workspaces in the Current State (§10.5). The Conversation's
-    own folder cannot be detached."""
-
-    async def list_workspaces(self, principal: PrincipalId, kind: EnvironmentKind) -> tuple[RegisteredWorkspace, ...]:
-        """Oldest first."""
-        ...
-
-    async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
-                                 note: str | None = None, filesystem: str | None = None) -> RegisteredWorkspace:
-        """DUPLICATE_IDENTITY: one is registered at ``location`` already.
-        LIMIT_EXCEEDED past MAX_WORKSPACES. INVALID_ARGUMENT: ``location`` is
-        not an absolute, normalized path of at most
-        MAX_WORKSPACE_LOCATION_BYTES, or the label, note or filesystem is not
-        one."""
-        ...
-
-    async def update_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId, *, label: str,
-                               note: str | None) -> RegisteredWorkspace:
-        """NOT_FOUND: not one of the principal's."""
-        ...
-
-    async def unregister_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId) -> None:
-        """NOT_FOUND as above; INVALID_STATE_TRANSITION while it is attached
-        to a Conversation (the trash included). The folder is not touched."""
-        ...
-
-    async def read_conversation_workspaces(self, scope: TrustedScope,
-                                           kind: EnvironmentKind) -> ConversationWorkspaces:
-        """NOT_FOUND: the kind is not active in the Conversation."""
-        ...
-
-    async def attach_workspace(self, scope: TrustedScope, workspace_id: WorkspaceId) -> BindingAuthority:
-        """NOT_FOUND: not one of the principal's Workspaces.
-        INVALID_STATE_TRANSITION: its kind is not active in the Conversation.
-        DUPLICATE_IDENTITY: attached already. LIMIT_EXCEEDED past
-        MAX_ATTACHED_WORKSPACES."""
-        ...
-
-    async def detach_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
-        """NOT_FOUND: no such Binding in the Conversation.
-        INVALID_STATE_TRANSITION: the Conversation's own folder."""
-        ...
-
-    async def set_working_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
-        """NOT_FOUND: no such Binding in the Conversation."""
-        ...
-
-    async def list_conversations_working_in(self, principal: PrincipalId, workspace_id: WorkspaceId, *,
-                                            limit: int = 50) -> Sequence[ConversationSummary]:
-        """V3-P75 §6.1: the principal's active Conversations whose working
-        folder (an activation's default Binding) is this registered Workspace;
-        most recent activity first. None for a Workspace not the principal's.
-        ``limit`` is 1..MAX_LIST_LIMIT, else INVALID_ARGUMENT."""
         ...
 
 
@@ -2327,11 +2196,6 @@ class ConversationCatalog(Protocol):
         came, in any Conversation outside the trash; None without any."""
         ...
 
-    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
-        """V3-P80 §3.2: the principal's Conversations outside the trash in
-        which ``find_waiting_call`` finds a call, in one read; in no order."""
-        ...
-
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:
@@ -2387,14 +2251,12 @@ class StateQuery(Protocol):
 
 
 __all__ = [
-    "AnswerCommit",
     "Artifact",
     "ArtifactMutation",
     "ArtifactStore",
     "AssistantFinal",
     "AssistantOutput",
     "AssistantToolCalls",
-    "AttachedWorkspace",
     "BindingAuthority",
     "CompletedGroupRef",
     "ConversationCatalog",
@@ -2404,7 +2266,6 @@ __all__ = [
     "ConversationRetention",
     "ConversationSummary",
     "ConversationWorkspace",
-    "ConversationWorkspaces",
     "DataError",
     "DataErrorCode",
     "EnvironmentActivation",
@@ -2414,16 +2275,11 @@ __all__ = [
     "ExternalSourceSetting",
     "ExternalSourceSettings",
     "InitialActivation",
-    "MAX_ATTACHED_WORKSPACES",
     "MAX_EFFORT_CHARS",
     "MAX_EXTERNAL_SETTINGS",
     "MAX_LIST_LIMIT",
     "MAX_MODEL_ID_CHARS",
     "MAX_TITLE_CHARS",
-    "MAX_WORKSPACES",
-    "MAX_WORKSPACE_LABEL_CHARS",
-    "MAX_WORKSPACE_LOCATION_BYTES",
-    "MAX_WORKSPACE_NOTE_CHARS",
     "ModelSetting",
     "PREVIEW_CHARS",
     "PersistedStateBasis",
@@ -2435,7 +2291,6 @@ __all__ = [
     "RawRunOutcome",
     "RawUncertain",
     "RecoveryReport",
-    "RegisteredWorkspace",
     "RunPreparation",
     "RunRecord",
     "RunStatus",
@@ -2447,6 +2302,5 @@ __all__ = [
     "TrashedConversation",
     "TriggerRef",
     "UserMessage",
-    "WorkspaceRegistry",
     "WorkspaceState",
 ]

@@ -168,9 +168,9 @@ class ContextLoader:
             source_notes=tuple(n for n in self._source_notes if n.source in enabled),
             attachments=attachments,
             user_instructions=user_instructions,
-            # V3-P101: the attachment, file reference and documents sentences name an Environment's Tools
+            # V3-P101: the attachment and documents sentences name an Environment's Tools
             system=self._system if self._system is None or active else replace(
-                self._system, attachments=False, file_references=False, documents=()),
+                self._system, attachments=False, documents=()),
             companion_persona=companion_persona,
             wake_notes=await self._wake_notes(scope, events),
             memories=memories,

@@ -19,7 +19,6 @@ from himari.prompt.api import (
     ATTACHMENT_NOTE,
     COMPANION_HEAD,
     EXPRESSION_RULE,
-    FILE_REFERENCE_NOTE,
     MEMORY_SECTION,
     NOTE_CHARS,
     NOTES_TOTAL_CHARS,
@@ -77,8 +76,7 @@ INTERFACE_RULE = (
     "presence and your workspace tools. A missing or false capability is unavailable. When file_download is "
     "false, do not promise downloading in this interface or say the user received a file. You may still prepare "
     "files with available tools; after successful preparation, direct the user to the same conversation on the "
-    "Web to download them. When workspace_browser is false, do not direct the user to a workspace browser in "
-    "this interface. Report a file as prepared only after present_file succeeds. It prepares an immutable file "
+    "Web to download them. Report a file as prepared only after present_file succeeds. It prepares an immutable file "
     "in the conversation; it does not mean the client "
     "downloaded it or saved it locally. A prepared file, a downloadable file and a locally saved file are "
     "different states. These capabilities describe delivery, never permission to execute tools."
@@ -89,8 +87,6 @@ def messages_section(spec: SystemSpec) -> str:
     lines = [TIME_NOTE, INTERFACE_RULE]
     if spec.attachments:
         lines.append(ATTACHMENT_NOTE)
-    if spec.file_references:
-        lines.append(FILE_REFERENCE_NOTE)
     lines.append(TOOL_IMAGES_NOTE)
     return _bullets("# Messages and time", lines)
 

@@ -1,8 +1,7 @@
 """The server profile: long-lived stdio processes (V3-P59 §4).
 
-A ``ServerSandbox`` shares the host capability with the Workspace backend
-but has its own self-test and state (§4.4): stdio servers start only while
-it is ENFORCED, and ``run_command`` does not depend on it.
+A ``ServerSandbox`` has its own self-test and state (§4.4): stdio servers
+start only while it is ENFORCED.
 
 Each ``launch``:
 
@@ -14,7 +13,7 @@ Each ``launch``:
    network; Landlock allows writes to ``writable`` and /tmp only;
 4. returns the process once the helper reported enforcement — otherwise the
    tree is killed and nothing ran (``SandboxSetupError``, which latches
-   SETUP_FAILED like the Workspace backend).
+   SETUP_FAILED).
 
 The process is spoken to by lines (stdin/stdout); its stderr is drained
 continuously and only the last ``STDERR_TAIL_BYTES`` are kept.
@@ -315,7 +314,7 @@ class ServerSandbox:
         return self._state
 
     def setup_failed(self) -> None:
-        self._state = SandboxState.SETUP_FAILED  # latched, as for the Workspace backend
+        self._state = SandboxState.SETUP_FAILED  # latched
 
     async def start(self, self_test: ServerSelfTest | None = None) -> SandboxState:
         """Once per process: ENFORCED only if the server self-test passes."""
@@ -392,7 +391,7 @@ class ServerSandbox:
                 limit=STREAM_LIMIT,
             ))
             try:
-                process = await asyncio.shield(spawn)  # as protected_run: never interrupt a spawn
+                process = await asyncio.shield(spawn)  # never interrupt a spawn (_abandon)
             except asyncio.CancelledError:
                 await _abandon(spawn)
                 raise

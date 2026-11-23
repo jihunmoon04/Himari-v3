@@ -10,7 +10,7 @@ from testkit import SCOPE, RecordingTool, calls, final, new_store, restart
 
 from himari.bootstrap import Runtime, Store, build_runtime
 from himari.bootstrap.interfaces import ConfiguredInterfaces
-from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope
+from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope
 from himari.control.api import DriveState, TurnPresence
 from himari.data.api import (
     DataError, InterfaceCapabilities, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind,
@@ -34,7 +34,7 @@ class Source:
     async def read(self, scope: object, origin: MessageOrigin | None) -> InterfaceSnapshot:
         self.calls += 1
         kind = interface_kind(origin)
-        return InterfaceSnapshot(kind, InterfaceCapabilities(self.enabled, kind is InterfaceKind.WEB))
+        return InterfaceSnapshot(kind, InterfaceCapabilities(self.enabled))
 
 
 def make(provider: ScriptedAdapter, source: Source | ConfiguredInterfaces, *, store: Store | None = None,
@@ -66,7 +66,7 @@ def test_capabilities_are_sampled_once_before_the_first_run() -> None:
         assert (await rt.driver.drive(SCOPE, message())).state is DriveState.COMPLETED
         assert source.calls == 1
         snapshots = [mi.current_state.interface for mi in provider.prepared_inputs]
-        assert snapshots == [InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True))] * 2
+        assert snapshots == [InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True))] * 2
 
     asyncio.run(scenario())
 
@@ -83,34 +83,32 @@ def test_accepted_input_is_restored_after_restart_without_resampling() -> None:
         assert (await again.driver.resume(SCOPE)).state is DriveState.COMPLETED
         assert second.calls == 0
         assert provider.prepared_inputs[0].current_state.interface == InterfaceSnapshot(
-            InterfaceKind.WEB, InterfaceCapabilities(True, True))
+            InterfaceKind.WEB, InterfaceCapabilities(True))
 
     asyncio.run(scenario())
 
 
-def test_answer_snapshot_survives_compression_past_the_answer_and_restart() -> None:
+def test_input_snapshot_survives_compression_past_the_input_and_restart() -> None:
     async def scenario() -> None:
         source = Source()
         tool = RecordingTool("probe")
-        provider = ScriptedAdapter([calls((ASK_USER_TOOL_ID, {"question": "which?"})),
-                                    calls(("probe", {})), final("SUMMARY")])
+        provider = ScriptedAdapter([final("first"), calls(("probe", {})), final("SUMMARY")])
         rt = make(provider, source, tools=(tool,), budget=ContextBudget(10000), limit=1)
-        assert (await rt.driver.drive(SCOPE, message())).state is DriveState.WAITING_FOR_USER
+        assert (await rt.driver.drive(SCOPE, message())).state is DriveState.COMPLETED
         assert (await rt.driver.drive(SCOPE, message(CLI))).state is DriveState.RUN_LIMIT_REACHED
-        answer = next(e for e in await rt.data.read_events(SCOPE)
-                      if isinstance(e.payload, UserMessage) and e.payload.answers_call is not None)
+        latest = [e for e in await rt.data.read_events(SCOPE) if isinstance(e.payload, UserMessage)][-1]
         assert (await rt.driver.compact(SCOPE)).state is DriveState.COMPACTED
         snapshot = await rt.data.get_latest_snapshot(SCOPE)
-        assert snapshot is not None and snapshot.covers_through_sequence >= answer.sequence
+        assert snapshot is not None and snapshot.covers_through_sequence >= latest.sequence
         summary_request = str(provider.prepared_inputs[-1].conversation)
-        assert "file_download" not in summary_request and "workspace_browser" not in summary_request
+        assert "file_download" not in summary_request
         provider2 = ScriptedAdapter([final("done")])
         changed = Source(False)
         again = make(provider2, changed, store=restart(rt.store), tools=(tool,), budget=ContextBudget(10000))
         assert (await again.driver.resume(SCOPE)).state is DriveState.COMPLETED
         mi = provider2.prepared_inputs[-1]
         assert isinstance(mi.conversation[0], CompressedHistory)
-        assert mi.current_state.interface == InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True, False))
+        assert mi.current_state.interface == InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True))
         assert changed.calls == 0
 
     asyncio.run(scenario())
@@ -150,33 +148,13 @@ def test_legacy_input_never_infers_capabilities_from_live_support(origin: Messag
 def test_input_cannot_supply_its_own_capabilities_or_a_different_kind() -> None:
     async def scenario() -> None:
         rt = make(ScriptedAdapter([]), ConfiguredInterfaces())
-        forged = InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True))
+        forged = InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True))
         await rt.driver.accept(SCOPE, replace(message(), interface=forged))
         first = (await rt.data.read_events(SCOPE))[0].payload
         assert isinstance(first, UserMessage) and first.interface == InterfaceSnapshot(InterfaceKind.WEB)
         with pytest.raises(DataError):
             await rt.driver.accept(SCOPE, replace(message(DESK), interface=forged))
         assert len(await rt.data.read_events(SCOPE)) == 1
-
-    asyncio.run(scenario())
-
-
-def test_a_rejected_answer_does_not_consume_the_waiting_call() -> None:
-    async def scenario() -> None:
-        rt = make(ScriptedAdapter([calls((ASK_USER_TOOL_ID, {"question": "which?"}))]), Source())
-        result = await rt.driver.drive(SCOPE, message())
-        assert result.waiting_call is not None
-        before = await rt.data.read_events(SCOPE)
-        with pytest.raises(DataError):
-            await rt.data.answer_pending_call(SCOPE, result.waiting_call, replace(
-                message(CLI), interface=InterfaceSnapshot(InterfaceKind.WEB)))
-        assert await rt.data.read_events(SCOPE) == before
-        assert await rt.data.find_waiting_call(SCOPE) == result.waiting_call
-        answer = replace(message(CLI), interface=InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True)))
-        await rt.data.answer_pending_call(SCOPE, result.waiting_call, answer)
-        recorded = [e.payload for e in await rt.data.read_events(SCOPE)
-                    if isinstance(e.payload, UserMessage) and e.payload.answers_call is not None]
-        assert len(recorded) == 1 and recorded[0].interface == answer.interface
 
     asyncio.run(scenario())
 
@@ -201,8 +179,8 @@ def test_parallel_conversations_do_not_share_their_input_snapshot() -> None:
                                                       rt.driver.drive(other, message(CLI))), timeout=5)
         assert all(r.state is DriveState.COMPLETED for r in results)
         assert {mi.current_state.interface for mi in provider.prepared_inputs} == {
-            InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True)),
-            InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True, False))}
+            InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True)),
+            InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True))}
 
     asyncio.run(scenario())
 
@@ -223,7 +201,7 @@ def test_live_device_switch_does_not_change_the_turn_interface() -> None:
 
         tool = RecordingTool("switch", behavior=switch)
         provider = ScriptedAdapter([calls(("switch", {})), final("done"), final("web")], companion=True)
-        rt = make(provider, ConfiguredInterfaces(True, True, frozenset({SCOPE.principal_id})), tools=(tool,))
+        rt = make(provider, ConfiguredInterfaces(True), tools=(tool,))
         rt.driver._presence = presence
         await rt.driver.drive(SCOPE, message(DESK))
         assert presence.current == "B"
@@ -232,7 +210,7 @@ def test_live_device_switch_does_not_change_the_turn_interface() -> None:
         await rt.driver.drive(SCOPE, message())
         state = provider.prepared_inputs[-1].current_state
         assert state.presence is not None and state.presence.current_device == "B"
-        assert state.interface == InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True))
+        assert state.interface == InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True))
 
     asyncio.run(scenario())
 
@@ -242,14 +220,9 @@ def test_live_device_switch_does_not_change_the_turn_interface() -> None:
                                        (DESK, InterfaceKind.WINDOWS_COMPANION), (None, InterfaceKind.UNKNOWN)])
 def test_phase_one_capabilities_follow_server_and_authenticated_interface(
         enabled: bool, origin: MessageOrigin | None, kind: InterfaceKind) -> None:
-    found = asyncio.run(ConfiguredInterfaces(enabled, enabled, frozenset({SCOPE.principal_id})).read(SCOPE, origin))
+    found = asyncio.run(ConfiguredInterfaces(enabled).read(SCOPE, origin))
     assert found == InterfaceSnapshot(kind, InterfaceCapabilities(
-        enabled and kind in (InterfaceKind.WEB, InterfaceKind.CLI), enabled and kind is InterfaceKind.WEB))
-
-
-def test_workspace_browser_is_false_without_the_principals_machine_permission() -> None:
-    source = ConfiguredInterfaces(True, True, frozenset({PrincipalId("someone_else")}))
-    assert asyncio.run(source.read(SCOPE, WEB)) == InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, False))
+        enabled and kind in (InterfaceKind.WEB, InterfaceKind.CLI)))
 
 
 def test_device_input_and_wake_snapshots_follow_connection_generation_negotiation() -> None:
@@ -260,7 +233,7 @@ def test_device_input_and_wake_snapshots_follow_connection_generation_negotiatio
 
     async def scenario() -> None:
         hub = PresenceHub()
-        source = ConfiguredInterfaces(True, True, frozenset({SCOPE.principal_id}), hub=hub, companion_enabled=True)
+        source = ConfiguredInterfaces(True, hub=hub, companion_enabled=True)
 
         # Without an active stream or negotiation, device input and wake default to file_download=False.
         assert await source.read(SCOPE, DESK) == InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION)
@@ -281,26 +254,26 @@ def test_device_input_and_wake_snapshots_follow_connection_generation_negotiatio
             with device_input_negotiation("stale-gen", True):
                 await source.read(SCOPE, DESK)
 
-        # Matching active generation + client_file_download=True -> file_download=True, workspace_browser=False.
+        # Matching active generation + client_file_download=True -> file_download=True.
         with device_input_negotiation(sub.connection_generation, True):
             assert await source.read(SCOPE, DESK) == InterfaceSnapshot(
-                InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(True, False)
+                InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(True)
             )
 
         # Legacy message without client_features does not borrow presence's file_download=True.
         hub.signal(SCOPE.principal_id, "d1", 0, None, connection_generation=sub.connection_generation, file_download=True)
         assert await source.read(SCOPE, DESK) == InterfaceSnapshot(
-            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(False, False)
+            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(False)
         )
         # Wake uses the active subscription's confirmed file_download state.
         assert await source.read(SCOPE, MessageOrigin(OriginKind.WAKE, "d1")) == InterfaceSnapshot(
-            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(True, False)
+            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(True)
         )
 
         # Stream replacement before wake or input immediately invalidates the old generation and resets wake to False.
         sub2 = hub.subscribe(SCOPE.principal_id, "d1")
         assert await source.read(SCOPE, MessageOrigin(OriginKind.WAKE, "d1")) == InterfaceSnapshot(
-            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(False, False)
+            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(False)
         )
         with pytest.raises(StaleConnectionGeneration):
             with device_input_negotiation(sub.connection_generation, True):

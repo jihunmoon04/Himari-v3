@@ -136,8 +136,9 @@ class AssistantTurn(DeepFrozen):
 @dataclass(frozen=True)
 class ToolGroupTurn(DeepFrozen):
     """An assistant ToolCall group immediately followed by its results in
-    original ordinal order. An ask_user answer appears only here, as the
-    result of its call — never again as a UserTurn (V3-P18)."""
+    original ordinal order. An answer to an ``ask_user`` question of older
+    history appears only here, as the result of its call — never again as a
+    UserTurn (V3-P18)."""
 
     run_id: RunId
     commentary: tuple[ContentBlock, ...]
@@ -281,32 +282,12 @@ class ModelInput(DeepFrozen):
 
 
 @dataclass(frozen=True)
-class TurnBudget(DeepFrozen):
-    """How much of the turn is left (V3-P62 §8), given only once it is low.
-    Token figures under a token budget; ``runs_left`` under a Run limit."""
-
-    low: bool
-    last: bool
-    used: int | None = None
-    budget: int | None = None
-    left: int | None = None
-    runs_left: int | None = None
-
-
-@dataclass(frozen=True)
-class RepeatedCall(DeepFrozen):
-    """A call that got the same result again in this turn (V3-P62 §4)."""
-
-    tool_id: str
-    times: int  # the how-many-th time with this same result
-    status: str
-    effect: str
-
-
-@dataclass(frozen=True)
 class TurnState(DeepFrozen):
-    budget: TurnBudget | None = None
-    repeated: tuple[RepeatedCall, ...] = ()
+    """How much of the turn is left (V3-P62 §8), given only once it is low:
+    the Runs its limit still allows, and whether this is the last."""
+
+    runs_left: int
+    last: bool
 
 
 @dataclass(frozen=True)
@@ -318,8 +299,7 @@ class SystemSpec(DeepFrozen):
     companion: bool = False
     memory: bool = False
     attachments: bool = False  # uploads work: the <attachment> line is explained
-    file_references: bool = False  # the machine Environment: the <file_reference> line is explained
-    turn_guidance: bool = False  # the turn guards are on
+    turn_guidance: bool = False  # the model is told when the turn's Run limit is near (V3-P62 §8)
     documents: tuple[str, ...] = ()
     proactive: bool = False  # V3-P87 §8.2: HIMARI may speak first (with the companion on)
 
@@ -552,13 +532,12 @@ PROGRESS_NOTE = (
     "tool calls; write nothing with calls that keep working toward the same goal. These lines are hidden once you "
     "answer, so put everything the user needs in the answer."
 )
-# V3-P62 §8 (moved from control.api, V3-P89 §3.3): told when the turn guards are on;
+# V3-P62 §8 (moved from control.api, V3-P89 §3.3): told with the turn's Run limit;
 # the runtime state carries only the numbers and flags it refers to.
 TURN_GUIDANCE = (
-    "Turn budget: the runtime state may carry turn_budget and progress. When turn_budget.low is true, finish with "
-    "what you have, or ask the user (ask_user) whether to go on. When turn_budget.last is true, tool calls made now "
-    "run but you see their results only if the user continues, so answer now or ask. progress.repeated lists calls "
-    "that got the same result again in this turn: do not repeat them unless something has changed."
+    "Turn limit: a turn has a limited number of steps. When the runtime state carries turn_limit, few are left: "
+    "finish with what you have. When turn_limit.last is true, tool calls made now run but you see their results "
+    "only if the user continues, so answer now."
 )
 
 # V3-P71 §5.1, V3-P85 §5.5, V3-P89 §3.4: the memory section, whenever memory is on, notes
@@ -815,24 +794,12 @@ SCREEN_MOVE_NOTE = (
 )
 
 
-# V3-P70 §7: one sentence when read_document is offered, one when run_command
-# has the documents toolkit; both fixed for the server's life (cache-safe).
+# V3-P70 §7: one sentence when read_document is offered, fixed for the server's life (cache-safe).
 DOCUMENTS_READ_NOTE = (
     "Read PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx) and HWPX files with read_document. A page marked "
     "[drawings] or with no text may hold a chart or a scan: view it. These marks are a guess; when the text mentions "
     "a figure or chart on an unmarked page, view that page too. Tell the user about content marked [hidden]."
 )
-
-
-def documents_script_note(modules: Sequence[str], fonts: Sequence[str]) -> str:
-    """The run_command sentence, naming only what the toolkit's check found."""
-    note = ("To create or change documents, write a Python script and run it with run_command as `python3 "
-            f"script.py` (not with -I or -E): it can import {', '.join(modules)}, which PYTHONPATH puts ahead of "
-            "packages in any virtual environment you make.")
-    if fonts:
-        note += (f" For Korean or other non-Latin text in a PDF, register {' and '.join(fonts)} from the folder in "
-                 "$HIMARI_FONTS with reportlab.")
-    return note + " Prepare finished files in the conversation with present_file; interface capabilities govern delivery."
 
 
 # V3-P69 §4: the user's instructions go after the operator's and the notes
@@ -885,14 +852,6 @@ def attachment_line(ref: AttachmentRef, attachments: Mapping[str, AttachmentInfo
     if reason is not None:
         data["not_shown"] = reason
     return "<attachment>" + json_data(data) + "</attachment>"
-
-
-# V3-P76 §3.3: the fixed sentence for a message that points at part of a file, and the line it becomes.
-FILE_REFERENCE_NOTE = (
-    "A <file_reference> line is part of a file (or a whole file) the user pointed at in the editor, as it was when "
-    "the message was sent (cut short when truncated); read the file for its content now. Lines are 1-based; a "
-    "whole-file reference has no excerpt."
-)
 
 
 def file_reference_line(ref: FileReference) -> str:
@@ -1058,16 +1017,7 @@ def turn_state_data(turn: TurnState | None) -> dict[str, object] | None:
     """The turn's state as runtime-state data (V3-P62 §8): numbers and flags only."""
     if turn is None:
         return None
-    data: dict[str, object] = {}
-    if turn.budget is not None:
-        b = turn.budget
-        data["turn_budget"] = {k: v for k, v in (("used", b.used), ("budget", b.budget), ("left", b.left),
-                                                 ("runs_left", b.runs_left), ("low", b.low), ("last", b.last))
-                               if v is not None}
-    if turn.repeated:
-        data["progress"] = {"repeated": [{"tool": r.tool_id, "times": r.times, "status": r.status,
-                                          "effect": r.effect} for r in turn.repeated]}
-    return data or None
+    return {"turn_limit": {"runs_left": turn.runs_left, "last": turn.last}}
 
 
 def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
@@ -1116,13 +1066,7 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                     place["working_directory"] = view.working_directory
                     if view.readable:
                         place["read"] = view.readable
-                    if view.network:
-                        place["network"] = view.network
-                    if view.workspaces:
-                        place["workspaces"] = [{"path": w.path, "label": w.label, **({"note": w.note} if w.note else {}),
-                                                **({"notice": w.notice} if w.notice else {})}
-                                               for w in view.workspaces]
-                    elif view.writable:
+                    if view.writable:
                         place["writable"] = list(view.writable)
                 elif binding.cwd_relative is not None:
                     entry["default_binding"]["working_directory"] = f"/workspace/{binding.cwd_relative}"  # type: ignore[index]
@@ -1155,7 +1099,6 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
             "kind": state.interface.kind.value,
             "capabilities": {
                 "file_download": state.interface.capabilities.file_download,
-                "workspace_browser": state.interface.capabilities.workspace_browser,
             },
         }
     return data

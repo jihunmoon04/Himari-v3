@@ -3,7 +3,6 @@
 이 폴더에는 두 앱이 따로 있다(V3-P104 §8, 나중에 합칠 수 있으면 합침).
 
 - **반려 앱** `Himari.Companion`(V3-P83): 캐릭터·말 걸기·화면. 아래 대부분이 이 앱의 설명이다.
-- **작업 앱** `Himari.Workbench`(V3-P104): 작업 콘솔(Web) 창과 이 PC의 hub 실행기 켜기·끄기. 맨 아래 "작업 앱" 절.
 
 .NET 10 Windows Desktop SDK, Windows 10 1809 이상과 기기 API가 배포된 서버가 필요하다.
 
@@ -115,24 +114,3 @@ dotnet run --project clients/windows/Himari.Companion.UiTests/Himari.Companion.U
 계약 테스트는 가짜 HTTP로 전송·이동·설정 마이그레이션·단축키 등록 복구·이전 창 선택 정책을 검증한다. UI 테스트는 실제 라우팅 이벤트와 앱 컨트롤로 Enter·합성 IME 조합, 기본 숨김·양방향 배치·긴 답변 중지 버튼, 말풍선 색·표시 순서·오래된 말풍선부터 숨김·늦은 접수 응답·재연결 시 새 초안의 순서 보존을 검증한다. 복귀 대상 테스트(`--hotkey-return-only`)는 별도 프로세스의 실제 `NonRudeHWND` 창으로 일반 앱 분류·직전 창 기록·지연 이벤트·다음 앱으로의 갱신·데스크톱 초기화와 초안 보존을 검증한다. 전경 읽기와 복구 요청은 대체해 사용자의 앱을 전환하지 않는다. 포커스 전환 테스트(`--focus-loss-only`)는 초안·선택 보존, 창 사이 전환과 포커스 복귀 경합, 중복 알림, 말풍선 순서, 전송 불명 UI 보호, POST 완료 후 재검사, 질문 조회 중 포커스 이탈/복귀, 외부 앱에서 반복 질문 조회와 복귀 후 초안 재개를 확인한다. 오프라인으로 띄운 분리 창에서는 화면 네 모서리의 캐릭터 좌표 보존, 위·아래 배치와 역방향 만료 순서, 첫 글자 보존, 전환 후 포커스 해제, 선택 영역·IME 조합 유지를 검증한다. WebView2 Runtime이 설치돼 있으면 실제 확장 보기에서 표·KaTeX·긴 코드와 외부 이미지/스크립트 차단도 검증한다(테스트용 임시 프로필 사용).
 
 `--screenshots`는 연결·자격 증명·설정 저장·화면 캡처 없이 실제 WPF 컨트롤을 PNG로 렌더링한다. `--native-presentation`은 Shell 전체화면 표시·해제 호출과 별도 프로세스 전체화면 창을 검사하며, `--fullscreen-only`로 이 검사만 실행할 수 있다. 표시 순서 복구 검사는 히마리 창을 실제 네이티브 순서에서 내려 가려진 상태를 만든 뒤 즉시·주기적 복구, 입력 포커스 유지, 대화 중·숨김 상태의 복구 제외를 확인한다. 이 검사에서는 전경 관찰만 대체한다. Windows가 백그라운드 테스트의 전경 창 전환을 거부하면 실제 전환 검사는 건너뛰었다고 출력한다. 크롬 유튜브 실제 재생과 Alt+Tab/Alt+Q 왕복, OS 단축키 충돌, 실제 한국어 IME 키보드 조작과 다중 모니터 DPI 전환은 실기 확인이 필요하다.
-
-## 작업 앱 (`Himari.Workbench`, V3-P104)
-
-설계: `docs/workbench-v0.1.md`(rev. 8). 반려 앱과 같은 .NET 10·WPF·WebView2 판이고, 설정·WebView2 데이터·트레이 아이콘은 따로다.
-
-```powershell
-dotnet run --project clients/windows/Himari.Workbench/Himari.Workbench.csproj
-dotnet test clients/windows/Himari.Workbench.Tests/Himari.Workbench.Tests.csproj
-```
-
-- **처음 켜면 마법사:** 서버 주소(`https`만, loopback `http`는 개발자 모드), hub 명령(`uv`를 `PATH`에서 찾아 절대 경로로 저장 + `run --project <hub 폴더> himari-hub`), hub 홈, `runner status --json` 확인과 기기 등록(`registration`), 연동(기본 켬). 설정은 `%LOCALAPPDATA%\HIMARI\workbench.json`(원자적으로 바꿔 씀, 깨지면 `workbench.json.broken-<시각>`으로 옮김), 앱 기록은 `%LOCALAPPDATA%\HIMARI\workbench\workbench.log`(종료 코드와 가린 오류 줄만), WebView2 데이터는 `%LOCALAPPDATA%\HIMARI\workbench\webview`.
-- **창:** 위쪽 상태 줄("실행기: 연결됨 · laptop · 앱이 켠 것", 켜기/끄기, 기록, 설정) + 작업 콘솔. 서버와 같은 출처만 이동(리디렉션·프레임 포함), 새 창은 열지 않음(같은 출처는 지금 창, 다른 출처 `https`는 사람이 누른 것만 2초에 한 번 기본 브라우저로, 나머지는 막고 "열지 않음: <scheme>"), 권한 요청 모두 거절, 인증서 오류는 넘기지 않음, 개발자 도구는 개발자 모드에서만, 페이지와 앱 사이의 다리(host object·web message) 없음. WebView2 Runtime이 없으면 설치 안내를 보이고 실행기 관리는 그대로 된다.
-- **창의 X는 트레이로**, 종료는 트레이의 "종료". 사용자마다 하나(`Global\HIMARI.Workbench.<SID>` Mutex). 두 번째로 켜면 이름 붙은 파이프로 첫 창을 앞으로 보이고 끝나며, 첫 앱이 다른 Windows 세션에 있으면 그렇다고 알린다.
-- **실행기(`RunnerSupervisor`):** 보이기는 5초(창이 보이면 2초)마다 `runner.state.json`만 읽고, 켜기·끄기 전과 상태가 어긋날 때 `runner status --json`을 부른다. 동작은 한 줄로 하나씩. 켤 때 `<부팅 id>.<기한>.<GUID>` 인스턴스 id를 만들어 `pending_instance`로 먼저 적고 `runner start --instance … --json`, 성공이면 `owned_instance`. 끌 때는 확인한 인스턴스를 `runner stop --instance … --json`으로만 끈다(사람이 끌 때는 대상을 보이고 묻는다). 확인할 수 없으면(`status` 실패, `instance: null`) 자동으로 켜거나 끄지 않는다.
-- **연동(기본 켬):** 앱을 켜면 꺼진 실행기를 켜고(이미 떠 있으면 누가 켰든 그대로 둔다), 트레이 종료와 로그오프·Windows 종료(`SessionEnding`)에서는 파이썬을 띄우지 않고 앱이 켠(또는 켜는 중인) 인스턴스에만 `runner.stop.d\<id>.<임의 값>` 멈춤 요청 파일을 새로 만든 뒤 `stop_ack`를 5초까지 본다. 마지막 `status`가 확인하지 못한 소유 인스턴스(확인 불가, `instance: null`)는 트레이 종료에서 건드리지 않는다(§5.4). 다른 곳에서 켠 실행기는 건드리지 않는다. 로그오프·Windows 종료에서는 연동을 꺼 두었어도 앱이 켠 인스턴스에 같은 요청을 쓴다(실행기는 어차피 세션과 함께 끝나므로 작업을 정리할 틈을 준다). 앱이 비정상 종료하면 실행기는 남고 다음 실행에서 이어 받는다.
-- **로그인 시 시작:** 설정에서 켜면 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 `HIMARI Workbench`(기본 끔).
-- **옮겨진 뒤:** `workbench.json`이 없고 `workbench.json.migrated`가 있으면 "HIMARI 앱으로 옮겨졌습니다"를 보이고 끝난다.
-
-hub 쪽 계약(H9·H10·H14·H15·H16)은 hub B1에서 들어온다. 그 전에는 `Himari.Workbench.FakeHub`(시험용 가짜 hub 명령: `runner status|start|stop`(`--json` 있이·없이), 실행기 자신(자기 Job, 전이 잠금), 상태 파일, 멈춤 요청 폴더를 문서 §5.3·§5.4·§9대로)로 시험한다. 손으로 해 보려면 설정의 hub 실행 파일을 그 exe로, 인자를 비우고, hub 홈을 빈 폴더로 둔다. 가짜의 동작은 hub 홈의 `fake-hub.json`(`registration`(없으면 hub처럼 `runner.json`·`runner.token`으로 판단), `status_fail`, `old_hub`, `instance_null`, `ignore_stop` 등)으로 바꾼다.
-
-단위 시험은 §10의 `RunnerSupervisor`·`WorkbenchSettings` 항목(상태 표 전부, pending·owned 규칙, 시작 중 종료, 종료 뒤 끝난 `start`, 이어 받기, 소유한 것만 끄기, 확인 불가면 끄지 않음, 직렬화, 셸 없는 인자 목록, 오류 줄 가리기, 공백·한글 경로)과 이동 규칙·마법사 판정을 덮는다. 실제 hub 실행기, 로그오프, 원격 데스크톱 세션, WebView2 Runtime 없는 PC는 실기 확인이 필요하다.

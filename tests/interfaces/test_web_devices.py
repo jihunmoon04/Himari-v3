@@ -25,7 +25,7 @@ from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, MOODS, CallId, ConversationId, TextBlock, ToolCall, TrustedScope  # noqa: E402
+from himari.common import MOODS, CallId, ConversationId, TextBlock, ToolCall, ToolId, TrustedScope  # noqa: E402
 from himari.data.api import MessageOrigin, OriginKind, UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import event_stream  # noqa: E402
@@ -56,10 +56,8 @@ ALLOWED = {
     ("POST", "/api/device/screens/{request_id}/refuse"),
     ("GET", "/api/device/conversations/{conversation_id}/presented-files"),  # V3-P93 §6.2
     ("GET", "/api/device/conversations/{conversation_id}/presented-files/{file_id}/{version}"),
-    ("POST", "/api/conversations/{conversation_id}/pause"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
-    ("POST", "/api/conversations/{conversation_id}/dismiss"),
 }
 # Routes without any sign-in: the session itself, pairing, and the page and its files (V3-P102 §7.2).
 PUBLIC = {("GET", "/api/session"), ("POST", "/api/session"), ("DELETE", "/api/session"),
@@ -195,13 +193,10 @@ def test_a_device_pairs_without_an_origin_and_talks_with_its_token(server: Serve
 def test_each_message_keeps_where_it_came_from(server: Server) -> None:
     token = server.paired()
     cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
-    server.provider.extend([
-        NormalizedToolCalls((ToolCall(CallId("q1"), 0, ASK_USER_TOOL_ID, {"question": "어느 쪽?"}),)),
-        final("알았어"), final("web"), final("cli"),
-    ])
+    server.provider.extend([final("어느 쪽?"), final("알았어"), final("web"), final("cli")])
     server.device.post(f"/api/conversations/{cid}/messages", json={"text": "골라줘"}, headers=server.as_device(token))
     server.wait(cid)
-    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "왼쪽"},  # the answer (T7a)
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "왼쪽"},  # the answer: a message
                        headers=server.as_device(token))
     server.wait(cid)
     server.client.post(f"/api/conversations/{cid}/messages", json={"text": "from web"}, headers=SEND)
@@ -230,7 +225,7 @@ def test_clients_cannot_supply_an_interface_snapshot(server: Server) -> None:
     cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
     token = server.paired()
     spoofed = {"text": "hi", "interface": {"version": 1, "kind": "web", "capabilities": {
-        "file_download": True, "workspace_browser": True}}}
+        "file_download": True}}}
     assert server.client.post(f"/api/conversations/{cid}/messages", json=spoofed, headers=SEND).status_code == 400
     assert server.device.post(f"/api/conversations/{cid}/messages", json=spoofed,
                               headers=server.as_device(token)).status_code == 400
@@ -240,11 +235,9 @@ def test_clients_cannot_supply_an_interface_snapshot(server: Server) -> None:
 def test_a_device_sends_text_only_and_sees_no_trash(server: Server) -> None:
     me = server.as_device(server.paired())
     cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
-    for body in ({"text": "x", "references": [{"path": "/etc/hostname", "identity": [1, 2, 3, 4], "start": 1, "end": 1,
-                                                "sha256": "0" * 64}]},
-                 {"text": "x", "attachments": ["f_1"]}):
-        response = server.device.post(f"/api/conversations/{cid}/messages", json=body, headers=me)
-        assert (response.status_code, error_code(response)) == (403, "device_scope"), body  # B3
+    response = server.device.post(f"/api/conversations/{cid}/messages", json={"text": "x", "attachments": ["f_1"]},
+                                  headers=me)
+    assert (response.status_code, error_code(response)) == (403, "device_scope")  # B3
     response = server.device.get("/api/conversations?trashed=true", headers=me)
     assert (response.status_code, error_code(response)) == (403, "device_scope")
     assert server.device.get("/api/conversations", headers=me).status_code == 200
@@ -258,8 +251,7 @@ def test_every_route_but_the_allowed_ones_refuses_a_device(server: Server) -> No
     assert ALLOWED <= routes and PUBLIC <= routes
     for method, path in sorted(routes - ALLOWED - PUBLIC):
         url = path.replace("{conversation_id}", cid)
-        for name in ("{device_id}", "{run_id}", "{call_id}", "{file_id}", "{version}", "{binding_id}",
-                     "{workspace_id}", "{version_id}", "{name}"):
+        for name in ("{device_id}", "{run_id}", "{call_id}", "{file_id}", "{version}", "{version_id}", "{name}"):
             url = url.replace(name, "x1")
         response = server.device.request(method, url, headers=me, json={})
         assert (response.status_code, error_code(response)) == (403, "device_scope"), (method, path)
@@ -360,18 +352,17 @@ def test_answers_and_questions_carry_their_display(server: Server) -> None:
         return list(server.client.get(f"/api/conversations/{cid}/events").json()["items"])
 
     server.provider.extend([
-        NormalizedToolCalls((ToolCall(CallId("q"), 0, ASK_USER_TOOL_ID, {"question": "[[mood:thinking]]어디?"}),),
-                            commentary=(TextBlock("[[mood:happy]]좋아"),)),
+        NormalizedToolCalls((ToolCall(CallId("q"), 0, ToolId("look"), {}),), commentary=(TextBlock("[[mood:happy]]좋아"),)),
+        final("[[mood:thinking]]어디?"),
         final("[[mood:excited]]서울! [[mood:nope]]끝"),
     ])
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "여행"}, headers=SEND).status_code == 202
     server.wait(cid)
-    waiting = server.client.get(f"/api/conversations/{cid}").json()["waiting"]
-    assert waiting["question"] == "[[mood:thinking]]어디?"
-    assert waiting["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}], "moves": []}
-    asked = [e for e in events() if e["kind"] == "assistant_tool_calls"][0]
-    assert asked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}], "moves": []}
-    assert asked["calls"][0]["display"]["text"] == "어디?"
+    looked = [e for e in events() if e["kind"] == "assistant_tool_calls"][0]
+    assert looked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}], "moves": []}
+    assert "display" not in looked["calls"][0]  # a call's arguments are shown as they are
+    question = [e for e in events() if e["kind"] == "assistant_final"][-1]  # V3-P106: a question is text
+    assert question["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}], "moves": []}
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "서울"}, headers=SEND).status_code == 202
     server.wait(cid)
     answer = [e for e in events() if e["kind"] == "assistant_final"][-1]
@@ -423,7 +414,7 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
         "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1,
                                                                       "free_wake_screen": 1, "screen_look": 1,
                                                                       "file_download": 1, "connection_generation": 1},
-        "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
+        "quiet_until": None, "activity": {"working": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
     assert "connection_generation" not in web_hello
@@ -933,7 +924,7 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     snap = server.provider.prepared_inputs[-1].current_state.interface
     assert snap is not None
     assert snap.kind.value == "windows_companion"
-    assert snap.capabilities.file_download is True and snap.capabilities.workspace_browser is False
+    assert snap.capabilities.file_download is True
 
     # Replacing sub1 immediately resets wake capability to False and rejects me_gen.
     sub1_next = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]

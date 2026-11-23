@@ -1,5 +1,7 @@
 # Default Workspace, Cross-Conversation Files & Sandboxed Commands — v0.2
 
+> **명령 실행 제거됨(2026-11-23, V3-P106):** Sandboxed `run_command`는 코드에 없다. 파일은 machine Environment의 대화 폴더에서만 다룬다.
+
 > 2026-10-13 · **설계 기준 업데이트 / Detailed Contract PROPOSED**
 >
 > **V3-032~036 명시 결정:** 기본 Workspace에서 `run_command`를 지원하고 OS Sandbox를 도입한다. **사용자별 소유 Root**에 Conversation별 디렉터리를 만들고 같은 사용자에게 허용된 다른 Conversation 폴더에도 접근한다. **Sandbox 네트워크는 기본 차단**. 초기 Approval 미도입은 유지한다. 이 문서는 [v0.1](default-workspace-files-v0.1.md)을 우선하며, Sandbox 상세는 [Sandbox Execution v0.1](sandbox-execution-v0.1.md)을 따른다.

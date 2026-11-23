@@ -140,6 +140,8 @@ EnvironmentInstanceId = NewType("EnvironmentInstanceId", str)
 BindingId = NewType("BindingId", str)
 FileId = NewType("FileId", str)  # V3-P66: one uploaded or presented file of a Conversation
 ToolId = NewType("ToolId", str)
+# V3-P106: the question Tool of older servers. It is gone; only older history holds its calls.
+LEGACY_ASK_USER = ToolId("ask_user")
 EnvironmentKind = NewType("EnvironmentKind", str)
 
 # The Tool ids every Provider can carry as a function name (V3-P52): one or
@@ -161,10 +163,6 @@ def tool_id_problem(tool_id: str) -> str | None:
         return f"is longer than {MAX_TOOL_NAME_CHARS} characters ('/' counts as two)"
     return None
 
-
-ASK_USER_TOOL_ID = ToolId("ask_user")
-"""The suspending question Tool (V3-044). Control provides its handler; Data
-derives the wait state from it; Provider rejects it mixed with other calls."""
 
 type JsonValue = (
     None | bool | int | float | str | Sequence[JsonValue] | Mapping[str, JsonValue]

@@ -12,8 +12,7 @@ export interface ComposerHandle {
 }
 
 /** Enter sends, Shift+Enter breaks the line; an Enter that ends an IME composition never sends. The draft stays
- *  in this tab (sessionStorage) until it is sent. ``queues``: a message may be sent while it runs (it waits its
- *  turn), so Stop stands beside Send instead of taking its place. ``tools``: drawn on the left of the buttons. */
+ *  in this tab (sessionStorage) until it is sent. ``tools``: drawn on the left of the buttons. */
 export function Composer({
   onSend,
   onStop,
@@ -22,7 +21,6 @@ export function Composer({
   placeholder,
   draftKey,
   autoFocus,
-  queues,
   tools,
   above,
   onFiles,
@@ -38,7 +36,6 @@ export function Composer({
   placeholder?: string;
   draftKey: string;
   autoFocus?: boolean;
-  queues?: boolean;
   tools?: ReactNode;
   above?: ReactNode; // inside the box, over the text: chips, a picker
   onFiles?: (files: File[]) => void; // files pasted or dropped on it (it takes none without this)
@@ -152,18 +149,7 @@ export function Composer({
       />
       <div className="flex items-center justify-end gap-2 px-1 pt-1">
         {tools && <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">{tools}</div>}
-        {running && onStop && queues && (
-          <button
-            type="button"
-            onClick={onStop}
-            aria-label="Stop"
-            title="Stop the running turn"
-            className="inline-flex size-8 items-center justify-center rounded-full border border-line text-ink hover:bg-raised"
-          >
-            <Square className="size-3.5 fill-current" />
-          </button>
-        )}
-        {running && onStop && !queues ? (
+        {running && onStop ? (
           <button
             type="button"
             onClick={onStop}
@@ -178,7 +164,7 @@ export function Composer({
             type="button"
             onClick={() => void send()}
             aria-label="Send"
-            title={running && queues ? "Send (it waits for the running turn)" : "Send"}
+            title="Send"
             disabled={(!text.trim() && !allowEmpty) || sending || disabled}
             className={cn(
               "inline-flex size-8 items-center justify-center rounded-full bg-accent text-accent-ink",

@@ -12,12 +12,12 @@ import pytest
 
 from himari.bootstrap.application import Application
 from himari.bootstrap.proactive import ProactiveRefused, parse_quiet, wake_outcome
-from himari.common import ASK_USER_TOOL_ID, CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
+from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.control.api import DriveResult, DriveState, JobStatus
 from himari.data.api import EventKind, MessageOrigin, OriginKind, WakeKind, WakeReason, WakeStatus
 from himari.proactive import ProactiveSettings
 from himari.prompt.api import PROACTIVE_RULE, UserTurn
-from himari.provider.api import NormalizedFinal, NormalizedToolCalls
+from himari.provider.api import NormalizedFinal
 from himari.provider.scripted import ScriptedAdapter
 
 ME = PrincipalId("operator")
@@ -105,24 +105,6 @@ def test_try_is_refused_with_a_reason(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_try_never_speaks_over_a_waiting_question(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        ask = NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId(ASK_USER_TOOL_ID), {"question": "어디?"}),))
-        app = await opened(tmp_path, ScriptedAdapter([ask], companion=True), proactive=ON)
-        try:
-            await current_device(app)
-            scope = TrustedScope(ME, await app.create_conversation(ME))
-            await app.send(scope, "여행", origin=MessageOrigin(OriginKind.WEB))
-            await app.runner.wait(scope)
-            with pytest.raises(ProactiveRefused) as refused:
-                await app.try_wake(ME)
-            assert refused.value.code == "not_settled"
-        finally:
-            await app.close()
-
-    asyncio.run(scenario())
-
-
 def test_a_restart_settles_the_wakes_it_cut(tmp_path: Path) -> None:
     async def scenario() -> None:
         app = await opened(tmp_path, ScriptedAdapter([NormalizedFinal((TextBlock("응"),))]), proactive=ON)
@@ -146,41 +128,37 @@ def test_a_restart_settles_the_wakes_it_cut(tmp_path: Path) -> None:
 
 
 DONE = JobStatus(running=False, result=DriveResult(DriveState.COMPLETED))
-ASKED = JobStatus(running=False, result=DriveResult(DriveState.WAITING_FOR_USER))
 CANCELLED = JobStatus(running=False, result=DriveResult(DriveState.CANCELLED))
 
 
-@pytest.mark.parametrize(("status", "after", "waiting", "outcome"), [
-    (DONE, ["final"], False, (WakeStatus.ANSWERED, False)),
-    (ASKED, ["calls"], True, (WakeStatus.ANSWERED, True)),
-    (CANCELLED, [], False, (WakeStatus.CANCELLED, False)),
-    (CANCELLED, ["calls"], False, (WakeStatus.FAILED, False)),
-    (JobStatus(running=False, error="provider"), [], False, (WakeStatus.FAILED, False)),
-    (JobStatus(running=False, result=DriveResult(DriveState.RUN_LIMIT_REACHED)), ["calls"], False,
-     (WakeStatus.FAILED, False)),
+@pytest.mark.parametrize(("status", "after", "outcome"), [
+    (DONE, ["final"], WakeStatus.ANSWERED),
+    (CANCELLED, [], WakeStatus.CANCELLED),
+    (CANCELLED, ["calls"], WakeStatus.FAILED),
+    (JobStatus(running=False, error="provider"), [], WakeStatus.FAILED),
+    (JobStatus(running=False, result=DriveResult(DriveState.RUN_LIMIT_REACHED)), ["calls"], WakeStatus.FAILED),
     # the user won and their own turn answered before the wake was ended: not the wake's answer
-    (CANCELLED, ["message", "final"], False, (WakeStatus.CANCELLED, False)),
+    (CANCELLED, ["message", "final"], WakeStatus.CANCELLED),
     # at a restart (no job): from the Events
-    (None, ["final"], False, (WakeStatus.ANSWERED, False)),
-    (None, ["calls"], True, (WakeStatus.ANSWERED, True)),
-    (None, ["calls", "answer", "final"], False, (WakeStatus.ANSWERED, True)),
-    (None, ["calls"], False, (WakeStatus.FAILED, False)),
-    (None, ["message", "final"], True, (WakeStatus.FAILED, False)),
+    (None, ["final"], WakeStatus.ANSWERED),
+    (None, ["calls"], WakeStatus.FAILED),
+    (None, ["message", "final"], WakeStatus.FAILED),
+    # V3-P106: an older server's ask_user question was shown, cut before the wake was ended
+    (None, ["asked"], WakeStatus.ANSWERED),
 ])
-def test_how_a_wake_ends(status: JobStatus | None, after: list[str], waiting: bool,
-                         outcome: tuple[WakeStatus, bool]) -> None:
-    from himari.common import CallRef, ConversationId, EventId, RunId
+def test_how_a_wake_ends(status: JobStatus | None, after: list[str], outcome: WakeStatus) -> None:
+    from himari.common import CallId, ConversationId, EventId, RunId, ToolCall, ToolId
     from himari.data.api import AssistantFinal, AssistantToolCalls, ConversationEvent, UserMessage
 
+    asked = AssistantToolCalls((ToolCall(CallId("q"), 0, ToolId("ask_user"), {"question": "?"}),))
     payloads = {"final": AssistantFinal((TextBlock("x"),)), "calls": AssistantToolCalls((), ()),
-                "message": UserMessage((TextBlock("잠깐"),)),
-                "answer": UserMessage((TextBlock("서울"),), answers_call=CallRef(RunId("r"), CallId("c0")))}
+                "message": UserMessage((TextBlock("잠깐"),)), "asked": asked}
     kinds = {"final": EventKind.ASSISTANT_FINAL, "calls": EventKind.ASSISTANT_TOOL_CALLS,
-             "message": EventKind.USER_MESSAGE, "answer": EventKind.USER_MESSAGE}
+             "message": EventKind.USER_MESSAGE, "asked": EventKind.ASSISTANT_TOOL_CALLS}
     events = [ConversationEvent(EventId(f"e{i}"), ConversationId("c"), i + 2, kinds[a], payloads[a], 1,  # type: ignore[arg-type]
-                                datetime.now(UTC), origin_run_id=None if a in ("message", "answer") else RunId("r"))
+                                datetime.now(UTC), origin_run_id=None if a == "message" else RunId("r"))
               for i, a in enumerate(after)]
-    assert wake_outcome(status, events, waiting) == outcome
+    assert wake_outcome(status, events) == outcome
 
 
 def test_quiet_hours_parse() -> None:

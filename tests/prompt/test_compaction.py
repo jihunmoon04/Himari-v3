@@ -395,7 +395,7 @@ def test_interface_changed_since_the_measurement_recounts_state_without_invalida
     mark = UsageMark(500, 3, None, composed.prompt_basis.context_key, 0, state_key=composed.prompt_basis.state_key)
     same = dataclasses.replace(base, usage_mark=mark)
     assert Compactor().estimate(same, Composer().compose(same)).tokens == 500
-    changed = dataclasses.replace(same, interface=InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True)))
+    changed = dataclasses.replace(same, interface=InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True)))
     wire = Composer().compose(changed)
     assert wire.prompt_basis.context_key == composed.prompt_basis.context_key
     assert wire.prompt_basis.state_key != composed.prompt_basis.state_key
@@ -404,13 +404,13 @@ def test_interface_changed_since_the_measurement_recounts_state_without_invalida
 
 
 def test_environment_observations_changed_since_the_measurement_add_the_whole_state() -> None:
-    """PR #152 re-review P1: what an Environment is observed to be (online, its folders, its working
+    """PR #152 re-review P1: what an Environment is observed to be (online, what it may write, its working
     directory) is read every turn, apart from the state's revision; ``observed_at`` is not shown."""
     from datetime import UTC, datetime, timedelta
 
     from himari.common import BindingId, EnvironmentInstanceId, EnvironmentKind, WorkspaceId
     from himari.data.api import BindingAuthority, EnvironmentActivation
-    from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
+    from himari.environment.api import BindingObservation, ConnectionStatus
     from himari.prompt.compaction import state_key
 
     at = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
@@ -421,15 +421,15 @@ def test_environment_observations_changed_since_the_measurement_add_the_whole_st
                           1),), ())
     offline = BindingObservation(binding, ConnectionStatus.OFFLINE, at)
     online = BindingObservation(binding, ConnectionStatus.ONLINE, at, working_directory="/srv/a",
-                                workspaces=(ObservedWorkspace("/srv/a", "A"),))
+                                writable=("/srv/a",))
     events = history("q1", "a1", "q2")
     base = dataclasses.replace(inputs(events), state_basis=basis, observations=(offline,))
     key = state_key(base)
     assert state_key(dataclasses.replace(base, observations=(dataclasses.replace(
         offline, observed_at=at + timedelta(seconds=30)),))) == key  # observed again, nothing new
     keys = [state_key(dataclasses.replace(base, observations=(observed,))) for observed in (
-        online,  # offline → online, with its folders
-        dataclasses.replace(online, workspaces=(ObservedWorkspace("/srv/a", "A"), ObservedWorkspace("/srv/b", "B"))),
+        online,  # offline → online, with its folder
+        dataclasses.replace(online, writable=("/srv/a", "/srv/b")),
         dataclasses.replace(online, working_directory="/srv/b"),
     )]
     assert key not in keys and len(set(keys)) == 3  # each change is a new key

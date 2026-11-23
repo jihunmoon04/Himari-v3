@@ -11,7 +11,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
-from testkit import FAKE, FOREIGN, SCOPE, RecordingTool, calls, final, restart, runtime, text_result, user
+from testkit import FAKE, FOREIGN, SCOPE, RecordingTool, SimulatedCrash, calls, final, restart, runtime, text_result, user
 
 from himari.common import TextBlock
 from himari.control.api import DriveState
@@ -170,7 +170,7 @@ async def test_a_request_over_the_limit_is_never_sent() -> None:
     assert result.run_ids == ()
 
 
-@pytest.mark.parametrize("output", [final("   "), calls(("ask_user", {"question": "?"}))])
+@pytest.mark.parametrize("output", [final("   "), calls(("probe", {}))])
 @sync
 async def test_an_unusable_summary_is_not_committed(output: object) -> None:
     rt, _ = runtime([Measured(final("a1"), 850), output, final("a2")], context_budget=BUDGET)  # type: ignore[list-item]
@@ -469,10 +469,13 @@ async def test_context_status_reports_the_estimate_and_the_latest_summary() -> N
 async def test_context_status_without_a_budget_or_with_a_group_open() -> None:
     plain, _ = runtime([final("a1")])
     assert await plain.driver.context_status(SCOPE) is None
-    rt, _ = runtime([calls(("ask_user", {"question": "which?"}))], context_budget=BUDGET)
-    await rt.driver.drive(SCOPE, user("q1"))
+    probe = RecordingTool("probe")
+    probe.crash_next = True
+    rt, _ = runtime([calls(("probe", {}))], tools=[probe], context_budget=BUDGET)
+    with pytest.raises(SimulatedCrash):
+        await rt.driver.drive(SCOPE, user("q1"))
     status = await rt.driver.context_status(SCOPE)
-    assert status is not None and status.estimated_tokens is None  # the question is still open
+    assert status is not None and status.estimated_tokens is None  # the group a crash cut is still open
     with pytest.raises(DataError):
         await rt.driver.context_status(FOREIGN)
 
@@ -511,13 +514,7 @@ async def test_compact_now_with_nothing_to_compact() -> None:
 
 
 @sync
-async def test_compact_now_waits_for_an_open_question_and_reports_failures() -> None:
-    rt, adapter = runtime([calls(("ask_user", {"question": "which?"}))], context_budget=BUDGET)
-    await rt.driver.drive(SCOPE, user("q1"))
-    sent = len(adapter.sent)
-    waiting = await rt.driver.compact(SCOPE)
-    assert waiting.state is DriveState.WAITING_FOR_USER and waiting.waiting_call is not None
-    assert len(adapter.sent) == sent
+async def test_compact_now_reports_failures() -> None:
     failing, failing_adapter = runtime([final("a1"), final("a2"), NativeNoResponse("http_500")], context_budget=BUDGET)
     await failing.driver.drive(SCOPE, user("q1"))
     await failing.driver.drive(SCOPE, user("q2"))

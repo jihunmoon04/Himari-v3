@@ -3,7 +3,7 @@ import type { PromptInfo } from "@/api/himari";
 import { matchPrompts } from "./prompts";
 
 const prompt = (name: string, title: string | null = null): PromptInfo =>
-  ({ source: "hub", name, title, description: null, arguments: [] });
+  ({ source: "notes", name, title, description: null, arguments: [] });
 
 describe("the / picker", () => {
   it("offers names and titles that hold the query, names that start with it first", () => {

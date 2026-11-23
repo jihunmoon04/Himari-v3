@@ -17,38 +17,36 @@ compaction fails, the Run still goes ahead when its input fits the
 budget's ``ceiling_tokens`` (the model's window less the room kept for its
 answer); an input estimated over it is never sent (REQUEST_REJECTED).
 
-Pause and cancel (V3-P55) come from the ``StopSignal`` of the job. A pause
-is checked at the safe boundaries — before each Run, each summarizing call
-and each Tool call starts — so the model call or Tool call under way
-finishes and is recorded; the drive ends PAUSED, never-started calls stay
-PENDING for ``resume``, and a compaction stopped between its calls commits
-nothing. A cancel interrupts the model call or Tool call under way: an
-interrupted model call is recorded as OUTCOME_UNKNOWN and never resent (it
-may have been processed), an interrupted Tool call is settled by
-``cancel_group`` (never-started → CANCELLED, claimed → uncertain), and the
-drive ends CANCELLED. A cancel is checked once more right before each
-commit of a model's output — its projection, a compaction snapshot — and
-before a group's result is returned: a response that arrived together with
-the cancel is kept as raw but never committed. A commit that passed that
-check is atomic (Data commits never yield) and completes; the cancel
-applies after it. Stop requests outrank the Run limit.
+Cancel (V3-P55) comes from the ``StopSignal`` of the job. It interrupts the
+model call or Tool call under way: an interrupted model call is recorded as
+OUTCOME_UNKNOWN and never resent (it may have been processed), an
+interrupted Tool call is settled by ``cancel_group`` (never-started →
+CANCELLED, claimed → uncertain), and the drive ends CANCELLED. A cancel is
+checked at the safe boundaries — before each Run, each summarizing call and
+each Tool call starts — and once more right before each commit of a model's
+output — its projection, a compaction snapshot — and before a group's result
+is returned: a response that arrived together with the cancel is kept as raw
+but never committed. A commit that passed that check is atomic (Data commits
+never yield) and completes; the cancel applies after it. A cancel outranks
+the Run limit.
 
-A turn (V3-P62) has no Run limit unless one is set (``max_runs_per_drive``).
-It is guarded instead by a token budget (``turn_budget``, checked before
-every request — model Runs and summarizing calls — against what the drive
-used, the request's estimate and an output reserve: BUDGET_REACHED), by
-progress (``no_progress_runs`` Runs in a row that brought nothing new:
-NO_PROGRESS; nothing is ever kept from running) and, through the Runner, by
-a pause when no client reads the Conversation. Stop requests outrank them
-all. The drive's state (``control.turn``) is told to the model as data in the
-runtime state, and to the Runner after every Run (``TurnProgress``). Every
-request carries a per-Conversation ``session_key`` (OpenRouter
-``session_id``), so the provider's cache can serve the growing history.
+A turn (V3-P62) is guarded by one Run limit (``max_runs_per_drive``; a
+wake's turn may have a tighter one): RUN_LIMIT_REACHED. With
+``turn_guidance`` the Runs it still allows are told to the model as data in
+the runtime state once few are left (``control.turn``); what the drive used
+is told to the Runner after every Run (``TurnProgress``). Every request
+carries a per-Conversation ``session_key`` (OpenRouter ``session_id``), so
+the provider's cache can serve the growing history.
+
+An ``ask_user`` question of older history (the Tool is gone) is the user's
+to answer, never a Run's: a resume leaves it and starts nothing — so a
+wake's question is never continued outside the wake's own Tool rules — and
+the user's next message closes it as CANCELLED.
 
 The model (V3-P64 §5) is fixed for a turn: once the Conversation's lock is
 held, its stored choice is read and resolved against the ``ModelCatalog``
-into one ``ResolvedModel`` — request options, context budget, output
-reserve — which every Run and summarizing call of the turn uses. A choice
+into one ``ResolvedModel`` — request options and context budget — which
+every Run and summarizing call of the turn uses. A choice
 changed meanwhile applies from the next turn. ``context_status`` resolves
 without the lock: it shows what the next turn would use.
 
@@ -74,7 +72,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
+    LEGACY_ASK_USER,
     CallRef,
     ContentBlock,
     ConversationId,
@@ -128,7 +126,6 @@ from himari.data.api import (
     RunPreparation,
     RunPurpose,
     ToolExecutionStatus,
-    ToolResultRecord,
     TriggerRef,
     UserMessage,
     Wake,
@@ -170,13 +167,13 @@ from himari.tool.api import SCREEN_TOOL_ID, GroupDispatchResult, GroupState, Too
 
 
 MAX_COMPACTIONS_PER_RUN = 4
+MAX_RUNS = 12  # model Runs a turn may make (V3-P62 §6)
 CANCELLED_BY_USER = "cancelled_by_user"  # the error code of a model call interrupted by a cancel
 SHUTDOWN = "shutdown"  # of a streamed model call the server stopped (V3-P73 §5.3)
 
 # Model-facing results of calls that never ran (V3-P55).
 CANCELLED_RESULT = "Not run: the user cancelled before this call started."
 REDIRECTED_RESULT = "Not run: the user sent a new message before this call started."
-DISMISSED_RESULT = "The user dismissed this question without answering it."
 
 
 class _Cancelled(Exception):
@@ -187,23 +184,11 @@ class _Cancelled(Exception):
         self.run_id = run_id
 
 
-class _Paused(Exception):
-    """A pause stopped a compaction between its calls (internal to the driver)."""
-
-
-class _BudgetReached(Exception):
-    """The next request would pass the turn's token budget (internal to the driver)."""
-
-
-NO_PROGRESS_RUNS = 3  # V3-P62 O3
-PAUSED_COMPACTING = "paused between summarizing calls; nothing was committed"
-
-
 def sent_from(events: Sequence[ConversationEvent]) -> MessageOrigin | None:
     """V3-P83 §6.2 (re-review C1): the origin of the last user message that no
-    assistant Event follows — a question's answer too, which its call's result
-    follows in the same transaction. None: there is none (a resume after an
-    answer), or it came before origins were recorded."""
+    assistant Event follows — an older ask_user answer too, which its call's
+    result follows in the same transaction. None: there is none, or it came
+    before origins were recorded."""
     for event in sorted(events, key=lambda e: e.sequence, reverse=True):
         if event.kind in (EventKind.ASSISTANT_FINAL, EventKind.ASSISTANT_TOOL_CALLS):
             return None
@@ -242,10 +227,9 @@ class Driver:
         user_instructions: InstructionsStore | None = None,  # None: no user instructions (V3-P69)
         wakes: WakeStore | None = None,  # V3-P87: server-opened turns; None: none are accepted
         memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
-        max_runs_per_drive: int | None = 16,
+        max_runs_per_drive: int = MAX_RUNS,
         planner: CompactionPlanner | None = None,
-        turn_budget: int | None = None,
-        no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
+        turn_guidance: bool = False,  # V3-P62 §8: the model is told when few Runs are left
         streaming: bool = False,  # V3-P73: answering Runs ask for a stream
         time_zone: str | None = None,  # V3-P83 §6.4: the zone the turn's time is shown in; None: not shown
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -255,12 +239,8 @@ class Driver:
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
-        if max_runs_per_drive is None and turn_budget is None:
-            raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
-        if turn_budget is not None and planner is None:
-            raise ValueError("a turn token budget needs a context budget: it uses its request estimates")
-        if any(v is not None and v < 1 for v in (max_runs_per_drive, turn_budget, no_progress_runs)):
-            raise ValueError("Run limits, budgets and the no-progress count are positive")
+        if max_runs_per_drive < 1:
+            raise ValueError("the Run limit is positive (V3-P62)")
         self._log = log
         self._loader = loader
         self._composer = composer
@@ -272,11 +252,9 @@ class Driver:
         self._memories = memories
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
-        self._limits: dict[ConversationId, int | None] = {}  # this drive's Run limit (V3-P87 §4.2)
         self._read_only: set[ConversationId] = set()  # a wake's turn: only Tools that read run (V3-P90 §5.6)
         self._free: dict[ConversationId, _Held] = {}  # a free wake's turn: its output held till it speaks (§7.3)
-        self._turn_budget = turn_budget
-        self._no_progress_runs = no_progress_runs
+        self._turn_guidance = turn_guidance
         self._planner = planner
         self._streaming = streaming
         self._zone = None if time_zone is None else ZoneInfo(time_zone)
@@ -362,8 +340,7 @@ class Driver:
                 raise ControlError(ControlErrorCode.MODEL_UNCHECKED, self._turn_model(scope).model_id)
             _, stop = await self._prepare(scope)
             triggers = await self._next_triggers(scope)
-            if (stop is not None or await self._log.find_waiting_call(scope) is not None
-                    or await self._unfinished_group(scope) is not None
+            if (stop is not None or await self._unfinished_group(scope) is not None
                     or (triggers and not await self._left_by_ended_wakes(scope, triggers))):
                 raise ControlError(ControlErrorCode.NOT_SETTLED, scope.conversation_id)
             interface = await self._interface_at_acceptance(scope, MessageOrigin(OriginKind.WAKE, device_id))
@@ -373,7 +350,7 @@ class Driver:
     async def _left_by_ended_wakes(self, scope: TrustedScope, triggers: Sequence[TriggerRef]) -> bool:
         """V3-P87 §6.1, §13: what the model has not answered blocks a new wake —
         a user message, a wake still opened, or a finished tool group of the
-        user's turn (e.g. paused between Runs: the user's work). What ended wakes
+        user's turn (e.g. stopped at the Run limit: the user's work). What ended wakes
         left does not (PR #153 review P2-1, PR #156 review P1): a wake cut by a
         restart before any word (failed, its keys given back), a group closed at
         a restart or stopped at a wake's Run cap. The next turn draws them all,
@@ -414,23 +391,6 @@ class Driver:
             await self._close_latest_group(scope, reason)
             return True
 
-    async def cancel(self, scope: TrustedScope) -> DriveResult:
-        async with self._exclusive(scope):
-            recovery, stop = await self._prepare(scope)
-            if stop is not None:
-                return stop
-            waiting = await self._log.find_waiting_call(scope)
-            if waiting is not None:
-                group: GroupDispatchResult | None = await self._dispatcher.cancel_group(
-                    scope, waiting.run_id, DISMISSED_RESULT)
-            else:
-                group = await self._close_latest_group(scope, CANCELLED_RESULT)
-            if group is None:
-                return DriveResult(DriveState.IDLE, recovery=recovery)
-            if group.state is GroupState.BLOCKED_UNKNOWN:
-                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
-            return DriveResult(DriveState.CANCELLED, recovery=recovery)
-
     async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
                       progress: TurnProgress | None = None) -> DriveResult:
         async with self._exclusive(scope, stop, progress):
@@ -440,10 +400,6 @@ class Driver:
             budget = self._turn_model(scope).offer.budget
             if self._planner is None or budget is None:
                 return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery, detail="no context budget")
-            waiting = await self._log.find_waiting_call(scope)
-            if waiting is not None:  # the open group cannot be folded yet
-                return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery,
-                                   detail="answer the question before compacting")
             try:
                 inputs = await self._situated(scope, await self._loader.load(
                     scope, (), self._options_for(scope), *self._turn_user(scope)))
@@ -462,12 +418,6 @@ class Driver:
             except _Cancelled:
                 return DriveResult(DriveState.CANCELLED, recovery=recovery, compaction_run_ids=tuple(compactions),
                                    detail="cancelled while summarizing; nothing was committed")
-            except _Paused:
-                return DriveResult(DriveState.PAUSED, recovery=recovery, compaction_run_ids=tuple(compactions),
-                                   detail=self._paused_detail(scope, PAUSED_COMPACTING))
-            except _BudgetReached as reached:
-                return DriveResult(DriveState.BUDGET_REACHED, recovery=recovery,
-                                   compaction_run_ids=tuple(compactions), detail=f"{reached}; nothing was committed")
             return DriveResult(
                 DriveState.COMPACTION_FAILED if failure is not None else DriveState.COMPACTED,
                 recovery=recovery, detail=failure or "", compaction_run_ids=tuple(compactions),
@@ -505,20 +455,15 @@ class Driver:
         )
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
-        """Record one user input durably — T7a if an ask_user call is waiting,
-        else T1 — after restart cleanup and projection of stored responses,
-        without running any Tool or calling the Provider. ``resume`` then
-        continues from it (CTRL-06: an interface may report acceptance only
-        once the input is committed)."""
+        """Record one user input durably (T1) after restart cleanup and
+        projection of stored responses, without running any Tool or calling
+        the Provider. ``resume`` then continues from it (CTRL-06: an
+        interface may report acceptance only once the input is committed)."""
         async with self._exclusive(scope):
             await self._prepare(scope)  # a stop is reported by the following resume
-            waiting = await self._log.find_waiting_call(scope)
             message = await self._capture_interface(scope, message)
-            if waiting is not None:
-                await self._log.answer_pending_call(scope, waiting, message)  # T7a
-            else:
-                await self._close_latest_group(scope, REDIRECTED_RESULT)  # blocked calls: resume reports them
-                await self._log.append_event(scope, message)  # T1
+            await self._close_latest_group(scope, REDIRECTED_RESULT)  # blocked calls: resume reports them
+            await self._log.append_event(scope, message)  # T1
 
     @contextlib.asynccontextmanager
     async def _exclusive(self, scope: TrustedScope, stop: StopSignal | None = None,
@@ -532,11 +477,8 @@ class Driver:
             self._turn_models[scope.conversation_id] = model
             self._turn_users[scope.conversation_id] = user
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
-            limit = self._max_runs if max_runs is None else (
-                max_runs if self._max_runs is None else min(max_runs, self._max_runs))
-            self._limits[scope.conversation_id] = limit
-            self._turns[scope.conversation_id] = Turn(self._turn_budget, limit, progress,
-                                                      model.offer.max_output_tokens)
+            limit = self._max_runs if max_runs is None else min(max_runs, self._max_runs)  # V3-P87 §4.2
+            self._turns[scope.conversation_id] = Turn(limit, progress)
             self._outputs[scope.conversation_id] = progress if isinstance(progress, OutputProgress) else None
             try:
                 yield
@@ -544,7 +486,6 @@ class Driver:
                 del self._outputs[scope.conversation_id]
                 del self._signals[scope.conversation_id]
                 del self._turns[scope.conversation_id]
-                self._limits.pop(scope.conversation_id, None)
                 del self._turn_models[scope.conversation_id]
                 del self._turn_users[scope.conversation_id]
                 self._turn_presences.pop(scope.conversation_id, None)
@@ -664,16 +605,11 @@ class Driver:
 
     def _compose(self, scope: TrustedScope, inputs: PromptInputs) -> ModelInput:
         """The model's input, with the turn's state as data (V3-P62 §8) — only
-        under a turn budget, where the system instructions carry its rule."""
+        with ``turn_guidance``, where the system instructions carry its rule."""
         model_input = self._composer.compose(inputs)
-        if self._turn_budget is None:
+        if not self._turn_guidance:
             return model_input
         return dataclasses.replace(model_input, turn_state=self._turn(scope).state())
-
-    def _paused_detail(self, scope: TrustedScope, what: str = "") -> str:
-        """A pause's detail: its reason when it was not the user's own (V3-P62 §5)."""
-        reason = self._stop(scope).reason
-        return "; ".join(part for part in (reason, what) if part)
 
     def _invocation(self, prepared: NativePreparedRequest, run_id: RunId, capture: RawCapture | None,
                     live: OutputProgress | None) -> Callable[[], Awaitable[NativeInvocationOutcome]]:
@@ -715,34 +651,26 @@ class Driver:
 
     async def _drive_locked(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
         recovery, stop = await self._prepare(scope)
-        triggers: tuple[TriggerRef, ...]
-        waiting = await self._log.find_waiting_call(scope)
         message = await self._capture_interface(scope, message)
-        if waiting is not None:
-            await self._log.answer_pending_call(scope, waiting, message)  # T7a
-            triggers = (CompletedGroupRef(waiting.run_id),)
-        else:
-            group = await self._close_latest_group(scope, REDIRECTED_RESULT) if stop is None else None
-            event = await self._log.append_event(scope, message)  # T1: input is never dropped
-            if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
-                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
-            triggers = (EventRef(event.event_id),)
+        group = await self._close_latest_group(scope, REDIRECTED_RESULT) if stop is None else None
+        event = await self._log.append_event(scope, message)  # T1: input is never dropped
+        if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
+            return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
         self._turn_inputs[scope.conversation_id] = message
         if stop is not None:
             return stop
-        return await self._run_loop(scope, triggers, recovery)
+        return await self._run_loop(scope, (EventRef(event.event_id),), recovery)
 
     async def _resume_locked(self, scope: TrustedScope) -> DriveResult:
         recovery, stop = await self._prepare(scope)
         if stop is not None:
             return stop
-        waiting = await self._log.find_waiting_call(scope)
-        if waiting is not None:
-            return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery)
+        left = await self._unfinished_group(scope)
+        if left is not None and any(c.tool_id == LEGACY_ASK_USER for c in left[1].calls):
+            return DriveResult(DriveState.IDLE, recovery=recovery)  # it waits for the user's message
         group = await self._resume_pending_group(scope)
-        if group is not None and group.state is not GroupState.COMPLETED:
-            return self._group_stop(group, lambda state, **kw: DriveResult(state, recovery=recovery, **kw),
-                                    self._paused_detail(scope))
+        if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
+            return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
         triggers = await self._next_triggers(scope)
         if not triggers:
             return DriveResult(DriveState.IDLE, recovery=recovery)
@@ -854,9 +782,9 @@ class Driver:
         return tuple(reversed(triggers))
 
     async def _unfinished_group(self, scope: TrustedScope) -> tuple[RunId, AssistantToolCalls] | None:
-        """The latest group if it has never-claimed PENDING calls or uncertain
-        ones the model was not told about; a lone waiting ``ask_user`` is
-        not unfinished work (it waits for the user)."""
+        """The latest group if it has never-claimed PENDING calls (an open
+        ``ask_user`` question of older history too) or uncertain ones the
+        model was not told about."""
         events = await self._log.read_events(scope)
         last_group = next(
             (e for e in reversed(events) if e.kind is EventKind.ASSISTANT_TOOL_CALLS), None
@@ -872,14 +800,14 @@ class Driver:
             if r.status is ToolExecutionStatus.PENDING
             or (r.status is ToolExecutionStatus.UNKNOWN and r.model_result is None)
         ]
-        if not unfinished or (len(records) == 1 and records[0].tool_id == ASK_USER_TOOL_ID):
+        if not unfinished:
             return None
         return last_group.origin_run_id, last_group.payload
 
     async def _resume_pending_group(self, scope: TrustedScope) -> GroupDispatchResult | None:
         """Finish the latest group: run never-claimed PENDING calls (D20) and
-        report UNKNOWN ones to the model (V3-047). A pause stops it before
-        the next call (PAUSED); a cancel settles it (``_dispatch``)."""
+        report UNKNOWN ones to the model (V3-047). A cancel settles it
+        (``_dispatch``)."""
         group = await self._unfinished_group(scope)
         if group is None:
             return None
@@ -894,31 +822,22 @@ class Driver:
         return await self._dispatcher.cancel_group(scope, group[0], reason)
 
     async def _dispatch(self, scope: TrustedScope, run_id: RunId, payload: AssistantToolCalls) -> GroupDispatchResult:
-        """Run a group's calls, stopping before the next one on a pause; a
-        cancel interrupts the call under way and closes the rest (COMPLETED
+        """Run a group's calls; a cancel interrupts the call under way, or
+        stops the group before the next one, and closes the rest (COMPLETED
         or BLOCKED_UNKNOWN: the next boundary sees the cancel)."""
         signal = self._stop(scope)
         try:
             group = await self._interruptible(
                 scope, lambda: self._dispatcher.dispatch_group(
-                    scope, run_id, payload.calls, pause=lambda: signal.pause_requested,
+                    scope, run_id, payload.calls, stop=lambda: signal.cancel_requested,
                     read_only=scope.conversation_id in self._read_only,
                     turn=self._turn_sources.get(scope.conversation_id),
                     capabilities=self._options_for(scope).tool_capabilities))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
-        if signal.cancel_requested:  # arrived as the group stopped (e.g. PAUSED): close what did not start
+        if signal.cancel_requested:  # arrived as the group stopped (STOPPED, or blocked): close what did not start
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
         return group
-
-    @staticmethod
-    def _group_stop(group: GroupDispatchResult, build: Callable[..., DriveResult], paused: str = "") -> DriveResult:
-        """The result of a drive stopped by a group that is not COMPLETED."""
-        if group.state is GroupState.BLOCKED_UNKNOWN:
-            return build(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls)
-        if group.state is GroupState.WAITING_FOR_USER:
-            return build(DriveState.WAITING_FOR_USER, waiting_call=group.waiting_call)
-        return build(DriveState.PAUSED, detail=paused)
 
     async def _run_loop(
         self, scope: TrustedScope, triggers: tuple[TriggerRef, ...], recovery: RecoveryReport
@@ -930,7 +849,6 @@ class Driver:
             state: DriveState,
             *,
             final_event: ConversationEvent | None = None,
-            waiting_call: CallRef | None = None,
             unknown_calls: tuple[CallRef, ...] = (),
             detail: str = "",
         ) -> DriveResult:
@@ -938,7 +856,6 @@ class Driver:
                 state,
                 run_ids=tuple(run_ids),
                 final_event=final_event,
-                waiting_call=waiting_call,
                 unknown_calls=unknown_calls,
                 recovery=recovery,
                 detail=detail,
@@ -948,23 +865,11 @@ class Driver:
         signal = self._stop(scope)
         turn = self._turn(scope)
 
-        def boundary() -> DriveResult | None:
-            """A safe boundary: nothing is under way, nothing new has started."""
-            if signal.cancel_requested:
-                return result(DriveState.CANCELLED)
-            if signal.pause_requested:
-                return result(DriveState.PAUSED, detail=self._paused_detail(scope))
-            return None
-
         while True:
-            if (stopped := boundary()) is not None:  # a stop outranks every limit
-                return stopped
-            limit = self._limits.get(scope.conversation_id, self._max_runs)
-            if limit is not None and turn.steps >= limit:
+            if signal.cancel_requested:  # a safe boundary; a cancel outranks the limit
+                return result(DriveState.CANCELLED)
+            if turn.steps >= turn.max_runs:
                 return result(DriveState.RUN_LIMIT_REACHED, detail=f"{turn.steps} steps")
-            if self._no_progress_runs is not None and turn.empty_streak >= self._no_progress_runs:
-                return result(DriveState.NO_PROGRESS,
-                              detail=f"the last {turn.empty_streak} steps brought nothing new")
             try:
                 inputs = await self._situated(scope, await self._loader.load(
                     scope, triggers, self._options_for(scope), *self._turn_user(scope)))
@@ -975,8 +880,7 @@ class Driver:
                         return result(DriveState.REQUEST_REJECTED,
                                       detail="companion_unsupported: the device turn requires a companion model")
                 model_input = self._compose(scope, inputs)
-                model_input, refusal, estimate = await self._fit_budget(scope, triggers, inputs, model_input,
-                                                                        compactions)
+                model_input, refusal = await self._fit_budget(scope, triggers, inputs, model_input, compactions)
             except PromptError as exc:
                 state = (
                     DriveState.RECOVERY_REQUIRED
@@ -986,19 +890,10 @@ class Driver:
                 return result(state, detail=str(exc))
             except _Cancelled:
                 return result(DriveState.CANCELLED, detail="cancelled while summarizing; nothing was committed")
-            except _Paused:
-                return result(DriveState.PAUSED, detail=self._paused_detail(scope, PAUSED_COMPACTING))
-            except _BudgetReached as reached:
-                return result(DriveState.BUDGET_REACHED, detail=f"{reached}; nothing was committed")
             if refusal is not None:
                 return result(DriveState.REQUEST_REJECTED, detail=refusal)
-            if (stopped := boundary()) is not None:  # e.g. paused while compacting
-                return stopped
-            reserve = turn.reserve()
-            if estimate is not None and not turn.fits(estimate, reserve):
-                return result(DriveState.BUDGET_REACHED,
-                              detail=f"the turn used {turn.used} tokens; the next request (about {estimate} in, "
-                                     f"{reserve} kept for its answer) would pass the budget of {turn.budget}")
+            if signal.cancel_requested:  # e.g. while compacting
+                return result(DriveState.CANCELLED)
             if self._streaming:  # V3-P73 §5.1: this Run answers the user
                 options = dataclasses.replace(model_input.request_options, stream=True)
                 model_input = dataclasses.replace(model_input, request_options=options)
@@ -1030,7 +925,7 @@ class Driver:
                     outcome = await self._interruptible(scope, self._invocation(prepared, run_id, capture, live))
                 except _Cancelled:
                     await self._log.record_raw_outcome(scope, run_id, _uncertain(CANCELLED_BY_USER, capture))
-                    turn.charge(None, estimate or 0, reserve, step=True)
+                    turn.charge(None, step=True)
                     return result(DriveState.CANCELLED,
                                   detail="cancelled while the model was answering; it may have been processed and "
                                          "is not resent")
@@ -1045,8 +940,7 @@ class Driver:
             finally:
                 if live is not None:
                     live.output_ended(run_id)
-            turn.charge(outcome.usage if isinstance(outcome, NativeReceived) else None, estimate or 0, reserve,
-                        step=True)
+            turn.charge(outcome.usage if isinstance(outcome, NativeReceived) else None, step=True)
             if isinstance(outcome, NativeReceived) and signal.cancel_requested:
                 # Arrived together with the cancel: the raw response is kept, nothing enters history.
                 await self._log.record_projection_failure(scope, run_id, CANCELLED_BY_USER)
@@ -1071,10 +965,8 @@ class Driver:
             if isinstance(normalized, NormalizedFinal):
                 return result(DriveState.COMPLETED, final_event=event)
             group = await self._dispatch(scope, run_id, AssistantToolCalls(normalized.calls, normalized.commentary))
-            if group.state is not GroupState.COMPLETED:
-                return self._group_stop(group, result, self._paused_detail(scope))
-            effects = {str(d.tool_id): d.effect_profile for d in model_input.tool_catalog}
-            turn.observe(await self._log.read_tool_executions(scope, run_id), group.refusals, effects)
+            if group.state is GroupState.BLOCKED_UNKNOWN:
+                return result(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls)
             triggers = (CompletedGroupRef(run_id),)
 
     async def _fit_budget(
@@ -1084,13 +976,12 @@ class Driver:
         inputs: PromptInputs,
         model_input: ModelInput,
         compactions: list[RunId],
-    ) -> tuple[ModelInput, str | None, int | None]:
+    ) -> tuple[ModelInput, str | None]:
         """The input to send (after at most MAX_COMPACTIONS_PER_RUN
-        compactions), or a refusal if it is still over the hard limit; and
-        its estimated size (None without a context budget)."""
+        compactions), or a refusal if it is still over the hard limit."""
         budget = self._turn_model(scope).offer.budget
         if self._planner is None or budget is None:
-            return model_input, None, None
+            return model_input, None
         decision = self._planner.decide(inputs, model_input, budget)
         failure = None
         for _ in range(MAX_COMPACTIONS_PER_RUN):
@@ -1110,8 +1001,8 @@ class Driver:
                 detail += f" (compaction failed: {failure})"
             elif decision.compaction is None:
                 detail += " (no compaction fits within the limit)"
-            return model_input, detail, estimate.tokens
-        return model_input, None, estimate.tokens
+            return model_input, detail
+        return model_input, None
 
     async def _compact(
         self,
@@ -1130,19 +1021,12 @@ class Driver:
         for index in range(len(plan.pieces)):
             if signal.cancel_requested:
                 raise _Cancelled()
-            if signal.pause_requested:  # the call under way finished; the next one does not start
-                raise _Paused()
             request = planner.step_request(plan, index, summary)
             size = planner.request_size(request)  # measured here, not taken from the planner
             if size > budget.limit_tokens:
                 return f"compaction request of about {size} tokens exceeds the limit"
-            turn = self._turn(scope)
-            reserve = plan.summary_limit  # characters: at least as many tokens as the summary can take
-            if not turn.fits(size, reserve):
-                raise _BudgetReached(f"the turn used {turn.used} tokens; a summarizing call (about {size} in, "
-                                     f"{reserve} kept for the summary) would pass the budget of {turn.budget}")
             try:
-                run_id, failure, text = await self._summarize(scope, request, planner, plan, size, reserve)
+                run_id, failure, text = await self._summarize(scope, request, planner, plan)
             except _Cancelled as cancelled:
                 if cancelled.run_id is not None:
                     compactions.append(cancelled.run_id)
@@ -1177,7 +1061,6 @@ class Driver:
 
     async def _summarize(
         self, scope: TrustedScope, request: ModelInput, planner: CompactionPlanner, plan: CompactionPlan,
-        size: int, reserve: int,
     ) -> tuple[RunId | None, str | None, str | None]:
         """One summarizing call as a COMPACTION Run: (Run, failure, summary)."""
         try:
@@ -1202,13 +1085,12 @@ class Driver:
             outcome = await self._interruptible(scope, lambda: self._provider.invoke_prepared(prepared))
         except _Cancelled:
             await self._log.record_raw_outcome(scope, run_id, RawUncertain(CANCELLED_BY_USER))
-            self._turn(scope).charge(None, size, reserve, step=False)
+            self._turn(scope).charge(None, step=False)
             raise _Cancelled(run_id) from None
         except Exception as exc:  # noqa: BLE001 — adapter error after send began
             outcome = NativeUncertain(type(exc).__name__)
         await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
-        self._turn(scope).charge(outcome.usage if isinstance(outcome, NativeReceived) else None, size, reserve,
-                                 step=False)
+        self._turn(scope).charge(outcome.usage if isinstance(outcome, NativeReceived) else None, step=False)
         if not isinstance(outcome, NativeReceived):
             return run_id, outcome.error_code, None  # no effects to reconcile: the next Run may try again
         try:

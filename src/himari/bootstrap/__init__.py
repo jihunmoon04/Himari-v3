@@ -11,9 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from himari.control.ask_user import AskUserTool
 from himari.control.api import InterfaceSource, ModelCatalog, ModelOffer, PresenceSource
-from himari.control.driver import Driver
+from himari.control.driver import MAX_RUNS, Driver
 from himari.common import TrustedScope
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
@@ -60,9 +59,8 @@ def build_runtime(
     store: Store | None = None,
     instructions: Sequence[str] = DEFAULT_INSTRUCTIONS,
     model_id: str = "scripted-model",
-    max_runs_per_drive: int | None = 16,  # None: no Run limit (then a turn_budget is needed, V3-P62)
-    turn_budget: int | None = None,  # tokens a drive may use (V3-P62 §3); None: none
-    no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop; V3-P62's default is NO_PROGRESS_RUNS
+    max_runs_per_drive: int = MAX_RUNS,  # V3-P62 §6
+    turn_guidance: bool = False,  # V3-P62 §8: the model is told when few Runs are left
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
     context_budget: ContextBudget | None = None,  # None: no compaction or size check
@@ -82,7 +80,7 @@ def build_runtime(
     presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: the model is not told
     interfaces: InterfaceSource | None = None,  # V3-P93: captured with each input
     screen: ScreenSource | None = None,  # V3-P91: the screen Tool asks devices through it; None: no screen Tool
-    # V3-P89 §6: what the system text's sections follow besides ``memory`` and ``turn_budget``
+    # V3-P89 §6: what the system text's sections follow besides ``memory`` and ``turn_guidance``
     # (which this sets); the text and its order are the Prompt module's. None: ``instructions``
     # as given, with no sections — only the memory section and the turn rule are added after
     # them as before (callers with their own base text: tests). Application.open always gives one.
@@ -97,7 +95,7 @@ def build_runtime(
         snapshot = await data.get_latest_snapshot(scope)
         return snapshot.covers_through_sequence if snapshot is not None and read_summary(snapshot) else None
 
-    registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data, time_zone=time_zone or "UTC") if memory else ()),
+    registry = ToolRegistry([*tools, *(memory_tools(data, time_zone=time_zone or "UTC") if memory else ()),
                              *(conversation_search_tools(data, compacted_through) if conversation_search else ()),
                              *((ScreenTool(screen),) if screen is not None else ())],
                             allow_require_user=allow_require_user_tools)
@@ -116,13 +114,13 @@ def build_runtime(
         provider.use_blobs(data.blobs.read_bytes)
     if models is None:
         capabilities = provider.describe_capabilities(model_id)
-        models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts, context_budget,
-                                          capabilities.max_output_tokens),), model_id)
-    # the turn's rule is in the system text when the turn guards are on (V3-P62 §8)
-    spec = None if system is None else replace(system, memory=memory, turn_guidance=turn_budget is not None)
+        models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts,
+                                          context_budget),), model_id)
+    # the turn's rule is in the system text when the model is told the turn's state (V3-P62 §8)
+    spec = None if system is None else replace(system, memory=memory, turn_guidance=turn_guidance)
     if spec is None:
         instructions = (*instructions, *((MEMORY_SECTION,) if memory else ()),
-                        *((TURN_GUIDANCE,) if turn_budget is not None else ()))
+                        *((TURN_GUIDANCE,) if turn_guidance else ()))
     driver = Driver(
         log=data,
         loader=ContextLoader(data, data, registry, instructions, access, source_notes, files=data,
@@ -138,8 +136,7 @@ def build_runtime(
         memories=data if memory else None,
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
-        turn_budget=turn_budget,
-        no_progress_runs=no_progress_runs,
+        turn_guidance=turn_guidance,
         streaming=streaming,
         time_zone=time_zone,
         presence=presence,
