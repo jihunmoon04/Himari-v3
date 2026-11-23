@@ -290,7 +290,8 @@ def _free_minutes(source: Mapping[str, str]) -> int:
     """V3-P107 §4: HIMARI_PROACTIVE_FREE_MINUTES (30; 0: no free wakes). Unset, a V3-P90 setting that
     turned free wakes off (HIMARI_PROACTIVE_FREE_STEPS empty) still turns them off; other steps are
     read no more."""
-    if source.get(PROACTIVE_FREE_MINUTES_VAR) is None and source.get(PROACTIVE_FREE_STEPS_VAR, "x").strip() == "":
+    unset = not (source.get(PROACTIVE_FREE_MINUTES_VAR) or "").strip()  # as _required reads it
+    if unset and source.get(PROACTIVE_FREE_STEPS_VAR, "x").strip() == "":
         return 0
     return _required(source.get(PROACTIVE_FREE_MINUTES_VAR), PROACTIVE_FREE_MINUTES_VAR, 30, 0, 24 * 60)
 

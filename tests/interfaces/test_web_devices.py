@@ -653,6 +653,8 @@ def test_speaking_first_settings_from_the_environment() -> None:
     assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_MINUTES": "0"}).proactive.free_minutes == 0  # none
     # V3-P90's way to turn them off still does, unless the new setting says otherwise
     assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": " "}).proactive.free_minutes == 0
+    assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": "", "HIMARI_PROACTIVE_FREE_MINUTES": " "}
+                              ).proactive.free_minutes == 0  # an empty new line is unset too
     assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": "", "HIMARI_PROACTIVE_FREE_MINUTES": "45"}
                               ).proactive.free_minutes == 45
 
