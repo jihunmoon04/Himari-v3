@@ -9,10 +9,7 @@ Control does not know presence.
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from himari.common import ConversationId, PrincipalId, TrustedScope
@@ -21,13 +18,7 @@ from himari.data.api import MessageOrigin, OriginKind
 from himari.presence.api import DeviceState, Devices, EventHub, Presence
 from himari.prompt.api import BeforePresence, DevicePresence, MediaPresence, NowDoing, PresenceView
 
-log = logging.getLogger(__name__)
-
 PRESENCE_DEVICES = 8  # devices the model is told of (§6.2)
-
-
-class WaitingConversations(Protocol):
-    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]: ...
 
 
 def origin_view(origin: MessageOrigin | None) -> dict[str, Any] | None:
@@ -41,45 +32,25 @@ class CompanionEvents:
     """The Runner's listener. It keeps the origin of each running job, so
     ``activity`` can say where each working conversation's message came from."""
 
-    def __init__(self, hub: EventHub, waiting: WaitingConversations) -> None:
+    def __init__(self, hub: EventHub) -> None:
         self._hub = hub
-        self._waiting = waiting
         # Each working conversation's origin and job (V3-P84 §6.3: an app that reconnects finds its job).
         self._working: dict[tuple[PrincipalId, ConversationId], tuple[MessageOrigin | None, str | None]] = {}
-        self._tasks: set[asyncio.Task[None]] = set()
-        # Each principal's latest activity change: a read that a later change overtook is
-        # not published (PR #124 review B1), so an older state never lands after a newer one.
-        self._revisions: dict[PrincipalId, int] = {}
 
-    async def activity(self, principal: PrincipalId) -> dict[str, Any]:
-        """V3-P80's working and waiting conversations, with the working ones' origins (§8.1)."""
+    def activity(self, principal: PrincipalId) -> dict[str, Any]:
+        """V3-P80's working conversations, with their origins (§8.1)."""
         working = sorted((cid, origin, job) for (who, cid), (origin, job) in self._working.items() if who == principal)
-        return {"working": [{"id": cid, "origin": origin_view(origin), "job_id": job} for cid, origin, job in working],
-                "waiting": sorted(await self._waiting.list_waiting_conversations(principal))}
+        return {"working": [{"id": cid, "origin": origin_view(origin), "job_id": job} for cid, origin, job in working]}
 
-    def activity_changed(self, principal: PrincipalId) -> None:
-        """Publish ``activity`` soon (it reads Data): after a job, a trash, a restore.
-        Only the read for the latest change is published."""
-        revision = self._revisions[principal] = self._revisions.get(principal, 0) + 1
-        task = asyncio.get_running_loop().create_task(self._publish_activity(principal, revision))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _publish_activity(self, principal: PrincipalId, revision: int) -> None:
-        try:
-            activity = await self.activity(principal)
-        except Exception:  # noqa: BLE001 — a missed activity is caught up by the next hello
-            log.exception("could not read the activity")
-            return
-        if self._revisions.get(principal) == revision:  # else a later change's read publishes
-            self._hub.publish(principal, "activity", activity)
+    def _activity_changed(self, principal: PrincipalId) -> None:
+        self._hub.publish(principal, "activity", self.activity(principal))
 
     def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
         self._working[(scope.principal_id, scope.conversation_id)] = (origin, status.job_id)
         self._hub.publish(scope.principal_id, "job", {"conversation": scope.conversation_id, "state": "started",
                                                       "origin": origin_view(origin), "job_id": status.job_id,
                                                       **({"free": True} if status.free else {})})  # V3-P90 §9
-        self.activity_changed(scope.principal_id)
+        self._activity_changed(scope.principal_id)
 
     def accepted(self, scope: TrustedScope) -> None:
         self._hub.publish(scope.principal_id, "conversation", {"conversation": scope.conversation_id})
@@ -100,12 +71,7 @@ class CompanionEvents:
                                                       "outcome": outcome, "error": status.error,
                                                       "job_id": status.job_id})
         self._hub.publish(scope.principal_id, "conversation", {"conversation": scope.conversation_id})
-        self.activity_changed(scope.principal_id)
-
-    async def aclose(self) -> None:
-        for task in list(self._tasks):
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._activity_changed(scope.principal_id)
 
 
 class CompanionPresence:

@@ -21,7 +21,6 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     ContentBlock,
     DeepFrozen,
     JsonValue,
@@ -36,7 +35,7 @@ class ProviderErrorCode(Enum):
     UNSUPPORTED_CAPABILITY = "unsupported_capability"
     INVALID_NATIVE_ORDER = "invalid_native_order"  # no legal native rendering
     INCOMPLETE_HISTORY = "incomplete_history"
-    INVALID_MODEL_OUTPUT = "invalid_model_output"  # incl. ask_user mixed (V3-P15)
+    INVALID_MODEL_OUTPUT = "invalid_model_output"
 
 
 class ProviderError(Exception):
@@ -227,13 +226,10 @@ class ProviderAdapter(Protocol):
 
 def validate_tool_calls(calls: Sequence[ToolCall]) -> None:
     """Shared normalization rule for all adapters: non-empty, unique call ids,
-    ordinals exactly ``0..n-1`` in listed order, ``ask_user`` only as the sole
-    call (V3-P15)."""
+    ordinals exactly ``0..n-1`` in listed order."""
     if not calls:
         raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "empty tool call group")
     if len({c.call_id for c in calls}) != len(calls):
         raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "duplicate call_id")
     if [c.ordinal for c in calls] != list(range(len(calls))):
         raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "ordinals must be 0..n-1 in order")
-    if len(calls) > 1 and any(c.tool_id == ASK_USER_TOOL_ID for c in calls):
-        raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "ask_user mixed with other calls")

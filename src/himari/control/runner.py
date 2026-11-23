@@ -9,11 +9,6 @@ is refused with CLOSED — then waits for those inputs to be accepted and for
 a running job, cancelled, to end. The runner checks no permission: it is
 told to close only a Conversation whose owner was checked.
 
-With
-``unattended_runs``, a drive that has run that many Runs while no client
-read the Conversation (``seen`` within ``seen_seconds``) is asked to pause,
-with the reason (§5). Seen means a connected client, not a person watching.
-
 Live output (V3-P73 §5.2): what a job's streamed Run writes is kept per
 Conversation as one accumulated state — the authoritative value a display
 reads, never a queue of pieces. ``live_output`` gives the state,
@@ -32,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import bisect
 import logging
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -65,8 +59,6 @@ def _classify(error: BaseException) -> str:
     return "internal_error"
 
 
-UNATTENDED_REASON = "paused: no client was reading this conversation"
-SEEN_SECONDS = 60.0  # V3-P62 O2
 WAKE_RUNS = 3  # V3-P87 §4.2: a server-opened turn stays short
 FREE_RUNS = 2  # V3-P90 §7.3: a free wake — one to look (the screen tool, later), one to speak
 WAKE_YIELD_SECONDS = 10.0  # §4.3: how long a message waits for the wake job it cancels
@@ -137,22 +129,13 @@ class _JobProgress:
 
 
 class BackgroundRunner:
-    def __init__(self, driver: ConversationDriver, *, unattended_runs: int | None = None,
-                 seen_seconds: float = SEEN_SECONDS, clock: Callable[[], float] = time.monotonic,
-                 listener: JobListener | None = None) -> None:
-        if unattended_runs is not None and unattended_runs < 1:
-            raise ValueError("unattended_runs is positive (or None: never pause for it)")
+    def __init__(self, driver: ConversationDriver, *, listener: JobListener | None = None) -> None:
         self._driver = driver
-        self._unattended_runs = unattended_runs
-        self._seen_seconds = seen_seconds
-        self._clock = clock
         self._listener = listener
         self._status: dict[_Key, JobStatus] = {}
         self._tasks: dict[_Key, asyncio.Task[None]] = {}
         self._signals: dict[_Key, StopSignal] = {}  # of the running (or last) job
-        self._seen: dict[ConversationId, float] = {}
         self._runs: dict[_Key, int] = {}  # Runs reported by the running job
-        self._unattended: dict[_Key, int] = {}  # of them, run while no client read the Conversation
         self._closed: set[ConversationId] = set()  # V3-P65: taking no work
         self._wake_jobs: dict[_Key, str] = {}  # V3-P87: the running (or last) job's wake, by Conversation
         self._origins: dict[_Key, MessageOrigin | None] = {}  # the running job's origin, for a later reveal
@@ -280,10 +263,9 @@ class BackgroundRunner:
         key = self._key(scope)
         if self._running(key):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-        for kept in (self._status, self._tasks, self._signals, self._runs, self._unattended, self._live,
-                     self._live_versions, self._wake_jobs):
+        for kept in (self._status, self._tasks, self._signals, self._runs, self._live, self._live_versions,
+                     self._wake_jobs):
             kept.pop(key, None)
-        self._seen.pop(scope.conversation_id, None)
         self._notify_live(key)
 
     async def submit_compaction(self, scope: TrustedScope) -> JobStatus:
@@ -292,29 +274,18 @@ class BackgroundRunner:
         return self._start(scope, lambda s, stop, progress: self._driver.compact(s, stop=stop, progress=progress),
                            "compact")
 
-    def request_pause(self, scope: TrustedScope, reason: str | None = None) -> JobStatus:
-        return self._signal(scope, lambda signal: signal.pause(reason))
-
     def cancel(self, scope: TrustedScope) -> JobStatus:
-        return self._signal(scope, StopSignal.cancel)
-
-    def seen(self, scope: TrustedScope) -> None:
-        """A client read this Conversation (V3-P62 §5)."""
-        self._seen[scope.conversation_id] = self._clock()
-        self._unattended[self._key(scope)] = 0
+        key = self._key(scope)
+        if self._running(key):
+            signal = self._signals[key]
+            signal.cancel()
+            self._status[key] = replace(self._status[key], stop_requested=signal.request)
+        return self.status(scope)
 
     async def submit_cancel(self, scope: TrustedScope) -> JobStatus:
         if self._running_in(scope.conversation_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         return self._start(scope, lambda s, _stop, _progress: self._driver.cancel(s), "cancel")
-
-    def _signal(self, scope: TrustedScope, ask: Callable[[StopSignal], None]) -> JobStatus:
-        key = self._key(scope)
-        if self._running(key):
-            signal = self._signals[key]
-            ask(signal)
-            self._status[key] = replace(self._status[key], stop_requested=signal.request)
-        return self.status(scope)
 
     def _running(self, key: _Key) -> bool:
         task = self._tasks.get(key)
@@ -343,7 +314,6 @@ class BackgroundRunner:
                            wake_id=wake_id, hidden=free, free=free)
         self._status[key] = status
         signal = self._signals[key] = StopSignal()
-        self.seen(scope)  # the client that started it is connected
         if self._live.pop(key, None) is not None:  # the last job's output is not this one's
             self._bump_live(key)
         self._runs[key] = 0
@@ -373,16 +343,6 @@ class BackgroundRunner:
         self._runs[key] = usage.runs
         if new_runs and not self._status[key].hidden:  # V3-P90 §7.3: a hidden job tells nothing
             self._tell(lambda listener: listener.run_ended(TrustedScope(*key)))
-        if self._unattended_runs is None:
-            return
-        seen = self._seen.get(key[1])
-        if seen is not None and self._clock() - seen <= self._seen_seconds:
-            self._unattended[key] = 0
-            return
-        self._unattended[key] = self._unattended.get(key, 0) + new_runs
-        if self._unattended[key] >= self._unattended_runs and not signal.pause_requested:
-            signal.pause(UNATTENDED_REASON)
-            self._status[key] = replace(self._status[key], stop_requested=signal.request)
 
     # --- live output (V3-P73 §5.2) ----------------------------------------------------
 

@@ -24,19 +24,14 @@ from runnerkit import start_runner  # noqa: E402
 from testkit import NoWakes, calls, final  # noqa: E402
 
 from himari.bootstrap import application as bootstrap  # noqa: E402
-from himari.bootstrap.application import (  # noqa: E402
-    DEFAULT_TURN_BUDGET,
-    DEFAULT_UNATTENDED_RUNS,
-    Application,
-)
+from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
+from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
-from himari.control.turn import MIN_OUTPUT_RESERVE  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
-from himari.interfaces.web.config import MIN_TURN_BUDGET, WebConfig, WebConfigError  # noqa: E402
+from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.provider.api import ProviderCapabilities  # noqa: E402
 from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep  # noqa: E402
 
@@ -142,27 +137,14 @@ def test_the_offered_models_are_configured() -> None:
             WebConfig.from_env({**base, "HIMARI_MODEL": "a/one", "HIMARI_MODELS": raw})
 
 
-def test_the_turn_guards_are_configured() -> None:
-    # V3-P62: a token budget and the unattended pause by default, no Run limit; 0 turns one off.
+def test_the_run_limit_is_configured() -> None:
+    # V3-P106: one Run limit, 12 by default; it cannot be turned off.
     base = {"HIMARI_DATA_ROOT": "/srv/himari"}
-    default = WebConfig.from_env(base)
-    assert (default.turn_budget, default.unattended_runs, default.max_runs) == (3_000_000, 20, None)
-    assert (default.turn_budget, default.unattended_runs) == (DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS)
-    tuned = WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": " 250000 ", "HIMARI_UNATTENDED_RUNS": "0",
-                                "HIMARI_MAX_RUNS": "40"})
-    assert (tuned.turn_budget, tuned.unattended_runs, tuned.max_runs) == (250_000, None, 40)
-    limited = WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "0", "HIMARI_MAX_RUNS": "12"})
-    assert (limited.turn_budget, limited.max_runs) == (None, 12)
-    with pytest.raises(WebConfigError, match="needs HIMARI_MAX_RUNS"):  # a turn needs one of the two
-        WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "0"})
-    # PR #48 review C2: a budget smaller than two answer reserves could never send a request.
-    assert MIN_TURN_BUDGET == 2 * MIN_OUTPUT_RESERVE
-    assert WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "16384"}).turn_budget == 16_384
-    for name, bad in [("HIMARI_TURN_TOKEN_BUDGET", "lots"), ("HIMARI_TURN_TOKEN_BUDGET", "16383"),
-                      ("HIMARI_TURN_TOKEN_BUDGET", "-1"), ("HIMARI_UNATTENDED_RUNS", "1001"),
-                      ("HIMARI_MAX_RUNS", "1.5")]:
-        with pytest.raises(WebConfigError, match=name):
-            WebConfig.from_env({**base, name: bad})
+    assert WebConfig.from_env(base).max_runs == 12
+    assert WebConfig.from_env({**base, "HIMARI_MAX_RUNS": " 40 "}).max_runs == 40
+    for bad in ("0", "-1", "1001", "1.5", "lots"):
+        with pytest.raises(WebConfigError, match="HIMARI_MAX_RUNS"):
+            WebConfig.from_env({**base, "HIMARI_MAX_RUNS": bad})
 
 
 @pytest.mark.parametrize("settings, message", [
@@ -271,8 +253,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
                     "streaming": True,  # V3-P73 §9: on unless HIMARI_STREAMING=0
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False, "companion": False}],
-                    "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
-                             "no_progress_runs": 3, "seen_seconds": 60.0}}  # V3-P62's defaults
+                    "turn": {"max_runs": 12}}  # V3-P106's default
 
 
 def test_cookie_mutations_need_an_allowed_origin(server: Server) -> None:
@@ -299,56 +280,43 @@ def test_cli_bearer_works_without_origin_and_the_secret_itself_does_not(server: 
 # --- conversations -----------------------------------------------------------------------------
 
 
-def test_activity_tells_waiting_and_working_without_counting_as_a_reader(server: Server,
-                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
-    """V3-P80 §3.2: which Conversations wait for an answer and which work, in one read that is never
-    ``seen`` (V3-P62 §5); the trash left out; signed in only."""
+def test_activity_tells_working_conversations(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V3-P80 §3.2: which Conversations work now; signed in only."""
     assert server.client.get("/api/conversations/activity").status_code == 401
     server.sign_in()
-    asking = server.post("/api/conversations", {}).json()["id"]
     idle = server.post("/api/conversations", {}).json()["id"]
-    queue(server, calls((ASK_USER_TOOL_ID, {"question": "Which city?"})))
-    assert server.post(f"/api/conversations/{asking}/messages", {"text": "plan a trip"}).status_code == 202
-    server.wait_idle(asking)
-    assert server.application is not None
-    readers: list[object] = []
-    monkeypatch.setattr(server.application, "seen", lambda scope: readers.append(scope))
     activity = server.client.get("/api/conversations/activity")
-    assert activity.status_code == 200 and activity.json() == {"working": [], "waiting": [asking]}
-    assert readers == []  # not a reader of any of them
+    assert activity.status_code == 200 and activity.json() == {"working": []}
+    assert server.application is not None
     monkeypatch.setattr(server.application.runner, "running", lambda who: (idle,))
-    assert server.client.get("/api/conversations/activity").json() == {"working": [idle], "waiting": [asking]}
-    monkeypatch.undo()
-    assert server.post(f"/api/conversations/{asking}/trash").status_code == 200
-    assert server.client.get("/api/conversations/activity").json()["waiting"] == []
+    assert server.client.get("/api/conversations/activity").json() == {"working": [idle]}
 
 
 def test_conversation_flow_with_a_tool_and_a_question(server: Server) -> None:
+    """V3-P106: a question is the answer's text; the reply is the next message."""
     server.sign_in()
     cid = server.post("/api/conversations", {"title": "  Trip  "}).json()["id"]
-    queue(server, calls(("machine/write_file", {"path": "plan.txt", "content": "draft"})),
-          calls((ASK_USER_TOOL_ID, {"question": "Which city?"})))
+    queue(server, calls(("machine/write_file", {"path": "plan.txt", "content": "draft"})), final("Which city?"))
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "plan a trip"}).status_code == 202
     detail = server.wait_idle(cid)
-    assert detail["waiting"]["question"] == "Which city?" and detail["job"]["state"] == "waiting_for_user"
+    assert detail["job"]["state"] == "completed" and "waiting" not in detail
     assert detail["conversation"]["title"] == "Trip" and detail["conversation"]["preview"] == "plan a trip"
 
     queue(server, final("Seoul it is."))
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "Seoul"}).status_code == 202
     detail = server.wait_idle(cid)
-    assert detail["waiting"] is None and detail["job"]["state"] == "completed" and detail["job"]["generation"] == 2
+    assert detail["job"]["state"] == "completed" and detail["job"]["generation"] == 2
 
     events = server.client.get(f"/api/conversations/{cid}/events").json()
     kinds = [e["kind"] for e in events["items"]]
-    assert kinds == ["user_message", "assistant_tool_calls", "tool_result", "assistant_tool_calls",
-                     "user_message", "tool_result", "assistant_final"]
+    assert kinds == ["user_message", "assistant_tool_calls", "tool_result", "assistant_final",
+                     "user_message", "assistant_final"]
     write_result = events["items"][2]
     assert write_result["is_error"] is False and "plan.txt" in write_result["text"]
     assert write_result["run_id"] == events["items"][1]["run_id"] != events["items"][3]["run_id"]  # (run, call) identity
-    assert events["items"][4]["answers_run"] == events["items"][3]["run_id"]
-    assert events["items"][4]["answers_call"] == events["items"][3]["calls"][0]["call_id"]
-    later = server.client.get(f"/api/conversations/{cid}/events?after=5").json()
-    assert [e["sequence"] for e in later["items"]] == [6, 7] and later["last_sequence"] == 7
+    assert "answers_call" not in events["items"][4]
+    later = server.client.get(f"/api/conversations/{cid}/events?after=4").json()
+    assert [e["sequence"] for e in later["items"]] == [5, 6] and later["last_sequence"] == 6
     listed = server.client.get("/api/conversations").json()
     assert listed["items"][0]["id"] == cid and listed["next_offset"] is None
     assert server.client.patch(f"/api/conversations/{cid}", json={"title": "Seoul"},
@@ -369,7 +337,6 @@ def test_foreign_and_missing_conversations_look_the_same(server: Server) -> None
                       server.client.get(f"/api/conversations/{cid}/events"),
                       server.client.get(f"/api/conversations/{cid}/context"),
                       server.post(f"/api/conversations/{cid}/compact"),
-                      server.post(f"/api/conversations/{cid}/pause"),
                       server.post(f"/api/conversations/{cid}/cancel"),
                       server.post(f"/api/conversations/{cid}/dismiss"),
                       server.client.get(f"/api/conversations/{cid}/model"),
@@ -432,17 +399,15 @@ def test_a_second_message_while_working_is_busy(server: Server) -> None:
     assert server.wait_idle(cid)["job"]["state"] == "completed"
 
 
-def test_pause_and_cancel_reach_the_running_job_and_cancel_when_idle_starts_one(server: Server) -> None:
+def test_cancel_reaches_the_running_job_and_dismiss_when_idle_starts_one(server: Server) -> None:
     server.sign_in()
     cid = server.post("/api/conversations").json()["id"]
     assert server.application is not None
     gated = GatedDriver()
     server.application.runner = BackgroundRunner(gated)
-    idle = server.post(f"/api/conversations/{cid}/pause")
-    assert idle.status_code == 202 and idle.json()["running"] is False  # nothing to pause
+    idle = server.post(f"/api/conversations/{cid}/cancel")
+    assert idle.status_code == 202 and idle.json()["running"] is False  # nothing to cancel
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "one"}).status_code == 202
-    paused = server.post(f"/api/conversations/{cid}/pause").json()
-    assert paused["running"] is True and paused["stop_requested"] == "pause"
     cancelling = server.post(f"/api/conversations/{cid}/cancel").json()
     assert cancelling["stop_requested"] == "cancel"
     assert server.client.get(f"/api/conversations/{cid}").json()["job"]["stop_requested"] == "cancel"
@@ -450,7 +415,7 @@ def test_pause_and_cancel_reach_the_running_job_and_cancel_when_idle_starts_one(
     server.wait_idle(cid)
     late = server.post(f"/api/conversations/{cid}/cancel").json()  # idle: a stop request closes nothing
     assert late["running"] is False and late["state"] == "completed"
-    started = server.post(f"/api/conversations/{cid}/dismiss")  # closes what was left waiting
+    started = server.post(f"/api/conversations/{cid}/dismiss")  # closes never-started calls left behind
     assert started.status_code == 202 and started.json()["running"] is True
     assert server.wait_idle(cid)["job"]["state"] == "idle"
     no_origin = server.client.post(f"/api/conversations/{cid}/dismiss", json={})
@@ -717,53 +682,18 @@ def test_a_finished_job_says_why_as_bounded_text(server: Server) -> None:
     assert len(detail) == web.MAX_DETAIL_CHARS and detail.endswith("…")  # bounded; the page renders it as text
 
 
-# --- one turn's guards (V3-P62) ---------------------------------------------------------------
+# --- what a turn used (V3-P62 §7) -------------------------------------------------------------
 
 
 def test_a_job_reports_what_its_turn_used(server: Server) -> None:
     server.sign_in()
     cid = server.post("/api/conversations", {}).json()["id"]
-    queue(server, calls(("machine/write_file", {"path": "a.txt", "content": "x"})), final("done"))
+    queue(server, Measured(calls(("machine/write_file", {"path": "a.txt", "content": "x"})), 1_000, 20),
+          Measured(final("done"), 1_100, 5))
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
     usage = server.wait_idle(cid)["job"]["turn_usage"]
-    assert usage["runs"] == 2 and usage["budget"] == 3_000_000 and usage["max_runs"] is None
-    assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0
-
-
-def test_a_turn_stopped_by_its_budget_continues_with_a_new_one(tmp_path: Path,
-                                                               monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
-    # The scripted model reports no usage: each Run is charged its estimate and the 8,192 reserve
-    # (sized with V3-P89's system text).
-    s = Server(tmp_path, [], turn={"turn_budget": 30_000})
-    with s.client:
-        s.sign_in()
-        cid = s.post("/api/conversations", {}).json()["id"]
-        queue(s, *(calls(("machine/write_file", {"path": f"{n}.txt", "content": "x"})) for n in range(3)),
-              final("done"))
-        assert s.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
-        detail = s.wait_idle(cid)
-        assert detail["job"]["state"] == "budget_reached" and detail["continuable"]
-        first = detail["job"]["turn_usage"]
-        assert first["budget"] == 30_000 and first["runs"] == 2
-        assert s.post(f"/api/conversations/{cid}/resume").status_code == 202  # a new budget: two more Runs
-        detail = s.wait_idle(cid)
-        assert detail["job"]["state"] == "completed" and not detail["continuable"]
-        assert detail["job"]["turn_usage"]["runs"] == 2 and len(s.provider.sent) == 4
-
-
-def test_only_an_authorized_read_counts_as_a_client_reading(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
-    server.sign_in()
-    cid = server.post("/api/conversations", {}).json()["id"]
-    assert server.application is not None
-    seen: list[str] = []
-    monkeypatch.setattr(server.application.runner, "seen", lambda scope: seen.append(scope.conversation_id))
-    assert server.client.get(f"/api/conversations/{cid}").status_code == 200
-    assert server.client.get(f"/api/conversations/{cid}/events").status_code == 200
-    assert seen == [cid, cid]
-    assert server.client.get("/api/conversations/not-mine").status_code == 404
-    assert server.client.get("/api/conversations/not-mine/events").status_code == 404
-    assert seen == [cid, cid]
+    assert usage == {"runs": 2, "input_tokens": 2_100, "output_tokens": 25, "cached_input_tokens": 0,
+                     "cache_write_tokens": 0, "max_runs": 12}
 
 
 # --- the model (V3-P64 §7) ----------------------------------------------------------------------
@@ -839,15 +769,15 @@ def test_answers_carry_their_model_and_a_change_applies_from_the_next_turn(model
     server.post(f"/api/conversations/{cid}/messages", {"text": "first"})
     server.wait_idle(cid)
     put_model(server, cid, {"model": "big", "effort": "max"})
-    queue(server, calls(("ask_user", {"question": "sure?"})))
+    queue(server, calls(("machine/write_file", {"path": "a.txt", "content": "x"})), final("two"))
     server.post(f"/api/conversations/{cid}/messages", {"text": "second"})
     server.wait_idle(cid)
     sent = server.provider.prepared_inputs
     assert [(i.request_options.model_id, i.request_options.reasoning_effort) for i in sent] == [
-        ("scripted-model", None), ("big", "max")]
+        ("scripted-model", None), ("big", "max"), ("big", "max")]
     items = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
     assert [(e["kind"], e.get("model")) for e in items if e["kind"].startswith("assistant")] == [
-        ("assistant_final", "scripted-model"), ("assistant_tool_calls", "big")]
+        ("assistant_final", "scripted-model"), ("assistant_tool_calls", "big"), ("assistant_final", "big")]
     assert all("model" not in e for e in items if not e["kind"].startswith("assistant"))
     context = server.client.get(f"/api/conversations/{cid}/context").json()
     assert context["hard_limit_tokens"] == 240_000  # the chosen model's window less its output

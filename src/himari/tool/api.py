@@ -5,8 +5,7 @@ V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
 
 - Every Tool — Internal (memory/plan/note), Environment-provided
   (``EnvironmentPlugin.tools()``), External (run by a server outside HIMARI,
-  e.g. an MCP server; V3-P52) or Control's ``ask_user`` — implements
-  ``ToolHandler``.
+  e.g. an MCP server; V3-P52) — implements ``ToolHandler``.
 - Tool implementations never touch the execution ledger: they return a
   ``ToolOutcome`` and the Dispatcher commits it (V3-042).
 - For Environment-provided and External Tools with ``effect_profile != READ``
@@ -18,7 +17,7 @@ V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -67,11 +66,6 @@ class ToolOrigin(Enum):
     EXTERNAL = "external"  # a server outside HIMARI (e.g. MCP); its effects are not visible here
 
 
-class Completion(Enum):
-    IMMEDIATE = "immediate"
-    SUSPENDING = "suspending"  # P0: only ask_user; ``run`` is never called
-
-
 class ConversationRecord(Enum):
     FULL = "full"  # tool_result Event stores model_result exactly
     OMIT = "omit"  # only the ToolExecution record keeps it
@@ -84,7 +78,6 @@ class ToolDefinition(DeepFrozen):
     input_schema: Mapping[str, JsonValue]  # JSON Schema of arguments
     workspace_requirement: WorkspaceRequirement
     effect_profile: EffectProfile
-    completion: Completion = Completion.IMMEDIATE
     environment_kind: EnvironmentKind | None = None  # set iff Environment-provided
     # Set iff External: the name of the server that runs the Tool (e.g. an
     # MCP server). An External Tool needs no Workspace; it is in the catalog
@@ -230,7 +223,7 @@ class ToolCatalog(Protocol):
         self, active_kinds: frozenset[EnvironmentKind], enabled_sources: frozenset[str] = frozenset(),
         capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[ToolDefinition]:
-        """Internal Tools + ask_user + Tools of kinds with an active Instance
+        """Internal Tools + Tools of kinds with an active Instance
         + External Tools of enabled sources, each only when the model has the
         capability it ``requires`` (V3-P91 §3.2). Stable order (prefix-cache
         friendly). Exposure is not authorization."""
@@ -266,36 +259,15 @@ class ExternalAccess(Protocol):
 
 class GroupState(Enum):
     COMPLETED = "completed"  # every call has a model-facing result → next Run allowed
-    WAITING_FOR_USER = "waiting_for_user"  # single ask_user left PENDING
     BLOCKED_UNKNOWN = "blocked_unknown"  # an uncertain call needs a user (REQUIRE_USER)
-    PAUSED = "paused"  # a pause stopped it before a call started; the rest stays PENDING (V3-P55)
+    STOPPED = "stopped"  # a cancel stopped it before a call started; the rest stays PENDING (V3-P55)
 
 
 @dataclass(frozen=True)
 class GroupDispatchResult(DeepFrozen):
     run_id: RunId
     state: GroupState
-    waiting_call: CallRef | None = None
     unknown_calls: tuple[CallRef, ...] = ()
-    # The calls the Dispatcher refused before running, by its own rule (V3-P62
-    # §4): returned, never stored. A handler's own DENIED is not here.
-    refusals: Mapping[CallId, RefusalRule] = field(default_factory=dict)
-
-
-class RefusalRule(Enum):
-    """Why the Dispatcher refused a call before running it (V3-P62 §4)."""
-
-    UNKNOWN_TOOL = "unknown_tool"
-    INVALID_ARGUMENTS = "invalid_arguments"
-    SOURCE_DISABLED = "source_disabled"
-    ENVIRONMENT_INACTIVE = "environment_inactive"
-    BINDING = "binding"
-    READ_ONLY = "read_only"  # V3-P90 §5.6: a turn the user did not ask for runs only Tools that read
-
-    @property
-    def by_input(self) -> bool:
-        """Decided by the call alone: the same call is refused the same way, whatever the state."""
-        return self in (RefusalRule.UNKNOWN_TOOL, RefusalRule.INVALID_ARGUMENTS)
 
 
 class ToolDispatcher(Protocol):
@@ -307,7 +279,7 @@ class ToolDispatcher(Protocol):
         run_id: RunId,
         calls: Sequence[ToolCall],
         *,
-        pause: Callable[[], bool] | None = None,
+        stop: Callable[[], bool] | None = None,
         read_only: bool = False,
         turn: TurnSource | None = None,
         capabilities: frozenset[str] = frozenset(),
@@ -324,21 +296,19 @@ class ToolDispatcher(Protocol):
         REPORT_TO_MODEL Tools get an "outcome unknown" result instead of
         being re-run (V3-047).
 
-        ``pause`` is asked before each call starts; once it returns True no
-        further call starts and the group is PAUSED (V3-P55). A suspending
-        call (``ask_user``) is not paused: it waits for the user anyway.
-        Cancelled (asyncio) during a call, the call is left as it is —
+        ``stop`` is asked before each call starts; once it returns True no
+        further call starts and the group is STOPPED, the rest left PENDING
+        for ``cancel_group`` (V3-P55). Cancelled (asyncio) during a call, the call is left as it is —
         PENDING if it was not claimed, claimed otherwise — for
         ``cancel_group`` to settle.
 
         ``read_only`` (V3-P90 §5.6, a server-opened turn): a call of a Tool
-        whose ``effect_profile`` is not READ is DENIED and never runs (a
-        suspending ``ask_user`` still waits for the user)."""
+        whose ``effect_profile`` is not READ is DENIED and never runs."""
         ...
 
     async def cancel_group(self, scope: TrustedScope, run_id: RunId, reason: str) -> GroupDispatchResult:
         """V3-P55: settle a group that will not be run further. Every
-        never-claimed PENDING call (a waiting ``ask_user`` included) gets a
+        never-claimed PENDING call gets a
         CANCELLED result telling the model ``reason``; it never runs. Claimed
         calls are uncertain and are treated as in ``dispatch_group``:
         REPORT_TO_MODEL ones get "outcome unknown", REQUIRE_USER ones leave

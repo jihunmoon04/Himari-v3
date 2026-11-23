@@ -164,7 +164,7 @@ def interface_kind(origin: MessageOrigin | None) -> InterfaceKind:
 @dataclass(frozen=True)
 class UserMessage(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
-    answers_call: CallRef | None = None  # set only via answer_pending_call (T7a)
+    answers_call: CallRef | None = None  # older history only: the ask_user call it answered (T7a, gone)
     origin: MessageOrigin | None = None  # V3-P83: set by the entry point; None for older messages
     interface: InterfaceSnapshot | None = None  # V3-P93: server-owned; None on legacy inputs
 
@@ -433,7 +433,7 @@ MAX_FILE_NAME_BYTES = 200  # UTF-8, after cleaning (§5.3)
 MAX_RAW_NAME_BYTES = 1000  # a name given longer than this is refused
 MAX_MEDIA_TYPE_CHARS = 127
 MAX_STAGED_UPLOADS = 50  # per Conversation
-MAX_ATTACHMENTS = 10  # per message (T1 and T7a)
+MAX_ATTACHMENTS = 10  # per message (T1)
 STAGED_KEEP = timedelta(hours=24)  # staged records older than this are dropped
 STAGED_SEND_CUTOFF = timedelta(hours=23)  # sending refuses older staged uploads (§4.2)
 BLOB_GRACE = timedelta(hours=1)  # a blob put this recently never expires or goes (§8.2, §8.5)
@@ -809,12 +809,6 @@ class ToolCompletion(DeepFrozen):
     # call as its source. Only with SUCCEEDED (INVALID_ARGUMENT otherwise);
     # MemoryStore's errors when the note cannot be written.
     memory_change: MemoryChange | None = None
-
-
-@dataclass(frozen=True)
-class AnswerCommit(DeepFrozen):
-    user_event: ConversationEvent
-    tool_result_event: ConversationEvent | None
 
 
 @dataclass(frozen=True)
@@ -1467,7 +1461,7 @@ REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered t
 class WakeStatus(Enum):
     OPENED = "opened"  # a free wake (V3-P90 §7.3): not shown yet
     SPEAKING = "speaking"  # V3-P90 §7.3: a free wake decided to speak, shown; still in progress
-    ANSWERED = "answered"  # a final answer, or an ask_user question left (``asked``)
+    ANSWERED = "answered"  # a final answer
     CANCELLED = "cancelled"  # no assistant output; the user won (§4.3)
     FAILED = "failed"
     PASSED = "passed"  # V3-P90 §7.3: a free wake the model passed — never shown
@@ -1493,7 +1487,6 @@ class WakeRecord(DeepFrozen):
     reasons: tuple[WakeReason, ...]
     device_id: str
     status: WakeStatus
-    asked: bool
     created_at: datetime
     ended_at: datetime | None
     # V3-P91 §8: the Run whose screen-Tool group a free wake ran unshown; its events are unshown and
@@ -1511,13 +1504,11 @@ class WakeStore(Protocol):
         was taken already), each reminder goes ``scheduled → claimed`` or, told
         again (V3-P90 §5.1), ``told → claimed`` (INVALID_STATE_TRANSITION when it
         is neither), the wake Event is
-        appended and its record written. Refused as an Event is (trash, an
-        ask_user call waiting). INVALID_ARGUMENT: no reason, or more than
-        MAX_WAKE_REASONS."""
+        appended and its record written. Refused as an Event is (trash).
+        INVALID_ARGUMENT: no reason, or more than MAX_WAKE_REASONS."""
         ...
 
-    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
-                       asked: bool = False) -> WakeRecord:
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus) -> WakeRecord:
         """``opened → status`` (V3-P90: ``speaking →`` answered, cancelled or failed), once (a later call
         changes nothing). The
         reminders it claimed (§5.3), only while still claimed by it: ANSWERED →
@@ -1947,8 +1938,8 @@ class ConversationLog(Protocol):
     async def append_event(
         self, scope: TrustedScope, message: UserMessage, *, idempotency_key: str | None = None
     ) -> ConversationEvent:
-        """T1: ordinary user input. While an ask_user call is waiting, Control
-        must use ``answer_pending_call`` instead (one path per input).
+        """T1: user input; one with ``answers_call`` (older history only) is
+        INVALID_STATE_TRANSITION.
         Same key + same message → the original Event; same key + a different
         message → DUPLICATE_IDENTITY."""
         ...
@@ -2036,19 +2027,6 @@ class ConversationLog(Protocol):
         Only for records whose persisted policy is REPORT_TO_MODEL; otherwise
         INVALID_STATE_TRANSITION (a user must resolve it).
         ALREADY_COMMITTED if the call already has a model result."""
-        ...
-
-    async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
-        """Derived wait state (V3-P17): the latest PROJECTED Run's group is a
-        single ``ask_user`` call still PENDING."""
-        ...
-
-    async def answer_pending_call(
-        self, scope: TrustedScope, call: CallRef, answer: UserMessage
-    ) -> AnswerCommit:
-        """T7a: ``user_message`` (with ``answers_call``) + ToolExecution
-        ``PENDING → SUCCEEDED`` + ``tool_result`` Event, atomically.
-        Raises ALREADY_COMMITTED if the call is no longer waiting."""
         ...
 
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
@@ -2218,11 +2196,6 @@ class ConversationCatalog(Protocol):
         came, in any Conversation outside the trash; None without any."""
         ...
 
-    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
-        """V3-P80 §3.2: the principal's Conversations outside the trash in
-        which ``find_waiting_call`` finds a call, in one read; in no order."""
-        ...
-
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:
@@ -2278,7 +2251,6 @@ class StateQuery(Protocol):
 
 
 __all__ = [
-    "AnswerCommit",
     "Artifact",
     "ArtifactMutation",
     "ArtifactStore",

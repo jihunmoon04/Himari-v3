@@ -10,7 +10,7 @@ from typing import Any
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from testkit import FAKE, SCOPE, data_for, new_store, restart, text_result, user
+from testkit import FAKE, SCOPE, data_for, new_store, restart, text_result
 
 from himari.common import (
     AttachmentRef,
@@ -70,12 +70,12 @@ def message(*file_ids: FileId, text: str = "see") -> UserMessage:
     return UserMessage((TextBlock(text), *(AttachmentRef(f, 1) for f in file_ids)))
 
 
-async def call(data: Data, scope: TrustedScope, tool: str = "inside/present_file") -> CallRef:
+async def call(data: Data, scope: TrustedScope) -> CallRef:
     run_id = await data.prepare_run(scope, RunPreparation(b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED,
                                                           (), PromptBasis(0, 0), "p", "m"))
     await data.mark_dispatch(scope, run_id)
     await data.record_raw_outcome(scope, run_id, RawReceived(b"{}", "application/json"))
-    await data.project_model_output(scope, run_id, AssistantToolCalls((ToolCall(CallId("c0"), 0, ToolId(tool), {}),)))
+    await data.project_model_output(scope, run_id, AssistantToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/present_file"), {}),)))
     return CallRef(run_id, CallId("c0"))
 
 
@@ -153,19 +153,6 @@ def test_the_send_check_refuses_old_staged_uploads_but_the_commit_does_not() -> 
         assert refused.value.file_id == file_id
         assert [r.file_id for r in await data.check_attachments(scope, [file_id])] == [file_id]
         await data.append_event(scope, message(file_id))  # T1 has no cutoff (review N3)
-
-    run(scenario())
-
-
-def test_an_answer_to_a_question_attaches_too() -> None:
-    async def scenario() -> None:
-        data = data_for(new_store())
-        scope = await conversation(data)
-        file_id = await upload(data, scope)
-        waiting = await call(data, scope, "ask_user")
-        commit = await data.answer_pending_call(scope, waiting, message(file_id))
-        assert commit.tool_result_event is not None
-        assert (await data.read_files(scope))[0].file_id == file_id
 
     run(scenario())
 

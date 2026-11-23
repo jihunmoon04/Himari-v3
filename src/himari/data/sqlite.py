@@ -4,7 +4,7 @@ Durability: one database file in WAL mode with ``synchronous=FULL``, so a
 committed transaction survives a process crash (and, given an honest disk,
 power loss). Every port call is exactly one ``BEGIN IMMEDIATE … COMMIT``
 transaction that validates first and writes last; any error — including
-a crash between statements — leaves no partial T1–T9/T7a/T-R effect.
+a crash between statements — leaves no partial T1–T9/T-R effect.
 
 Calls run synchronously on the caller's thread, like ``InMemoryData``: a
 port call never yields to the event loop, so its result is observed by the
@@ -56,7 +56,6 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     ArtifactId,
     AttachmentRef,
     BindingId,
@@ -91,7 +90,6 @@ from himari.data.api import (
     PRESENT_LIMIT_BYTES,
     PRESENT_WINDOW,
     STAGED_SEND_CUTOFF,
-    AnswerCommit,
     Artifact,
     ArtifactMutation,
     AssistantFinal,
@@ -1214,8 +1212,7 @@ def _fill_memory_cursors(tx: _Tx) -> None:
 def _wake(row: sqlite3.Row) -> WakeRecord:
     return WakeRecord(row["wake_id"], PrincipalId(row["owner"]), ConversationId(row["conversation_id"]),
                       int(row["event_sequence"]), codec.wake_reasons_from(json.loads(row["reasons"])),
-                      row["device_id"], WakeStatus(row["status"]), bool(row["asked"]),
-                      datetime.fromisoformat(row["created_at"]),
+                      row["device_id"], WakeStatus(row["status"]), datetime.fromisoformat(row["created_at"]),
                       None if row["ended_at"] is None else datetime.fromisoformat(row["ended_at"]),
                       None if row["held_run_id"] is None else RunId(row["held_run_id"]))
 
@@ -1422,24 +1419,6 @@ class SqliteData:
         return row
 
     @staticmethod
-    def _waiting(tx: _Tx, scope: TrustedScope) -> CallRef | None:
-        latest = tx.one(
-            "SELECT run_id FROM runs WHERE conversation_id=? AND status=? AND projected_event_id IS NOT NULL"
-            " ORDER BY seq DESC LIMIT 1",
-            scope.conversation_id, RunStatus.PROJECTED.value,
-        )
-        if latest is None:
-            return None
-        group = tx.all("SELECT * FROM tool_executions WHERE run_id=? AND conversation_id=?", latest["run_id"], scope.conversation_id)
-        if (
-            len(group) == 1
-            and group[0]["tool_id"] == ASK_USER_TOOL_ID
-            and group[0]["status"] == ToolExecutionStatus.PENDING.value
-        ):
-            return CallRef(RunId(group[0]["run_id"]), CallId(group[0]["call_id"]))
-        return None
-
-    @staticmethod
     def _set_run(tx: _Tx, run_id: str, status: RunStatus, **columns: object) -> None:
         assignments = ", ".join(["status=?", *(f"{name}=?" for name in columns)])
         tx.execute(f"UPDATE runs SET {assignments} WHERE run_id=?", status.value, *columns.values(), run_id)
@@ -1471,7 +1450,7 @@ class SqliteData:
         return rows
 
     def _attach(self, tx: _Tx, scope: TrustedScope, blocks: Sequence[object]) -> None:
-        """T1/T7a: check and attach the message's uploads in its transaction."""
+        """T1: check and attach the message's uploads in its transaction."""
         refs = [b for b in blocks if isinstance(b, AttachmentRef)]
         if not refs:
             return
@@ -1540,13 +1519,9 @@ class SqliteData:
                         raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"idempotency key {idempotency_key!r} reused")
                     return existing
             if message.answers_call is not None:
-                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers_call is older history only")
             rules.check_origin(message.origin)
             rules.check_interface(message.interface, message.origin)
-            if self._waiting(tx, scope) is not None:
-                raise DataError(
-                    DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
-                )
             self._attach(tx, scope, message.blocks)
             event = self._new_event(tx, scope, message, None)
             if idempotency_key is not None:
@@ -1804,48 +1779,6 @@ class SqliteData:
                 "UPDATE artifacts SET content=?, revision=revision+1 WHERE artifact_id=?",
                 codec.dump_json(m.content), m.artifact_id,
             )
-
-    async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            return self._waiting(tx, scope)
-
-    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
-        # ``_waiting`` for each Conversation at once: its latest PROJECTED Run with an Event, whose group is
-        # one ask_user call still PENDING.
-        with self._tx() as tx:
-            rows = tx.all(
-                "SELECT c.conversation_id FROM conversations c JOIN runs r ON r.conversation_id=c.conversation_id"
-                " AND r.seq=(SELECT MAX(l.seq) FROM runs l WHERE l.conversation_id=c.conversation_id"
-                " AND l.status=? AND l.projected_event_id IS NOT NULL)"
-                " WHERE c.owner=? AND c.trashed_at IS NULL"
-                " AND (SELECT COUNT(*) FROM tool_executions t WHERE t.conversation_id=r.conversation_id"
-                " AND t.run_id=r.run_id)=1"
-                " AND EXISTS (SELECT 1 FROM tool_executions t WHERE t.conversation_id=r.conversation_id"
-                " AND t.run_id=r.run_id AND t.tool_id=? AND t.status=?)",
-                RunStatus.PROJECTED.value, principal, ASK_USER_TOOL_ID, ToolExecutionStatus.PENDING.value,
-            )
-            return tuple(ConversationId(row["conversation_id"]) for row in rows)
-
-    async def answer_pending_call(
-        self, scope: TrustedScope, call: CallRef, answer: UserMessage
-    ) -> AnswerCommit:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            if self._waiting(tx, scope) != call:
-                raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
-            rules.check_origin(answer.origin)
-            rules.check_interface(answer.interface, answer.origin)
-            record = self._execution_row(tx, scope, call)
-            self._attach(tx, scope, answer.blocks)
-            result = ModelToolResult(blocks=answer.blocks)
-            user_event = self._new_event(tx, scope, dataclasses.replace(answer, answers_call=call), None)
-            tx.execute(
-                "UPDATE tool_executions SET status=?, model_result=? WHERE seq=?",
-                ToolExecutionStatus.SUCCEEDED.value, codec.model_result(result), record["seq"],
-            )
-            tool_event = self._new_event(tx, scope, ToolResultRecord(call, result), call.run_id)
-            return AnswerCommit(user_event=user_event, tool_result_event=tool_event)
 
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
         with self._tx() as tx:
@@ -2727,8 +2660,6 @@ class SqliteData:
         rules.check_interface(interface, MessageOrigin(OriginKind.DEVICE, device_id))
         with self._tx() as tx:
             tx.authorized(scope)
-            if self._waiting(tx, scope) is not None:
-                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting")
             now = _timestamp(datetime.now(UTC))
             wake_id = tx.new_id("wake")
             for key in keys:
@@ -2749,8 +2680,7 @@ class SqliteData:
                        codec.dumps(codec.wake_reasons(tuple(reasons))), device_id, now)
             return event
 
-    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
-                       asked: bool = False) -> WakeRecord:
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus) -> WakeRecord:
         if status.in_progress:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake ends answered, cancelled or failed")
         with self._tx() as tx:
@@ -2761,8 +2691,7 @@ class SqliteData:
             if not was.in_progress or (was is WakeStatus.SPEAKING and status in (WakeStatus.PASSED, WakeStatus.DROPPED)):
                 return _wake(row)  # ended already, once; a shown wake never becomes hidden
             now = _timestamp(datetime.now(UTC))
-            tx.execute("UPDATE wakes SET status=?, asked=?, ended_at=? WHERE wake_id=?",
-                       status.value, int(asked and status is WakeStatus.ANSWERED), now, wake_id)
+            tx.execute("UPDATE wakes SET status=?, ended_at=? WHERE wake_id=?", status.value, now, wake_id)
             # §5.3 (re-review P2): only reminders still claimed by this very wake
             if status is WakeStatus.ANSWERED:
                 asleep = [r.memory_id for r in _wake(row).reasons

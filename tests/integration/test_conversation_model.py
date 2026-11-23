@@ -22,8 +22,8 @@ from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import ScriptedAdapter
 
 OTHER = TrustedScope(PrincipalId("alice"), ConversationId("conv_2"))
-LARGE = ModelOffer("large", "low", frozenset({"low", "high"}), ContextBudget(limit_tokens=100_000), 4_000)
-SMALL = ModelOffer("small", None, frozenset(), ContextBudget(limit_tokens=3000), 2_000)
+LARGE = ModelOffer("large", "low", frozenset({"low", "high"}), ContextBudget(limit_tokens=100_000))
+SMALL = ModelOffer("small", None, frozenset(), ContextBudget(limit_tokens=3000))
 MODELS = ModelCatalog((LARGE, SMALL), "large")
 
 
@@ -175,7 +175,8 @@ def test_only_continuations_of_the_requests_model_still_in_the_prompt_are_replay
         fake = FakeOpenRouter()
         budget = ContextBudget(limit_tokens=100_000)
         models = ModelCatalog((ModelOffer(NANO, budget=budget), ModelOffer(HAIKU, budget=budget)), NANO)
-        rt = build_runtime(OpenRouterAdapter("k", transport=httpx.MockTransport(fake.handle)), models=models)
+        rt = build_runtime(OpenRouterAdapter("k", transport=httpx.MockTransport(fake.handle)), models=models,
+                           tools=[RecordingTool("probe")])  # a turn's request carries Tools, a summary's none
         rt.store.create_conversation(SCOPE)
         await rt.driver.drive(SCOPE, user("q1"))  # nano
         await rt.driver.drive(SCOPE, user("q2"))  # nano
@@ -194,7 +195,7 @@ def test_only_continuations_of_the_requests_model_still_in_the_prompt_are_replay
 
 
 def test_a_model_refusing_tool_calls_fails_the_turn_once_and_keeps_the_answer() -> None:
-    """B1: requests always carry Tools (ask_user); a model without Tool
+    """B1: requests carry Tools (here one); a model without Tool
     calling is refused by OpenRouter. The turn ends PROVIDER_FAILED, the error
     body stays on the Run, nothing is resent, and another model works."""
 
@@ -205,14 +206,15 @@ def test_a_model_refusing_tool_calls_fails_the_turn_once_and_keeps_the_answer() 
         def handle(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             seen.append(body["model"])
-            assert body["tools"]  # ask_user at least
+            assert body["tools"]
             if body["model"] == "some/no-tools-model":
                 return httpx.Response(404, json=refusal)
             message = {"role": "assistant", "content": "fine"}
             return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": "stop"}]})
 
         models = ModelCatalog((ModelOffer(NANO), ModelOffer("some/no-tools-model")), NANO)
-        rt = build_runtime(OpenRouterAdapter("k", transport=httpx.MockTransport(handle)), models=models)
+        rt = build_runtime(OpenRouterAdapter("k", transport=httpx.MockTransport(handle)), models=models,
+                           tools=[RecordingTool("probe")])
         rt.store.create_conversation(SCOPE)
         await rt.data.set_model_setting(SCOPE, ModelSetting("some/no-tools-model"))
         failed = await rt.driver.drive(SCOPE, user("hi"))

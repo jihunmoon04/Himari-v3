@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from testkit import SCOPE, data_for, forget_unknown_policy, new_store, text_result, user
 
-from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, ConversationId, PrincipalId, RawRepresentation, ToolCall, ToolId, TrustedScope
+from himari.common import ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
     ArtifactMutation,
     AssistantFinal,
@@ -59,56 +60,18 @@ def test_send_mark_is_once_only() -> None:
     asyncio.run(scenario())
 
 
-def test_waiting_conversations_of_a_principal() -> None:
-    """V3-P80 §3.2: the Conversations ``find_waiting_call`` finds waiting, all at once: only the
-    principal's, none in the trash, none whose question was answered or whose group is not one ask_user."""
-    async def scenario() -> None:
-        store = new_store()
-        scopes = {name: TrustedScope(PrincipalId(owner), ConversationId(name))
-                  for name, owner in (("conv_1", "alice"), ("conv_2", "alice"), ("conv_3", "alice"),
-                                      ("conv_4", "alice"), ("conv_5", "mallory"))}
-        for scope in scopes.values():
-            store.create_conversation(scope)
-        data = data_for(store)
-        alice = PrincipalId("alice")
-        assert await data.list_waiting_conversations(alice) == ()
-        asked = {name: await projected_group(data, ASK_USER_TOOL_ID, scope=scopes[name])
-                 for name in ("conv_1", "conv_2", "conv_3", "conv_5")}
-        await projected_group(data, ASK_USER_TOOL_ID, "inside/read_file", scope=scopes["conv_4"])  # two calls
-        assert sorted(await data.list_waiting_conversations(alice)) == ["conv_1", "conv_2", "conv_3"]
-        # A newer Run that was never PROJECTED (here, only prepared) leaves the question waiting, as
-        # ``find_waiting_call`` does (review N9).
-        await data.prepare_run(scopes["conv_1"], RunPreparation(b"{}", "application/json",
-                                                                RawRepresentation.ADAPTER_SERIALIZED, (),
-                                                                PromptBasis(0, 0), "p", "m"))
-        assert await data.find_waiting_call(scopes["conv_1"]) == asked["conv_1"]
-        assert "conv_1" in await data.list_waiting_conversations(alice)
-        await data.answer_pending_call(scopes["conv_2"], asked["conv_2"], user("yes"))
-        await data.trash_conversation(scopes["conv_3"])
-        assert await data.list_waiting_conversations(alice) == ("conv_1",)
-        assert await data.list_waiting_conversations(PrincipalId("mallory")) == ("conv_5",)
-        for name, scope in scopes.items():  # the same answer as one at a time
-            if name != "conv_3":
-                assert (await data.find_waiting_call(scope) is not None) == (name in ("conv_1", "conv_5")), name
-
-    asyncio.run(scenario())
-
-
-def test_waiting_call_forces_answer_path() -> None:
+def test_a_message_never_answers_a_call_and_an_open_ask_user_call_is_just_pending() -> None:
+    """V3-P106: T7a is gone. ``answers_call`` is older history only; an ``ask_user`` call of
+    older history left PENDING blocks nothing in Data (Control closes it before a new message)."""
     async def scenario() -> None:
         data = fresh()
-        call = await projected_group(data, ASK_USER_TOOL_ID)
-        assert await data.find_waiting_call(SCOPE) == call
+        call = await projected_group(data, "ask_user")
         with pytest.raises(DataError) as exc:
-            await data.append_event(SCOPE, user("not via T1"))
+            await data.append_event(SCOPE, replace(user("an answer"), answers_call=call))
         assert exc.value.code is DataErrorCode.INVALID_STATE_TRANSITION
-
-        commit = await data.answer_pending_call(SCOPE, call, user("yes"))
-        assert commit.user_event.payload.answers_call == call  # type: ignore[union-attr]
-        assert await data.find_waiting_call(SCOPE) is None
-        with pytest.raises(DataError) as again:
-            await data.answer_pending_call(SCOPE, call, user("yes again"))
-        assert again.value.code is DataErrorCode.ALREADY_COMMITTED
+        await data.append_event(SCOPE, user("a new message"))
+        (record,) = await data.read_tool_executions(SCOPE, call.run_id)
+        assert record.status is ToolExecutionStatus.PENDING
 
     asyncio.run(scenario())
 
@@ -343,18 +306,6 @@ def test_restart_discards_an_uncommitted_compaction_instead_of_projecting_it() -
         assert report.compactions_discarded == (run_id,) and report.runs_received_unprojected == ()
         run = await data.read_run(SCOPE, run_id)
         assert run.status is RunStatus.PROJECTION_FAILED and run.error_code == "interrupted"
-
-    asyncio.run(scenario())
-
-
-def test_a_committed_compaction_does_not_hide_a_waiting_question() -> None:
-    async def scenario() -> None:
-        data = fresh()
-        call = await projected_group(data, ASK_USER_TOOL_ID)
-        run_id = await received_compaction(data)
-        await data.commit_compaction(SCOPE, run_id, expected_revision=None, schema_version=1,
-                                     body={"summary": "s"}, covers_through_sequence=0, basis=PromptBasis(0, 0))
-        assert await data.find_waiting_call(SCOPE) == call
 
     asyncio.run(scenario())
 

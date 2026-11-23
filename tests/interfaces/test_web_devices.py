@@ -25,7 +25,7 @@ from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, MOODS, CallId, ConversationId, TextBlock, ToolCall, TrustedScope  # noqa: E402
+from himari.common import MOODS, CallId, ConversationId, TextBlock, ToolCall, ToolId, TrustedScope  # noqa: E402
 from himari.data.api import MessageOrigin, OriginKind, UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import event_stream  # noqa: E402
@@ -56,7 +56,6 @@ ALLOWED = {
     ("POST", "/api/device/screens/{request_id}/refuse"),
     ("GET", "/api/device/conversations/{conversation_id}/presented-files"),  # V3-P93 §6.2
     ("GET", "/api/device/conversations/{conversation_id}/presented-files/{file_id}/{version}"),
-    ("POST", "/api/conversations/{conversation_id}/pause"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
     ("POST", "/api/conversations/{conversation_id}/dismiss"),
@@ -195,13 +194,10 @@ def test_a_device_pairs_without_an_origin_and_talks_with_its_token(server: Serve
 def test_each_message_keeps_where_it_came_from(server: Server) -> None:
     token = server.paired()
     cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
-    server.provider.extend([
-        NormalizedToolCalls((ToolCall(CallId("q1"), 0, ASK_USER_TOOL_ID, {"question": "어느 쪽?"}),)),
-        final("알았어"), final("web"), final("cli"),
-    ])
+    server.provider.extend([final("어느 쪽?"), final("알았어"), final("web"), final("cli")])
     server.device.post(f"/api/conversations/{cid}/messages", json={"text": "골라줘"}, headers=server.as_device(token))
     server.wait(cid)
-    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "왼쪽"},  # the answer (T7a)
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "왼쪽"},  # the answer: a message
                        headers=server.as_device(token))
     server.wait(cid)
     server.client.post(f"/api/conversations/{cid}/messages", json={"text": "from web"}, headers=SEND)
@@ -357,18 +353,17 @@ def test_answers_and_questions_carry_their_display(server: Server) -> None:
         return list(server.client.get(f"/api/conversations/{cid}/events").json()["items"])
 
     server.provider.extend([
-        NormalizedToolCalls((ToolCall(CallId("q"), 0, ASK_USER_TOOL_ID, {"question": "[[mood:thinking]]어디?"}),),
-                            commentary=(TextBlock("[[mood:happy]]좋아"),)),
+        NormalizedToolCalls((ToolCall(CallId("q"), 0, ToolId("look"), {}),), commentary=(TextBlock("[[mood:happy]]좋아"),)),
+        final("[[mood:thinking]]어디?"),
         final("[[mood:excited]]서울! [[mood:nope]]끝"),
     ])
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "여행"}, headers=SEND).status_code == 202
     server.wait(cid)
-    waiting = server.client.get(f"/api/conversations/{cid}").json()["waiting"]
-    assert waiting["question"] == "[[mood:thinking]]어디?"
-    assert waiting["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}], "moves": []}
-    asked = [e for e in events() if e["kind"] == "assistant_tool_calls"][0]
-    assert asked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}], "moves": []}
-    assert asked["calls"][0]["display"]["text"] == "어디?"
+    looked = [e for e in events() if e["kind"] == "assistant_tool_calls"][0]
+    assert looked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}], "moves": []}
+    assert "display" not in looked["calls"][0]  # a call's arguments are shown as they are
+    question = [e for e in events() if e["kind"] == "assistant_final"][-1]  # V3-P106: a question is text
+    assert question["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}], "moves": []}
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "서울"}, headers=SEND).status_code == 202
     server.wait(cid)
     answer = [e for e in events() if e["kind"] == "assistant_final"][-1]
@@ -420,7 +415,7 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
         "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1,
                                                                       "free_wake_screen": 1, "screen_look": 1,
                                                                       "file_download": 1, "connection_generation": 1},
-        "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
+        "quiet_until": None, "activity": {"working": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
     assert "connection_generation" not in web_hello

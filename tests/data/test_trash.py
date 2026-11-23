@@ -74,7 +74,6 @@ OTHER_PORTS: list[tuple[str, Port]] = [
     ("read_events", lambda d, s: d.read_events(s)),
     ("prepare_run", lambda d, s: d.prepare_run(s, RunPreparation(
         b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))),
-    ("find_waiting_call", lambda d, s: d.find_waiting_call(s)),
     ("recover_interrupted", lambda d, s: d.recover_interrupted(s)),
     ("get_latest_snapshot", lambda d, s: d.get_latest_snapshot(s)),
     ("list_artifacts", lambda d, s: d.list_artifacts(s)),

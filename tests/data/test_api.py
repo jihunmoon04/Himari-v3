@@ -10,8 +10,8 @@ def test_dtos_are_frozen(assert_api_dataclasses_frozen: Callable[[ModuleType], N
     assert_api_dataclasses_frozen(api)
 
 
-def test_event_kinds_follow_ask_user_model() -> None:
-    # V3-044: question is an ask_user call; assistant_question is retired.
+def test_event_kinds() -> None:
+    # V3-044: assistant_question is retired (V3-P106: a question is plain text).
     assert {k.value for k in api.EventKind} == {
         "user_message",
         "assistant_final",

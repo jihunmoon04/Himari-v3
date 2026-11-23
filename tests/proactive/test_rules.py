@@ -44,7 +44,7 @@ def device(activity: ActivitySignal | None = None, before: EndedActivity | None 
 def wake(at: datetime, *kinds: WakeKind) -> WakeRecord:
     return WakeRecord(f"w{at.timestamp()}", PrincipalId("operator"), ConversationId("c"), 1,
                       tuple(WakeReason(k, memory_id=1 if k in (WakeKind.REMINDER, WakeKind.LOOP_DUE) else None)
-                            for k in kinds or (WakeKind.LOOP_DUE,)), "d1", WakeStatus.ANSWERED, False, at, at)
+                            for k in kinds or (WakeKind.LOOP_DUE,)), "d1", WakeStatus.ANSWERED, at, at)
 
 
 def situation(**changes: object) -> Situation:
@@ -419,7 +419,7 @@ def working(minutes: float, group: str = "work") -> DeviceState:
 def free_at(minutes_ago: float, status: WakeStatus = WakeStatus.ANSWERED) -> WakeRecord:
     at = NOW - timedelta(minutes=minutes_ago)
     return WakeRecord(f"wf{minutes_ago}", PrincipalId("operator"), ConversationId("c"), 1,
-                      (WakeReason(WakeKind.FREE, group="work", minutes=1, step=1),), "d1", status, False, at, at)
+                      (WakeReason(WakeKind.FREE, group="work", minutes=1, step=1),), "d1", status, at, at)
 
 
 def test_the_first_free_wake_comes_fifteen_minutes_into_a_task() -> None:

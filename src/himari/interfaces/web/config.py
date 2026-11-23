@@ -82,9 +82,7 @@ MODELS_VAR = "HIMARI_MODELS"  # V3-P64: the offered models
 REASONING_VAR = "HIMARI_REASONING_EFFORT"
 SANDBOX_VAR = "HIMARI_SANDBOX"
 CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
-TURN_BUDGET_VAR = "HIMARI_TURN_TOKEN_BUDGET"  # V3-P62: 0 turns it off
-UNATTENDED_RUNS_VAR = "HIMARI_UNATTENDED_RUNS"  # 0 turns it off
-MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # 0 (default): no Run limit
+MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # V3-P106: a turn's Run limit, 1..1000
 TRASH_DAYS_VAR = "HIMARI_TRASH_DAYS"  # V3-P65: days in the trash before a permanent delete
 FILE_MAX_VAR = "HIMARI_FILE_MAX_BYTES"  # V3-P66: one uploaded or presented file
 FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file store
@@ -115,11 +113,7 @@ PROACTIVE_ENDED_VAR = "HIMARI_PROACTIVE_ENDED_MINUTES"  # V3-P90 §8 (was _FOCUS
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
-DEFAULT_TURN_BUDGET = 3_000_000
-# Each request keeps 8,192 tokens for its answer (control.turn.MIN_OUTPUT_RESERVE),
-# so a smaller budget could refuse even the first request (PR #48 review C2).
-MIN_TURN_BUDGET = 16_384
-DEFAULT_UNATTENDED_RUNS = 20
+DEFAULT_MAX_RUNS = 12  # as control.driver.MAX_RUNS
 DEFAULT_TRASH_DAYS = 30  # as bootstrap.application.DEFAULT_TRASH_DAYS
 DEFAULT_TIME_ZONE = "Asia/Seoul"  # as bootstrap.application.DEFAULT_TIME_ZONE
 
@@ -149,10 +143,7 @@ class WebConfig:
     reasoning_effort: str | None
     sandbox: bool
     context_tokens: int | None = None  # None: the model's window, capped (Application)
-    # One turn's guards (V3-P62); None turns one off.
-    turn_budget: int | None = DEFAULT_TURN_BUDGET
-    unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS
-    max_runs: int | None = None
+    max_runs: int = DEFAULT_MAX_RUNS  # one turn's Run limit (V3-P106)
     # The offered models and their default efforts (V3-P64); empty: model_id alone.
     models: tuple[tuple[str, str | None], ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
@@ -211,10 +202,7 @@ class WebConfig:
         if not data_root:
             raise WebConfigError(f"{DATA_ROOT_VAR} must name the private data directory")
         effort = source.get(REASONING_VAR, "").strip() or None
-        turn_budget = _optional(source.get(TURN_BUDGET_VAR), TURN_BUDGET_VAR, DEFAULT_TURN_BUDGET, MIN_TURN_BUDGET,
-                                10**9)
-        unattended = _optional(source.get(UNATTENDED_RUNS_VAR), UNATTENDED_RUNS_VAR, DEFAULT_UNATTENDED_RUNS, 1, 1000)
-        max_runs = _optional(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, None, 1, 1000)
+        max_runs = _required(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, DEFAULT_MAX_RUNS, 1, 1000)
         trash_days = _optional(source.get(TRASH_DAYS_VAR), TRASH_DAYS_VAR, DEFAULT_TRASH_DAYS, 1, 365)
         if trash_days is None:
             raise WebConfigError(f"{TRASH_DAYS_VAR} must be between 1 and 365 (there is no keeping forever)")
@@ -223,8 +211,6 @@ class WebConfig:
         keep_days = _required(source.get(FILE_KEEP_DAYS_VAR), FILE_KEEP_DAYS_VAR, DEFAULT_FILE_KEEP_DAYS, 1, 365)
         if file_max > store_max:
             raise WebConfigError(f"{FILE_MAX_VAR} must not be larger than {FILE_STORE_MAX_VAR}")
-        if turn_budget is None and max_runs is None:
-            raise WebConfigError(f"{TURN_BUDGET_VAR}=0 needs {MAX_RUNS_VAR}: a turn needs a token budget or a Run limit")
         model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
         models_raw = source.get(MODELS_VAR)
         models = _models(models_raw, model_id) if models_raw is not None and models_raw.strip() else ()
@@ -248,8 +234,6 @@ class WebConfig:
             reasoning_effort=effort,
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
             context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
-            turn_budget=turn_budget,
-            unattended_runs=unattended,
             max_runs=max_runs,
             models=models,
             trash_days=trash_days,

@@ -21,7 +21,6 @@ from testkit import FAKE, SCOPE, V15_UNDO, FakeEnvironment, RecordingTool, final
 
 from himari.bootstrap import build_runtime
 from himari.common import (
-    ASK_USER_TOOL_ID,
     ArtifactId,
     ConversationId,
     EnvironmentKind,
@@ -102,7 +101,6 @@ async def everything(data: SqliteData, store: SqliteStore) -> dict[str, Any]:
         "artifacts": await data.list_artifacts(SCOPE),
         "snapshot": await data.get_latest_snapshot(SCOPE),
         "state": await data.read_current_state_basis(SCOPE),
-        "waiting": await data.find_waiting_call(SCOPE),
     }
 
 
@@ -515,12 +513,6 @@ async def op_unknown(store: SqliteStore, data: SqliteData) -> Operation:
     return lambda: data.commit_unknown_outcome(SCOPE, call, UNKNOWN_OUTCOME_RESULT)
 
 
-async def op_answer(store: SqliteStore, data: SqliteData) -> Operation:
-    run_id = await _received(data)
-    await data.project_model_output(SCOPE, run_id, AssistantToolCalls((ToolCall(CallId("q"), 0, ASK_USER_TOOL_ID, {}),)))
-    return lambda: data.answer_pending_call(SCOPE, CallRef(run_id, CallId("q")), user("yes"))
-
-
 async def op_recover(store: SqliteStore, data: SqliteData) -> Operation:
     for _ in range(2):
         run_id = await _received(data)
@@ -566,7 +558,7 @@ async def op_purge(store: SqliteStore, data: SqliteData) -> Operation:
     return lambda: data.purge_conversation(SCOPE)
 
 
-@pytest.mark.parametrize("setup", [op_project, op_commit, op_unknown, op_answer, op_recover, op_append, op_final,
+@pytest.mark.parametrize("setup", [op_project, op_commit, op_unknown, op_recover, op_append, op_final,
                                    op_activate, op_create, op_purge], ids=lambda f: f.__name__)
 def test_a_failure_after_any_write_rolls_the_whole_transaction_back(tmp_path: Path, setup: Setup) -> None:
     store, data = open_store(tmp_path / "h.db")
@@ -602,7 +594,7 @@ def child(*args: str) -> subprocess.CompletedProcess[str]:
                           capture_output=True, text=True, timeout=120, env=env)
 
 
-@pytest.mark.parametrize("op", ["project", "commit", "answer", "recover"])
+@pytest.mark.parametrize("op", ["project", "commit", "recover"])
 def test_killed_mid_transaction_leaves_the_state_before_it(tmp_path: Path, op: str) -> None:
     counted = child(str(tmp_path / "count.db"), "transaction", op, "count", "0", str(tmp_path / "count.dump"))
     assert counted.returncode == 0, counted.stderr
@@ -619,7 +611,7 @@ def test_killed_mid_transaction_leaves_the_state_before_it(tmp_path: Path, op: s
             reopened.close()
 
 
-@pytest.mark.parametrize("op", ["project", "commit", "answer", "recover"])
+@pytest.mark.parametrize("op", ["project", "commit", "recover"])
 def test_killed_right_after_commit_keeps_the_commit(tmp_path: Path, op: str) -> None:
     db, dump = tmp_path / "h.db", tmp_path / "h.dump"
     killed = child(str(db), "transaction", op, "after", "0", str(dump))
@@ -633,8 +625,6 @@ def test_killed_right_after_commit_keeps_the_commit(tmp_path: Path, op: str) -> 
             assert isinstance(events[-1].payload, AssistantToolCalls)
         elif op == "commit":
             assert len(asyncio.run(data.list_artifacts(SCOPE))) == 2
-        elif op == "answer":
-            assert asyncio.run(data.find_waiting_call(SCOPE)) is None
         else:
             report = asyncio.run(data.recover_interrupted(SCOPE))  # already done: nothing left
             assert report.tools_unknown == () and report.runs_abandoned_not_sent == ()

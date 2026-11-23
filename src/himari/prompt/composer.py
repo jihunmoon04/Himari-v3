@@ -57,7 +57,7 @@ class Composer:
                 case UserMessage(answers_call=None, blocks=blocks):
                     history.append(UserTurn(event.event_id, blocks))
                 case UserMessage():
-                    pass  # rendered once, as its ask_user call's result (V3-P18)
+                    pass  # an older ask_user answer: rendered once, as its call's result (V3-P18)
                 case AssistantFinal(blocks=blocks):
                     continuation = inputs.continuations.get(event.origin_run_id) if event.origin_run_id else None
                     history.append(AssistantTurn(event.event_id, blocks, continuation))

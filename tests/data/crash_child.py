@@ -17,7 +17,6 @@ from testkit import FAKE, SCOPE, FakeEnvironment, RecordingTool, calls, final, t
 
 from himari.bootstrap import build_runtime
 from himari.common import (
-    ASK_USER_TOOL_ID,
     CallId,
     CallRef,
     RawRepresentation,
@@ -94,10 +93,6 @@ async def setup_op(store: SqliteStore, data: SqliteData, op: str) -> Any:
         done = ToolCompletion(ToolExecutionStatus.SUCCEEDED, text_result("ok"), raw_result={"x": 1},
                               artifact_mutations=(ArtifactMutation("note", "a"), ArtifactMutation("plan", "b")))
         return lambda: data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c0")), done)
-    if op == "answer":
-        run_id = await new_run()
-        await data.project_model_output(SCOPE, run_id, AssistantToolCalls((ToolCall(CallId("q"), 0, ASK_USER_TOOL_ID, {}),)))
-        return lambda: data.answer_pending_call(SCOPE, CallRef(run_id, CallId("q")), user("yes"))
     if op == "recover":
         for _ in range(2):
             run_id = await new_run()

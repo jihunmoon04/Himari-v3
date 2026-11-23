@@ -10,7 +10,7 @@ from testkit import SCOPE, RecordingTool, calls, final, new_store, restart
 
 from himari.bootstrap import Runtime, Store, build_runtime
 from himari.bootstrap.interfaces import ConfiguredInterfaces
-from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope
+from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope
 from himari.control.api import DriveState, TurnPresence
 from himari.data.api import (
     DataError, InterfaceCapabilities, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind,
@@ -88,20 +88,18 @@ def test_accepted_input_is_restored_after_restart_without_resampling() -> None:
     asyncio.run(scenario())
 
 
-def test_answer_snapshot_survives_compression_past_the_answer_and_restart() -> None:
+def test_input_snapshot_survives_compression_past_the_input_and_restart() -> None:
     async def scenario() -> None:
         source = Source()
         tool = RecordingTool("probe")
-        provider = ScriptedAdapter([calls((ASK_USER_TOOL_ID, {"question": "which?"})),
-                                    calls(("probe", {})), final("SUMMARY")])
+        provider = ScriptedAdapter([final("first"), calls(("probe", {})), final("SUMMARY")])
         rt = make(provider, source, tools=(tool,), budget=ContextBudget(10000), limit=1)
-        assert (await rt.driver.drive(SCOPE, message())).state is DriveState.WAITING_FOR_USER
+        assert (await rt.driver.drive(SCOPE, message())).state is DriveState.COMPLETED
         assert (await rt.driver.drive(SCOPE, message(CLI))).state is DriveState.RUN_LIMIT_REACHED
-        answer = next(e for e in await rt.data.read_events(SCOPE)
-                      if isinstance(e.payload, UserMessage) and e.payload.answers_call is not None)
+        latest = [e for e in await rt.data.read_events(SCOPE) if isinstance(e.payload, UserMessage)][-1]
         assert (await rt.driver.compact(SCOPE)).state is DriveState.COMPACTED
         snapshot = await rt.data.get_latest_snapshot(SCOPE)
-        assert snapshot is not None and snapshot.covers_through_sequence >= answer.sequence
+        assert snapshot is not None and snapshot.covers_through_sequence >= latest.sequence
         summary_request = str(provider.prepared_inputs[-1].conversation)
         assert "file_download" not in summary_request
         provider2 = ScriptedAdapter([final("done")])
@@ -157,26 +155,6 @@ def test_input_cannot_supply_its_own_capabilities_or_a_different_kind() -> None:
         with pytest.raises(DataError):
             await rt.driver.accept(SCOPE, replace(message(DESK), interface=forged))
         assert len(await rt.data.read_events(SCOPE)) == 1
-
-    asyncio.run(scenario())
-
-
-def test_a_rejected_answer_does_not_consume_the_waiting_call() -> None:
-    async def scenario() -> None:
-        rt = make(ScriptedAdapter([calls((ASK_USER_TOOL_ID, {"question": "which?"}))]), Source())
-        result = await rt.driver.drive(SCOPE, message())
-        assert result.waiting_call is not None
-        before = await rt.data.read_events(SCOPE)
-        with pytest.raises(DataError):
-            await rt.data.answer_pending_call(SCOPE, result.waiting_call, replace(
-                message(CLI), interface=InterfaceSnapshot(InterfaceKind.WEB)))
-        assert await rt.data.read_events(SCOPE) == before
-        assert await rt.data.find_waiting_call(SCOPE) == result.waiting_call
-        answer = replace(message(CLI), interface=InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True)))
-        await rt.data.answer_pending_call(SCOPE, result.waiting_call, answer)
-        recorded = [e.payload for e in await rt.data.read_events(SCOPE)
-                    if isinstance(e.payload, UserMessage) and e.payload.answers_call is not None]
-        assert len(recorded) == 1 and recorded[0].interface == answer.interface
 
     asyncio.run(scenario())
 

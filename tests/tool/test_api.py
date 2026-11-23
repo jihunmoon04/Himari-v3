@@ -5,7 +5,6 @@ from collections.abc import Callable, Sequence
 from types import ModuleType
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     ArtifactId,
     CallId,
     ConversationId,
@@ -18,7 +17,6 @@ from himari.common import (
 from himari.data.api import Artifact
 from himari.tool import api
 from himari.tool.api import (
-    Completion,
     EffectProfile,
     ToolContext,
     ToolDefinition,
@@ -35,9 +33,6 @@ def assert_handler_conforms(handler: object) -> None:
     assert isinstance(handler, ToolHandler)
     d = handler.definition
     assert d.tool_id
-    if d.completion is Completion.SUSPENDING:
-        assert d.tool_id == ASK_USER_TOOL_ID, "P0: only ask_user may suspend"
-        assert d.effect_profile is EffectProfile.READ
     if d.environment_kind is not None:
         assert d.tool_id.startswith(f"{d.environment_kind}/")
     else:
@@ -73,27 +68,12 @@ class EchoTool:
         )
 
 
-class AskUserTool:
-    definition = ToolDefinition(
-        tool_id=ASK_USER_TOOL_ID,
-        description="Ask the user a question and wait for the answer.",
-        input_schema={"type": "object", "properties": {"question": {"type": "string"}}},
-        workspace_requirement=WorkspaceRequirement.NONE,
-        effect_profile=EffectProfile.READ,
-        completion=Completion.SUSPENDING,
-    )
-
-    async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
-        raise AssertionError("suspending Tools are never run by the Dispatcher")
-
-
 def test_dtos_are_frozen(assert_api_dataclasses_frozen: Callable[[ModuleType], None]) -> None:
     assert_api_dataclasses_frozen(api)
 
 
 def test_example_handlers_conform() -> None:
     assert_handler_conforms(EchoTool())
-    assert_handler_conforms(AskUserTool())
 
 
 def test_handler_returns_outcome_without_ledger_access() -> None:

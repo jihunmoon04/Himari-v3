@@ -104,8 +104,8 @@ def test_a_wake_ends_once() -> None:
     store = new_store()
     data, _ = opened(store)
     wake_id = asyncio.run(data.begin_wake(SCOPE, TRY, "d1")).payload.wake_id  # type: ignore[union-attr]
-    ended = asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.ANSWERED, asked=True))
-    assert ended.status is WakeStatus.ANSWERED and ended.asked and ended.ended_at is not None
+    ended = asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.ANSWERED))
+    assert ended.status is WakeStatus.ANSWERED and ended.ended_at is not None
     later = asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.FAILED))
     assert later.status is WakeStatus.ANSWERED  # once
     assert asyncio.run(data.opened_wakes()) == ()

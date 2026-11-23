@@ -3,7 +3,7 @@
 The ``InMemoryStore`` object plays the role of durable storage: a "process
 restart" is modelled by building a new driver over the same store. Every port
 call validates first and mutates last, so each call is all-or-nothing under
-single-threaded asyncio (the transaction boundaries T1–T9, T7a, T-R).
+single-threaded asyncio (the transaction boundaries T1–T9, T-R).
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     ArtifactId,
     AttachmentRef,
     BindingId,
@@ -47,7 +46,6 @@ from himari.data.api import (
     PRESENT_LIMIT_BYTES,
     PRESENT_WINDOW,
     STAGED_SEND_CUTOFF,
-    AnswerCommit,
     Artifact,
     ArtifactMutation,
     AssistantFinal,
@@ -166,7 +164,6 @@ class _Run:
     raw_request_body: bytes
     raw_response_body: bytes | None = None
     raw_response_content_type: str = ""
-    projected_event_id: EventId | None = None
 
 
 @dataclass
@@ -456,22 +453,6 @@ class InMemoryData:
     def _set_status(run: _Run, status: RunStatus, **changes: object) -> None:
         run.record = replace(run.record, status=status, **changes)  # type: ignore[arg-type]
 
-    def _waiting(self, conv: _Conversation) -> CallRef | None:
-        projected = [
-            r for r in conv.runs.values() if r.record.status is RunStatus.PROJECTED and r.projected_event_id is not None
-        ]
-        if not projected:
-            return None
-        run_id = projected[-1].record.run_id
-        group = [e for e in conv.executions.values() if e.call.run_id == run_id]
-        if (
-            len(group) == 1
-            and group[0].tool_id == ASK_USER_TOOL_ID
-            and group[0].status is ToolExecutionStatus.PENDING
-        ):
-            return group[0].call
-        return None
-
     def _conversation_binding(self, conv: _Conversation, binding_id: object) -> BindingAuthority:
         binding = conv.bindings.get(BindingId(str(binding_id)))
         if binding is None:
@@ -591,13 +572,9 @@ class InMemoryData:
                 raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"idempotency key {idempotency_key!r} reused")
             return existing
         if message.answers_call is not None:
-            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers_call is older history only")
         rules.check_origin(message.origin)
         rules.check_interface(message.interface, message.origin)
-        if self._waiting(conv) is not None:
-            raise DataError(
-                DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
-            )
         attached = self._attach(conv, message.blocks)
         self._mark_attached(attached)
         event = self._new_event(conv, scope, message, None)
@@ -700,7 +677,6 @@ class InMemoryData:
         event = self._new_event(conv, scope, output, run_id)
         for record in pending:
             conv.executions[record.call] = record
-        run.projected_event_id = event.event_id
         stamped = (
             None
             if continuation is None
@@ -830,29 +806,6 @@ class InMemoryData:
                 raise DataError(DataErrorCode.VERSION_CONFLICT, m.artifact_id)
             staged[m.artifact_id] = replace(current, content=m.content, revision=current.revision + 1)
         return staged
-
-    async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
-        return self._waiting(self._conv(scope))
-
-    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
-        return tuple(cid for cid, conv in self._store._conversations.items()
-                     if conv.owner == principal and conv.trashed_at is None and self._waiting(conv) is not None)
-
-    async def answer_pending_call(
-        self, scope: TrustedScope, call: CallRef, answer: UserMessage
-    ) -> AnswerCommit:
-        conv = self._conv(scope)
-        if self._waiting(conv) != call:
-            raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
-        rules.check_origin(answer.origin)
-        rules.check_interface(answer.interface, answer.origin)
-        record = self._execution(conv, call)
-        self._mark_attached(self._attach(conv, answer.blocks))
-        result = ModelToolResult(blocks=answer.blocks)
-        user_event = self._new_event(conv, scope, replace(answer, answers_call=call), None)
-        conv.executions[call] = replace(record, status=ToolExecutionStatus.SUCCEEDED, model_result=result)
-        tool_event = self._new_event(conv, scope, ToolResultRecord(call, result), call.run_id)
-        return AnswerCommit(user_event=user_event, tool_result_event=tool_event)
 
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
         conv = self._conv(scope)
@@ -1362,8 +1315,6 @@ class InMemoryData:
         rules.check_wake(reasons, device_id, keys, reminders)
         rules.check_interface(interface, MessageOrigin(OriginKind.DEVICE, device_id))
         conv = self._conv(scope)
-        if self._waiting(conv) is not None:
-            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting")
         for key in keys:
             if (scope.principal_id, key) in self._store.wake_keys:
                 raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"wake key {key!r} was taken")
@@ -1380,20 +1331,18 @@ class InMemoryData:
             self._store.reminders[(scope.principal_id, memory_id)] = ("claimed", wake_id, attempts)
         event = self._new_event(conv, scope, Wake(wake_id, tuple(reasons), device_id, interface), None)
         self._store.wakes[wake_id] = WakeRecord(wake_id, scope.principal_id, scope.conversation_id, event.sequence,
-                                                tuple(reasons), device_id, WakeStatus.OPENED, False,
-                                                datetime.now(UTC), None)
+                                                tuple(reasons), device_id, WakeStatus.OPENED, datetime.now(UTC),
+                                                None)
         return event
 
-    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
-                       asked: bool = False) -> WakeRecord:
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus) -> WakeRecord:
         if status.in_progress:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake ends answered, cancelled or failed")
         record = await self.read_wake(principal, wake_id)
         if not record.status.in_progress or (record.status is WakeStatus.SPEAKING
                                              and status in (WakeStatus.PASSED, WakeStatus.DROPPED)):
             return record
-        ended = replace(record, status=status, asked=asked and status is WakeStatus.ANSWERED,
-                        ended_at=datetime.now(UTC))
+        ended = replace(record, status=status, ended_at=datetime.now(UTC))
         self._store.wakes[wake_id] = ended
         asleep = {r.memory_id for r in record.reasons if r.kind is WakeKind.REMINDER and r.asleep}
         for key, (state, claimer, attempts) in list(self._store.reminders.items()):

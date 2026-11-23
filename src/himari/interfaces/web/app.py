@@ -46,7 +46,7 @@ import threading
 import time
 import unicodedata
 from urllib.parse import quote
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -106,7 +106,6 @@ from himari.presence.api import (
 )
 from himari.common import (
     ACTIVITIES,
-    ASK_USER_TOOL_ID,
     MOODS,
     AttachmentRef,
     FileReference,
@@ -490,12 +489,6 @@ def _text(blocks: tuple[ContentBlock, ...]) -> str:
     return "\n\n".join(b.text for b in blocks if isinstance(b, TextBlock))
 
 
-def _question(arguments: Mapping[str, Any]) -> str:
-    """An ask_user call's question, as the model wrote it."""
-    asked = arguments.get("question")
-    return asked if isinstance(asked, str) else ""
-
-
 def display_view(text: str) -> dict[str, Any]:
     """What the model wrote as it is shown (V3-P83 §7.2, appendix A.6): the
     text without its marks, and each mark's place in it (code points) — moods,
@@ -637,9 +630,6 @@ def event_view(event: ConversationEvent,
     payload = event.payload
     if isinstance(payload, UserMessage):
         view["text"] = _text(payload.blocks)
-        # A call is identified by (run_id, call_id): call ids repeat across Runs.
-        view["answers_call"] = None if payload.answers_call is None else payload.answers_call.call_id
-        view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
         view["attachments"] = [_attachment(b, files) for b in payload.blocks if isinstance(b, AttachmentRef)]
         view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
         # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
@@ -654,9 +644,7 @@ def event_view(event: ConversationEvent,
         view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
-        view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
-                          **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
-                             else {})}
+        view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
     elif isinstance(payload, Wake):  # V3-P87 §9: a dim line, not a bubble
         view["wake"] = {"id": payload.wake_id, "device_id": payload.device_id,
@@ -671,7 +659,7 @@ def event_view(event: ConversationEvent,
         line = memory.get(payload.call)
         view["memory"] = None if line is None else {"action": line.action, "id": line.memory_id, "text": line.text,
                                                     "undo": line.undo}
-        # V3-P67 §8: the images the call returned (kept as files of the call) — never an
+        # V3-P67 §8: the images the call returned (kept as files of the call) — never an older
         # ask_user answer's attachments, which are its result too (PR #63 review C2).
         view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
                           if (found := files.get((b.file_id, b.version))) is not None
@@ -707,7 +695,7 @@ def turn_usage_view(usage: TurnUsage) -> dict[str, Any]:
     """What the job's drive used so far (V3-P62 §7)."""
     return {"runs": usage.runs, "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
             "cached_input_tokens": usage.cached_input_tokens, "cache_write_tokens": usage.cache_write_tokens,
-            "budget": usage.budget, "max_runs": usage.max_runs}
+            "max_runs": usage.max_runs}
 
 
 def context_view(status: ContextStatus | None) -> dict[str, Any]:
@@ -1273,7 +1261,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.get("/api/server")
     async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """What this server runs with: the models and the budget."""
+        """What this server runs with: the models and the budgets."""
         application = himari(request)
         turn = application.turn
         return {"model": application.model_id,
@@ -1286,9 +1274,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "auto_memory": application.auto_memory,  # V3-P85 §12: "on (…)" or "off (why)"
                 "conversation_search": application.conversation_search_enabled,  # V3-P72 §9
                 "streaming": application.streaming_enabled,  # V3-P73 §9
-                "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
-                         "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
-                         "seen_seconds": turn.seen_seconds}}
+                "turn": {"max_runs": turn.max_runs}}
 
     @app.post("/api/session", status_code=204)
     async def sign_in(body: LoginBody, request: Request, response: Response) -> None:
@@ -1320,11 +1306,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.get("/api/conversations/activity")  # before /api/conversations/{conversation_id}, which would take it
     async def conversation_activity(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
-        them: it never counts as the user being there (``seen``, V3-P62 §5)."""
+        """V3-P80 §3.2: which Conversations work now."""
         application, who = himari(request), by.principal
-        return {"working": sorted(application.runner.shown_running(who)),  # V3-P90 §7.3: not a hidden one
-                "waiting": sorted(await application.data.list_waiting_conversations(who))}
+        return {"working": sorted(application.runner.shown_running(who))}  # V3-P90 §7.3: not a hidden one
 
     @app.post("/api/conversations", status_code=201)
     async def create_conversation(body: CreateBody, request: Request,
@@ -1340,23 +1324,14 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     async def _detail(application: Application, scope: TrustedScope) -> dict[str, Any]:
         summary = await application.data.read_conversation(scope)  # authorizes first
-        application.seen(scope)  # a client is reading (V3-P62 §5)
-        waiting = await application.data.find_waiting_call(scope)
-        question = None
-        if waiting is not None:
-            for record in await application.data.read_tool_executions(scope, waiting.run_id):
-                if record.call == waiting and record.tool_id == ASK_USER_TOOL_ID:
-                    asked = _question(record.arguments)
-                    question = {"call_id": waiting.call_id, "question": asked, "display": display_view(asked)}
         job = application.runner.shown_status(scope)  # V3-P90 §7.3: a hidden free wake is not working
         # An accepted input (or finished Tool results) with no assistant
         # output after it — e.g. the server stopped before the job ran.
         last = await application.data.read_events(scope, after_sequence=summary.last_sequence - 1, limit=1) \
             if summary.last_sequence else ()
-        continuable = (not job.running and question is None and bool(last)
+        continuable = (not job.running and bool(last)
                        and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls"))
-        return {"conversation": summary_view(summary), "job": job_view(job), "waiting": question,
-                "continuable": continuable}
+        return {"conversation": summary_view(summary), "job": job_view(job), "continuable": continuable}
 
     @app.get("/api/conversations/{conversation_id}")
     async def read_conversation(conversation_id: str, request: Request,
@@ -1418,7 +1393,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         events = await application.data.read_events(scope, after_sequence=after, limit=limit)
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
             events = tuple(e for e in events if e.sequence not in unshown)
-        application.seen(scope)  # a client is reading (V3-P62 §5): only after the read was authorized
         writers = [e.origin_run_id for e in events
                    if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
         models = await application.run_models(scope, writers) if writers else {}
@@ -1449,7 +1423,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         if by.device is None:
             return _LiveResponse(live.stream(application.runner, scope, closing), release,
                                  media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
-        # V3-P83 §8.3: a device's open live stream is a connected client (seen); §8.1: revoking ends it.
+        # V3-P83 §8.1: revoking the device ends its open live stream.
         key, ended = (who, by.device.device_id), asyncio.Event()
         device_lives.setdefault(key, set()).add(ended)
 
@@ -1461,8 +1435,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 if not kept:
                     del device_lives[key]
 
-        return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended,
-                                         awake=lambda: application.seen(scope)), done,
+        return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended), done,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/conversations/{conversation_id}/context")
@@ -1891,13 +1864,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit(scope, None))
 
-    @app.post("/api/conversations/{conversation_id}/pause", status_code=202)
-    async def pause(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """Stop the running job at the next safe boundary (V3-P55); nothing if idle."""
-        application, scope = himari(request), scope_of(conversation_id, by.principal)
-        await application.data.read_conversation(scope)
-        return job_view(application.runner.request_pause(scope))
-
     @app.post("/api/conversations/{conversation_id}/cancel", status_code=202)
     async def cancel(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """Stop the running job now (V3-P55); nothing if idle."""
@@ -1907,8 +1873,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.post("/api/conversations/{conversation_id}/dismiss", status_code=202)
     async def dismiss(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """Close what was left waiting — a question, or never-started steps
-        of a paused or interrupted turn (V3-P55). Busy while a job runs."""
+        """Close the never-started steps of an interrupted turn (V3-P55).
+        Busy while a job runs."""
         application, scope = himari(request), scope_of(conversation_id, by.principal)
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit_cancel(scope))
@@ -2126,7 +2092,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 from None
         try:
             assert application.events is not None
-            hello = {**await device_state(application, by), "activity": await application.events.activity(by.principal)}
+            hello = {**await device_state(application, by), "activity": application.events.activity(by.principal)}
             if by.device is None:  # V3-P88 §8.1: the Web compares, and rereads the devices when it differs
                 hello["signals"] = {"epoch": application.presence.signals_epoch,
                                     "revision": application.presence.signals_revision(by.principal)}

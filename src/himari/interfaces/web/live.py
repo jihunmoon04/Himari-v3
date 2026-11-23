@@ -165,18 +165,14 @@ def _moves(moves: Moves) -> list[dict[str, Any]]:
 
 async def stream(source: LiveSource, scope: TrustedScope, closing: asyncio.Event, *,
                  clock: Callable[[], float] = time.monotonic, heartbeat: float = HEARTBEAT_SECONDS,
-                 limit: float = MAX_SECONDS, ended: asyncio.Event | None = None,
-                 awake: Callable[[], None] | None = None) -> AsyncIterator[str]:
+                 limit: float = MAX_SECONDS, ended: asyncio.Event | None = None) -> AsyncIterator[str]:
     """``ended``: set when this stream must end (its device was revoked, V3-P83
-    §8.1). ``awake``: called each time it wakes, at least every ``heartbeat``
-    (a device's open stream counts as a connected client, §8.3)."""
+    §8.1)."""
     yield f"retry: {RETRY_MS}\n\n"
     cursor = Cursor()
     deadline = clock() + limit
     stopped = closing if ended is None else _Either(closing, ended)
     while not stopped.is_set():
-        if awake is not None:
-            awake()
         version = source.live_version(scope)
         for event in step(source, scope, cursor):
             yield event

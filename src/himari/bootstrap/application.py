@@ -80,8 +80,8 @@ from himari.control.api import (
     ModelOffer,
     ResolvedModel,
 )
-from himari.control.driver import NO_PROGRESS_RUNS, Driver
-from himari.control.runner import SEEN_SECONDS, BackgroundRunner
+from himari.control.driver import MAX_RUNS, Driver
+from himari.control.runner import BackgroundRunner
 from himari.memory.api import MemoryPassSettings, PassOutcome
 from himari.memory.worker import MemoryPasses
 from himari.data.api import (
@@ -182,21 +182,13 @@ BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # HIMARI's own Tool ids 
 PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the folder's lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
-# One turn's guards (V3-P62): no Run limit by default; a token budget, a
-# no-progress stop, and a pause when no client reads the Conversation.
-DEFAULT_TURN_BUDGET = 3_000_000  # tokens per drive (O1: the owner's choice, 2026-10-16)
-DEFAULT_UNATTENDED_RUNS = 20  # Runs without a client read in SEEN_SECONDS (O2)
 
 
 @dataclass(frozen=True)
 class TurnSettings:
-    """How a turn is guarded (V3-P62), as this server runs it."""
+    """How a turn is guarded (V3-P62), as this server runs it: one Run limit."""
 
-    turn_budget: int | None  # None: no token budget (then max_runs is set)
-    unattended_runs: int | None  # None: never paused for want of a client
-    max_runs: int | None  # None: no Run limit
-    no_progress_runs: int = NO_PROGRESS_RUNS
-    seen_seconds: float = SEEN_SECONDS
+    max_runs: int = MAX_RUNS
 
 
 # Default request budget: the model's window, capped so that a long
@@ -696,8 +688,7 @@ class Application:
     context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
     mcp: McpConnection = field(default_factory=lambda: McpConnection([], (), []))
-    turn: TurnSettings = field(default_factory=lambda: TurnSettings(DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS,
-                                                                    None))
+    turn: TurnSettings = field(default_factory=TurnSettings)
     # Offered models whose window, efforts and Tool calling the Provider does
     # not declare (V3-P64 §3, review B1): told at startup, used as configured.
     unverified_models: tuple[str, ...] = ()
@@ -760,9 +751,7 @@ class Application:
         environ: Mapping[str, str] | None = None,  # where mcp.json's token variables are read
         mcp_transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake MCP server
         mcp_launcher_for: LauncherFor | None = None,  # tests: stdio servers without the server sandbox
-        turn_budget: int | None = DEFAULT_TURN_BUDGET,
-        unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS,
-        max_runs: int | None = None,
+        max_runs: int = MAX_RUNS,
         # The offered models with their default efforts (V3-P64 §3), in the
         # operator's order; empty: ``model_id`` alone. The default model's
         # effort, when its entry has none, is ``reasoning_effort``.
@@ -792,11 +781,11 @@ class Application:
         speaking_first = proactive if proactive is not None else ProactiveSettings()
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
             raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
-        if turn_budget is None and max_runs is None:
-            raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
+        if max_runs < 1:
+            raise ValueError("a turn needs a Run limit (V3-P62)")
         if not 1 <= trash_days <= 365:
             raise ValueError("trash_days is 1..365 (V3-P65)")
-        turn = TurnSettings(turn_budget, unattended_runs, max_runs)
+        turn = TurnSettings(max_runs)
         offers: list[ModelOffer] = []
         unverified: list[str] = []
         image_models: list[str] = []
@@ -812,8 +801,7 @@ class Application:
                 limit = ContextBudget(context_limit(ceiling, context_tokens), hard_limit_tokens=ceiling)
             except ValueError as error:
                 raise ValueError(f"{offered}: {error}") from None
-            offers.append(ModelOffer(offered, effort, capabilities.reasoning_efforts, limit,
-                                     capabilities.max_output_tokens))
+            offers.append(ModelOffer(offered, effort, capabilities.reasoning_efforts, limit))
             if capabilities.context_tokens is None:
                 unverified.append(offered)
             if capabilities.image_input:
@@ -894,8 +882,7 @@ class Application:
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
-                                    max_runs_per_drive=max_runs, turn_budget=turn_budget,
-                                    no_progress_runs=turn.no_progress_runs, image_views=views,
+                                    max_runs_per_drive=max_runs, turn_guidance=True, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory,
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
@@ -914,11 +901,10 @@ class Application:
                 store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
-        events = CompanionEvents(hub, runtime.data)
+        events = CompanionEvents(hub)
         wake_events = WakeEvents(runtime.data)
         listeners = _JobListeners(events, wake_events)
-        runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
-                                  listener=listeners)
+        runner = BackgroundRunner(runtime.driver, listener=listeners)
         application = cls(root, store, runtime.data, runtime, runner, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models),
@@ -967,11 +953,6 @@ class Application:
                 ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)
         application.ticker.start()
         return application
-
-    def seen(self, scope: TrustedScope) -> None:
-        """A client read this Conversation (V3-P62 §5): call only after the
-        read was authorized."""
-        self.runner.seen(scope)
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
@@ -1595,14 +1576,12 @@ class Application:
                 await self.mcp.release(scope.conversation_id)
             except Exception:  # noqa: BLE001 — the move stands; an idle process ends by itself
                 log.exception("could not end the MCP processes of %s", scope.conversation_id)
-            self._activity_changed(scope)
             return moved
 
     async def restore(self, scope: TrustedScope) -> None:
         async with self._exclusive(scope.conversation_id):
             await self.data.restore_conversation(scope)  # owner and state first
             self.runner.reopen(scope)
-            self._activity_changed(scope)
 
     async def purge(self, scope: TrustedScope) -> None:
         """§7.2: PURGING recorded (no restore from here on), the
@@ -1616,12 +1595,6 @@ class Application:
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)
             self.runner.reopen(scope)
-            self._activity_changed(scope)
-
-    def _activity_changed(self, scope: TrustedScope) -> None:
-        """V3-P83 §2.2: a waiting conversation may have left or come back."""
-        if self.events is not None:
-            self.events.activity_changed(scope.principal_id)
 
     async def purge_due(self, now: datetime | None = None) -> int:
         """Purge what was trashed more than ``trash_days`` before ``now``,
@@ -1683,8 +1656,6 @@ class Application:
             await self.memory_passes.close()  # a pass cut short is counted at the next start (V3-P85 §4.5)
         try:
             await self.runner.shutdown(grace_seconds)
-            if self.events is not None:
-                await self.events.aclose()
             if self._wake_events is not None:
                 await self._wake_events.aclose()
             if self.inputs is not None:

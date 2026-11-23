@@ -78,8 +78,8 @@ def test_a_stream_that_fell_behind_ends() -> None:
     assert len(frames) == 2 + QUEUE_EVENTS  # what was queued, then the end: it reopens and gets hello
 
 
-def test_a_devices_live_stream_ends_when_revoked_and_wakes_as_a_client() -> None:
-    """§8.1: revoking ends its live streams; §8.3: each wakeup is a connected client (seen)."""
+def test_a_devices_live_stream_ends_when_revoked() -> None:
+    """§8.1: revoking ends its live streams."""
     class Running:
         def live_output(self, scope: object, *, text: bool = True) -> None:
             return None
@@ -97,19 +97,11 @@ def test_a_devices_live_stream_ends_when_revoked_and_wakes_as_a_client() -> None
         def status(self, scope: object) -> JobStatus:
             return JobStatus(running=True)
 
-    async def scenario() -> tuple[list[str], int]:
-        woke = 0
-
-        def awake() -> None:
-            nonlocal woke
-            woke += 1
-
+    async def scenario() -> list[str]:
         ended = asyncio.Event()
         asyncio.get_running_loop().call_later(0.1, ended.set)
-        frames = [f async for f in live.stream(Running(), object(), asyncio.Event(),  # type: ignore[arg-type]
-                                               heartbeat=0.02, limit=5, ended=ended, awake=awake)]
-        return frames, woke
+        return [f async for f in live.stream(Running(), object(), asyncio.Event(),  # type: ignore[arg-type]
+                                             heartbeat=0.02, limit=5, ended=ended)]
 
-    frames, woke = asyncio.run(scenario())
+    frames = asyncio.run(scenario())
     assert "event: idle\ndata: {}\n\n" in frames and "done" not in "".join(frames)  # ended, not finished
-    assert woke >= 3

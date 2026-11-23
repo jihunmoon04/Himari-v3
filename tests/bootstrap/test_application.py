@@ -14,8 +14,6 @@ from testkit import calls, final, user
 from himari.bootstrap.application import (
     DEFAULT_CONTEXT_TOKENS,
     DEFAULT_OUTPUT_TOKENS,
-    DEFAULT_TURN_BUDGET,
-    DEFAULT_UNATTENDED_RUNS,
     UNKNOWN_WINDOW_TOKENS,
     Application,
     ModelChoiceView,
@@ -304,28 +302,23 @@ def test_a_stored_model_no_longer_offered_falls_back_after_a_restart(tmp_path: P
 
 
 def test_a_turn_is_guarded_as_configured(tmp_path: Path) -> None:
-    # V3-P62: by default a token budget and the unattended pause, no Run limit.
+    # V3-P106: one Run limit, 12 by default; the model is told when few Runs are left.
     async def scenario() -> None:
         app, _ = await open_app(tmp_path / "a")
         try:
-            assert app.turn == TurnSettings(DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS, None)
-            assert (app.turn.no_progress_runs, app.turn.seen_seconds) == (3, 60.0)
+            assert app.turn == TurnSettings(12)
             driver = app.runtime.driver
-            assert (driver._turn_budget, driver._max_runs, driver._no_progress_runs) == (3_000_000, None, 3)
-            assert app.runner._unattended_runs == 20
+            assert (driver._max_runs, driver._turn_guidance) == (12, True)
+            assert driver._loader._system.turn_guidance  # type: ignore[attr-defined]  # the rule is in the system text
         finally:
             await app.close()
-        tuned = await Application.open(tmp_path / "b", ScriptedAdapter(), model_id="m", sandbox=False,
-                                       turn_budget=None, unattended_runs=None, max_runs=30)
+        tuned = await Application.open(tmp_path / "b", ScriptedAdapter(), model_id="m", sandbox=False, max_runs=30)
         try:
-            assert tuned.turn == TurnSettings(None, None, 30)
-            assert (tuned.runtime.driver._turn_budget, tuned.runtime.driver._max_runs) == (None, 30)
-            assert tuned.runner._unattended_runs is None
+            assert tuned.turn == TurnSettings(30) and tuned.runtime.driver._max_runs == 30
         finally:
             await tuned.close()
-        with pytest.raises(ValueError, match="token budget or a Run limit"):
-            await Application.open(tmp_path / "c", ScriptedAdapter(), model_id="m", sandbox=False,
-                                   turn_budget=None, max_runs=None)
+        with pytest.raises(ValueError, match="a Run limit"):
+            await Application.open(tmp_path / "c", ScriptedAdapter(), model_id="m", sandbox=False, max_runs=0)
 
     asyncio.run(scenario())
 

@@ -8,9 +8,9 @@ import asyncio
 from collections.abc import Sequence
 
 import pytest
-from testkit import SCOPE, calls, final, runtime, user
+from testkit import SCOPE, RecordingTool, calls, final, runtime, user
 
-from himari.common import ASK_USER_TOOL_ID, TrustedScope
+from himari.common import TrustedScope
 from himari.control import runner as runner_module
 from himari.control.api import (ControlError, ControlErrorCode, DriveResult, DriveState, StopSignal,
                                 TurnProgress)
@@ -84,8 +84,9 @@ def test_a_wake_turn_runs_only_tools_that_read() -> None:
     asyncio.run(scenario())
 
 def test_a_wake_opens_only_in_a_settled_conversation() -> None:
-    """§4.1: a waiting question is not a place to speak first; nothing is recorded."""
-    rt, _ = runtime([calls((ASK_USER_TOOL_ID, {"question": "어디로?"}))])
+    """§4.1: a turn left unanswered (here at its Run limit) is not a place to speak first;
+    nothing is recorded."""
+    rt, _ = runtime([calls(("look", {}))], tools=[RecordingTool("look")], max_runs_per_drive=1)
     runner = BackgroundRunner(rt.driver)
 
     async def scenario() -> None:
