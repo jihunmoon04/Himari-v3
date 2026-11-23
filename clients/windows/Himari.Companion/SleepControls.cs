@@ -6,7 +6,7 @@ namespace Himari.Companion;
 
 // V3-P90 §2, §9: reading Windows for the sleep rules (SleepPolicy.cs) — the screen's power state, a key
 // pressed anywhere (raw input: that one was pressed, never which), what plays, a call, a fullscreen window —
-// and what follows a change: the signal goes at once, waking stretches, a reminder told while asleep stays up.
+// and what follows a change: the signal goes at once, waking stretches, a wake while asleep wakes it for its words.
 public partial class MainWindow
 {
     private readonly SleepPolicy sleepPolicy = new();
@@ -14,9 +14,8 @@ public partial class MainWindow
     private bool quietPlaying, quietCall;
     private IReadOnlyList<MediaSession> mediaSessions = [];  // V3-P90 §5.3: a video's own session gone is its end
     private DateTime lastQuietRead = DateTime.MinValue;
-    private bool reminderAwake;  // a reminder wakes it for its words only (§2.4): no stretch, asleep after
-    private CancellationToken reminderLive;  // the live that woke it: only that one ends it (PR #164 re-review P2-3)
-    private bool bubbleUntilAwake;  // that reminder's bubble stays until the user wakes it (§2.4)
+    private bool wakeAwake;  // a wake while asleep wakes it for its words only (§2.4): no stretch, asleep after
+    private CancellationToken wakeLive;  // the live that woke it: only that one ends it (PR #164 re-review P2-3)
     private DateTime stretchUntil = DateTime.MinValue;  // a wake's words wait for the stretch (§5.2)
     private TaskCompletionSource presenceNudge = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private HwndSource? sleepSource;
@@ -88,7 +87,6 @@ public partial class MainWindow
         {
             if (character.Manifest.Clips.TryGetValue("stretch", out var stretch))
                 stretchUntil = DateTime.UtcNow + TimeSpan.FromTicks((long)(stretch.Length.Ticks / animationSpeed));
-            if (bubbleUntilAwake) { bubbleUntilAwake = false; ScheduleBubbleClose(Message.Text); }  // now it may go
         }
         UpdateFrame();
     }
@@ -123,21 +121,23 @@ public partial class MainWindow
 
     private static bool FullscreenNow() => SHQueryUserNotificationState(out int state) == 0 && state is 2 or 3 or 4;  // busy, D3D, presentation
 
-    /// <summary>§2.4: a wake for this device while asleep is a reminder — it wakes for its words, and its bubble
-    /// stays. <paramref name="live"/>: the live that speaks them, the only one whose end puts it back to sleep.</summary>
+    /// <summary>§2.4: a wake for this device while asleep wakes it for its words only. A V3-P107 server opens no
+    /// wake for a sleeping device, so this is one that fell asleep as the wake opened, the operator's try, or an
+    /// older server's reminder. Its bubble closes as any other (V3-P107 §2: no note is left up).
+    /// <paramref name="live"/>: the live that speaks them, the only one whose end puts it back to sleep.</summary>
     private void WakeJobArrived(CancellationToken live)
     {
         if (!sleepPolicy.Asleep || sleepPolicy.Locked) return;
-        reminderAwake = true; reminderLive = live; bubbleUntilAwake = true;
+        wakeAwake = true; wakeLive = live;
         UpdateFrame();
     }
 
-    /// <summary>A live ended: if it is the one that woke it, asleep again (the bubble stays). A live cancelled by a
-    /// reconnect that ends after the new one started is not that one.</summary>
+    /// <summary>A live ended: if it is the one that woke it, asleep again. A live cancelled by a reconnect that ends
+    /// after the new one started is not that one.</summary>
     private void WakeJobEnded(CancellationToken live)
     {
-        if (!reminderAwake || reminderLive != live) return;
-        reminderAwake = false; reminderLive = default;
+        if (!wakeAwake || wakeLive != live) return;
+        wakeAwake = false; wakeLive = default;
         UpdateFrame();
     }
 

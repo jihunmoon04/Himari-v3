@@ -86,7 +86,7 @@ internal sealed class CharacterAnimator
 
     // Dozing yawns, then plays the sleep clip, when the art has them; without a sleep clip it
     // only closes the eyes. Waking ends both at once, then stretches once there is stretch art.
-    // ``stretch`` false: woken only to say something (a reminder, V3-P90 §2.4), asleep again after.
+    // ``stretch`` false: woken only to say something (a wake while asleep, V3-P90 §2.4), asleep again after.
     internal void SetSleeping(bool value, TimeSpan now, bool stretch = true)
     {
         if (value == sleeping) return;
