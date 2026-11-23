@@ -126,14 +126,14 @@ def test_no_speaking_first_line_for_a_model_that_was_not_checked() -> None:
     assert PROACTIVE_RULE not in text and "<wake> message" not in text
 
 
-def test_a_reminder_told_again_and_an_end_are_drawn() -> None:
-    """V3-P90 §5.1, §5.3: the model reads that a reminder is told again, and what ended."""
+def test_a_reminder_and_an_end_are_drawn() -> None:
+    """V3-P90 §5.3: the model reads what ended; V3-P107 §2: a reminder has no "again" any more."""
     from himari.prompt.api import wake_text
 
-    again = Wake("wake_3", (WakeReason(WakeKind.REMINDER, memory_id=15, again=True),
-                            WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95)), "d1")
-    reminder, game = json.loads(wake_text(again, {15: LOOP})[6:-7])["reasons"]
-    assert reminder["again"] is True and "late" not in reminder
+    wake = Wake("wake_3", (WakeReason(WakeKind.REMINDER, memory_id=15),
+                           WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95)), "d1")
+    reminder, game = json.loads(wake_text(wake, {15: LOOP})[6:-7])["reasons"]
+    assert "again" not in reminder and "late" not in reminder
     assert game == {"kind": "task_ended", "group": "game", "minutes": 95}
 
 

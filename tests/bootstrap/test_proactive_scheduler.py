@@ -82,7 +82,7 @@ def test_a_due_loop_is_spoken_of_once(tmp_path: Path) -> None:
             again = await scheduler.look(ME)
             assert again.outcome == "nothing" and again.decision.reasons == ()  # its key is taken
             status = await app.proactive_status(ME)
-            assert status["today"] == 0 and status["daily"] == 6  # V3-P90 §7.4: free wakes only
+            assert status["today"] == 0 and status["daily"] == 10  # V3-P107 §4: free wakes opened only
             assert status["last_look"] == {"at": again.at, "outcome": "nothing", "held": []}
         finally:
             await app.close()
@@ -376,70 +376,37 @@ def asleep_signals(sleep: Sleep | None = Sleep.IDLE) -> Signals:
     return Signals(session=Session.ACTIVE, sleep_known=True, sleep=sleep)
 
 
-async def told_while_asleep(app: Application, adapter: ScriptedAdapter) -> tuple[str, TrustedScope, int]:
-    """V3-P90 §5.1: the character sleeps (idle); a reminder comes due; it is told and marked told."""
-    device = await paired(app)
-    app.presence.subscribe(ME, device)
-    app.presence.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))
-    scope = TrustedScope(ME, await app.create_conversation(ME))
-    await app.send(scope, "나 잠깐 나갔다 올게", origin=MessageOrigin(OriginKind.WEB))
-    await app.runner.wait(scope)
-    app.presence.signal(ME, device, 700, "Asia/Seoul", asleep_signals())
-    at = parse_note_date((datetime.now(UTC) - timedelta(minutes=1)).isoformat(timespec="minutes"), "UTC")
-    assert at is not None
-    note = await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 저녁 약을 먹어야 한다",
-                                      dates=NoteDates(remind_at=at[0], remind_instant=at[1]))
-    scheduler = app.scheduler
-    assert scheduler is not None
-    look = await scheduler.look(ME)
-    assert look.outcome == "spoke", look
-    await settled(app, scope)
-    wake = (await app.data.read_events(scope))[-2]
-    assert isinstance(wake.payload, Wake)
-    assert wake.payload.reasons == (WakeReason(WakeKind.REMINDER, memory_id=note.memory_id, asleep=True),)
-    assert (await app.data.read_memory(ME, note.memory_id)).remind_state == "told"
-    return device, scope, note.memory_id
-
-
-def test_a_reminder_told_while_asleep_is_seen_at_a_return_soon_after(tmp_path: Path) -> None:
+def test_a_reminder_due_while_asleep_waits_for_the_user(tmp_path: Path) -> None:
+    """V3-P107 §2: the character sleeps (idle) when a reminder comes due — it is not woken; the reminder
+    stays scheduled and is told, plainly, once the user wakes the computer."""
     async def scenario() -> None:
         adapter = answers("다녀와!", "약 먹을 시간이야!")
         app = await opened(tmp_path / "data", adapter)
         try:
-            device, _, memory_id = await told_while_asleep(app, adapter)
-            app.presence.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))  # the user comes to the bubble
-            scheduler = app.scheduler
-            assert scheduler is not None
-            for _ in range(50):
-                if ME in scheduler._returns:
-                    break
-                await asyncio.sleep(0.01)
-            look = await scheduler.look(ME)
-            assert look.decision.reasons == () and look.decision.seen == (memory_id,)
-            assert (await app.data.read_memory(ME, memory_id)).remind_state == "delivered"
-        finally:
-            await app.close()
-
-    asyncio.run(scenario())
-
-
-def test_a_reminder_told_while_asleep_is_seen_by_a_message_in_its_conversation(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        adapter = answers("다녀와!", "약 먹을 시간이야!", "응 잘했어")
-        app = await opened(tmp_path / "data", adapter)
-        try:
-            _, scope, memory_id = await told_while_asleep(app, adapter)
-            other = TrustedScope(ME, await app.create_conversation(ME))
-            await app.send(other, "다른 얘기", origin=MessageOrigin(OriginKind.WEB))
-            await app.runner.wait(other)
-            scheduler = app.scheduler
-            assert scheduler is not None
-            await scheduler.look(ME)
-            assert (await app.data.read_memory(ME, memory_id)).remind_state == "told"  # elsewhere: not seen
-            await app.send(scope, "먹었어", origin=MessageOrigin(OriginKind.WEB))
+            device = await paired(app)
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "나 잠깐 나갔다 올게", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
-            await scheduler.look(ME)
-            assert (await app.data.read_memory(ME, memory_id)).remind_state == "delivered"
+            app.presence.signal(ME, device, 700, "Asia/Seoul", asleep_signals())
+            at = parse_note_date((datetime.now(UTC) - timedelta(minutes=1)).isoformat(timespec="minutes"), "UTC")
+            assert at is not None
+            note = await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 저녁 약을 먹어야 한다",
+                                              dates=NoteDates(remind_at=at[0], remind_instant=at[1]))
+            scheduler = app.scheduler
+            assert scheduler is not None
+            look = await scheduler.look(ME)
+            assert look.outcome == "asleep" and [c.reason.kind for c in look.decision.held] == [WakeKind.REMINDER]
+            assert (await app.data.read_memory(ME, note.memory_id)).remind_state == "scheduled"
+            app.presence.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))  # the user is back
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke", look
+            await settled(app, scope)
+            wake = (await app.data.read_events(scope))[-2]
+            assert isinstance(wake.payload, Wake)
+            assert wake.payload.reasons == (WakeReason(WakeKind.REMINDER, memory_id=note.memory_id),)
+            assert (await app.data.read_memory(ME, note.memory_id)).remind_state == "delivered"
         finally:
             await app.close()
 
@@ -453,7 +420,8 @@ def working_signals(minutes: float) -> Signals:
 
 
 def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> None:
-    """V3-P90 §7: fifteen minutes into a task the model is asked; a pass is never seen, and counts."""
+    """V3-P90 §7, V3-P107 §4: thirty minutes into a task the model is asked; a pass is never seen, and
+    counts toward the day."""
     async def scenario() -> None:
         adapter = answers("응", "[[pass]]")
         app = await opened(tmp_path / "data", adapter)
@@ -466,9 +434,9 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
             scheduler = app.scheduler
             assert scheduler is not None
-            # 27 minutes into the task, the message 16 minutes ago (past talking): step 1 is due
+            # 31 minutes into the task, the message 16 minutes ago (past talking): step 1 is due
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
-            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(31))
             look = await scheduler.look(ME)
             assert look.outcome == "spoke" and look.decision.reasons[0].kind is WakeKind.FREE, look
             await settled(app, scope)
@@ -479,7 +447,7 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             record = await app.data.read_wake(ME, wake_id)
             scheduler._clock = lambda: record.created_at  # Read counters on the persisted wake's day, even near midnight.
             status = await app.proactive_status(ME)
-            assert status["today"] == 0 and status["attempts"] == 1
+            assert status["today"] == 1 and "attempts" not in status  # V3-P107 §4: a pass counts
         finally:
             await app.close()
 
@@ -535,7 +503,7 @@ def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
             scheduler = app.scheduler
             assert scheduler is not None
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
-            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
+            app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(31))
             assert (await scheduler.look(ME)).outcome == "spoke"
             await settled(app, scope)
             wake, answer = (await app.data.read_events(scope))[-2:]
@@ -545,7 +513,7 @@ def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
             assert "A free wake" in "\n".join(adapter.prepared_inputs[-1].stable_prefix)  # its line, for a checked model
             scheduler._clock = lambda: record.created_at  # The earlier +16 minutes may have crossed local midnight.
             status = await app.proactive_status(ME)
-            assert status["today"] == 1 and status["attempts"] == 1
+            assert status["today"] == 1
         finally:
             await app.close()
 

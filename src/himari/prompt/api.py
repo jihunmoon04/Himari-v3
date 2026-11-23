@@ -774,8 +774,6 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
                 item[name] = value
         if reason.late:
             item["late"] = True
-        if reason.again:  # V3-P90 §5.1: told while the character slept, not seen: told again
-            item["again"] = True
         reasons.append(item)
     return "<wake>" + json_data({"reasons": reasons}) + "</wake>"
 

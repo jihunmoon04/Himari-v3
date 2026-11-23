@@ -584,9 +584,8 @@ def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
     for name in ("memory_id", "away_minutes", "via", "activity", "group", "minutes"):
         if (value := getattr(reason, name)) is not None:
             out[name] = value
-    for flag in ("late", "again"):
-        if getattr(reason, flag):
-            out[flag] = True
+    if reason.late:  # V3-P107 §2: "again" is no more (an old record's is read past)
+        out["late"] = True
     return out
 
 
@@ -601,7 +600,7 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
         if r.kind is WakeKind.LOOP_DUE:
             parts.append(f"open loop m{r.memory_id}")
         elif r.kind is WakeKind.REMINDER:
-            parts.append(f"reminder m{r.memory_id}" + (" (late)" if r.late else " (again)" if r.again else ""))
+            parts.append(f"reminder m{r.memory_id}" + (" (late)" if r.late else ""))
         elif r.kind is WakeKind.RETURNED:
             parts.append(f"you were away {_span(r.away_minutes or 0)}")
         elif r.kind is WakeKind.FOCUS:
