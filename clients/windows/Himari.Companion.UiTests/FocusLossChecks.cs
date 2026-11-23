@@ -47,21 +47,6 @@ internal static class FocusLossChecks
         check(ready(), "focus-loss operation completes within the test deadline");
     }
 
-    private sealed class QuestionHandler : HttpMessageHandler
-    {
-        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal bool Requested;
-        internal void Release() => release.SetResult();
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-        {
-            Requested = true;
-            await release.Task.WaitAsync(ct);
-            return new(HttpStatusCode.OK) { Content = new StringContent(
-                "{\"waiting\":{\"question\":{\"display\":{\"text\":\"어느 쪽으로 갈까요?\"}}},\"job\":{\"running\":false,\"job_id\":\"question\"}}",
-                Encoding.UTF8, "application/json") };
-        }
-    }
-
     internal static void Run(Action<bool, string> check)
     {
         using (var scene = new Scene())
@@ -100,18 +85,15 @@ internal static class FocusLossChecks
                 "focus dismissal keeps the reply and sent message in conversation order");
         }
 
-        foreach (bool question in new[] { true, false })
         using (var scene = new Scene())
         {
             scene.Call("OpenReplyBubble", "c", "reply");
             ((MarkdownView)scene.Window.FindName("Message")).Text = "먼저 온 답변";
             scene.Call("OpenComposer"); scene.Call("ShowSentMessage", "나중에 보낸 글");
-            scene.Field("awaitingAnswer", question);
-            ((FrameworkElement)scene.Window.FindName("StopButton")).Visibility = question ? Visibility.Collapsed : Visibility.Visible;
+            ((FrameworkElement)scene.Window.FindName("StopButton")).Visibility = Visibility.Visible;
             scene.InFront = false; scene.Dismiss(); Pump();
             check(scene.History.Count == 0 && scene.User.Visibility == Visibility.Visible && scene.Reply.Visibility == Visibility.Visible,
-                "an older question or streaming reply keeps its controls and order on focus loss");
-            check(!question || (bool)scene.Field("awaitingAnswer")!, "focus loss never clears a pending question");
+                "an older streaming reply keeps its controls and order on focus loss");
         }
 
         foreach (bool screen in new[] { false, true })
@@ -158,47 +140,6 @@ internal static class FocusLossChecks
             transport.ReleaseAcceptance(); Until(() => !(bool)scene.Field("sending")!, check); Pump();
             check(scene.User.Visibility == Visibility.Collapsed && scene.Editor.Text == "전송 중에 쓴 새 초안",
                 "POST completion rechecks focus and hides a newer draft without losing it");
-        }
-
-        foreach (bool before in new[] { true, false })
-        foreach (bool after in new[] { false, true })
-        using (var scene = new Scene())
-        {
-            var transport = new QuestionHandler();
-            using var server = new ServerClient("https://example.com/", "test", transport);
-            scene.Field("client", server); scene.Field("currentConversation", "c");
-            scene.Call("OpenReplyBubble", "c", "earlier");
-            ((MarkdownView)scene.Window.FindName("Message")).Text = "이전 답변";
-            scene.Call("OpenComposer"); scene.Editor.Text = "질문이 와도 남길 초안"; scene.Editor.Select(2, 3);
-            scene.InFront = before;
-            if (!before) { scene.Dismiss(); Pump(); }
-            var read = (Task)scene.Call("ReadConversation", "c", CancellationToken.None)!;
-            Until(() => transport.Requested, check);
-            // Change foreground while the HTTP detail is in flight. No focus event
-            // follows its completion, so the question path itself must obey the policy.
-            scene.InFront = after;
-            if (!after) { scene.Dismiss(); Pump(); }
-            transport.Release(); Until(() => read.IsCompleted, check); read.GetAwaiter().GetResult(); Pump();
-            check(scene.Reply.Visibility == Visibility.Visible && (bool)scene.Field("awaitingAnswer")!
-                && ((MarkdownView)scene.Window.FindName("Message")).Text == "어느 쪽으로 갈까요?"
-                && scene.History.Count == 1 && scene.PastText(0) == "이전 답변",
-                "an asynchronous question remains visible and pending even outside the chat");
-            var composer = (FrameworkElement)scene.Window.FindName("ComposerPanel");
-            check(scene.User.Visibility == (after ? Visibility.Visible : Visibility.Collapsed)
-                && composer.Visibility == (after ? Visibility.Visible : Visibility.Collapsed)
-                && scene.Editor.Text == "질문이 와도 남길 초안" && scene.Editor.SelectionStart == 2 && scene.Editor.SelectionLength == 3,
-                "question receipt opens the editor only when chat is foreground at completion, preserving its draft");
-            if (!after)
-            {
-                var again = (Task)scene.Call("ReadConversation", "c", CancellationToken.None)!;
-                Until(() => again.IsCompleted, check); again.GetAwaiter().GetResult(); Pump();
-                check(scene.User.Visibility == Visibility.Collapsed && (bool)scene.Field("awaitingAnswer")!,
-                    "repeated background question refreshes do not reopen the editor");
-                scene.InFront = true; scene.Call("OpenChat"); Pump();
-                check(scene.User.Visibility == Visibility.Visible && composer.Visibility == Visibility.Visible
-                    && scene.Editor.Text == "질문이 와도 남길 초안" && (bool)scene.Field("awaitingAnswer")!,
-                    "returning to chat opens the preserved draft for the pending question");
-            }
         }
 
         using (var scene = new Scene())

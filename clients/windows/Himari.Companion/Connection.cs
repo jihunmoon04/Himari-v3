@@ -252,11 +252,10 @@ public partial class MainWindow
         if (local is null) return;
         long preparationVersion = replyPreparationVersion;
         var detail = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
-        var question = ConversationView.Question(detail);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
         string? detailJob = Str(Prop(detail, "job"), "job_id");
         // A request started before a new preparation must not change its stop button,
-        // status, question or body. Also reject mismatched job data read afterwards.
+        // status or body. Also reject mismatched job data read afterwards.
         if (preparationVersion != replyPreparationVersion ||
             ReplyPreparing && detailJob != replyProgressJob ||
             liveStreams.ContainsKey(id) && liveDisplays.TryGetValue(id, out var active) && active.Job is not null && active.Job != detailJob) return;
@@ -266,27 +265,11 @@ public partial class MainWindow
             !pendingReplies.TryGetValue(id, out var awaited) || !awaited.Server.SameDevice(local) ||
             Str(Prop(detail, "job"), "job_id") != awaited.Job)) return;
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
-        if (!ConversationView.IsRunning(detail) || question is not null) EndReplyProgress(closeEmpty: true);
+        if (!ConversationView.IsRunning(detail)) EndReplyProgress(closeEmpty: true);
         if (connected) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation,
             ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
-        if (question is not null)
-        {
-            var asked = await ReadReplyHistoryAsync(local, id, lastSequence, needsFinal: false, ct);
-            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
-            await RefreshPresentedFilesAsync(local, id, asked.Turn.Files, ct);
-            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
-            // Archive the previous reply before assigning the new question. Opening
-            // its bubble can clear awaitingAnswer while freezing that older reply.
-            OpenReplyBubble(id, detailJob);
-            awaitingAnswer = true; Message.Text = question;
-            // A background refresh may show the question, but only the user's
-            // return to chat should reopen the hidden editor and its draft.
-            if (ChatHasForeground) { OpenComposer(); dialogueHost?.Activate(); Input.Focus(); }
-            return;
-        }
-        awaitingAnswer = false;
         if (liveStreams.ContainsKey(id) && liveDisplays.TryGetValue(id, out var live) && live.Job == detailJob)
         {
             if (ConversationView.IsRunning(detail)) UpdateReplyProgress(id, live.Job, live.Display);
@@ -430,7 +413,7 @@ public partial class MainWindow
         if (currentConversation != id)
         {
             dismissedFileCards.Clear(); ClearPresentedFileCards();
-            inputRevision++; CloseBubble(); ClearStack(keepUnsent: true); awaitingAnswer = false;
+            inputRevision++; CloseBubble(); ClearStack(keepUnsent: true);
             UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed;
         }
         currentConversation = id;

@@ -223,10 +223,6 @@ internal static class Program
         Check(oldUser.Visibility == Visibility.Collapsed && reply.Visibility == Visibility.Visible, "replacing an expired answer gives the new answer its own reading lifetime");
         Timeline("CloseBubble");
         Timeline("OpenReplyBubble", "c", "j5"); Timeline("OpenComposer"); draftInput.Clear();
-        typeof(MainWindow).GetField("awaitingAnswer", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, true);
-        Timeline("AssistantBubbleExpired"); Timeline("UserBubbleExpired");
-        Check(reply.Visibility == Visibility.Visible && oldUser.Visibility == Visibility.Visible, "an older pending question blocks the newer bubble's expiry");
-        typeof(MainWindow).GetField("awaitingAnswer", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, false);
         Timeline("AssistantBubbleExpired");
         Check(reply.Visibility == Visibility.Collapsed && oldUser.Visibility == Visibility.Visible, "assistant-first order also closes from the top");
         Timeline("UserBubbleExpired");
