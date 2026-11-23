@@ -1,5 +1,7 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
+> **대부분 제거됨(2026-11-23, V3-P106):** 반려 에이전트 집중 결정으로 hub 작업 콘솔(`interfaces/web/hub.py`·`hub_stream.py`, `/api/hub/*`, 프로젝트·세션·승인 화면)을 코드에서 뺐다. 남은 것은 React+TypeScript로 옮긴 Web(`web/`)의 HIMARI 대화·설정 화면이다.
+
 > 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W3 구현**(§7.8), 운영 배포(2026-11-17, v3 `b6906f2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w3.md)) · **W4 구현**(§7.9), 운영 배포(2026-11-17, v3 `c4378e2`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w4.md)) · **W5 구현**(§7.10) · **W6a 구현**(§7.11) · **W6b 구현**(§7.12) · **W6c 구현**(§7.13) · **W6d 구현: `/`가 새 화면**(§7.14), 운영 배포(2026-11-17, v3 `8fcf110`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w6d.md)) · **W5~W6c 운영 배포**(2026-11-17, v3 `1c2f5b1`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-w6c.md)) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >

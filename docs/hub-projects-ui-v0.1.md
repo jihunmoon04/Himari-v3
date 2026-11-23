@@ -1,5 +1,7 @@
 # Web에서 hub 프로젝트와 기기 폴더 다루기 (V3-P103 설계 초안 v0.1)
 
+> **제거됨(2026-11-23, V3-P106):** 반려 에이전트 집중 결정으로 Web의 hub 중계(`/api/hub/*`)와 프로젝트·기기 폴더 화면을 코드에서 뺐다. 이 문서는 기록으로만 남긴다.
+
 > 2026-11-18 · rev. 10(Codex 설계 검수 9차 NOT_READY 반영, §12) · **설계 초안** · 대상: v3 `cb56a53`(V3-P102 작업 콘솔 운영 중), hub `f1f5119`(프로젝트 요청 구현, 운영 배포 전)
 > 앞 문서: [작업 콘솔](web-console-v0.1.md)(V3-P102), hub [프로젝트 요청 설계](https://github.com/jihunmoon04/himari-hub/blob/main/docs/projects-v0.1.md), hub [user 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md) §4.6·§5.2
 > **운영 배포(2026-11-18, v3 `06f9eef`, hub `0769e1b`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-18-v3-p103.md)):** P1–P4 화면과 중계가 운영에 있다. 운영 `linux` 실행기는 `approve user`, 루트 `/home/coder/projects`이고 `laptop`은 `off`다. 화면에서의 첫 실제 등록은 소유자가 한다.

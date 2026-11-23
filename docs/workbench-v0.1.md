@@ -1,5 +1,7 @@
 # HIMARI 작업 앱: 작업 콘솔 창과 hub 실행기 관리 (V3-P104 설계 초안 v0.1)
 
+> **제거됨(2026-11-23, V3-P106):** 반려 에이전트 집중 결정으로 작업 앱(`clients/windows/Himari.Workbench*`)을 코드에서 뺐다. 이 문서는 기록으로만 남긴다.
+
 > 2026-11-18 · rev. 8(Codex 설계 검수 7차 NOT_READY 반영, §13) · **설계 초안** · 대상: v3 `cb56a53`, hub `f1f5119`
 > 앞 문서: [작업 콘솔](web-console-v0.1.md)(V3-P102), [Web에서 hub 프로젝트](hub-projects-ui-v0.1.md)(V3-P103), [반려 1단계](companion-v0.1.md)(V3-P83), hub README "백그라운드 실행과 터널"
 
