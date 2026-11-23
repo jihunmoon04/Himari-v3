@@ -140,6 +140,8 @@ EnvironmentInstanceId = NewType("EnvironmentInstanceId", str)
 BindingId = NewType("BindingId", str)
 FileId = NewType("FileId", str)  # V3-P66: one uploaded or presented file of a Conversation
 ToolId = NewType("ToolId", str)
+# V3-P106: the question Tool of older servers. It is gone; only older history holds its calls.
+LEGACY_ASK_USER = ToolId("ask_user")
 EnvironmentKind = NewType("EnvironmentKind", str)
 
 # The Tool ids every Provider can carry as a function name (V3-P52): one or

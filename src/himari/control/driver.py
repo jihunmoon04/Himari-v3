@@ -38,10 +38,10 @@ is told to the Runner after every Run (``TurnProgress``). Every request
 carries a per-Conversation ``session_key`` (OpenRouter ``session_id``), so
 the provider's cache can serve the growing history.
 
-An ``ask_user`` question of older history (the Tool is gone) is a
-never-started call of the latest group like any other: a new message closes
-it as CANCELLED; a resume runs it, and the Dispatcher refuses it as an
-unknown Tool.
+An ``ask_user`` question of older history (the Tool is gone) is the user's
+to answer, never a Run's: a resume leaves it and starts nothing — so a
+wake's question is never continued outside the wake's own Tool rules — and
+the user's next message closes it as CANCELLED.
 
 The model (V3-P64 §5) is fixed for a turn: once the Conversation's lock is
 held, its stored choice is read and resolved against the ``ModelCatalog``
@@ -72,6 +72,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from himari.common import (
+    LEGACY_ASK_USER,
     CallRef,
     ContentBlock,
     ConversationId,
@@ -664,6 +665,9 @@ class Driver:
         recovery, stop = await self._prepare(scope)
         if stop is not None:
             return stop
+        left = await self._unfinished_group(scope)
+        if left is not None and any(c.tool_id == LEGACY_ASK_USER for c in left[1].calls):
+            return DriveResult(DriveState.IDLE, recovery=recovery)  # it waits for the user's message
         group = await self._resume_pending_group(scope)
         if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
             return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)

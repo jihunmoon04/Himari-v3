@@ -105,6 +105,7 @@ from himari.presence.api import (
     is_device_token,
 )
 from himari.common import (
+    LEGACY_ASK_USER,
     ACTIVITIES,
     MOODS,
     AttachmentRef,
@@ -1322,6 +1323,11 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         cid = await application.create_conversation(who, title=body.title, initial_model=initial_model)
         return summary_view(await application.data.read_conversation(scope_of(cid, who)))
 
+    def _legacy_question(event: ConversationEvent) -> bool:
+        """V3-P106: an older server's open ``ask_user`` question waits for the user's message, not Continue."""
+        return isinstance(event.payload, AssistantToolCalls) and any(
+            c.tool_id == LEGACY_ASK_USER for c in event.payload.calls)
+
     async def _detail(application: Application, scope: TrustedScope) -> dict[str, Any]:
         summary = await application.data.read_conversation(scope)  # authorizes first
         job = application.runner.shown_status(scope)  # V3-P90 §7.3: a hidden free wake is not working
@@ -1330,7 +1336,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         last = await application.data.read_events(scope, after_sequence=summary.last_sequence - 1, limit=1) \
             if summary.last_sequence else ()
         continuable = (not job.running and bool(last)
-                       and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls"))
+                       and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls")
+                       and not _legacy_question(last[-1]))
         return {"conversation": summary_view(summary), "job": job_view(job), "continuable": continuable}
 
     @app.get("/api/conversations/{conversation_id}")

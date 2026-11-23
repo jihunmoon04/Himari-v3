@@ -1,6 +1,7 @@
 """V3-P106: ``ask_user`` is gone. A question an older server left open is a
 never-started call of the latest group: the next message closes it as
-CANCELLED (the redirect of V3-P55) and the turn goes on; a resume runs it, and the Dispatcher refuses it as an unknown Tool."""
+CANCELLED (the redirect of V3-P55) and the turn goes on; a resume leaves it
+and starts nothing."""
 
 from __future__ import annotations
 
@@ -64,14 +65,19 @@ def test_a_drive_closes_it_too() -> None:
     asyncio.run(scenario())
 
 
-def test_a_resume_refuses_it_as_an_unknown_tool() -> None:
+def test_a_resume_leaves_it_for_the_user_and_starts_nothing() -> None:
+    """Codex review of V3-P106: Continue on an older wake's question must not run a Run
+    outside the wake's own Tool rules; the question is the user's to answer."""
     async def scenario() -> None:
-        rt2, adapter = runtime([final("I'll just ask: which city?")])
-        question = await legacy_question(rt2)
-        assert (await rt2.driver.resume(SCOPE)).state is DriveState.COMPLETED
-        (record,) = await rt2.data.read_tool_executions(SCOPE, question.run_id)
-        assert record.status is ToolExecutionStatus.DENIED and record.model_result is not None
-        assert record.model_result.blocks[0].text == "unknown tool ask_user"  # type: ignore[union-attr]
-        assert "ask_user" not in {str(d.tool_id) for d in adapter.prepared_inputs[-1].tool_catalog}
+        rt, adapter = runtime([final("Seoul it is.")])
+        question = await legacy_question(rt)
+        for _ in range(2):
+            assert (await rt.driver.resume(SCOPE)).state is DriveState.IDLE
+        (record,) = await rt.data.read_tool_executions(SCOPE, question.run_id)
+        assert record.status is ToolExecutionStatus.PENDING
+        assert adapter.prepared_inputs == []
+        assert (await rt.driver.drive(SCOPE, user("Seoul"))).state is DriveState.COMPLETED  # the answer closes it
+        (record,) = await rt.data.read_tool_executions(SCOPE, question.run_id)
+        assert record.status is ToolExecutionStatus.CANCELLED
 
     asyncio.run(scenario())

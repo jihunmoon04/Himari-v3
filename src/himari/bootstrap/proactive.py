@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 
-from himari.common import PrincipalId, TrustedScope
+from himari.common import LEGACY_ASK_USER, PrincipalId, TrustedScope
 from himari.control.api import ControlError, DriveState, JobStatus
 from himari.control.driver import Driver
 from himari.control.runner import BackgroundRunner
@@ -91,13 +91,17 @@ def wake_turn(after: Sequence[ConversationEvent]) -> list[ConversationEvent]:
 
 
 def wake_outcome(status: JobStatus | None, after: Sequence[ConversationEvent]) -> WakeStatus:
-    """§4.2: ANSWERED when the wake's turn gave a final answer; CANCELLED when it was
-    cancelled before saying anything (the user won, §4.3); else FAILED. The wake job's
-    own result decides first (``status``; None at a restart), then its own Events
-    (``after``: from the wake on; cut at the user's next message)."""
+    """§4.2: ANSWERED when the wake's turn gave a final answer, or asked with an older
+    server's ``ask_user`` (the user saw it: V3-P106); CANCELLED when it was cancelled
+    before saying anything (the user won, §4.3); else FAILED. The wake job's own result
+    decides first (``status``; None at a restart), then its own Events (``after``: from
+    the wake on; cut at the user's next message)."""
     own = wake_turn(after)
     state = None if status is None or status.result is None else status.result.state
     if state is DriveState.COMPLETED or any(isinstance(e.payload, AssistantFinal) for e in own):
+        return WakeStatus.ANSWERED
+    if any(isinstance(e.payload, AssistantToolCalls) and any(c.tool_id == LEGACY_ASK_USER for c in e.payload.calls)
+           for e in own):
         return WakeStatus.ANSWERED
     cancelled = state is DriveState.CANCELLED or (status is not None and status.error == "cancelled")
     if cancelled and not any(isinstance(e.payload, AssistantToolCalls) for e in own):

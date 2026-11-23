@@ -438,6 +438,35 @@ def test_an_unanswered_accepted_message_is_reported_as_continuable(server: Serve
     assert detail["continuable"] is False and detail["job"]["state"] == "completed"
 
 
+
+def test_an_older_question_waits_for_the_user_not_continue(server: Server) -> None:
+    """Codex review of V3-P106: an older server's open ask_user question is not offered to Continue
+    (a Run would leave a wake's Tool rules); the user's message answers it."""
+    from himari.common import CallId, RawRepresentation, ToolCall, ToolId
+    from himari.data.api import AssistantToolCalls, PromptBasis, RawReceived, RunPreparation
+
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    scope, data, portal = TrustedScope(OPERATOR, cid), application.data, server.client.portal
+
+    async def asked() -> None:
+        await data.append_event(scope, UserMessage((TextBlock("plan my trip"),)))
+        run = await data.prepare_run(scope, RunPreparation(b"{}", "application/json",
+                                                           RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0),
+                                                           "scripted", "scripted-model"))
+        await data.mark_dispatch(scope, run)
+        await data.record_raw_outcome(scope, run, RawReceived(b"{}", "application/json"))
+        await data.project_model_output(scope, run, AssistantToolCalls(
+            (ToolCall(CallId("q"), 0, ToolId("ask_user"), {"question": "Which city?"}),)))
+
+    portal.call(asked)
+    assert server.client.get(f"/api/conversations/{cid}").json()["continuable"] is False
+    queue(server, final("Seoul it is."))
+    assert server.post(f"/api/conversations/{cid}/messages", {"text": "Seoul"}).status_code == 202
+    assert server.wait_idle(cid)["job"]["state"] == "completed"
+
 # --- context (compaction visibility) ----------------------------------------------------------
 
 

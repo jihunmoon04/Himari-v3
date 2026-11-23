@@ -143,15 +143,18 @@ CANCELLED = JobStatus(running=False, result=DriveResult(DriveState.CANCELLED))
     (None, ["final"], WakeStatus.ANSWERED),
     (None, ["calls"], WakeStatus.FAILED),
     (None, ["message", "final"], WakeStatus.FAILED),
+    # V3-P106: an older server's ask_user question was shown, cut before the wake was ended
+    (None, ["asked"], WakeStatus.ANSWERED),
 ])
 def test_how_a_wake_ends(status: JobStatus | None, after: list[str], outcome: WakeStatus) -> None:
-    from himari.common import ConversationId, EventId, RunId
+    from himari.common import CallId, ConversationId, EventId, RunId, ToolCall, ToolId
     from himari.data.api import AssistantFinal, AssistantToolCalls, ConversationEvent, UserMessage
 
+    asked = AssistantToolCalls((ToolCall(CallId("q"), 0, ToolId("ask_user"), {"question": "?"}),))
     payloads = {"final": AssistantFinal((TextBlock("x"),)), "calls": AssistantToolCalls((), ()),
-                "message": UserMessage((TextBlock("잠깐"),))}
+                "message": UserMessage((TextBlock("잠깐"),)), "asked": asked}
     kinds = {"final": EventKind.ASSISTANT_FINAL, "calls": EventKind.ASSISTANT_TOOL_CALLS,
-             "message": EventKind.USER_MESSAGE}
+             "message": EventKind.USER_MESSAGE, "asked": EventKind.ASSISTANT_TOOL_CALLS}
     events = [ConversationEvent(EventId(f"e{i}"), ConversationId("c"), i + 2, kinds[a], payloads[a], 1,  # type: ignore[arg-type]
                                 datetime.now(UTC), origin_run_id=None if a == "message" else RunId("r"))
               for i, a in enumerate(after)]
