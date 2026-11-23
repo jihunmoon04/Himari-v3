@@ -190,8 +190,8 @@ public partial class MainWindow : Window
         var now = AnimationNow();
         animator.Mood = mood;
         animator.SetTalking(talking || settings.TalkPreview.IsChecked == true, now);
-        // A reminder wakes it for its words only: no stretch, asleep again after (§2.4).
-        animator.SetSleeping(settings.SleepPreview.IsChecked == true || asleep && !reminderAwake, now, stretch: !asleep);
+        // A wake while asleep wakes it for its words only: no stretch, asleep again after (§2.4).
+        animator.SetSleeping(settings.SleepPreview.IsChecked == true || asleep && !wakeAwake, now, stretch: !asleep);
         character.Render(PreviewPose(animator.Pose(now)));
         // Wake for the next pose, and at least as often as the idle check.
         double wait = settings.PausePreview.IsChecked == true ? 2000 : (animator.NextChange(now) - now).TotalMilliseconds / animationSpeed;

@@ -436,7 +436,7 @@ Check(waking.Pose(Ms(9010)) is { Clip: "stretch", Frame: 0 } && waking.Pose(Ms(9
 var toldAwake = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
 toldAwake.SetSleeping(true, Ms(1000));
 toldAwake.SetSleeping(false, Ms(9000), stretch: false);
-Check(toldAwake.Pose(Ms(9010)).Clip == "idle", "woken only to tell a reminder, it does not stretch (V3-P90 §2.4)");
+Check(toldAwake.Pose(Ms(9010)).Clip == "idle", "woken only to say a wake's words, it does not stretch (V3-P90 §2.4)");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",

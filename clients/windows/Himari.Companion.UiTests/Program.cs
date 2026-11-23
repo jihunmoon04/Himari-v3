@@ -686,7 +686,7 @@ internal static class Program
         // V3-P93 §6.1, §6.3: connection generation 409 preserves draft, and presented file cards support save/cancel/verification.
         RunPresentedFileChecks(Check);
         app.Shutdown();
-        // V3-P90 §2.4: a reminder told while asleep wakes it for its words only, and its bubble stays until the user wakes it
+        // V3-P90 §2.4: a wake while asleep wakes it for its words only; V3-P107 §2: its bubble closes as usual
         {
             var napping = new MainWindow(true);
             const BindingFlags inside = BindingFlags.NonPublic | BindingFlags.Instance;
@@ -696,17 +696,17 @@ internal static class Program
             Check(policy.Asleep, "a window starts asleep");
             using var oldLive = new CancellationTokenSource(); using var newLive = new CancellationTokenSource();
             Nap("WakeJobArrived", oldLive.Token);
-            Check(NapField<bool>("reminderAwake") && NapField<bool>("bubbleUntilAwake"), "a wake while asleep is a reminder's: awake for its words");
+            Check(NapField<bool>("wakeAwake"), "a wake while asleep: awake for its words");
             Nap("ScheduleBubbleClose", "약 먹을 시간이야!");
-            Check(!NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "its bubble does not start to close while asleep");
+            Check(NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "its bubble starts to close as any other (no note left up)");
             // PR #164 re-review P2-3: a reconnect cancels the live and opens a new one; the old one ends late
             oldLive.Cancel(); Nap("WakeJobArrived", newLive.Token);
             Nap("WakeJobEnded", oldLive.Token);
-            Check(NapField<bool>("reminderAwake"), "the cancelled live ending late does not put it back to sleep mid-words");
+            Check(NapField<bool>("wakeAwake"), "the cancelled live ending late does not put it back to sleep mid-words");
             Nap("WakeJobEnded", newLive.Token);
-            Check(!NapField<bool>("reminderAwake") && policy.Asleep && !NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "said, asleep again, the bubble still up");
+            Check(!NapField<bool>("wakeAwake") && policy.Asleep, "said, asleep again");
             Nap("WakeFromUser");
-            Check(!policy.Asleep && NapField<DispatcherTimer>("bubbleTimer").IsEnabled && !NapField<bool>("bubbleUntilAwake"), "the user wakes it: the bubble now closes as usual");
+            Check(!policy.Asleep, "the user wakes it");
             Check((TimeSpan)Nap("StretchLeft")! > TimeSpan.Zero, "a wake from sleep stretches, and a wake's words wait for it (§5.2)");
             // PR #164 review P1-1: HIMARI's box keeping the focus is not the user; typing in it is
             napping.Show(); var box = (TextBox)napping.FindName("Input");
@@ -717,15 +717,16 @@ internal static class Program
             Check(policy.Asleep, "HIMARI's box open, with no key typed, does not wake it");
             box.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, System.Windows.Input.Key.A) { RoutedEvent = Keyboard.PreviewKeyDownEvent });
             Check(!policy.Asleep, "a key typed in the box wakes it");
-            // PR #164 review P2-2: a wake's live started by a reconnect's recovery restores the reminder's state
+            // PR #164 review P2-2: a wake's live started by a reconnect's recovery goes through the same pair; one
+            // that ends at once (its token cancelled) leaves it asleep, however often it is told
             policy.FallAsleep(); Nap("CloseBubble");
-            typeof(MainWindow).GetField("bubbleUntilAwake", inside)!.SetValue(napping, false);
+            typeof(MainWindow).GetField("wakeAwake", inside)!.SetValue(napping, false);
             using var gone = new CancellationTokenSource(); gone.Cancel();
             using var nowhere = new ServerClient("https://example.com/", "test", new HttpClientHandler());
             Nap("StartLive", "c", nowhere, gone.Token, "j9", true);
-            Check(NapField<bool>("bubbleUntilAwake"), "a recovered wake while asleep keeps its bubble up");
+            Check(!NapField<bool>("wakeAwake") && policy.Asleep, "a recovered wake's live that ended puts it back to sleep");
             Nap("StartLive", "c", nowhere, gone.Token, "j9", true);  // told again: the same state
-            Check(NapField<bool>("bubbleUntilAwake") && policy.Asleep, "told twice, the state stays the same");
+            Check(!NapField<bool>("wakeAwake") && policy.Asleep, "told twice, the state stays the same");
             napping.Close();
         }
         Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout, reply reconnect and wake follow checks passed.");
