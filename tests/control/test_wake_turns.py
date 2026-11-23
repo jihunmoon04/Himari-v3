@@ -150,9 +150,6 @@ class WakeDriver:
             await asyncio.sleep(0.005)
         return DriveResult(DriveState.COMPLETED)
 
-    async def cancel(self, scope: TrustedScope) -> DriveResult:
-        return DriveResult(DriveState.IDLE)
-
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
         self.withdrawn.append(wake_id)
 

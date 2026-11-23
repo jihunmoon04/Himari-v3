@@ -1871,14 +1871,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         await application.data.read_conversation(scope)
         return job_view(application.runner.cancel(scope))
 
-    @app.post("/api/conversations/{conversation_id}/dismiss", status_code=202)
-    async def dismiss(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
-        """Close the never-started steps of an interrupted turn (V3-P55).
-        Busy while a job runs."""
-        application, scope = himari(request), scope_of(conversation_id, by.principal)
-        await application.data.read_conversation(scope)
-        return job_view(await application.runner.submit_cancel(scope))
-
     @app.post("/api/conversations/{conversation_id}/compact", status_code=202)
     async def compact(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """Summarize the older history now, whatever its size (no Run)."""

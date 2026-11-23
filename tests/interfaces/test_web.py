@@ -338,7 +338,6 @@ def test_foreign_and_missing_conversations_look_the_same(server: Server) -> None
                       server.client.get(f"/api/conversations/{cid}/context"),
                       server.post(f"/api/conversations/{cid}/compact"),
                       server.post(f"/api/conversations/{cid}/cancel"),
-                      server.post(f"/api/conversations/{cid}/dismiss"),
                       server.client.get(f"/api/conversations/{cid}/model"),
                       server.client.put(f"/api/conversations/{cid}/model", json={"model": "scripted-model"},
                                         headers={"origin": ORIGIN})]
@@ -381,10 +380,6 @@ class GatedDriver(NoWakes):
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPACTED)
 
-    async def cancel(self, scope: TrustedScope) -> DriveResult:
-        return DriveResult(DriveState.IDLE)
-
-
 def test_a_second_message_while_working_is_busy(server: Server) -> None:
     server.sign_in()
     cid = server.post("/api/conversations").json()["id"]
@@ -415,10 +410,7 @@ def test_cancel_reaches_the_running_job_and_dismiss_when_idle_starts_one(server:
     server.wait_idle(cid)
     late = server.post(f"/api/conversations/{cid}/cancel").json()  # idle: a stop request closes nothing
     assert late["running"] is False and late["state"] == "completed"
-    started = server.post(f"/api/conversations/{cid}/dismiss")  # closes never-started calls left behind
-    assert started.status_code == 202 and started.json()["running"] is True
-    assert server.wait_idle(cid)["job"]["state"] == "idle"
-    no_origin = server.client.post(f"/api/conversations/{cid}/dismiss", json={})
+    no_origin = server.client.post(f"/api/conversations/{cid}/cancel", json={})
     assert no_origin.status_code == 403  # a cookie request needs the Origin check, like every POST
 
 

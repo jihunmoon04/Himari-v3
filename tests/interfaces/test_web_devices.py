@@ -58,7 +58,6 @@ ALLOWED = {
     ("GET", "/api/device/conversations/{conversation_id}/presented-files/{file_id}/{version}"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
-    ("POST", "/api/conversations/{conversation_id}/dismiss"),
 }
 # Routes without any sign-in: the session itself, pairing, and the page and its files (V3-P102 §7.2).
 PUBLIC = {("GET", "/api/session"), ("POST", "/api/session"), ("DELETE", "/api/session"),

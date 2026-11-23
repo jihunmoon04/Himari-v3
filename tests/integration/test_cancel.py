@@ -151,22 +151,6 @@ def test_a_cancelled_write_is_reported_as_unknown_never_rerun() -> None:
     asyncio.run(scenario())
 
 
-def test_cancel_when_idle_closes_a_cut_group() -> None:
-    async def scenario() -> None:
-        slow, later = SlowTool("slow"), RecordingTool("later")
-        rt, _ = runtime([calls(("slow", {}), ("later", {})), final("new turn")], tools=[slow, later])
-        assert (await rt.driver.cancel(SCOPE)).state is DriveState.IDLE  # nothing yet
-        run_id = await _cut(rt, slow)
-        assert [r.status for r in await _records(rt, run_id)] == [ToolExecutionStatus.PENDING] * 2
-
-        assert (await rt.driver.cancel(SCOPE)).state is DriveState.CANCELLED
-        assert [r.status for r in await _records(rt, run_id)] == [ToolExecutionStatus.CANCELLED] * 2
-        assert slow.invocations == [] and later.invocations == []
-        assert (await rt.driver.cancel(SCOPE)).state is DriveState.IDLE  # already closed
-
-    asyncio.run(scenario())
-
-
 def test_a_new_message_closes_the_pending_calls() -> None:
     async def scenario() -> None:
         slow, planned = SlowTool("slow"), RecordingTool("planned")

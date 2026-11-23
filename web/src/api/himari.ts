@@ -185,7 +185,6 @@ export const setToolSource = (id: string, source: string, enabled: boolean | nul
   put<{ sources: ToolSource[] }>(`/api/conversations/${enc(id)}/tools/${enc(source)}`, { enabled });
 export const compactConversation = (id: string) => post<Job>(`/api/conversations/${enc(id)}/compact`);
 /** Closes the calls a turn left unstarted (it was interrupted). */
-export const dismissUnfinished = (id: string) => post<Job>(`/api/conversations/${enc(id)}/dismiss`);
 /** The notes a conversation saved, counted from the memory list (what a deletion for good takes with it). */
 export const listMemories = () =>
   get<{ memories: { id: string; source?: { conversation?: string | null } | null }[] }>("/api/memories");

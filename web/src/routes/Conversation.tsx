@@ -96,7 +96,7 @@ export function Conversation() {
           actions={
             <>
               <ConversationMenu key={id} id={id} title={conversation?.title || conversation?.preview || ""}
-                unfinished={continuable} running={running} />
+                running={running} />
               <IconButton label={panel ? "Close details" : "Details"} onClick={() => setPanel(!panel)}>
                 {panel ? <PanelRightClose className="size-4" /> : <PanelRight className="size-4" />}
               </IconButton>

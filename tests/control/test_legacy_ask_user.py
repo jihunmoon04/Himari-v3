@@ -1,7 +1,6 @@
 """V3-P106: ``ask_user`` is gone. A question an older server left open is a
 never-started call of the latest group: the next message closes it as
-CANCELLED (the redirect of V3-P55) and the turn goes on; a cancel closes it
-too; a resume runs it, and the Dispatcher refuses it as an unknown Tool."""
+CANCELLED (the redirect of V3-P55) and the turn goes on; a resume runs it, and the Dispatcher refuses it as an unknown Tool."""
 
 from __future__ import annotations
 
@@ -65,14 +64,8 @@ def test_a_drive_closes_it_too() -> None:
     asyncio.run(scenario())
 
 
-def test_a_cancel_closes_it_and_a_resume_refuses_it_as_an_unknown_tool() -> None:
+def test_a_resume_refuses_it_as_an_unknown_tool() -> None:
     async def scenario() -> None:
-        rt, _ = runtime()
-        question = await legacy_question(rt)
-        assert (await rt.driver.cancel(SCOPE)).state is DriveState.CANCELLED
-        (record,) = await rt.data.read_tool_executions(SCOPE, question.run_id)
-        assert record.status is ToolExecutionStatus.CANCELLED
-
         rt2, adapter = runtime([final("I'll just ask: which city?")])
         question = await legacy_question(rt2)
         assert (await rt2.driver.resume(SCOPE)).state is DriveState.COMPLETED

@@ -282,11 +282,6 @@ class BackgroundRunner:
             self._status[key] = replace(self._status[key], stop_requested=signal.request)
         return self.status(scope)
 
-    async def submit_cancel(self, scope: TrustedScope) -> JobStatus:
-        if self._running_in(scope.conversation_id):
-            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-        return self._start(scope, lambda s, _stop, _progress: self._driver.cancel(s), "cancel")
-
     def _running(self, key: _Key) -> bool:
         task = self._tasks.get(key)
         return task is not None and not task.done()

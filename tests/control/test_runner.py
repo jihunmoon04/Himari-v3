@@ -28,7 +28,6 @@ class GatedDriver(NoWakes):
         self.accept_error: BaseException | None = None
         self.compactions: list[TrustedScope] = []
         self.signals: list[StopSignal | None] = []  # the stop signal each job was given
-        self.cancels: list[TrustedScope] = []
 
     async def _call(self, scope: TrustedScope, message: UserMessage | None) -> DriveResult:
         self.calls.append((scope, message))
@@ -56,11 +55,6 @@ class GatedDriver(NoWakes):
         self.compactions.append(scope)
         self.signals.append(stop)
         return await self._call(scope, None)
-
-    async def cancel(self, scope: TrustedScope) -> DriveResult:
-        self.cancels.append(scope)
-        return DriveResult(DriveState.CANCELLED)
-
 
 def test_submit_returns_at_once_and_one_job_runs_per_conversation() -> None:
     async def scenario() -> None:
@@ -261,7 +255,6 @@ def test_cancel_reaches_the_running_job_through_its_signal() -> None:
 
         cancelling = runner.cancel(SCOPE)
         assert signal.cancel_requested and cancelling.running and cancelling.stop_requested is StopRequest.CANCEL
-        assert driver.cancels == []  # the running job stops itself; no separate cancel job
 
         driver.outcome = DriveResult(DriveState.CANCELLED)
         driver.release.set()
@@ -277,30 +270,6 @@ def test_cancel_reaches_the_running_job_through_its_signal() -> None:
         await runner.wait(SCOPE)
 
     asyncio.run(scenario())
-
-
-def test_cancel_with_no_job_running_closes_what_was_left_waiting() -> None:
-    async def scenario() -> None:
-        driver = GatedDriver()
-        runner = BackgroundRunner(driver)
-        assert runner.cancel(SCOPE) == JobStatus(running=False)  # a stop request never closes anything
-        assert driver.cancels == []
-        started = await runner.submit_cancel(SCOPE)
-        assert started.running and started.generation == 1
-        done = await runner.wait(SCOPE)
-        assert driver.cancels == [SCOPE] and done.result == DriveResult(DriveState.CANCELLED)
-        assert done.stop_requested is None
-        await runner.submit(SCOPE, None)
-        with pytest.raises(ControlError) as busy:
-            await runner.submit_cancel(SCOPE)
-        assert busy.value.code is ControlErrorCode.BUSY
-        driver.release.set()
-        await runner.wait(SCOPE)
-
-    asyncio.run(scenario())
-
-
-# --- closing a Conversation for the trash (V3-P65 §7.1) ------------------------------------
 
 
 class GatedAccept(GatedDriver):
@@ -366,12 +335,12 @@ def test_a_closed_conversation_takes_no_work_until_reopened() -> None:
         await runner.close(SCOPE, timeout=5)
         submits: list[Callable[[], Awaitable[JobStatus]]] = [
             lambda: runner.submit(SCOPE, user("x")), lambda: runner.submit(SCOPE, None),
-            lambda: runner.submit_compaction(SCOPE), lambda: runner.submit_cancel(SCOPE)]
+            lambda: runner.submit_compaction(SCOPE)]
         for submit in submits:
             with pytest.raises(ControlError) as refused:
                 await submit()
             assert closed(refused)
-        assert driver.calls == [] and driver.cancels == []  # nothing accepted, nothing run
+        assert driver.calls == []  # nothing accepted, nothing run
         other = TrustedScope(SCOPE.principal_id, ConversationId("conv_2"))
         assert (await runner.submit(other, None)).running  # other Conversations are not affected
         runner.reopen(SCOPE)

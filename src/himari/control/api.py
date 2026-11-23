@@ -312,15 +312,6 @@ class ConversationDriver(Protocol):
         their effects; whether there was one."""
         ...
 
-    async def cancel(self, scope: TrustedScope) -> DriveResult:
-        """V3-P55, for a Conversation that is not running: close the
-        never-started calls of the latest group (an interrupted one, or an
-        open ``ask_user`` question of older history) with a CANCELLED result,
-        so the next message starts a new turn. CANCELLED if anything was
-        closed, IDLE if nothing was left, RECOVERY_REQUIRED if uncertain
-        calls still need a user. Same BUSY rule."""
-        ...
-
 
 @dataclass(frozen=True)
 class JobStatus(DeepFrozen):
@@ -421,12 +412,6 @@ class ConversationRunner(Protocol):
     def cancel(self, scope: TrustedScope) -> JobStatus:
         """V3-P55: ask the running job to stop now. Nothing to do when no job
         is running — never closes anything a finished job left."""
-        ...
-
-    async def submit_cancel(self, scope: TrustedScope) -> JobStatus:
-        """V3-P55: start the driver's ``cancel`` in the background — close
-        the never-started calls of the latest group. Same BUSY rule as
-        ``submit``."""
         ...
 
     def status(self, scope: TrustedScope) -> JobStatus: ...

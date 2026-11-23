@@ -39,9 +39,9 @@ carries a per-Conversation ``session_key`` (OpenRouter ``session_id``), so
 the provider's cache can serve the growing history.
 
 An ``ask_user`` question of older history (the Tool is gone) is a
-never-started call of the latest group like any other: a new message or a
-cancel closes it as CANCELLED; a resume runs it, and the Dispatcher refuses
-it as an unknown Tool.
+never-started call of the latest group like any other: a new message closes
+it as CANCELLED; a resume runs it, and the Dispatcher refuses it as an
+unknown Tool.
 
 The model (V3-P64 §5) is fixed for a turn: once the Conversation's lock is
 held, its stored choice is read and resolved against the ``ModelCatalog``
@@ -389,18 +389,6 @@ class Driver:
                 return False
             await self._close_latest_group(scope, reason)
             return True
-
-    async def cancel(self, scope: TrustedScope) -> DriveResult:
-        async with self._exclusive(scope):
-            recovery, stop = await self._prepare(scope)
-            if stop is not None:
-                return stop
-            group = await self._close_latest_group(scope, CANCELLED_RESULT)
-            if group is None:
-                return DriveResult(DriveState.IDLE, recovery=recovery)
-            if group.state is GroupState.BLOCKED_UNKNOWN:
-                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
-            return DriveResult(DriveState.CANCELLED, recovery=recovery)
 
     async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
                       progress: TurnProgress | None = None) -> DriveResult:
