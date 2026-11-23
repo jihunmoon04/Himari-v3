@@ -584,9 +584,8 @@ def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
     for name in ("memory_id", "away_minutes", "via", "activity", "group", "minutes"):
         if (value := getattr(reason, name)) is not None:
             out[name] = value
-    for flag in ("late", "again"):
-        if getattr(reason, flag):
-            out[flag] = True
+    if reason.late:  # V3-P107 §2: "again" is no more (an old record's is read past)
+        out["late"] = True
     return out
 
 

@@ -12,7 +12,7 @@
 | 자유 wake 타이머 | 15 → +30 → +60분마다(`FREE_STEPS`) | **한 간격**, 기본 30분(`FREE_MINUTES`) |
 | 자유 wake 하루 예산 | 말한 것 6, 연 것(pass 포함) 12 | **연 것(pass 포함) 하나**, 기본 10 |
 
-줄어든 것: `told`·`again`·`asleep` 표시, `TOLD_SEEN`, `Told`, `seen_reminders`, Data의 `told_reminders`·`see_answered_reminders`·`see_reminders`, 스케줄러의 매 틱 "봤나" 확인 두 번, 설정 둘(`HIMARI_PROACTIVE_FREE_STEPS`, `HIMARI_PROACTIVE_FREE_ATTEMPTS`), 상태의 `attempts`·`free_attempts`. 코드 약 300줄, 테스트 약 250줄.
+줄어든 것: `told`·`again`·`asleep` 표시, `TOLD_SEEN`, `Told`, `seen_reminders`, Data의 `told_reminders`·`see_answered_reminders`·`see_reminders`, 스케줄러의 매 틱 "봤나" 확인 두 번, 설정 둘(`HIMARI_PROACTIVE_FREE_STEPS`, `HIMARI_PROACTIVE_FREE_ATTEMPTS`), 상태의 `attempts`·`free_attempts`. 서버 코드는 292줄을 지우고 102줄을 더해 약 190줄 줄었다(테스트는 273줄 삭제, 160줄 추가).
 
 ## 2. 알림: 잠든 캐릭터를 깨우지 않음
 
@@ -36,7 +36,7 @@
 | 2. 방금 일어난 일 (`EVENT_KINDS`) | 돌아옴, 작업 끝남 | + "조용히"(`quiet`), 대화 중 10분(`talking`) |
 | 3. HIMARI가 먼저 꺼내는 말 | 열린 고리, 자유 wake | + 답하지 않은 wake(`unanswered`), 23–08시(`quiet_hours`), 간격 15분(`gap`), 자유 wake는 하루 예산(`daily`) |
 
-- V3-P90 표와 다른 점은 둘뿐이다. 알림이 잠에 막히는 것(§2)과, 돌아옴이 "대화 중"에도 막히게 된 것. 돌아옴은 "비운 동안 사용자 메시지가 없음"이 조건이라 비운 시간(1시간 이상)이 지난 뒤 10분 안의 메시지는 있을 수 없으므로 실제로 달라지는 경우는 없고, 스케줄러가 wake를 열기 직전 다시 보는 확인(`TALKING_KINDS`)도 "알림만 빼고 모두"로 한 줄이 되었다.
+- V3-P90 표와 다른 점은 둘뿐이다. 알림이 잠에 막히는 것(§2, 화면이 꺼져 막힐 때의 이유도 `display_off`에서 `asleep`으로)과, 돌아옴이 "대화 중"에도 막히게 된 것. 돌아옴은 "비운 동안 사용자 메시지가 없음"이 조건이라 비운 시간(1시간 이상)이 지난 뒤 10분 안의 메시지는 있을 수 없으므로 실제로 달라지는 경우는 없고, 스케줄러가 wake를 열기 직전 다시 보는 확인(`TALKING_KINDS`)도 "알림만 빼고 모두"로 한 줄이 되었다.
 - 작업 끝남이 3분 뒤 버려지는 것, 고리가 24시간 기다리는 것, 늦은 알림 규칙은 그대로다.
 
 ## 4. 자유 wake: 한 간격, 하루 한 셈
@@ -46,8 +46,8 @@
   - 사용자 메시지는 단계도 기다림도 바꾸지 않고 10분 동안 막을 뿐이다(V3-P90 §17.8 그대로).
 - **하루 예산:** `HIMARI_PROACTIVE_FREE_DAILY`(기본 **10**, 0–96)는 그날(지금 기기의 시간대 자정부터) **연** 자유 wake 수다. 말한 것과 pass한 것을 같이 센다. 둘 다 요청 하나의 비용이고, 사용자에게 들리는 횟수는 간격·대화 중·답하지 않은 wake 규칙이 이미 줄인다.
   - V3-P90은 "말한 것 6"과 "연 것 12"를 따로 셌다. 15분부터 시작하던 타이머가 30분 한 간격이 되면서 하루에 열리는 수 자체가 줄어 두 셈을 나눌 이유가 약해졌다.
-- 상태(`himari proactive`, `/api/proactive`)의 `today`는 오늘 연 자유 wake 수, `daily`는 그 한도다. `attempts`·`free_attempts`는 없앴다.
-- 옛 설정 `HIMARI_PROACTIVE_FREE_STEPS`·`HIMARI_PROACTIVE_FREE_ATTEMPTS`는 더 읽지 않는다(값이 있어도 오류 없이 무시).
+- 상태(`himari proactive`, `/api/proactive`)의 `today`는 오늘 연 자유 wake 수, `daily`는 그 한도다. `attempts`·`free_attempts`와 막힘 이유 `attempts`는 없앴다.
+- 옛 설정 `HIMARI_PROACTIVE_FREE_STEPS`·`HIMARI_PROACTIVE_FREE_ATTEMPTS`는 더 읽지 않는다(값이 있어도 오류 없이 무시). 단, V3-P90에서 자유 wake를 끄던 방법(`HIMARI_PROACTIVE_FREE_STEPS=` 빈 값)은 `HIMARI_PROACTIVE_FREE_MINUTES`가 없을 때 계속 끈다. 끈 기능이 업그레이드로 조용히 켜지지 않게 하기 위해서다(검수 P2).
 
 ## 5. 줄이지 않은 것
 
@@ -65,9 +65,10 @@
 - `WakeStore`: `told_reminders`, `see_answered_reminders`, `see_reminders` 삭제. `begin_wake`는 `scheduled`만 `claimed`로, `end_wake`는 `delivered` 또는 `scheduled`(+1회)/`missed`로만, `miss_reminders`는 `scheduled`만 본다. `PENDING_REMINDERS`는 `scheduled`·`claimed`.
 - SQLite 스키마 v19(데이터만): `told → delivered`.
 - `himari.proactive`: `Told`, `seen_reminders`, `TOLD_SEEN`, `Situation.told`, `Decision.seen` 삭제. `EVENT_KINDS`, `free_today` 추가. `ProactiveSettings`: `attempts`·`free_steps` 삭제, `free_minutes` 추가, `daily` 기본 10.
-- 설정: `HIMARI_PROACTIVE_FREE_MINUTES` 추가, `HIMARI_PROACTIVE_FREE_STEPS`·`HIMARI_PROACTIVE_FREE_ATTEMPTS` 삭제, `HIMARI_PROACTIVE_FREE_DAILY`의 뜻과 기본값(6 → 10, 범위 0–96) 바뀜.
+- 설정: `HIMARI_PROACTIVE_FREE_MINUTES` 추가, `HIMARI_PROACTIVE_FREE_STEPS`(빈 값의 "끔"만 남음, §4)·`HIMARI_PROACTIVE_FREE_ATTEMPTS` 삭제, `HIMARI_PROACTIVE_FREE_DAILY`의 뜻과 기본값(6 → 10, 범위 0–96) 바뀜.
+- 상태의 막힘 이유(`last_look.outcome`): 알림이 꺼진 화면에 막히면 `display_off` 대신 `asleep`, `attempts`는 없음. 읽는 곳은 CLI의 출력 줄뿐이다.
 - 프롬프트: wake 이유에 `"again"`이 더 나오지 않는다. 실제 모델 확인 장면 `reminder_again`을 뺐다(`tests/live/test_proactive_live.py`).
-- Web 대화 기록의 wake 줄: `(again)` 표시 삭제.
+- Web 대화 기록의 wake 줄과 wake 이유(`event_view`의 `wake.reasons`): `again` 삭제(옛 기록도 표시하지 않음).
 
 공개 계약이 바뀌므로 전체 pytest를 돌린다(V3-038).
 

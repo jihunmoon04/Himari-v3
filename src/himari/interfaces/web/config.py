@@ -107,8 +107,9 @@ PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
 PROACTIVE_GAP_VAR = "HIMARI_PROACTIVE_GAP_MINUTES"
 # V3-P107 §4: free wakes opened a day, passes too (HIMARI_PROACTIVE_FREE_ATTEMPTS is no more)
 PROACTIVE_FREE_DAILY_VAR = "HIMARI_PROACTIVE_FREE_DAILY"
-# V3-P107 §4: one interval (HIMARI_PROACTIVE_FREE_STEPS is no more)
+# V3-P107 §4: one interval
 PROACTIVE_FREE_MINUTES_VAR = "HIMARI_PROACTIVE_FREE_MINUTES"
+PROACTIVE_FREE_STEPS_VAR = "HIMARI_PROACTIVE_FREE_STEPS"  # V3-P90's steps: only its "" (off) is still heard
 PROACTIVE_RETURN_VAR = "HIMARI_PROACTIVE_RETURN_HOURS"
 PROACTIVE_ENDED_VAR = "HIMARI_PROACTIVE_ENDED_MINUTES"  # V3-P90 §8 (was _FOCUS_MINUTES, _GAME_MINUTES)
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
@@ -279,10 +280,19 @@ def _proactive(source: Mapping[str, str]) -> ProactiveSettings:
         quiet_start=quiet_start, quiet_end=quiet_end,
         gap_minutes=_required(source.get(PROACTIVE_GAP_VAR), PROACTIVE_GAP_VAR, 15, 0, 24 * 60),  # V3-P90 §8
         daily=_required(source.get(PROACTIVE_FREE_DAILY_VAR), PROACTIVE_FREE_DAILY_VAR, 10, 0, 96),
-        free_minutes=_required(source.get(PROACTIVE_FREE_MINUTES_VAR), PROACTIVE_FREE_MINUTES_VAR, 30, 0, 24 * 60),
+        free_minutes=_free_minutes(source),
         return_hours=_required(source.get(PROACTIVE_RETURN_VAR), PROACTIVE_RETURN_VAR, 1, 0, 72),  # V3-P90 §8
         ended_minutes=_required(source.get(PROACTIVE_ENDED_VAR), PROACTIVE_ENDED_VAR, 60, 0, 24 * 60),
     )
+
+
+def _free_minutes(source: Mapping[str, str]) -> int:
+    """V3-P107 §4: HIMARI_PROACTIVE_FREE_MINUTES (30; 0: no free wakes). Unset, a V3-P90 setting that
+    turned free wakes off (HIMARI_PROACTIVE_FREE_STEPS empty) still turns them off; other steps are
+    read no more."""
+    if source.get(PROACTIVE_FREE_MINUTES_VAR) is None and source.get(PROACTIVE_FREE_STEPS_VAR, "x").strip() == "":
+        return 0
+    return _required(source.get(PROACTIVE_FREE_MINUTES_VAR), PROACTIVE_FREE_MINUTES_VAR, 30, 0, 24 * 60)
 
 
 def _port(value: str | None, name: str = PORT_VAR, *, default: int = DEFAULT_PORT) -> int:

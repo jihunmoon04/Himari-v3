@@ -358,7 +358,8 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert "held_run_id" not in [r[1] for r in conn.execute("PRAGMA table_info(wakes)")]  # v18's
+        if version < 18:
+            assert "held_run_id" not in [r[1] for r in conn.execute("PRAGMA table_info(wakes)")]  # v18's
     finally:
         conn.close()
     assert not list(tmp_path.glob("*.bak*"))  # refused before any backup

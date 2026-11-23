@@ -651,6 +651,10 @@ def test_speaking_first_settings_from_the_environment() -> None:
                                "HIMARI_PROACTIVE_FREE_ATTEMPTS": "y"}).proactive
     assert (free.free_minutes, off.free_minutes) == (20, 30)
     assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_MINUTES": "0"}).proactive.free_minutes == 0  # none
+    # V3-P90's way to turn them off still does, unless the new setting says otherwise
+    assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": " "}).proactive.free_minutes == 0
+    assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": "", "HIMARI_PROACTIVE_FREE_MINUTES": "45"}
+                              ).proactive.free_minutes == 45
 
 
 def test_a_screen_answer_comes_from_a_device_for_a_request_it_was_asked(server: Server) -> None:
