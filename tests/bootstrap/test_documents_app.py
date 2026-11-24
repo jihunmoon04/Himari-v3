@@ -33,7 +33,8 @@ def test_without_a_working_toolkit_nothing_is_offered(tmp_path: Path, caplog: py
     app = open_app(tmp_path, documents_dir=documents_dir)
     try:
         assert app.documents is None and app.toolkit is None
-        assert app.machine is None  # no runner: no Environment, no read_document (V3-P101)
+        assert app.machine is not None  # the folders are there (V3-P109), but no reader: no read_document
+        assert "machine/read_document" not in {t.definition.tool_id for t in app.machine.tools()}
         assert not any("read_document" in n for n in instructions(app))
     finally:
         asyncio.run(app.close())
@@ -47,10 +48,9 @@ def test_the_sentences() -> None:
     assert _documents_notes(reader, kit) == (DOCUMENTS_READ_NOTE,)  # type: ignore[arg-type]
 
 
-def test_read_document_is_told_with_the_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # V3-P101: read_document is the machine Environment's; told when the runner is there.
+def test_read_document_is_told_with_conversation_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # V3-P101, V3-P109: read_document is the machine Environment's; told when Conversations have folders.
     from himari.bootstrap import application as boot
-    from himari.environment.machine import MachineEnvironment
 
     class Kit:
         fd = 99
@@ -62,9 +62,6 @@ def test_read_document_is_told_with_the_runner(tmp_path: Path, monkeypatch: pyte
     class Reading:
         versions = {"python-docx": "1"}
 
-    async def hello(self: MachineEnvironment) -> dict[str, Any]:
-        return {"himari_home": "/home/u/HIMARI"}
-
     kit, reader = Kit(), Reading()
 
     async def documents(*_: Any) -> tuple[Any, Any, str]:
@@ -75,15 +72,10 @@ def test_read_document_is_told_with_the_runner(tmp_path: Path, monkeypatch: pyte
 
         return ImageViews(None)
 
-    async def no_servers(*_: Any) -> None:
-        return None
-
     monkeypatch.setattr(boot, "_documents", documents)
-    monkeypatch.setattr(MachineEnvironment, "hello", hello)
     monkeypatch.setattr(boot, "_image_views", no_views)
-    monkeypatch.setattr(boot, "_server_launchers", no_servers)
     app = asyncio.run(Application.open(tmp_path / "data", ScriptedAdapter([]), model_id="m", sandbox=True,
-                                       cleanup_seconds=None, machine_socket=str(tmp_path / "runner.sock")))
+                                       cleanup_seconds=None))
     try:
         assert app.machine is not None
         tools = {t.definition.tool_id for t in app.machine.tools()}
@@ -95,9 +87,9 @@ def test_read_document_is_told_with_the_runner(tmp_path: Path, monkeypatch: pyte
         asyncio.run(app.close())
 
 
-def test_a_working_toolkit_without_the_runner_tells_the_model_nothing(tmp_path: Path,
-                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-    # V3-P101: read_document is the machine Environment's; without the runner there is no Tool to tell of.
+def test_a_working_toolkit_without_folders_tells_the_model_nothing(tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    # V3-P101: read_document is the machine Environment's; with no folders there is no Tool to tell of.
     from himari.bootstrap import application as boot
 
     class Kit:
@@ -114,7 +106,7 @@ def test_a_working_toolkit_without_the_runner_tells_the_model_nothing(tmp_path: 
         return Kit(), Reading(), "on"
 
     monkeypatch.setattr(boot, "_documents", documents)
-    app = open_app(tmp_path)
+    app = open_app(tmp_path, machine_principals=())
     try:
         assert app.documents is not None and app.machine is None
         assert not any("read_document" in n for n in instructions(app))

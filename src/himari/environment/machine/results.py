@@ -1,13 +1,13 @@
 """What the machine Tools' results look like to the model (FILE-03, V3-051).
 
 Listing, reading and giving a file are formatted here
-from what the runner answered. Every result is at most
+from what the Conversation's folder gave. Every result is at most
 MAX_OBSERVATION_BYTES of UTF-8, whatever produced it.
 """
 
 from __future__ import annotations
 
-import posixpath
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -255,7 +255,7 @@ async def present(files: ToolFiles, ctx: ToolContext, raw_path: object, fetch: P
             return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: larger than {_size(files.max_bytes)}",
                                                         error=True), raw_result={"refused": "too_large"})
         raise
-    name = clean_file_name(posixpath.basename(shown))
+    name = clean_file_name(os.path.basename(shown))
     presented = PresentedFile(blob, name, clean_media_type(None, name), shown)
     return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Prepared {name} in the conversation ({_size(blob.size)})."),
                        raw_result={"path": shown, "size": blob.size, "sha256": blob.sha256},

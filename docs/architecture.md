@@ -1,6 +1,6 @@
 # HIMARI v3 아키텍처
 
-> 상태: **현행 구조**, 2026-11-24 (V3-P106·V3-P108 기준). 2026-10-13 설계 기준선을 지금 코드에 맞춰 고쳐 썼다. 뺀 기능(작업 에이전트 쪽)은 §9에 모았고, 각 결정의 근거는 [결정 기록](decisions.md)에 있다. 세부 계약은 [통합 모듈 계약 기준서](contracts.md)와 각 설계 문서가 원본이다.
+> 상태: **현행 구조**, 2026-11-24 (V3-P106·V3-P108·V3-P109 기준). 2026-10-13 설계 기준선을 지금 코드에 맞춰 고쳐 썼다. 뺀 기능(작업 에이전트 쪽)은 §9에 모았고, 각 결정의 근거는 [결정 기록](decisions.md)에 있다. 세부 계약은 [통합 모듈 계약 기준서](contracts.md)와 각 설계 문서가 원본이다.
 
 ## 1. 한눈에
 
@@ -15,8 +15,9 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다.
 
 ```text
 Windows 반려 앱 ──┐                         ┌── OpenRouter (모델)
-Web ──────────────┼─ HTTP ─▶ HIMARI 서버 ───┼── MCP 서버 (stdio는 server sandbox 안)
-CLI ──────────────┘ (loopback 전용)         └── himari-runner (대화 폴더 파일, 별도 프로세스)
+Web ──────────────┼─ HTTP ─▶ HIMARI 서버 ───┴── MCP 서버 (Streamable HTTP)
+CLI ──────────────┘ (loopback 전용)
+                              └─ 데이터 폴더: DB, 파일 저장소, conversations/<id> (대화 폴더)
 ```
 
 - 서버는 평문 HTTP라 loopback에만 바인딩한다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 둔다.
@@ -56,11 +57,10 @@ Control ── 입력을 Data에 기록
 | `provider` | 모델 API 통신(OpenRouter, 스트리밍·reasoning)·응답 정규화 | Run 반복 정책 |
 | `tool` | `ToolHandler` SPI, 카탈로그·디스패치, `ToolOutcome` 원자 커밋, Internal Tool(기억·대화 검색·화면) | Environment별 실행 방식 |
 | `data` | SQLite(WAL) 영속 저장, 원본 기록, Consumer별 공개 sub-port | 프롬프트 정책, 실제 파일 I/O |
-| `environment` | `EnvironmentPlugin` SPI. `machine` Environment가 대화 폴더 파일 Tool을 직접 제공 | Run 반복 |
-| `runner` | `himari-runner`: 사용자 권한으로 파일 연산을 하는 별도 프로세스(`runner.api`로만 닿음) | 그 밖의 HIMARI 코드(아무것도 import하지 않음) |
+| `environment` | `EnvironmentPlugin` SPI. `machine` Environment가 대화 폴더(`<data>/conversations/<id>`)와 그 파일 Tool을 직접 제공, 서버 프로세스 안에서(V3-P109) | Run 반복 |
 | `sandbox` | server sandbox(Bubblewrap/Landlock, 네트워크 차단)와 시작 시 자체 검사 | 무엇을 실행할지의 판단 |
 | `documents`·`imaging` | 문서 읽기(`read_document`)·이미지 처리 worker, sandbox 안에서 | 대화 상태 |
-| `mcp` | 범용 MCP 클라이언트(Streamable HTTP·stdio), 프롬프트·리소스, External Tool 등록 | 효과 등급 판정(운영자가 `mcp.json`에 정함) |
+| `mcp` | 범용 MCP 클라이언트(Streamable HTTP; stdio는 V3-P109에서 뺌), 프롬프트·리소스, External Tool 등록 | 효과 등급 판정(운영자가 `mcp.json`에 정함) |
 | `memory` | 대화가 잠잠해진 뒤 자동 기억·일화·열린 고리를 뽑는 worker([메모리 2단계](memory-v0.2.md)) | 대화의 Run |
 | `presence` | 기기 연결·지금 기기·활동 신호, 사건 흐름 허브(메모리에만) | 영속 저장 |
 | `proactive` | 먼저 말 걸기의 계기와 규칙(순수 함수, [v0.3](proactive-v0.3.md)) | 실행 주기(→ `bootstrap/schedule`) |
@@ -120,12 +120,12 @@ Provider 설정             (model · reasoning; 별도 API 필드)
 | 출처 | 예 | 특징 |
 | --- | --- | --- |
 | Internal | `memory_save`·`memory_forget`·`memory_search`, `conversation_search`·`conversation_read`, `look_at_screen` | Data 공개 API를 직접 사용 |
-| Environment (`machine`) | `machine/list_files`·`read_file`·`write_file`·`edit_file`·`delete_file`·`present_file`·`read_document` | `machine` Environment가 `tools()`로 제공. runner 경유 |
+| Environment (`machine`) | `machine/list_files`·`read_file`·`write_file`·`edit_file`·`delete_file`·`present_file`·`read_document` | `machine` Environment가 `tools()`로 제공 |
 | External (MCP) | `mcp.json`에 적은 서버의 Tool | 목록에 적은 Tool만 등록, 효과 등급(`read`·`scoped_write`·`unknown`)은 운영자가 정함, 대화마다 서버 켬/끔 |
 
 - 모든 Tool은 같은 `ToolHandler` SPI를 구현하고 `ToolOutcome`만 반환한다.
-- **파일 범위:** 쓰기는 **대화 폴더**(사용자별 Root 아래 `conversations/<id>`)에만 한다. 읽기는 runner 사용자가 읽을 수 있는 곳에서 숨김 목록을 뺀 범위다([machine-workspace-v0.1.md](machine-workspace-v0.1.md), V3-P100).
-- **sandbox:** 문서·이미지 처리와 stdio MCP 서버는 server sandbox 안에서 돈다. 네트워크가 없고, HIMARI 데이터 폴더에는 닿지 못한다. 자체 검사를 통과하지 못하면 stdio 서버는 띄우지 않는다. `HIMARI_SANDBOX=0`으로 끈다.
+- **파일 범위:** 읽기와 쓰기 모두 **그 대화의 폴더**(`<HIMARI_DATA_ROOT>/conversations/<id>`, 폴더 0700·파일 0600) 안에서만 한다. 폴더 안의 링크는 따라가지 않는다([server-slim-v0.1.md](server-slim-v0.1.md), V3-P109).
+- **sandbox:** 문서·이미지 처리는 server sandbox 안에서 돈다. 네트워크가 없고, HIMARI 데이터 폴더에는 닿지 못한다. 자체 검사를 통과하지 못하면 그 기능은 꺼진다. `HIMARI_SANDBOX=0`으로 끈다.
 
 ## 8. 기억
 
@@ -145,6 +145,7 @@ Provider 설정             (model · reasoning; 별도 API 필드)
 | 턴의 토큰 예산·진척 없음·자리 비움 | V3-P106 (Run 상한 하나로) |
 | 붙인 Workspace 쓰기, `git_push` | V3-P100 |
 | MCP Apps | V3-P97 |
+| `himari-runner`(사용자 권한의 파일 연산), 서버 전체 읽기, stdio MCP 실행 | V3-P109 |
 
 범용 코딩 일은 Claude Code·Codex 같은 도구가 맡는다. 옛 Workspace/Environment/Binding 설계와 Pause 초안은 기록으로 남는다: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md), [Control Pause/Resume v0.1](control-pause-v0.1.md), [CurrentState Contract v0.1](current-state-contract-v0.1.md).
 

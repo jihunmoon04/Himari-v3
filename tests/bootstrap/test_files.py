@@ -1,16 +1,15 @@
 """Application and files (V3-P66 §5, §7, §8): upload, send with attachments,
 the model presenting a file, download, and the cleanup — in the machine
-Environment, through an in-process runner (V3-P101)."""
+Environment: each Conversation's folder under the data root (V3-P101, V3-P109)."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
 from himari.prompt.system import COMPANION_BASE
@@ -30,16 +29,6 @@ from himari.prompt.api import ATTACHMENT_NOTE, PROGRESS_NOTE, TOOL_IMAGES_NOTE
 from himari.provider.scripted import ScriptedAdapter
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
-KIT: RunnerKit | None = None
-
-
-@pytest.fixture(autouse=True)
-def runner(tmp_path: Path) -> Iterator[RunnerKit]:
-    global KIT
-    KIT = start_runner(tmp_path / "runner")
-    yield KIT
-    KIT.close()
-    KIT = None
 
 
 async def chunks(*parts: bytes) -> AsyncIterator[bytes]:
@@ -50,17 +39,15 @@ async def chunks(*parts: bytes) -> AsyncIterator[bytes]:
 async def open_app(root: Path, adapter: ScriptedAdapter | None = None, *, machine: bool = True,
                    **kwargs: object) -> Application:
     kwargs.setdefault("cleanup_seconds", None)
-    assert KIT is not None
-    if machine:
-        kwargs.update(machine_socket=KIT.socket, machine_principals=(ALICE, BOB))
+    kwargs.update(machine_principals=(ALICE, BOB) if machine else ())
     return await Application.open(root, adapter or ScriptedAdapter(), model_id="scripted-model", sandbox=False,
                                   **kwargs)  # type: ignore[arg-type]
 
 
 async def conversation(app: Application, owner: PrincipalId = ALICE) -> tuple[TrustedScope, Path]:
     scope = TrustedScope(owner, await app.create_conversation(owner))
-    assert KIT is not None
-    return scope, KIT.himari_home / "conversations" / scope.conversation_id
+    assert app.machine is not None
+    return scope, Path(app.machine.root) / scope.conversation_id
 
 
 def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path) -> None:
@@ -121,7 +108,7 @@ def test_a_presented_file_can_be_downloaded(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("origin_kind", [OriginKind.WEB, OriginKind.CLI, OriginKind.DEVICE])
-def test_without_the_runner_uploads_stop_and_existing_downloads_stay(
+def test_without_folders_uploads_stop_and_existing_downloads_stay(
         tmp_path: Path, origin_kind: OriginKind) -> None:
     async def scenario() -> None:
         root = tmp_path / "data"
@@ -144,7 +131,7 @@ def test_without_the_runner_uploads_stop_and_existing_downloads_stay(
         finally:
             await app.close()
 
-        # Reopen without the runner (V3-P101): no uploads, but the existing immutable file remains downloadable.
+        # Reopen with no folders (V3-P101, V3-P109): no uploads, but the existing immutable file stays downloadable.
         next_provider = ScriptedAdapter([final("ready")], companion=True)
         again = await open_app(root, next_provider, machine=False)
         try:

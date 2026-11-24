@@ -13,7 +13,6 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
-from runnerkit import start_runner  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
@@ -30,18 +29,22 @@ class Server:
         self.provider = ScriptedAdapter(script)
         self.application: Application | None = None
         self.root = tmp_path / "data"
-        self.kit = start_runner(tmp_path / "runner")  # the machine Environment: uploads go there (V3-P101)
 
         async def opener() -> Application:
             self.application = await Application.open(self.root, self.provider, model_id="scripted-model",
-                                                      sandbox=False, cleanup_seconds=None,
-                                                      machine_socket=self.kit.socket, **kwargs)
+                                                      sandbox=False, cleanup_seconds=None, **kwargs)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),
                            allowed_origins=frozenset({ORIGIN}), secure_cookie=False, data_root=str(self.root),
                            model_id="scripted-model", reasoning_effort=None, sandbox=False)
         self.client = TestClient(web.create_app(config, opener))
+
+    @property
+    def machine_root(self) -> str:
+        """Where the Conversations' own folders are (V3-P109: under the data root)."""
+        assert self.application is not None and self.application.machine is not None
+        return self.application.machine.root
 
     def sign_in(self) -> None:
         assert self.application is not None
@@ -75,7 +78,6 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
     with s.client:
         s.sign_in()
         yield s
-    s.kit.close()
 
 
 def error(response: Any) -> tuple[int, str]:
@@ -129,14 +131,13 @@ def test_a_presented_file_comes_with_its_tool_result(
         assert s.application is not None
         s.application.uploads_work = uploads_work
         check_presented_download(s, uploads_work)
-    s.kit.close()
 
 
 def check_presented_download(server: Server, uploads_work: bool) -> None:
     cid = server.new()
     assert server.application is not None
     assert server.application.uploads_work is uploads_work
-    folder = server.kit.himari_home / "conversations" / cid
+    folder = Path(server.machine_root) / cid
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "out.csv").write_text("a,b\n")
     server.provider.extend([calls(("machine/present_file", {"path": "out.csv"})), final("here")])

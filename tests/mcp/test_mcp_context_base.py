@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 from mcp_fake import URL, FakeMcpServer
-from mcp_stdio_fake import FakeLauncher
 
 from himari.mcp import tools as tools_module
 
@@ -172,34 +171,6 @@ def test_a_prompts_only_server_can_be_switched_per_conversation(tmp_path: Path) 
 # --- prompts/get in the Conversation's session (V3-P60 C2) ----------------------------------
 
 
-def test_a_prompt_is_got_from_the_conversations_own_process() -> None:
-    async def run() -> None:
-        launcher = FakeLauncher()
-        launcher.capabilities = {"tools": {}, "prompts": {}}
-        launcher.prompts = [PROMPT]
-        entry = {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}},
-                 "processes": {"scope": "per_conversation", "max": 2}}
-        config = parse_config(json.dumps({"servers": {"calliope": entry}}), {})
-        connection = await connect(config, check_schema=check_tool_input_schema,
-                                   launcher_for=lambda source, stdio: launcher)
-        try:
-            a = await connection.get_prompt("calliope", "calliope_commentary", {"game": "g"}, "conv-a")
-            b = await connection.get_prompt("calliope", "calliope_commentary", {"game": "g"}, "conv-b")
-            again = await connection.get_prompt("calliope", "calliope_commentary", {"game": "g"}, "conv-a")
-            texts = [r["messages"][0]["content"]["text"] for r in (a, b, again)]
-            assert texts == ["prompt calliope_commentary from process 1", "prompt calliope_commentary from process 2",
-                             "prompt calliope_commentary from process 1"]  # 0 was the listing session
-            with pytest.raises(McpRefused, match="no prompt"):
-                await connection.get_prompt("calliope", "missing", {}, "conv-a")
-        finally:
-            await connection.aclose()
-
-    asyncio.run(asyncio.wait_for(run(), 20))
-
-
-# --- prompts are optional: their failure costs nothing else (PR #40 review) ----------------
-
-
 @pytest.mark.parametrize("bad", [
     {"name": "example", "arguments": 123},
     {"name": "example", "arguments": [{"name": 5}]},
@@ -219,20 +190,24 @@ def test_a_malformed_prompt_never_breaks_the_connection(bad: Any) -> None:
     assert "calliope_commentary" in names
 
 
-def test_one_servers_bad_prompts_do_not_touch_another_server() -> None:
+def test_a_stdio_entry_is_left_out_with_why_and_the_others_connect() -> None:
+    """V3-P109 §3 D10: a ``command`` entry no longer runs, never stops the
+    start, and its other keys are not read (an unset env_from is no error)."""
     async def run() -> None:
         http = FakeMcpServer()
         http.capabilities = {"tools": {}, "prompts": {}}
         http.prompts = [{"name": "broken", "arguments": 123}]
-        launcher = FakeLauncher()
         entries = {"calliope": {"url": URL, "tools": {"echo": {"effect": "read"}}},
-                   "other": {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}}}}
+                   "other": {"command": "/usr/bin/fake-server", "env_from": ["NOT_SET_ANYWHERE"],
+                             "tools": {"echo": {"effect": "read"}}, "default": "off"}}
         config = parse_config(json.dumps({"servers": entries}), {})
-        connection = await connect(config, check_schema=check_tool_input_schema, transport=http.transport(),
-                                   launcher_for=lambda source, stdio: launcher)
+        connection = await connect(config, check_schema=check_tool_input_schema, transport=http.transport())
         try:
-            assert [(s.source, s.available) for s in connection.statuses] == [("calliope", True), ("other", True)]
+            assert [(s.source, s.available) for s in connection.statuses] == [("calliope", True), ("other", False)]
             assert "left out" in connection.statuses[0].problems[0]
+            other = connection.statuses[1]
+            assert other.tool_ids == () and not other.enabled_by_default
+            assert "V3-P109" in other.problems[0] and "HTTP" in other.problems[0]
         finally:
             await connection.aclose()
 
@@ -244,13 +219,11 @@ def test_a_prompt_list_that_never_answers_keeps_the_tools(monkeypatch: pytest.Mo
     monkeypatch.setattr(tools_module, "PROMPTS_STARTUP_SECONDS", 0.3)
 
     async def run() -> None:
-        launcher = FakeLauncher()
-        launcher.capabilities = {"tools": {}, "prompts": {}}
-        launcher.hang_prompts_list = True
-        entry = {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}}}
-        config = parse_config(json.dumps({"servers": {"calliope": entry}}), {})
-        connection = await connect(config, check_schema=check_tool_input_schema,
-                                   launcher_for=lambda source, stdio: launcher)
+        server = FakeMcpServer()
+        server.capabilities = {"tools": {}, "prompts": {}}
+        server.prompts = [PROMPT]
+        server.prompts_list_delay = 30.0
+        connection = await connect(config_of(), check_schema=check_tool_input_schema, transport=server.transport())
         try:
             (status,) = connection.statuses
             assert status.available and status.tool_ids == ("calliope/echo",)
@@ -272,28 +245,3 @@ def test_a_prompt_list_over_its_byte_bound_is_left_out() -> None:
 
 
 
-def test_a_prompt_list_that_never_answers_keeps_a_stdio_servers_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PR #40 re-review B3: a timed-out prompts/list leaves a stdio listing
-    session checking; the Tools are read before it, so they stay."""
-    monkeypatch.setattr(tools_module, "PROMPTS_STARTUP_SECONDS", 0.3)
-    from mcp_fake import ECHO_SCHEMA, VIEW_URI, view_entry
-
-    async def run() -> None:
-        launcher = FakeLauncher()
-        launcher.capabilities = {"tools": {}, "prompts": {}, "resources": {}}
-        launcher.tools = [{"name": "echo", "description": "Echo.", "inputSchema": ECHO_SCHEMA,
-                           "_meta": {"ui": {"resourceUri": VIEW_URI}}}]
-        launcher.resources = {VIEW_URI: {"contents": [view_entry()]}}
-        launcher.hang_prompts_list = True
-        entry = {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}}, "ui": {}}
-        config = parse_config(json.dumps({"servers": {"calliope": entry}}), {})
-        connection = await connect(config, check_schema=check_tool_input_schema,
-                                   launcher_for=lambda source, stdio: launcher)
-        try:
-            (status,) = connection.statuses
-            assert status.available and status.tool_ids == ("calliope/echo", "calliope/list_resources", "calliope/read_resource")
-            assert status.problems == ("prompts left out: no answer in time",)
-        finally:
-            await connection.aclose()
-
-    asyncio.run(asyncio.wait_for(run(), 20))

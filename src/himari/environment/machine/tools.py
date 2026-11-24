@@ -1,25 +1,24 @@
-"""The machine Environment's Tools (V3-P74 §8, §9): ``machine/<name>``.
+"""The machine Environment's Tools (V3-P74 §8, §9; V3-P109 §4.2): ``machine/<name>``.
 
-The file Tools and documents on the user's real paths, through the runner;
-results are formatted by :mod:`.results`. A refusal about the
-boundary (outside the Workspaces, permission, hidden) is DENIED; other
-problems are FAILED. A request the runner never received is DENIED (nothing
-happened); one whose answer was lost raises, and the Dispatcher records the
-call's outcome as unknown (V3-047).
+The file Tools and documents in the Conversation's own folder, read and
+written in this process (:mod:`.folders`); results are formatted by
+:mod:`.results`. A refusal about the boundary (outside the folder,
+permission) is DENIED; other problems are FAILED.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from himari.common import CallId, EnvironmentKind, JsonValue, ToolId
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, MAX_DOCUMENT_BYTES, DataError
 from himari.documents.api import DocumentReading
 from himari.environment.machine.blocking import run_blocking
 from himari.environment.machine.documents import ReadDocument, document_definition
+from himari.environment.machine.errors import DENIED, TOO_LARGE, FolderError
 from himari.environment.machine.results import (
     MAX_LIST_ENTRIES,
     MAX_READ_BYTES,
@@ -35,7 +34,6 @@ from himari.environment.machine.results import (
     read_offset,
     read_outcome,
 )
-from himari.runner import api as runner
 from himari.tool.api import (
     EffectProfile,
     ToolContext,
@@ -52,31 +50,38 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("himari.environment.machine")
 
-_DENIED = {runner.OUTSIDE_WORKSPACES, runner.ACCESS}
-_PATHS = ("Paths are absolute, relative to the working directory, or start with ~ (the user's home). ")
-_WRITE_SCOPE = ("You can write only inside this conversation's own folder (the working directory in the runtime "
-                "state); writing elsewhere is refused. ")
-_READ_ONLY = "outside this conversation's own folder, which is the only place you can write; nothing was changed"
-_UNREACHABLE = "the machine runner is not reachable; nothing was done"
+_PATHS = ("Paths are inside this conversation's own folder (the working directory in the runtime state): "
+          "absolute, or relative to it; nothing outside it can be read or written. ")
 
 
-def _refused(shown: str, error: runner.RunnerError) -> ToolOutcome:
-    status = ToolStatus.DENIED if error.category in _DENIED else ToolStatus.FAILED
+def _refused(shown: str, error: FolderError) -> ToolOutcome:
+    status = ToolStatus.DENIED if error.category in DENIED else ToolStatus.FAILED
     return ToolOutcome(status, _text(f"{shown}: {error}", error=True), raw_result={"category": error.category})
 
 
-def _unreachable(why: str = _UNREACHABLE) -> ToolOutcome:
-    return ToolOutcome(ToolStatus.DENIED, _text(why, error=True), raw_result={"runner": "unreachable"})
+def _unavailable(why: str) -> ToolOutcome:
+    return ToolOutcome(ToolStatus.DENIED, _text(f"{why}; nothing was done", error=True),
+                       raw_result={"folder": "unavailable"})
 
 
 def _no_places(error: DataError) -> ToolOutcome:
-    """The Conversation's folders could not be read: nothing runs (§10.5)."""
+    """The Conversation's folders could not be read: nothing runs (V3-P74 §10.5)."""
     return ToolOutcome(ToolStatus.DENIED, _text(f"this conversation's folders could not be read ({error.code.value}); "
                                                 "nothing was done", error=True), raw_result={"data": error.code.value})
 
 
 def _shown(raw: object) -> str:
     return raw if isinstance(raw, str) else "?"
+
+
+def _read_at(handle: BinaryIO, offset: int, count: int) -> bytes:
+    handle.seek(offset)
+    return handle.read(count)
+
+
+def _read_all(handle: BinaryIO, limit: int) -> bytes:
+    handle.seek(0)
+    return handle.read(limit)
 
 
 class _MachineTool:
@@ -106,92 +111,67 @@ class _MachineTool:
         try:
             places = await self._env.places(ctx.scope)
         except MachineUnavailable as unavailable:
-            return _unreachable(str(unavailable))
+            return _unavailable(str(unavailable))
         except DataError as error:
             return _no_places(error)
         args = invocation.arguments
-        roots = list(places.writable)
         try:
             if self.effect is EffectProfile.READ:
-                return await self.act(args, places.cwd, roots, ctx, invocation.call_id)
-            # All of the Conversation's folders at once (§9.1): which one a path lands in is
-            # known only once the runner has resolved it.
+                return await self.act(args, places.cwd, ctx, invocation.call_id)
             async with self._env.locks.hold(places.roots):
-                return await self.act(args, places.cwd, roots, ctx, invocation.call_id)
-        except runner.NotSent:
-            return _unreachable()
-        except runner.RunnerError as error:
-            if error.category == runner.OUTSIDE_WORKSPACES:
-                error = runner.RunnerError(runner.OUTSIDE_WORKSPACES, _READ_ONLY)
+                return await self.act(args, places.cwd, ctx, invocation.call_id)
+        except FolderError as error:
             return _refused(_shown(args.get(self.target, ".")), error)
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
         raise NotImplementedError
 
-    async def change(self, path: object, op: str, args: dict[str, Any]) -> dict[str, Any]:
-        """The runner's write or delete of ``path``. A refusal raises RunnerError."""
-        result, fds = await self._env.call(op, {**args, "path": path})
-        for fd in fds:
-            os.close(fd)
-        return result
+    async def opened[T](self, folder: str, raw: object, use: Callable[[BinaryIO, str, os.stat_result], T]) -> T:
+        """``use(file, path, stat)`` on the opened file, in the worker thread."""
+        folders = self._env.folders
+
+        def work() -> T:
+            handle, shown, info = folders.open_read(folder, raw)
+            with handle:
+                return use(handle, shown, info)
+
+        return await run_blocking(work)
 
 
 class ListFiles(_MachineTool):
     name = "list_files"
-    description = ("List a directory on this server. " + _PATHS
-                   + "Hidden locations (credentials, HIMARI's own data) are not shown.")
-    properties = {"path": {"type": "string", "description": "Directory to list (default: working directory)."}}
+    description = "List a directory in this conversation's folder. " + _PATHS
+    properties = {"path": {"type": "string", "description": "Directory to list (default: the folder itself)."}}
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
-        result, _ = await self._env.call(runner.LIST, {"path": args.get("path", "."), "cwd": cwd,
-                                                       "limit": MAX_LIST_ENTRIES})
-        entries = [Entry(str(e["name"]), str(e["kind"]), e.get("size")) for e in result["entries"]]
-        return listing_outcome(str(result["path"]), entries, bool(result["truncated"]))
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
+        shown, raw, truncated = await run_blocking(self._env.folders.listing, folder, args.get("path", "."),
+                                                   MAX_LIST_ENTRIES)
+        entries = [Entry(str(e["name"]), str(e["kind"]), e.get("size")) for e in raw]  # type: ignore[arg-type]
+        return listing_outcome(shown, entries, truncated)
 
 
 class ReadFile(_MachineTool):
     name = "read_file"
-    description = ("Read a UTF-8 text file you can read on this server (anything the user can read, except "
-                   "hidden locations). " + _PATHS + "Large files are shown in parts: the result says which bytes "
-                   "it shows and the offset to read on from.")
+    description = ("Read a UTF-8 text file in this conversation's folder. " + _PATHS + "Large files are shown in "
+                   "parts: the result says which bytes it shows and the offset to read on from.")
     properties = {
         "path": {"type": "string", "description": "File to read."},
         "offset": {"type": "integer", "minimum": 0, "description": "Byte to start at (default 0)."},
     }
     required = ["path"]
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
-        result, fds = await self._env.call(runner.OPEN, {"path": args.get("path"), "cwd": cwd})
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
         offset = read_offset(args)
         limit = self._env.files.max_bytes if self._env.files is not None else DEFAULT_FILE_MAX_BYTES
-        fd = fds[0]
-        try:
-            return await run_blocking(
-                lambda: read_outcome(str(result["path"]), os.pread(fd, MAX_READ_BYTES, offset), int(result["size"]),
-                                     offset, lambda: _read_all(fd, limit), limit,
-                                     documents=self._env.documents is not None))
-        finally:
-            os.close(fd)
-
-
-def _read_all(fd: int, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    position = 0
-    while position < limit:
-        chunk = os.pread(fd, min(1 << 20, limit - position), position)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        position += len(chunk)
-    return b"".join(chunks)
+        documents = self._env.documents is not None
+        return await self.opened(folder, args.get("path"), lambda handle, shown, info: read_outcome(
+            shown, _read_at(handle, offset, MAX_READ_BYTES), info.st_size, offset,
+            lambda: _read_all(handle, limit), limit, documents=documents))
 
 
 class WriteFile(_MachineTool):
     name = "write_file"
-    description = "Create or overwrite a text file (written atomically). " + _WRITE_SCOPE + _PATHS
+    description = "Create or overwrite a text file (written atomically). " + _PATHS
     effect = EffectProfile.SCOPED_WRITE
     properties = {
         "path": {"type": "string", "description": "File to write."},
@@ -200,24 +180,22 @@ class WriteFile(_MachineTool):
     }
     required = ["path", "content"]
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
         data = str(args["content"]).encode("utf-8")
         if len(data) > MAX_WRITE_BYTES:
-            return _refused(_shown(args.get("path")), runner.RunnerError(runner.TOO_LARGE))
-        result = await self.change(args.get("path"), runner.WRITE, {
-            "cwd": cwd, "write_roots": roots, "content": str(args["content"]),
-            "create_parents": bool(args.get("create_parents", True))})
-        path = str(result["path"])
+            return _refused(_shown(args.get("path")), FolderError(TOO_LARGE))
+        path, created = await run_blocking(
+            lambda: self._env.folders.write(folder, args.get("path"), data,
+                                            create_parents=bool(args.get("create_parents", True))))
         return ToolOutcome(ToolStatus.SUCCEEDED,
-                           _text(f"{'created' if result['created'] else 'updated'} {path} ({len(data)} bytes)"),
-                           raw_result={"path": path, "bytes": len(data), "created": bool(result["created"])})
+                           _text(f"{'created' if created else 'updated'} {path} ({len(data)} bytes)"),
+                           raw_result={"path": path, "bytes": len(data), "created": created})
 
 
 class EditFile(_MachineTool):
     name = "edit_file"
     description = ("Replace exact text in a UTF-8 file. Fails unless old_text occurs exactly expected_replacements "
-                   "times (default 1). " + _WRITE_SCOPE)
+                   "times (default 1). " + _PATHS)
     effect = EffectProfile.SCOPED_WRITE
     properties = {
         "path": {"type": "string", "description": "File to edit."},
@@ -227,22 +205,17 @@ class EditFile(_MachineTool):
     }
     required = ["path", "old_text", "new_text"]
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
         shown = _shown(args.get("path"))
         old, new = str(args["old_text"]), str(args["new_text"])
         expected = int(args.get("expected_replacements", 1))
         if not old or expected < 1:
             return ToolOutcome(ToolStatus.FAILED, _text(
                 f"{shown}: old_text must be non-empty and expected_replacements >= 1", error=True))
-        result, fds = await self._env.call(runner.OPEN, {"path": args.get("path"), "cwd": cwd})
-        try:
-            data = await run_blocking(_read_all, fds[0], MAX_WRITE_BYTES + 1)
-        finally:
-            os.close(fds[0])
-        shown = str(result["path"])
+        shown, data, identity = await self.opened(folder, args.get("path"), lambda handle, path, info: (
+            path, _read_all(handle, MAX_WRITE_BYTES + 1), _identity(info)))
         if len(data) > MAX_WRITE_BYTES:
-            return _refused(shown, runner.RunnerError(runner.TOO_LARGE))
+            return _refused(shown, FolderError(TOO_LARGE))
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -252,32 +225,35 @@ class EditFile(_MachineTool):
             return ToolOutcome(ToolStatus.FAILED, _text(
                 f"{shown}: found {found} occurrence(s) of old_text, expected {expected}; nothing changed", error=True),
                 raw_result={"path": shown, "found": found, "expected": expected})
-        updated = text.replace(old, new)
-        if len(updated.encode("utf-8")) > MAX_WRITE_BYTES:
-            return _refused(shown, runner.RunnerError(runner.TOO_LARGE))
-        # The path the runner opened, with the identity it read: changed since → CHANGED, nothing written.
-        await self.change(shown, runner.WRITE, {"cwd": cwd, "write_roots": roots, "content": updated,
-                                                "expected": result["identity"]})
+        updated = text.replace(old, new).encode("utf-8")
+        if len(updated) > MAX_WRITE_BYTES:
+            return _refused(shown, FolderError(TOO_LARGE))
+        # The path that was opened, with the identity it had: changed since → CHANGED, nothing written.
+        await run_blocking(lambda: self._env.folders.write(folder, shown, updated, expected=identity))
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"edited {shown}: replaced {found} occurrence(s)"),
-                           raw_result={"path": shown, "replacements": found, "bytes": len(updated.encode("utf-8"))})
+                           raw_result={"path": shown, "replacements": found, "bytes": len(updated)})
+
+
+def _identity(info: os.stat_result) -> list[int]:
+    from himari.environment.machine.folders import identity
+
+    return identity(info)
 
 
 class DeleteFile(_MachineTool):
     name = "delete_file"
-    description = "Delete one file (not directories). " + _WRITE_SCOPE
+    description = "Delete one file (not directories). " + _PATHS
     effect = EffectProfile.SCOPED_WRITE
     properties = {"path": {"type": "string", "description": "File to delete."}}
     required = ["path"]
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
-        result = await self.change(args.get("path"), runner.DELETE, {"cwd": cwd, "write_roots": roots})
-        path = str(result["path"])
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
+        path = await run_blocking(self._env.folders.delete, folder, args.get("path"))
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"deleted {path}"), raw_result={"path": path})
 
 
 class PresentFile(_MachineTool):
-    """``machine/present_file`` (V3-P66 §7.1): any file the model can read."""
+    """``machine/present_file`` (V3-P66 §7.1): a file in the Conversation's folder."""
 
     name = "present_file"
     description = ("Prepare a file in the conversation. Whether the user can download it depends on "
@@ -286,33 +262,29 @@ class PresentFile(_MachineTool):
     properties = {"path": {"type": "string", "description": "File to prepare in the conversation."}}
     required = ["path"]
 
-    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
-                  call: CallId) -> ToolOutcome:
+    async def act(self, args: Mapping[str, Any], folder: str, ctx: ToolContext, call: CallId) -> ToolOutcome:
         files = self._env.files
         if files is None:
             return ToolOutcome(ToolStatus.DENIED, _text("files cannot be given on this server", error=True))
 
         async def fetch(raw: object, most: int, allowance: int) -> tuple[str, bytes] | ToolOutcome:
-            result, fds = await self._env.call(runner.OPEN, {"path": raw, "cwd": cwd})
-            fd, shown, size = fds[0], str(result["path"]), int(result["size"])
-            try:
-                refused = present_refusal(shown, size, most, allowance)
+            def load(handle: BinaryIO, shown: str, info: os.stat_result) -> tuple[str, bytes] | ToolOutcome:
+                refused = present_refusal(shown, info.st_size, most, allowance)
                 if refused is not None:
                     return refused
-                before = os.fstat(fd)
-                data = await run_blocking(_read_all, fd, size + 1)
-                after = os.fstat(fd)
-                if len(data) != size or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                data = _read_all(handle, info.st_size + 1)
+                after = os.fstat(handle.fileno())
+                if len(data) != info.st_size or (info.st_size, info.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                     return present_changed(shown)
                 return shown, data
-            finally:
-                os.close(fd)
+
+            return await self.opened(folder, raw, load)
 
         return await present(files, ctx, args.get("path"), fetch)
 
 
 class MachineReadDocument(ReadDocument):
-    """``machine/read_document`` (V3-P70 on the user's paths)."""
+    """``machine/read_document`` (V3-P70) on a file in the Conversation's folder."""
 
     def __init__(self, env: MachineEnvironment, reader: DocumentReading) -> None:
         self._machine = env
@@ -328,28 +300,27 @@ class MachineReadDocument(ReadDocument):
 
         assert ctx.workspace is not None
         shown = _shown(raw_path)
+        folders = self._machine.folders
+
+        def load(folder: str) -> tuple[str, int, bytes]:
+            handle, path, info = folders.open_read(folder, raw_path)
+            with handle:
+                if info.st_size > limit:
+                    return path, info.st_size, b""
+                return path, info.st_size, _read_all(handle, limit + 1)
+
         try:
-            cwd = (await self._machine.places(ctx.scope)).cwd
-            result, fds = await self._machine.call(runner.OPEN, {"path": raw_path, "cwd": cwd})
+            folder = (await self._machine.places(ctx.scope)).cwd
+            shown, size, data = await run_blocking(load, folder)
         except MachineUnavailable as unavailable:
-            return _unreachable(str(unavailable))
+            return _unavailable(str(unavailable))
         except DataError as error:
             return _no_places(error)
-        except runner.NotSent:
-            return _unreachable()
-        except runner.RunnerError as error:
+        except FolderError as error:
             return _refused(shown, error)
-        fd, shown, size = fds[0], str(result["path"]), int(result["size"])
-        try:
-            if size > limit:
-                return ToolOutcome(ToolStatus.FAILED, _text(
-                    f"{shown}: too large for read_document ({_size(size)}, limit {_size(limit)})",
-                    error=True))
-            data = await run_blocking(_read_all, fd, limit + 1)
-        finally:
-            os.close(fd)
-        if len(data) > limit:
-            return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: too large for read_document", error=True))
+        if size > limit or len(data) > limit:
+            return ToolOutcome(ToolStatus.FAILED, _text(
+                f"{shown}: too large for read_document ({_size(size)}, limit {_size(limit)})", error=True))
         return shown, data
 
 

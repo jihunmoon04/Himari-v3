@@ -17,11 +17,8 @@ A Tool's view (MCP Apps, ``_meta.ui``) is not shown. A Tool whose
 ``visibility`` leaves out ``"model"`` is not registered at all, whatever the
 operator listed: nothing can call it.
 
-stdio servers (V3-P59 §5) run only through a launcher Bootstrap gives for
-each one (the server sandbox); without it the server is left out with the
-reason. Their Tools are read by a listing session of their own
-at connect; calls then go to the server's processes (``stdio``), keyed by
-the calling Conversation.
+Servers are reached over Streamable HTTP. A stdio entry (V3-P59) is no
+longer run (V3-P109): it is left out with the reason.
 """
 
 from __future__ import annotations
@@ -36,10 +33,9 @@ from typing import Any, TypeGuard
 import httpx
 
 from himari.common import JsonValue, ModelToolResult, TextBlock
-from himari.mcp.client import McpClient, McpError, McpRefused, http_client
-from himari.mcp.config import McpConfig, McpServerConfig, McpStdioConfig, McpToolConfig
+from himari.mcp.client import RESTART_NOTICE, McpClient, McpError, McpRefused, http_client
+from himari.mcp.config import McpConfig, McpServerConfig, McpToolConfig
 from himari.mcp.resources import ResourceTool, resource_tools
-from himari.mcp.stdio import RESTART_NOTICE, ListingChannel, ProcessLauncher, StdioChannel, StdioServer
 from himari.tool.api import (
     MAX_IMAGE_BASE64_CHARS,
     ResultImage,
@@ -225,8 +221,8 @@ class McpConnection:
         return {s.source: s.enabled_by_default for s in self.statuses}
 
     async def release(self, key: str) -> None:
-        """V3-P65 §6.3: end what only this Conversation used (its own stdio
-        processes); servers shared by every Conversation are untouched."""
+        """V3-P65 §6.3: end what only this Conversation used; servers shared
+        by every Conversation are untouched."""
         for client in self.clients:
             await client.release(key)
 
@@ -305,10 +301,6 @@ class _Started:
     resource_tools: list[ResourceTool] = field(default_factory=list)
 
 
-# Bootstrap's launcher for a stdio server; raising says why it cannot run (the reason is shown).
-LauncherFor = Callable[[str, McpStdioConfig], ProcessLauncher]
-
-
 class _Unavailable:
     """The channel of a server left out at startup: nothing is sent."""
 
@@ -335,33 +327,23 @@ class _Unavailable:
         pass
 
 
-def _clients(server: McpServerConfig, transport: httpx.AsyncBaseTransport | None,
-             launcher_for: LauncherFor | None) -> tuple[McpClient, McpClient | None]:
-    """The client for calls, and for a stdio server a listing client."""
-    if server.stdio is None:
-        assert server.url is not None
-        client = http_client(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport)
-        return client, None
-    if launcher_for is None:
-        raise McpRefused("stdio servers run only in the server sandbox, which is not available")
-    launcher = launcher_for(server.name, server.stdio)
-    stdio = StdioServer(server.name, server.stdio, launcher, capabilities={},
-                        timeout_seconds=server.timeout_seconds)
-    return McpClient(StdioChannel(stdio)), McpClient(ListingChannel(stdio, server.timeout_seconds))
+def _client(server: McpServerConfig, transport: httpx.AsyncBaseTransport | None) -> McpClient:
+    if server.url is None:
+        raise McpRefused(server.refused or "the server has no url")
+    return http_client(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport)
 
 
-async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transport: httpx.AsyncBaseTransport | None,
-                 launcher_for: LauncherFor | None) -> _Started:
-    lister: McpClient | None = None
+async def _start(server: McpServerConfig, check_schema: InputSchemaCheck,
+                 transport: httpx.AsyncBaseTransport | None) -> _Started:
     try:
-        client, lister = _clients(server, transport, launcher_for)
+        client = _client(server, transport)
     except Exception as error:  # noqa: BLE001 — a server that cannot run is left out with the reason
         return _Started(McpClient(_Unavailable()), [], SourceStatus(server.name, server.enabled_by_default, False, (),
                                                                     (f"unavailable: {error}",)))
     problems: list[str] = []
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
-            init = await (lister or client).initialize()
+            init = await client.initialize()
             declared = init.get("capabilities")
             capabilities = frozenset(k for k, v in declared.items() if isinstance(v, dict)) \
                 if isinstance(declared, dict) else frozenset()
@@ -369,12 +351,10 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             listing: list[Mapping[str, Any]] = []
             if server.tools:
                 if "tools" in capabilities:
-                    listing = await (lister or client).list_tools()
+                    listing = await client.list_tools()
                 else:
                     problems.append("the server declares no tools: the listed Tools are not offered")
     except Exception as error:  # noqa: BLE001 — whatever the server did, only this server is left out
-        if lister is not None:
-            await lister.aclose()
         if isinstance(error, TimeoutError):
             reason = "no answer in time"
         elif isinstance(error, McpError):
@@ -420,14 +400,12 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             continue
         handlers.append(handler)
     # Prompts are optional: their failure, however it comes, leaves them out
-    # and nothing else (PR #40 review B1, B2). They are listed last: a timed-out
-    # prompts/list leaves a stdio listing session checking, so nothing may
-    # follow it on that session (B3).
+    # and nothing else (PR #40 review B1, B2). They are listed last (B3).
     prompts: tuple[PromptInfo, ...] = ()
     if server.prompts and "prompts" in capabilities:
         try:
             async with asyncio.timeout(PROMPTS_STARTUP_SECONDS):
-                prompt_entries = await (lister or client).list_prompts()
+                prompt_entries = await client.list_prompts()
             infos = [_prompt_info(e) for e in prompt_entries]
             prompts = tuple(info for info in infos if info is not None)
             if len(prompts) < len(infos):
@@ -438,8 +416,6 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             problems.append(f"prompts left out: {error}")
         except Exception as error:  # noqa: BLE001 — whatever the server sent, only its prompts are left out
             problems.append(f"prompts left out: the answer could not be used ({type(error).__name__})")
-    if lister is not None:
-        await lister.aclose()
     readers: list[ResourceTool] = []
     if server.resources is not None and "resources" in capabilities:
         # Only a server Tool that is registered takes the name (PR #42 re-review B2).
@@ -458,12 +434,12 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
 
 async def connect(config: McpConfig, *, check_schema: InputSchemaCheck,
                   transport: httpx.AsyncBaseTransport | None = None,
-                  launcher_for: LauncherFor | None = None) -> McpConnection:
+                  ) -> McpConnection:
     """Every server at once; never raises for an unreachable server.
     ``check_schema`` is the Registry's own check, so a Tool it would refuse
     is left out here, with the reason, instead of failing the startup."""
     started: Sequence[_Started] = await asyncio.gather(
-        *(_start(server, check_schema, transport, launcher_for) for server in config.servers))
+        *(_start(server, check_schema, transport) for server in config.servers))
     names = [server.name for server in config.servers]
     return McpConnection(
         handlers=[h for s in started for h in s.handlers],

@@ -20,7 +20,7 @@ read at all: what was not read could restrict any URI (PR #42 review B3).
 
 **Per session (§5 B6, C6).** The list a URI is judged by is the one of the
 session the read goes to: the lists are cached per session
-(``CACHE_SECONDS``; an HTTP session, or a stdio process), the read is sent
+(``CACHE_SECONDS``; an HTTP session), the read is sent
 only to the session that was judged (``request_in`` with that session), and
 when that session is gone or replaced before the read is processed, the
 URI is judged again on the new session's list, once.
@@ -42,9 +42,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from himari.common import JsonValue, ModelToolResult, TextBlock, ToolId, tool_id_problem
-from himari.mcp.client import McpClient, McpRefused, McpSessionChanged, McpUncertain
+from himari.mcp.client import RESTART_NOTICE, McpClient, McpRefused, McpSessionChanged, McpUncertain
 from himari.mcp.config import McpResourcePolicy
-from himari.mcp.stdio import RESTART_NOTICE
 from himari.mcp.uritemplate import UriTemplate
 from himari.tool.api import (
     ToolContext,

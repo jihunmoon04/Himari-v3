@@ -1,7 +1,7 @@
-"""The server profile: long-lived stdio processes (V3-P59 §4).
+"""The server profile: processes spoken to over stdin/stdout (V3-P59 §4).
 
-A ``ServerSandbox`` has its own self-test and state (§4.4): stdio servers
-start only while it is ENFORCED.
+A ``ServerSandbox`` has its own self-test and state (§4.4): its processes
+(the image copies, the document reader) start only while it is ENFORCED.
 
 Each ``launch``:
 

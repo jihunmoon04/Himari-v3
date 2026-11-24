@@ -51,13 +51,13 @@ device token (403 ``companion_off``; the tokens stay); on by default.
 Time (V3-P83 §6.4): ``HIMARI_TIME_ZONE`` (an IANA name, default
 ``Asia/Seoul``) is the zone the model is told the time in.
 
-Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
-runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
-of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
-``operator``) work on this server as the user. Unset (or another principal):
-Conversations only talk, with no files, commands or uploads (V3-P101). HIMARI's own Tools write a
-Conversation's own folder only: attached Workspaces are read, and changed
-by the hub's coding agents (V3-P94, V3-P100).
+Conversation folders (V3-P74 §4.4, V3-P109): new Conversations of the
+principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
+``operator``; empty: nobody) have their own folder under the data root, where
+uploads go and the file Tools read and write. Other principals'
+Conversations only talk, with no files or uploads (V3-P101).
+``HIMARI_MACHINE_SOCKET`` (the removed ``himari-runner``) is no longer used:
+when set, the start says so.
 
 """
 
@@ -99,7 +99,7 @@ COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
 COMPANION_DEFAULT_MODEL_VAR = "HIMARI_COMPANION_DEFAULT_MODEL"  # default companion model for companion devices
 COMPANION_MODELS_ONLY_VAR = "HIMARI_COMPANION_MODELS_ONLY"  # 1: only companion-verified models offered
 TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
-MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
+MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P109: no longer used (the runner was removed); said when set
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
@@ -164,7 +164,7 @@ class WebConfig:
     companion_default_model: str | None = None  # V3-P92: automatic preference unless explicitly configured
     companion_models_only: bool = False  # only companion-verified models offered
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
-    machine_socket: str | None = None  # V3-P74
+    machine_socket_ignored: bool = False  # V3-P109 §3 D9: HIMARI_MACHINE_SOCKET is set but no longer used
     machine_principals: tuple[str, ...] = ("operator",)
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
@@ -219,9 +219,7 @@ class WebConfig:
         documents_dir = source.get(DOCUMENTS_DIR_VAR, "").strip() or None
         if documents_dir is not None and not os.path.isabs(documents_dir):
             raise WebConfigError(f"{DOCUMENTS_DIR_VAR} must be an absolute path")
-        machine_socket = source.get(MACHINE_SOCKET_VAR, "").strip() or None
-        if machine_socket is not None and not os.path.isabs(machine_socket):
-            raise WebConfigError(f"{MACHINE_SOCKET_VAR} must be an absolute path")
+        machine_socket_ignored = bool(source.get(MACHINE_SOCKET_VAR, "").strip())
         principals = source.get(MACHINE_PRINCIPALS_VAR)
         machine_principals = (("operator",) if principals is None
                               else tuple(p.strip() for p in principals.split(",") if p.strip()))
@@ -254,7 +252,7 @@ class WebConfig:
             companion_default_model=source.get(COMPANION_DEFAULT_MODEL_VAR, "").strip() or None,
             companion_models_only=_flag(source.get(COMPANION_MODELS_ONLY_VAR), COMPANION_MODELS_ONLY_VAR, default=False),
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
-            machine_socket=machine_socket,
+            machine_socket_ignored=machine_socket_ignored,
             machine_principals=machine_principals,
             proactive=_proactive(source),
         )

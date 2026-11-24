@@ -10,8 +10,8 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 | Control | Run 반복(Run = LLM 호출 1회), 한 턴의 Run 상한 `HIMARI_MAX_RUNS`(기본 12), 취소, 문맥 압축, 대화별 모델 |
 | Data | SQLite 영속 저장(WAL, 업그레이드 전 백업), 원본 요청·응답 기록, 휴지통과 영구 삭제, 기억·일화 |
 | Prompt·Provider | Cache-first 구성, 지금 시각·기기, OpenRouter(스트리밍, reasoning) |
-| Tool | 기억, 대화 검색, 화면, 범용 MCP(stdio·HTTP, 프롬프트·리소스), 대화 폴더의 파일 Tool·`present_file`·`read_document` |
-| 파일 | 올리기·내려받기, 이미지 입력, 문서 읽기(server sandbox), 대화 폴더(runner 경유, 대화 폴더에만 씀) |
+| Tool | 기억, 대화 검색, 화면, 범용 MCP(HTTP, 프롬프트·리소스), 대화 폴더의 파일 Tool·`present_file`·`read_document` |
+| 파일 | 올리기·내려받기, 이미지 입력, 문서 읽기(server sandbox), 대화 폴더(데이터 폴더 안, 그 대화 폴더에서만 읽고 씀, V3-P109) |
 | 인터페이스 | Web(React+TypeScript), Windows 반려 앱, 작은 CLI |
 
 뺀 것: hub 중계·작업 콘솔(V3-P102 hub 부분, V3-P103), 작업 앱(V3-P104), `run_command`와 명령용 sandbox, 붙인·등록한 Workspace, 서버 파일 탐색기와 파일 참조, `ask_user`, 일시정지, 토큰 예산·진척 없음·자리 비움. 자세한 목록은 [결정 기록](docs/decisions.md)의 V3-P106에 있습니다.
@@ -30,8 +30,8 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 - **Provider reasoning** 설정과 사용량/공개된 continuation 정보는 Data에서 관리하고 Prompt·Provider가 지원 가능한 모델 요청을 구성합니다. 비공개 내부 추론 원문은 이용 가능하다고 전제하지 않습니다.
 - **표정은 Tool이 아니라 답 안의 `[[mood:이름]]` 표시**입니다. 서버가 떼어 앱의 `live`로 보냅니다(V3-P83). 앱 자신의 상태(듣는 중·졸림 등)는 앱이 정합니다.
 - **Memory는 Tool과 worker**로 처리합니다. 모델이 `memory_save`·`memory_forget`·`memory_search`로 쓰고(V3-P71), 대화가 잠잠해진 뒤 `memory` worker가 자동 기억·일화·열린 고리를 만듭니다(V3-P85). 지난 대화의 원문 회상은 `conversation_search`가 맡습니다(V3-P72).
-- **Tool 출처는 셋**: Internal(기억·대화 검색·화면), Environment(`machine`의 대화 폴더 파일 Tool, runner 경유), External(MCP). **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다.
-- **파일 Tool은 대화 폴더에만 씁니다**(사용자별 Root 아래, runner 경유). 문서·이미지 처리와 stdio MCP 서버는 server sandbox(네트워크 차단)에서 돕니다. 명령 실행(`run_command`), 붙인 Workspace와 Binding은 V3-P106에서 뺐습니다. 향후 Web Search는 별도 Tool로 설계합니다.
+- **Tool 출처는 셋**: Internal(기억·대화 검색·화면), Environment(`machine`의 대화 폴더 파일 Tool), External(MCP). **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다.
+- **파일 Tool은 대화 폴더에서만 읽고 씁니다**(`<HIMARI_DATA_ROOT>/conversations/<id>`, 서버 프로세스 안에서; V3-P109). 문서·이미지 처리는 server sandbox(네트워크 차단)에서 돕니다. 명령 실행(`run_command`), 붙인 Workspace와 Binding은 V3-P106에서, `himari-runner`와 stdio MCP는 V3-P109에서 뺐습니다. 향후 Web Search는 별도 Tool로 설계합니다.
 
 ### 모듈 경계 (V3-039~046)
 
@@ -58,12 +58,13 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 - [Sandbox Implementation v0.2 검토 초안](docs/sandbox-implementation-v0.2.md) — v2 코드 이식 지도, Environment 공개 계약, Sandbox 활성화·검증 및 bounded 명령 실행
 - **[Pytest 운영 정책](docs/testing-policy.md)** — 계약 변경에만 전체 pytest, 그 외에는 변경 모듈별 pytest (확정 V3-038)
 - [MCP Apps 1단계 설계 초안](docs/mcp-apps-v0.1.md) — MCP 서버가 준 Tool 화면을 sandbox에서 읽기 전용으로 표시(V3-P58). **제거됨(V3-P97)**, 기록으로 남김
-- [MCP stdio 지원](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 server sandbox 안의 격리 프로세스로 실행(기본 서버당 하나), Sandbox 모듈 분리(V3-P59)
+- [MCP stdio 지원](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 server sandbox 안의 격리 프로세스로 실행, Sandbox 모듈 분리(V3-P59). **stdio 실행은 제거됨(V3-P109)**, Sandbox 분리는 남음
 - [MCP 서버의 안내문·프롬프트·리소스](docs/mcp-context-v0.1.md) — 서버 안내문을 시스템 영역에, 프롬프트는 사용자가 `/`로, 리소스는 모델용 읽기 Tool로(V3-P60, 설계 초안)
 - [한 턴의 예산과 비용](docs/control-run-budget-v0.1.md) — (V3-P106에서 Run 상한 하나로 바뀜) 원래는 토큰 예산·진척 없음·자리 비움이 한 턴을 지킴; 남은 예산 알림, 사용량 표시, 대화별 캐시 경로(V3-P62)
 - [대화 삭제와 업그레이드 백업](docs/conversation-delete-v0.1.md) — 휴지통 → N일 뒤 영구 삭제, 대화 폴더도 함께, 외부 서버 데이터는 알림만; DB 업그레이드 전 백업과 되돌리기(V3-P65)
 - **[반려 에이전트 1단계](docs/companion-v0.1.md)** — Windows 앱(몸, 로컬 에이전트가 만듦)과 서버의 HIMARI(두뇌), 기기 짝짓기와 좁은 권한의 기기 토큰, 모든 대화의 지금 시각, 지금 기기, 답 안의 표정 표시(V3-P83, 설계 초안)
 - [먼저 말 걸기 간략화](docs/proactive-v0.3.md) — 잠든 캐릭터를 알림으로 깨우지 않음, 조절 규칙 세 단계, 자유 wake는 30분 한 간격·하루 10개(V3-P107)
+- **[서버 줄이기](docs/server-slim-v0.1.md)** — `himari-runner`를 빼고 대화 폴더를 데이터 폴더 안으로, 파일 Tool은 대화 폴더에서만, stdio MCP 제거(V3-P109)
 - **[반려 바탕과 여러 페르소나](docs/companion-persona-v0.1.md)** — 바탕을 반려 켬/끔 두 글로(범용 에이전트 철회), 페르소나를 여러 개 저장하고 Web에서 하나를 골라 모든 대화에(V3-P108, 설계 초안)
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
@@ -79,7 +80,7 @@ mkdir -m 700 -p ~/.himari                       # 실행 사용자 전용 데이
 HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 ```
 
-- `.env`(git 제외)에 `OPENROUTER_API_KEY=...`를 둡니다. 선택: `HIMARI_MODEL`(기본 모델, 기본 `openai/gpt-6-luna`), `HIMARI_REASONING_EFFORT`(기본 모델의 추론 강도), `HIMARI_MODELS`(대화마다 고를 수 있는 모델 목록, `모델id[=강도]`를 쉼표로; 기본 모델을 포함해야 함. 예: `openai/gpt-6-luna,anthropic/claude-haiku-5.5=medium`), `HIMARI_WEB_PORT`(기본 8765), `HIMARI_SANDBOX=0`(문서·이미지 처리와 stdio MCP 서버의 sandbox 끄기).
+- `.env`(git 제외)에 `OPENROUTER_API_KEY=...`를 둡니다. 선택: `HIMARI_MODEL`(기본 모델, 기본 `openai/gpt-6-luna`), `HIMARI_REASONING_EFFORT`(기본 모델의 추론 강도), `HIMARI_MODELS`(대화마다 고를 수 있는 모델 목록, `모델id[=강도]`를 쉼표로; 기본 모델을 포함해야 함. 예: `openai/gpt-6-luna,anthropic/claude-haiku-5.5=medium`), `HIMARI_WEB_PORT`(기본 8765), `HIMARI_SANDBOX=0`(문서·이미지 처리의 sandbox 끄기).
 - 한 턴(메시지 하나에 대한 작업)은 `HIMARI_MAX_RUNS`(기본 12, 1 이상) Run에서 멈춥니다(V3-P106). 멈춘 턴은 Web의 **Continue**로 이어 갑니다. 쓴 토큰은 Web 입력창 아래(작업 중)에 보입니다.
 - **대화 삭제 (V3-P65):** Web 대화 메뉴(**⋯**)의 **Move to trash…**는 대화를 휴지통으로 옮깁니다(실행 중이면 먼저 멈춤). 휴지통(사이드바 **Settings → Trash**)에서 복원하거나 바로 영구 삭제할 수 있고, `HIMARI_TRASH_DAYS`(기본 30, 1~365)일이 지나면 서버가 영구 삭제합니다. 영구 삭제는 대화의 모든 기록과 대화 폴더(`conversations/<id>`)를 지웁니다. MCP 서버가 자기 쪽에 저장한 데이터는 지우지 않으며, 확인 창이 그 서버 이름을 알려 줍니다.
 - **메모리 (V3-P71):** HIMARI가 대화에서 사용자에 대한 메모(1~2문장)를 저장해 다음 대화에서 씁니다. 분류는 넷입니다: `user`(하는 일·환경), `preference`(선호), `project`(진행 중인 일), `reference`(경로·링크·이름). 모델은 사용자가 말한 것만 `memory_save`로 저장하고, `memory_forget`으로 지우고, `memory_search`로 찾습니다(승인 없이 실행, 저장할 때마다 대화에 줄이 남음). `user`·`preference` 메모는 매 요청의 Current State(`user_memory`, 2,000자까지)에 데이터로 들어가 캐시를 깨지 않고, 나머지는 개수만 알려 모델이 검색합니다. 턴이 시작될 때 읽으므로 고치거나 지운 메모는 열린 대화에서도 다음 메시지부터 반영됩니다. 메모는 하나 500자, 1,000개까지입니다. Web의 Memory 화면에서 관리합니다. 대화를 영구 삭제하면 그 대화에서 저장된 메모도 함께 지워집니다. `HIMARI_MEMORY=0`이면 끕니다(메모는 남음).
@@ -112,26 +113,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - 대화마다 서버를 켜고 끌 수 있습니다: Web 대화 메뉴(**⋯**)의 **Tool servers…**. 따로 정하지 않은 대화는 서버의 `default`를 따릅니다.
 - **`read`의 뜻:** 다시 실행해도, 실행됐는지 몰라도 아무것도 달라지지 않는 Tool입니다. 외부 파일뿐 아니라 서버의 세션 상태(발급한 id, 예산 등)도 포함합니다. `read` 호출은 claim되지 않아서, 요청이 간 뒤 Stop이 오면 "실행 안 됨"으로 보고되기 때문입니다. 그 보고가 해로울 수 있으면 `scoped_write`로 적습니다.
 
-**stdio 서버 (V3-P59).** `url` 대신 `command`를 적으면 HIMARI가 그 서버를 직접 띄워 표준 입출력으로 이야기합니다. 서버는 **server sandbox 안에서만** 돕니다. 네트워크가 없고, 적은 폴더만 호스트와 같은 경로로 보이며, HIMARI 데이터 폴더(DB·비밀값·Workspaces)에는 어떤 경로로도 닿지 못합니다. 이 호스트에서 server sandbox가 시작 시 자체 검사를 통과하지 못하면 stdio 서버는 띄우지 않습니다.
-
-```json
-{"servers": {"calliope": {
-  "command": "/home/coder/Calliope/.venv/bin/python",
-  "args": ["-m", "tools.mcp", "--data", "/home/coder/.local/share/calliope"],
-  "cwd": "/home/coder/Calliope",
-  "env": {"PYTHONPATH": "."},
-  "read_only": ["/home/coder/Calliope", "/home/coder/opt/stockfish"],
-  "writable": ["/home/coder/.local/share/calliope"],
-  "processes": {"scope": "shared"},
-  "tools": {"open_game": {"effect": "scoped_write"}}
-}}}
-```
-
-- `command`는 `read_only` 폴더나 시스템 경로(`/usr` 등) 안에 있어야 합니다(Sandbox 안에서 보이는 곳이 그것뿐). `read_only` 16개·`writable` 4개까지, `writable`은 HIMARI 실행 사용자의 폴더여야 합니다.
-- 환경 변수는 고정된 것(`PATH`, `HOME=/tmp/home` 등)에 `env`와 `env_from`(HIMARI 환경에서 이름으로 복사; 토큰용)만 더합니다. HIMARI 자신의 환경은 넘기지 않습니다.
-- `processes.scope`: `shared`(기본, 서버당 프로세스 하나를 모든 대화가 같이 씀) 또는 `per_conversation`(대화마다 하나, 최대 `max`개). `idle_seconds`(기본 1800) 동안 쓰지 않으면 종료하고, 다음 호출이 새로 띄웁니다. 새로 띄운 뒤의 첫 결과에는 "서버가 다시 시작됐다"는 안내가 붙습니다.
-- **Stop은 최선 노력 취소입니다(MCP 표준).** 서버에 취소를 알리고 기다리기를 멈출 뿐, 서버 안의 작업이 멈췄다고 보장하지 않습니다. 취소된 작업이 서버에서 끝까지 돌아 효과(파일, 캐시 등)를 낼 수 있습니다. 쓰기 Tool의 호출은 "결과 불명"으로 기록되고 다시 실행되지 않습니다. 그래서 `read`는 늦게 끝나도 해가 없는 Tool에만 줍니다.
-- Stop이나 시간 초과 뒤에는 서버에 `ping`을 보내 살아 있는지 확인합니다(그동안 새 호출은 잠깐 기다립니다). 10초 안에 답하지 않을 때만 프로세스를 끝내고 다시 띄웁니다. 그때는 그 프로세스의 다른 진행 중 호출도 결과 불명이 됩니다. 서버가 연결 단위 상태에 기대면 `per_conversation`을 고릅니다.
+**stdio 서버는 띄우지 않습니다(V3-P109).** `url` 대신 `command`가 적힌 항목은 시작을 막지 않고 그 서버만 빠지며, `/tools`와 시작 로그에 이유가 보입니다. stdio로만 나오는 서버는 HTTP로 이어 주는 다리를 따로 띄워 `url`로 붙입니다.
 
 **서버 안내문과 리소스 (V3-P60).** Tool 말고도 서버가 주는 것을 모델이 쓰게 합니다. `tools`는 선택이라, 안내문이나 리소스만 주는 서버도 연결됩니다.
 
@@ -188,9 +170,9 @@ himari memory retry conv_1 mpass_3              # 실패한 기억 정리 하나
 
 구현(P0): `data/memory.py`(인메모리 Data)·`data/sqlite.py`+`data/codec.py`(SQLite 영속 Data, V3-P42), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`, `bootstrap/`(조립).
 
-MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`, 리소스 Tool `resources.py`·URI 템플릿 `uritemplate.py`, 프롬프트 글 `prompts.py`; V3-P52/P53/P59/P60). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
+MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, Tool 연결 `tools.py`, 리소스 Tool `resources.py`·URI 템플릿 `uritemplate.py`, 프롬프트 글 `prompts.py`; V3-P52/P53/P60; stdio는 V3-P109에서 뺐다). Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
 
-Machine Environment: `environment/machine/`(V3-P74). 파일 Tool·업로드는 사용자 계정으로 도는 runner(`runner/`)를 거치고, 쓰기는 대화 폴더에만 한다(V3-P106). `HIMARI_MACHINE_SOCKET`이 없거나 `HIMARI_MACHINE_PRINCIPALS`에 없는 사용자의 대화는 말만 한다(Inside Environment는 V3-P101에서 없어졌다).
+Machine Environment: `environment/machine/`(V3-P74, V3-P109). 대화마다 데이터 폴더 아래 `conversations/<id>` 폴더를 두고, 파일 Tool·업로드는 서버 프로세스 안에서 그 폴더에서만 읽고 쓴다(`folders.py`, 링크는 따라가지 않음). `HIMARI_MACHINE_PRINCIPALS`에 없는 사용자의 대화는 말만 한다(Inside Environment는 V3-P101에서 없어졌다). `HIMARI_MACHINE_SOCKET`은 더 이상 쓰지 않는다.
 
 실호스트 Sandbox 검증(선택 실행): `HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`.
 

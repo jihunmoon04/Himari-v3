@@ -51,21 +51,18 @@ c.save()
 
 
 def test_a_model_reads_a_document_and_views_its_scanned_page(tmp_path: Path) -> None:
-    from runnerkit import start_runner
-
-    kit = start_runner(tmp_path / "runner")  # the machine Environment (V3-P101); its commands do not run here
-
     async def go() -> str:
         adapter = OpenRouterAdapter(KEY)
         app = await Application.open(tmp_path / "data", adapter, model_id=MODEL, cleanup_seconds=None,
                                      documents_dir=os.path.dirname(os.path.abspath(TOOLKIT)),
                                      documents_owners=frozenset({os.getuid()}),
-                                     machine_socket=kit.socket, machine_principals=("alice",))
+                                     machine_principals=("alice",))
         try:
             alice = PrincipalId("alice")
             scope = TrustedScope(alice, await app.create_conversation(alice))
             site = os.path.join(os.path.abspath(TOOLKIT), "site-packages")
-            target = kit.himari_home / "conversations" / scope.conversation_id / "report.pdf"
+            assert app.machine is not None
+            target = Path(app.machine.root) / scope.conversation_id / "report.pdf"
             target.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["/usr/bin/python3", "-I", "-S", "-c",
                             f"import sys; sys.path.insert(0, {site!r})\n" + PDF, str(target)], check=True)
@@ -77,6 +74,5 @@ def test_a_model_reads_a_document_and_views_its_scanned_page(tmp_path: Path) -> 
             return " ".join(str(b.text) for b in finals[-1].blocks if isinstance(b, TextBlock))
         finally:
             await app.close()
-            kit.close()
 
     assert "PELICAN" in asyncio.run(go())

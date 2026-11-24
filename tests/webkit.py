@@ -1,4 +1,4 @@
-"""A Web server on the real Application for interface tests, with a machine runner socket or none."""
+"""A Web server on the real Application for interface tests."""
 
 from __future__ import annotations
 
@@ -17,14 +17,13 @@ SEND = {"origin": ORIGIN}
 
 
 class Server:
-    def __init__(self, tmp_path: Path, socket: str | None) -> None:
+    def __init__(self, tmp_path: Path) -> None:
         self.application: Application | None = None
         self.provider = ScriptedAdapter([])
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider,
-                                                      model_id="scripted-model", sandbox=False, cleanup_seconds=None,
-                                                      machine_socket=socket)
+                                                      model_id="scripted-model", sandbox=False, cleanup_seconds=None)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),

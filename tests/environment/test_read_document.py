@@ -13,8 +13,6 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from runnerkit import start_runner
-
 from himari.common import BindingId, CallId, ConversationId, EnvironmentInstanceId, PrincipalId, ToolId, TrustedScope
 from himari.common import thaw
 from himari.data.api import BindingAuthority, ConversationWorkspace
@@ -71,7 +69,7 @@ def reader() -> Scripted:
 
 @dataclass
 class Place:
-    """The machine Environment through an in-process runner, and the Conversation's folder."""
+    """The machine Environment on a temporary data root, and the Conversation's folder."""
 
     machine: MachineEnvironment
     folder: Path
@@ -79,11 +77,10 @@ class Place:
 
 @pytest.fixture
 def env(tmp_path: Path, reader: Scripted) -> Iterator[Place]:
-    kit = start_runner(tmp_path)
-    folder = kit.himari_home / "conversations/c1"
+    root = tmp_path / "conversations"
+    folder = root / "c1"
     folder.mkdir(parents=True)
-    yield Place(MachineEnvironment(kit.socket, documents=reader), folder)
-    kit.close()
+    yield Place(MachineEnvironment(str(root), documents=reader), folder)
 
 
 @pytest.fixture
@@ -116,7 +113,7 @@ def text(outcome: ToolOutcome) -> str:
 
 
 def test_offered_only_with_a_reader(tmp_path: Path) -> None:
-    plain = MachineEnvironment(str(tmp_path / "runner.sock"))
+    plain = MachineEnvironment(str(tmp_path / "conversations"))
     assert "machine/read_document" not in {t.definition.tool_id for t in plain.tools()}
 
 
@@ -251,7 +248,9 @@ def test_unavailable_is_denied_and_large_files_are_not_read(env: Place, reader: 
     outcome = run(env, path="huge.pdf")
     assert outcome.status is ToolStatus.FAILED and "too large for read_document" in text(outcome)
     assert reader.calls == []
-    assert run(env, path="~/.ssh/id").status is ToolStatus.FAILED  # hidden: told as missing
+    outside = run(env, path="/etc/hostname")  # V3-P109 Q1: only the Conversation's folder
+    assert outside.status is ToolStatus.DENIED and "outside this conversation's folder" in text(outside)
+    assert reader.calls == []
 
 
 def test_read_file_points_binary_documents_here(env: Place, doc: bytes) -> None:

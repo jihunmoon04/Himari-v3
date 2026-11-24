@@ -81,7 +81,6 @@ def main(argv: list[str] | None = None) -> int:
                                              companion_default_model=config.companion_default_model,
                                              companion_models_only=config.companion_models_only,
                                              time_zone=config.time_zone,
-                                             machine_socket=config.machine_socket,
                                              machine_principals=config.machine_principals,
                                              proactive=config.proactive)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
@@ -102,10 +101,13 @@ def main(argv: list[str] | None = None) -> int:
         if not application.streaming_enabled:  # V3-P73 §9
             print("HIMARI web: streaming is off (HIMARI_STREAMING=0): answers arrive whole", file=sys.stderr,
                   flush=True)
-        if application.machine is not None:  # V3-P74 §4.4
-            print(f"HIMARI web: machine Workspace on ({application.machine.client.socket_path}) for "
+        if application.machine is not None:  # V3-P74 §4.4, V3-P109
+            print(f"HIMARI web: conversation folders in {application.machine.root} for "
                   f"{', '.join(sorted(application.machine_principals)) or 'nobody'}'s new conversations",
                   file=sys.stderr, flush=True)
+        if config.machine_socket_ignored:  # V3-P109 §3 D9
+            print("HIMARI web: HIMARI_MACHINE_SOCKET is no longer used (himari-runner was removed, V3-P109); "
+                  "remove it", file=sys.stderr, flush=True)
         if not application.images_available:  # V3-P67 §3.1: fail-closed, said once at startup
             print("HIMARI web: images are not shown to models on this server (the image sandbox is unavailable): "
                   "an image is attached as a file line only", file=sys.stderr, flush=True)
