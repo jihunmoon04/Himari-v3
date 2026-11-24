@@ -21,7 +21,7 @@ from himari.prompt.api import MEMORY_SECTION, TURN_GUIDANCE, ContextBudget, Sour
 from himari.prompt.compaction import Compactor, read_summary
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
-from himari.prompt.system import COMPANION_BASE
+from himari.prompt.system import ASSISTANT_BASE
 from himari.provider.api import ProviderAdapter, ReadsImageCopies
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, ViewMaker
 from himari.tool.access import ConfiguredExternalAccess
@@ -33,7 +33,9 @@ from himari.tool.memory import memory_tools
 from himari.tool.screen import ScreenTool
 from himari.tool.registry import ToolRegistry
 
-DEFAULT_INSTRUCTIONS = COMPANION_BASE  # V3-P89 §3.1, V3-P108 §3.1: the base; an operator's own replaces only this
+# V3-P89 §3.1, V3-P108 §3.1: the base without the companion (Application picks by the switch); an operator's
+# own replaces only this.
+DEFAULT_INSTRUCTIONS = ASSISTANT_BASE
 
 
 type Store = InMemoryStore | SqliteStore

@@ -170,8 +170,14 @@ def test_an_id_that_is_not_an_int_is_not_found() -> None:
     async def scenario() -> None:
         data = data_for(new_store())
         await data.create_persona(ALICE, "Teacher", "")
-        for bad in (True, "1", 1.0):
+        for bad in (True, "1", 1.0, 0, -1, 1 << 63, 10**20):  # review: one SQLite cannot hold is no persona
             with refused(DataErrorCode.NOT_FOUND):
                 await data.update_persona(ALICE, bad, "x", "", 1)  # type: ignore[arg-type]
+            with refused(DataErrorCode.NOT_FOUND):
+                await data.choose_persona(ALICE, bad, 0)  # type: ignore[arg-type]
+            with refused(DataErrorCode.NOT_FOUND):
+                await data.delete_persona(ALICE, bad, 1)  # type: ignore[arg-type]
+        with refused(DataErrorCode.INVALID_ARGUMENT):  # both stores check the name before the id
+            await data.update_persona(ALICE, 999, "", "x", 1)
 
     asyncio.run(scenario())

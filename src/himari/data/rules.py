@@ -155,7 +155,8 @@ def check_persona_name(name: object) -> tuple[str, str]:
 
 
 def check_persona_id(persona_id: object) -> int:
-    if isinstance(persona_id, bool) or not isinstance(persona_id, int):
+    """An id is a positive int SQLite can hold; anything else is no persona."""
+    if isinstance(persona_id, bool) or not isinstance(persona_id, int) or not 1 <= persona_id < 1 << 63:
         raise DataError(DataErrorCode.NOT_FOUND, f"no persona {persona_id}")
     return persona_id
 

@@ -1263,9 +1263,9 @@ class InMemoryData:
 
     async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
                              expected_revision: int) -> Persona:
-        current = self._persona(principal, persona_id)
         name, key = rules.check_persona_name(name)
         text = rules.check_persona_text(text)
+        current = self._persona(principal, persona_id)
         if expected_revision != current.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
         self._check_name_free(principal, key, current.persona_id)

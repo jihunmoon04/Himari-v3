@@ -189,6 +189,13 @@ def test_personas_are_made_edited_chosen_and_deleted(server: Server) -> None:
     assert [p["name"] for p in listed["personas"]] == ["Friend"] and listed["choice"]["persona_id"] is None
     again = server.client.delete("/api/personas/1", params={"revision": 1}, headers=WRITE)
     assert (again.status_code, error_code(again)) == (404, "not_found")
+    # an id no SQLite integer can hold is no persona, not a server error (review)
+    huge = server.client.put("/api/personas/99999999999999999999", json={"name": "x", "text": "", "revision": 1},
+                             headers=WRITE)
+    assert (huge.status_code, error_code(huge)) == (404, "not_found")
+    huge_choice = server.client.put("/api/personas/choice", json={"persona_id": 10**20, "revision": 2},
+                                    headers=WRITE)
+    assert (huge_choice.status_code, error_code(huge_choice)) == (404, "not_found")
 
 
 def test_personas_need_a_signed_in_user_and_an_allowed_origin(server: Server) -> None:

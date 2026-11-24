@@ -511,7 +511,7 @@ class Driver:
         text = persona = ""
         if self._user_instructions is not None:
             text = (await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
-        if self._personas is not None:  # V3-P108 §4.2: the persona chosen when the turn starts
+        if self._personas is not None and self._companion:  # V3-P108 §4.2: told only with the companion on
             chosen = await self._personas.active_persona(scope.principal_id)
             persona = "" if chosen is None else chosen.text
         now = self._clock()

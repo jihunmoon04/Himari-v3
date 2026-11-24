@@ -67,7 +67,7 @@ def test_interface_switch_only_changes_runtime_state_and_its_key() -> None:
 def test_companion_may_prepare_files_for_web_while_local_download_is_unavailable() -> None:
     desk = inputs(interface=InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION))
     composed = text(desk)
-    assert "put long material in a file" in composed
+    assert "long material goes in a file when you can prepare one" in composed
     assert "prepare it with present_file and say so only after it succeeds" in composed
     assert "download it from the same conversation on the Web" in composed
     assert "never say they received it or that it is on their computer" in composed

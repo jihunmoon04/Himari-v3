@@ -52,10 +52,32 @@ describe("the personas screen", () => {
   });
 });
 
+describe("an open persona", () => {
+  afterEach(cleanup);
+
+  it("keeps its unsaved text: nothing else can replace it until it is saved or cancelled", async () => {
+    const at = "2026-11-24T00:00:00+00:00";
+    state.data = { ...emptyList(), personas: [
+      { id: 1, name: "Teacher", text: "a", revision: 1, created_at: at, updated_at: at },
+      { id: 2, name: "Friend", text: "b", revision: 1, created_at: at, updated_at: at }] };
+    shown();
+    const [firstEdit] = await screen.findAllByRole("button", { name: "Edit" });
+    if (!firstEdit) throw new Error("no Edit button");
+    fireEvent.click(firstEdit);
+    expect((screen.getByRole("button", { name: "Edit" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Duplicate" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "New persona" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getAllByRole("button", { name: "Edit" }).every((b) => !(b as HTMLButtonElement).disabled)).toBe(true);
+  });
+});
+
 describe("a duplicate's name", () => {
   it("is the first free copy name", () => {
     expect(copyName("Teacher", ["Teacher"], 40)).toBe("Teacher copy");
     expect(copyName("Teacher", ["Teacher", "teacher COPY"], 40)).toBe("Teacher copy 2");
     expect(copyName("가".repeat(40), [], 40)).toBe(`${"가".repeat(35)} copy`);
+    expect(copyName("😀".repeat(40), [], 40)).toBe(`${"😀".repeat(35)} copy`); // cut in code points, no lone surrogate
+    expect(copyName("히", ["히 COPY"], 40)).toBe("히 copy 2"); // NFC, as the server compares
   });
 });

@@ -106,8 +106,8 @@ On the user's Windows devices you appear as a character that speaks your answers
 `PROGRESS_NOTE`의 예시를 바꾼다.
 
 ```
-When you start a new stage of a task with tools (for example: searching past conversations,
-reading a document, looking at the screen), write one short sentence about it, …
+When you start a new stage of a task with tools (for example: looking something up, then
+checking what you found), write one short sentence about it, …
 ```
 
 나머지 문장과 `TURN_GUIDANCE`는 그대로다.
@@ -127,8 +127,8 @@ reading a document, looking at the screen), write one short sentence about it, �
 
 ```
 - Speaking: when runtime_state.interface.kind is windows_companion, your answer is spoken by
-  the character: at most four short sentences, with no code blocks, lists or headings — put
-  long material in a file. When presence.now_doing shows the microphone or camera in use,
+  the character: at most four short sentences, with no code blocks, lists or headings; long
+  material goes in a file when you can prepare one. When presence.now_doing shows the microphone or camera in use,
   the user may be in a call: two or three short sentences.
 ```
 

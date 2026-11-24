@@ -26,13 +26,17 @@ export const STARTER = [
   "하지 않는 것: (예: 지나친 칭찬, 이모지)",
 ].join("\n");
 
-/** "<name> copy", or "<name> copy 2", … — the first one no persona has (names compare case-insensitively). */
+const nameKey = (name: string) => name.trim().normalize("NFC").toLowerCase();
+
+/** "<name> copy", or "<name> copy 2", … — the first one no persona has. Cut in code points, as the server counts;
+ * names compare as near the server's case folding as the browser can (a rare miss is refused as duplicate_name). */
 export function copyName(name: string, taken: string[], max: number): string {
-  const names = new Set(taken.map((n) => n.trim().toLowerCase()));
+  const names = new Set(taken.map(nameKey));
+  const points = Array.from(name.trim().normalize("NFC"));
   for (let n = 1; ; n += 1) {
     const suffix = n === 1 ? " copy" : ` copy ${n}`;
-    const made = name.slice(0, Math.max(1, max - suffix.length)) + suffix;
-    if (!names.has(made.toLowerCase())) return made;
+    const made = points.slice(0, Math.max(1, max - suffix.length)).join("") + suffix;
+    if (!names.has(nameKey(made))) return made;
   }
 }
 
@@ -94,8 +98,8 @@ function Editor({ draft, limits, onDone }: {
   );
 }
 
-function Row({ persona, inUse, busy, onUse, onEdit, onDuplicate, onDelete }: {
-  persona: Persona; inUse: boolean; busy: boolean;
+function Row({ persona, inUse, busy, full, onUse, onEdit, onDuplicate, onDelete }: {
+  persona: Persona; inUse: boolean; busy: boolean; full: boolean;
   onUse: () => void; onEdit: () => void; onDuplicate: () => void; onDelete: () => void;
 }) {
   const first = persona.text.split("\n").find((line) => line.trim()) ?? "";
@@ -110,7 +114,7 @@ function Row({ persona, inUse, busy, onUse, onEdit, onDuplicate, onDelete }: {
       </div>
       {!inUse && <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={busy} onClick={onUse}>Use</Button>}
       <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={busy} onClick={onEdit}>Edit</Button>
-      <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={busy} onClick={onDuplicate}>Duplicate</Button>
+      <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={busy || full} onClick={onDuplicate}>Duplicate</Button>
       <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger" disabled={busy} onClick={onDelete}>Delete</Button>
     </li>
   );
@@ -151,6 +155,7 @@ export function PersonaSettings() {
     }
   };
   const full = personas.length >= limits.count;
+  const locked = busy || draft !== null; // while a persona is open, nothing else may replace its unsaved text
   return (
     <section className="space-y-4" aria-label="Personas">
       <h2 className="text-base font-semibold">Personas</h2>
@@ -165,7 +170,7 @@ export function PersonaSettings() {
             <Editor draft={draft} limits={limits} onDone={() => setDraft(null)} />
           </li>
         ) : (
-          <Row key={persona.id} persona={persona} inUse={persona.id === choice.persona_id} busy={busy}
+          <Row key={persona.id} persona={persona} inUse={persona.id === choice.persona_id} busy={locked} full={full}
             onUse={() => void use(persona)} onDuplicate={() => void duplicate(persona)} onDelete={() => remove(persona)}
             onEdit={() => setDraft({ id: persona.id, name: persona.name, text: persona.text, revision: persona.revision })} />
         ))}
@@ -179,7 +184,7 @@ export function PersonaSettings() {
             <p className="text-xs text-muted">HIMARI speaks warmly and plainly, in its own default voice.</p>
           </div>
           {choice.persona_id !== null && (
-            <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={busy} onClick={() => void use(null)}>Use</Button>
+            <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={() => void use(null)}>Use</Button>
           )}
         </li>
       </ul>
@@ -187,7 +192,7 @@ export function PersonaSettings() {
         <Editor draft={draft} limits={limits} onDone={() => setDraft(null)} />
       ) : (
         <div className="flex items-center gap-3">
-          <Button variant="primary" disabled={full || busy}
+          <Button variant="primary" disabled={full || locked}
             onClick={() => setDraft({ id: null, name: "", text: personas.length === 0 ? STARTER : "", revision: 0 })}>
             New persona
           </Button>
