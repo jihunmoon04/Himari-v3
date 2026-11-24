@@ -2,7 +2,7 @@
 
 > 작성: 2026-10-13 · **READY_FOR_INDEPENDENT_DESIGN_REVIEW / NOT FROZEN / NOT IMPLEMENTED**. 기존 [Data v0.1](data-contract-v0.1.md)의 확정된 불변식은 유지하되, 필드·상태·트랜잭션·오류를 구현 가능한 후보 계약으로 좁힌다. 아래의 **PROPOSED 세부 항목을 사용자 확정 결정으로 승격하지 않는다.**
 >
-> 관련: [통합 계약](contracts.md) · [Control Pause](control-pause-v0.1.md) · [Current State](current-state-contract-v0.1.md) · [Prompt composition](prompt-composition.md) · [Sandbox implementation](sandbox-implementation-v0.2.md) · [미결정](open-questions.md).
+> 관련: [통합 계약](contracts.md) · [Control Pause](archive/control-pause-v0.1.md) · [Current State](archive/current-state-contract-v0.1.md) · [Prompt composition](prompt-composition.md) · [Sandbox implementation](archive/sandbox-implementation-v0.2.md) · [미결정](archive/open-questions.md).
 >
 > **Owner / Provider:** Data. **Consumers:** Control, Prompt, Internal Tool, Environment(Registry/Binding public Port), Web/CLI(권한 제한 조회). **현재 정의 위치:** 본 문서. **향후 선언 위치 제안:** `src/himari/data/api.py`. 저장소 내부 SQL·Repository는 Data private 구현이다.
 

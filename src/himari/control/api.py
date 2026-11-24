@@ -1,8 +1,8 @@
 """Control public contract (CTRL-01, CTRL-04, CTRL-06; V3-P106 took CTRL-03 pause and CTRL-05 ask_user).
 
 Source documents: docs/control-prompt-provider-v0.1.md §3, §5.1, §7;
-docs/control-pause-v0.1.md; docs/control-run-budget-v0.1.md; docs/conversation-model-v0.1.md;
-docs/decisions.md V3-024, V3-044, V3-045, V3-P55, V3-P62, V3-P64, V3-P106.
+docs/archive/control-pause-v0.1.md; docs/archive/control-run-budget-v0.1.md; docs/conversation-model-v0.1.md;
+docs/archive/decisions-v3.md V3-024, V3-044, V3-045, V3-P55, V3-P62, V3-P64, V3-P106.
 """
 
 from __future__ import annotations

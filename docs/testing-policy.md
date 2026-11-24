@@ -2,7 +2,7 @@
 
 > 2026-10-13 · **Confirmed policy V3-038**. Module test directories, import boundary check and static CI now exist. Real Provider live tests are opt-in; Sandbox host security gates remain future work.
 >
-> References: [decisions.md](decisions.md), [contracts.md](contracts.md), [module boundaries](module-boundaries.md), [Sandbox implementation candidate](sandbox-implementation-v0.2.md).
+> References: [decisions-v3.md](archive/decisions-v3.md), [contracts.md](contracts.md), [module boundaries](module-boundaries.md), [Sandbox implementation candidate](archive/sandbox-implementation-v0.2.md).
 
 ## 1. Rule (CONFIRMED)
 

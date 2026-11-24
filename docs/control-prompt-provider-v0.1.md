@@ -1,6 +1,6 @@
 # Control–Prompt–Provider Boundary Contract v0.1
 
-> 2026-10-13 · **DESIGN BASELINE / P0 SUBSET IMPLEMENTED**. Control Run loop, Prompt composition, Provider SPI, Tool dispatch and OpenRouter Adapter are implemented (PR #1~#6). The document also contains future Pause/Streaming/Compaction designs **not yet implemented**. Implemented API declarations are authoritative; confirmed [decisions](decisions.md) take precedence.
+> 2026-10-13 · **DESIGN BASELINE / P0 SUBSET IMPLEMENTED**. Control Run loop, Prompt composition, Provider SPI, Tool dispatch and OpenRouter Adapter are implemented (PR #1~#6). The document also contains future Pause/Streaming/Compaction designs **not yet implemented**. Implemented API declarations are authoritative; confirmed [decisions](archive/decisions-v3.md) take precedence.
 >
 > **Scope:** Control's per-Conversation run loop, Prompt provider-neutral input, Provider native serialization/invocation/normalization, Data Run/Tool group lifecycle, Tool dispatch barrier. Implemented DTOs/enums are defined in code; non-P0 extensions remain proposed.
 
@@ -43,7 +43,7 @@ Constraints:
 - Prompt must never silently infer a missing ToolResult from UI, summary, cached model text or incomplete ToolExecution.
 - Tool catalog is owned by Tool, used by Prompt to select/authorize model-visible tools and Provider to serialize native schemas. Exposing a tool does not authorize its current execution.
 - Data snapshot is last **full** compiled provider-neutral model input only, not the actual Provider wire body. Actual native request bytes are preserved in RunRecord.
-- CurrentStateProjection is a time-scoped observation, not authorization. Exact read coherency/version checks are [CurrentState CS-03](current-state-contract-v0.1.md) proposed.
+- CurrentStateProjection is a time-scoped observation, not authorization. Exact read coherency/version checks are [CurrentState CS-03](archive/current-state-contract-v0.1.md) proposed.
 
 **Prompt 구조 (V3-043 CONFIRMED):** `PromptContextLoader.load(scope) -> PromptInputs`가 Data sub-port·Tool catalog·선택적 Environment 관측을 모으고, `compose(PromptInputs) -> PreparedModelInput`은 I/O 없는 순수 함수다. 위 제약(순서·coverage·Trigger 무복제)은 모두 `compose`의 계약이며 고정 입력으로 테스트한다.
 

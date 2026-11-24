@@ -143,7 +143,7 @@ Immutable published attachment/version (recommended)
 | **ENV-04** | Environment | SandboxCommandExecutor → Tool | validated Workspace binding + Sandbox profile + actual process | 본 문서 §3; planned `environment/api.py` |
 | **DATA-11** | Data | ConversationWorkspacePath Port → Environment/Prompt | Data conversation-to-workspace relative cwd assignment | 본 문서 §2; planned `data/api.py` |
 
-These new Port identifiers extend [contracts.md](contracts.md); they do not imply that code exists.
+These new Port identifiers extend [contracts.md](../contracts.md); they do not imply that code exists.
 
 ## 6. Minimal acceptance gates
 

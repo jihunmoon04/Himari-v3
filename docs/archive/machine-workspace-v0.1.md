@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> **runner도 제거됨(2026-11-24, V3-P109):** `himari-runner`(사용자 계정의 파일 연산, Unix 소켓 프로토콜, `runner.toml`, systemd 단위)와 서버 전체 읽기를 코드에서 뺐다. 대화 폴더는 `<HIMARI_DATA_ROOT>/conversations/<id>`이고 서버 프로세스 안에서 다루며, 파일 Tool은 그 폴더 안에서만 읽고 쓴다. 이 문서의 runner·숨김 목록·읽기 범위 부분은 기록으로 남긴다. 현행: [server-slim-v0.1.md](server-slim-v0.1.md).
+> **runner도 제거됨(2026-11-24, V3-P109):** `himari-runner`(사용자 계정의 파일 연산, Unix 소켓 프로토콜, `runner.toml`, systemd 단위)와 서버 전체 읽기를 코드에서 뺐다. 대화 폴더는 `<HIMARI_DATA_ROOT>/conversations/<id>`이고 서버 프로세스 안에서 다루며, 파일 Tool은 그 폴더 안에서만 읽고 쓴다. 이 문서의 runner·숨김 목록·읽기 범위 부분은 기록으로 남긴다. 현행: [server-slim-v0.1.md](../server-slim-v0.1.md).
 
 > **더 제거됨(2026-11-23, V3-P106):** `run_command`와 machine sandbox(runner의 명령 실행, 네트워크 프록시, cgroup), 붙인·등록한 Workspace(§10, Data `WorkspaceRegistry`)를 코드에서 뺐다. runner는 대화 폴더의 파일 일(목록·읽기·쓰기·지우기·업로드 놓기)만 한다.
 

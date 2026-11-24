@@ -1,10 +1,12 @@
 # HIMARI v3 — 통합 모듈 계약 기준서
 
+> **2026-11-24 주의:** 이 기준서의 Inside Environment, Workspace·Binding, `run_command`, `ask_user`, Pause 부분은 V3-P101·V3-P106·V3-P109 전의 기록이다. 지금 구조는 [아키텍처](architecture.md), 지금 유효한 결정은 [결정 기록](decisions.md)이 우선이다.
+
 > 작성: 2026-10-13 · 문서 버전: **Contract Baseline v0.1** · 구현 상태(2026-10-14): **P0 계약·실제 Provider·Inside 파일 Tool·Sandbox `run_command`·SQLite 영속 Data·Web 서버 구현됨 / CLI·자원 한도 미구현**
 >
 > **이 문서는 지금까지의 모듈 계약을 찾고 비교하는 단일 진입점이다.** 이미 합의한 원칙은 **CONFIRMED**, 그 원칙에 따라 작성한 포트/DTO/함수 이름은 **PROPOSED**, 후속 선택이 필요한 곳은 **OPEN**으로 표시한다.
 >
-> 상세한 설계 근거는 [decisions.md](decisions.md), [data-contract-v0.2.md](data-contract-v0.2.md), [current-state-contract-v0.1.md](current-state-contract-v0.1.md), [prompt-composition.md](prompt-composition.md), [data-and-tools.md](data-and-tools.md), [open-questions.md](open-questions.md)에 남겨 둔다. 내용이 충돌하면 명시적으로 사용자 승인을 받은 **Confirmed Decision**을 우선하고, 충돌을 이 문서에 드러내 수정한다.
+> 상세한 설계 근거는 [decisions-v3.md](archive/decisions-v3.md), [data-contract-v0.2.md](data-contract-v0.2.md), [current-state-contract-v0.1.md](archive/current-state-contract-v0.1.md), [prompt-composition.md](prompt-composition.md), [data-and-tools.md](data-and-tools.md), [open-questions.md](archive/open-questions.md)에 남겨 둔다. 내용이 충돌하면 명시적으로 사용자 승인을 받은 **Confirmed Decision**을 우선하고, 충돌을 이 문서에 드러내 수정한다.
 
 > **V3-P93 설계 병합 / 1단계 구현:** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md)은
 > Data의 턴 출처 스냅샷, Control/Prompt의 인터페이스 투영, FILE-04의 기기 제공 파일 전용
@@ -170,7 +172,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **DATA-12** | ConversationCatalog / **Data·ConversationCatalog** | Data → Web/CLI (조립된 Application 경유) | Data Conversation 소유·제목·생성 시각 + Event 요약 | T0 대화 생성(초기 Environment 활성화와 원자적), 본인 대화 목록(최근 활동순)·조회·제목 변경; V3-P92 list_user_conversations: 휴지통 밖 사용자 메시지 대화의 최신 사용자 메시지순 페이지 조회 | P0 코드 구현 (V3-P43) |
 | **DATA-13** | ExternalSourceSettings / **Data·ExternalSourceSettings** | Data → `ExternalAccess`(Tool), Web/CLI (Application 경유) | Data 대화별 External Tool 출처 선택(출처 → 켬/끔) | 운영자 기본값과 다른 선택만 저장·조회·삭제. 기본값은 모름 | P0 코드 구현 (V3-P53, SQLite v4) |
 | **TOOL-05** | RunCommandTool / **Environment(Inside)** | Inside가 제공하는 ToolHandler → Tool Dispatcher | ENV-04 execution result, DATA-11 cwd mapping | command request, bounded canonical ToolResult | initial support CONFIRMED, schema PROPOSED |
-| **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | **isolated-only network enforcement** status; refuse if unavailable | isolated-only profile CONFIRMED (V3-037); spec in [Sandbox Implementation v0.2](sandbox-implementation-v0.2.md), implementation PROPOSED |
+| **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | **isolated-only network enforcement** status; refuse if unavailable | isolated-only profile CONFIRMED (V3-037); spec in [Sandbox Implementation v0.2](archive/sandbox-implementation-v0.2.md), implementation PROPOSED |
 | **TOOL-06** | WebSearch (future) / **Tool** | trusted Web Search adapter → Control/Prompt | external retrieved content, explicitly untrusted | bounded Web Search observations without Sandbox egress grant | OPTIONAL FUTURE |
 | **INTERNAL-01** | MemoryTool / **Tool** | Internal Memory ToolHandler → Tool Dispatcher | Data Memory 저장/검색 계약 (읽기) | ToolOutcome: 모델용 검색 결과, Conversation 기록 | 방향 확정, 기능 미정 |
 | **INTERNAL-02** | PlanNoteTool / **Tool** | Internal Plan/Note ToolHandler → Tool Dispatcher | Data conversation-scoped Artifacts | ToolOutcome: 간결한 complete 결과 + `artifact_mutations` (커밋은 DATA-08) | 저장 위치 확정, 수정 API 미정 |
@@ -193,7 +195,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | Prompt | 본 문서 §4·§7, [prompt-composition](prompt-composition.md) | `src/himari/prompt/api.py` |
 | Provider | 본 문서 §4·§8, [prompt-composition](prompt-composition.md) | `src/himari/provider/api.py` |
 | Tool | 본 문서 §4·§9, [data-and-tools](data-and-tools.md) | `src/himari/tool/api.py` (`ToolHandler` SPI 포함) |
-| Environment | 본 문서 §4·§10, [current-state-contract-v0.1](current-state-contract-v0.1.md) | `src/himari/environment/api.py` (`EnvironmentPlugin` SPI), 구현은 `environment/inside/` |
+| Environment | 본 문서 §4·§10, [current-state-contract-v0.1](archive/current-state-contract-v0.1.md) | `src/himari/environment/api.py` (`EnvironmentPlugin` SPI), 구현은 `environment/inside/` |
 | Bootstrap | 본 문서 §11 | `src/himari/bootstrap/` (구체 경로 미정) |
 
 ## 5. Control Contract
@@ -390,7 +392,7 @@ class ToolOutcome:
 
 ## 10. Environment Contract (Workspace 자원 접근)
 
-**Owner:** Environment · **Providers:** Inside 등 Environment 구현 · **Consumers:** Tool(실행), Prompt(관측) · **Sources:** Data Registry/Binding, 실제 연결/실행 대상, 실행 정책 · **Location:** 본 문서 §10 + [current-state-contract-v0.1](current-state-contract-v0.1.md) + [sandbox-execution-v0.1](sandbox-execution-v0.1.md) / planned `environment/api.py`.
+**Owner:** Environment · **Providers:** Inside 등 Environment 구현 · **Consumers:** Tool(실행), Prompt(관측) · **Sources:** Data Registry/Binding, 실제 연결/실행 대상, 실행 정책 · **Location:** 본 문서 §10 + [current-state-contract-v0.1](archive/current-state-contract-v0.1.md) + [sandbox-execution-v0.1](archive/sandbox-execution-v0.1.md) / planned `environment/api.py`.
 
 **CONFIRMED**
 
@@ -509,7 +511,7 @@ class ToolOutcome:
 12. Prompt 압축 시점/품질/예산, opaque Provider continuation/캐시 최적화/streaming.
 13. 데이터 삭제 cascade/retention, v2 데이터 이관, 외부 서비스 Connector 형태.
 
-상세 추적은 [open-questions.md](open-questions.md), [Data Contract v0.2](data-contract-v0.2.md)의 DR 목록과 [CurrentState Contract](current-state-contract-v0.1.md)의 CS 목록을 따른다.
+상세 추적은 [open-questions.md](archive/open-questions.md), [Data Contract v0.2](data-contract-v0.2.md)의 DR 목록과 [CurrentState Contract](archive/current-state-contract-v0.1.md)의 CS 목록을 따른다.
 
 ## 14. 문서의 권위와 앞으로의 업데이트
 
@@ -545,7 +547,7 @@ Inside Environment
 - 같은 공유 Workspace root를 읽고 쓸 수 있는 임의 명령은 다른 Conversation의 파일도 손상시킬 수 있다. UNKNOWN file effects를 가진 run_command는 같은 Workspace 파일 작업과 기본 충돌하며, 완료/결과 불명은 ToolExecution으로 보존한다.
 - Conversation 삭제가 공유 filesystem 경로와 published files를 어떻게 정리하는지는 OPEN; 다른 Conversation이 사용 중이면 자동 삭제하지 않는다.
 
-**Contract metadata:** FILE-01~05, ENV-04~05, DATA-11, TOOL-05; future TOOL-06 (§4). 세부: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md), [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md). 이전 [Default Workspace v0.1](default-workspace-files-v0.1.md)은 Superseded.
+**Contract metadata:** FILE-01~05, ENV-04~05, DATA-11, TOOL-05; future TOOL-06 (§4). 세부: [Default Workspace v0.2](archive/default-workspace-files-v0.2.md), [Sandbox Execution v0.1](archive/sandbox-execution-v0.1.md), [Sandbox Implementation Candidate v0.2](archive/sandbox-implementation-v0.2.md). 이전 [Default Workspace v0.1](archive/default-workspace-files-v0.1.md)은 Superseded.
 
 ## 16. Conversation Pause/Resume — 2026-10-13 신규 설계
 
@@ -559,7 +561,7 @@ Inside Environment
 - final/question terminal의 의미는 Pause 요청으로 덮어쓰지 않음.
 - Resume 시 기존 Run의 Provider 요청을 다시 전송하는 것이 아니라 **완결된 기록에서 다음 작업 지점을 복원**함.
 
-**Contract metadata:** CTRL-03/04, DATA-09/10, TOOL-04 (§4, 상세 [control-pause-v0.1.md](control-pause-v0.1.md)). 실제 status enum, DB lease, Pause timeout 및 Cancel 의미는 검토 후 결정. **V3-045에 따라 P0의 Pause는 프로세스 내 상태로 시작하고, 영속 ControlState·fencing은 P2.** 크래시 후 중복 방지는 Run/Tool의 영속 표시(T3/T6/T-R)가 담당한다. question 대기는 미완결 `ask_user` call로 표현된다(V3-044).
+**Contract metadata:** CTRL-03/04, DATA-09/10, TOOL-04 (§4, 상세 [control-pause-v0.1.md](archive/control-pause-v0.1.md)). 실제 status enum, DB lease, Pause timeout 및 Cancel 의미는 검토 후 결정. **V3-045에 따라 P0의 Pause는 프로세스 내 상태로 시작하고, 영속 ControlState·fencing은 P2.** 크래시 후 중복 방지는 Run/Tool의 영속 표시(T3/T6/T-R)가 담당한다. question 대기는 미완결 `ask_user` call로 표현된다(V3-044).
 
 ## 17. Data v0.2 / Control–Prompt–Provider v0.1 설계 진전 (2026-10-13)
 
@@ -596,4 +598,4 @@ Inside Environment
 | B1 P0 실행 내구성 | lock(동시 실행)과 영속 표시(크래시 중복)를 구분. T3 `DISPATCH_CLAIMED`·T6 `EXECUTION_CLAIMED`를 P0로 되돌리고 재시작 정리 T-R 정의 | V3-045, §5, [Data v0.2 §1.1·§5·§6·§9](data-contract-v0.2.md) |
 | B2 ask_user 대기 | suspending Tool, lock 해제, 원래 `call_id` ToolResult 커밋 후 새 Run, 파생 대기 판별 | V3-044, V3-P17, [CPP §5.1](control-prompt-provider-v0.1.md) |
 | B3 native 재생 | 답변 Event와 ToolResult 모두 보존, 렌더링은 ToolResult로 1회, 그룹 인접성 규칙, Provider 배열 계약 테스트 R1–R7 | V3-P18, [CPP §6.1–6.2](control-prompt-provider-v0.1.md) |
-| 정리 | `assistant_question` 폐지, raw 보존 기준 OPEN, Environment 등록 관계, Confirmed 범위 명시 | V3-P14/P19, [decisions](decisions.md) |
+| 정리 | `assistant_question` 폐지, raw 보존 기준 OPEN, Environment 등록 관계, Confirmed 범위 명시 | V3-P14/P19, [decisions](archive/decisions-v3.md) |

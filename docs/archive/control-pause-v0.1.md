@@ -2,13 +2,13 @@
 
 > **일시정지 제거됨(2026-11-23, V3-P106):** 반려 에이전트 집중 결정으로 Pause(`/pause`, `PAUSED`)를 뺐다. 취소(Cancel)만 남는다.
 
-> **2026-10-15 · P0 구현: [V3-P55](decisions.md).** 아래는 원래 초안이다. P0는 별도 `ConversationControlState`·cursor 없이 실행 중인 작업의 `StopSignal`(영속하지 않음)과 Data의 Run·Tool 기록으로 구현했다. Pause = §4의 권고(진행 중인 호출은 끝까지, 다음 단계 전에 정지), Cancel = 진행 중인 모델·Tool 호출을 끊음(모델 호출은 OUTCOME_UNKNOWN, 재전송 없음). 새 메시지는 남은 호출을 닫는다. 영속 상태·lease·RECOVERY 전이 세부는 여전히 P2.
+> **2026-10-15 · P0 구현: [V3-P55](decisions-v3.md).** 아래는 원래 초안이다. P0는 별도 `ConversationControlState`·cursor 없이 실행 중인 작업의 `StopSignal`(영속하지 않음)과 Data의 Run·Tool 기록으로 구현했다. Pause = §4의 권고(진행 중인 호출은 끝까지, 다음 단계 전에 정지), Cancel = 진행 중인 모델·Tool 호출을 끊음(모델 호출은 OUTCOME_UNKNOWN, 재전송 없음). 새 메시지는 남은 호출을 닫는다. 영속 상태·lease·RECOVERY 전이 세부는 여전히 P2.
 >
 > 2026-10-13 · **PROPOSED**, except prior Confirmed: `Run = exactly one LLM invocation`, `Conversation execution serial`, `raw Run/Tool data durable`, `tool-result group native replay`.
 >
 > 범위: 별도 Task/ManagerTurn 계층을 복원하지 않고 **Conversation의 Control 실행 흐름**이 Pause/Resume를 지원할 수 있는 최소 계약.
 
-> **2026-10-13 개정:** P0는 단일 프로세스·Conversation별 in-process lock으로 시작하며, 아래의 영속 `ConversationControlState`·lease·fencing·다중 worker 복구는 **P2**다(V3-045). 단, lock은 동시 실행만 막으므로 **크래시 후 중복 방지는 P0에서도 Run/Tool의 영속 표시(`DISPATCH_CLAIMED`/`EXECUTION_CLAIMED`)와 재시작 시 UNKNOWN 처리**가 담당한다([Data v0.2 §1.1](data-contract-v0.2.md)). question 대기는 미완결 `ask_user` call로 표현되며 대기 중 lock을 해제한다(V3-044, [CPP §5.1](control-prompt-provider-v0.1.md)). Pause의 "미완결 call 보존·재개"와 같은 경로를 쓴다.
+> **2026-10-13 개정:** P0는 단일 프로세스·Conversation별 in-process lock으로 시작하며, 아래의 영속 `ConversationControlState`·lease·fencing·다중 worker 복구는 **P2**다(V3-045). 단, lock은 동시 실행만 막으므로 **크래시 후 중복 방지는 P0에서도 Run/Tool의 영속 표시(`DISPATCH_CLAIMED`/`EXECUTION_CLAIMED`)와 재시작 시 UNKNOWN 처리**가 담당한다([Data v0.2 §1.1](../data-contract-v0.2.md)). question 대기는 미완결 `ask_user` call로 표현되며 대기 중 lock을 해제한다(V3-044, [CPP §5.1](../control-prompt-provider-v0.1.md)). Pause의 "미완결 call 보존·재개"와 같은 경로를 쓴다.
 
 ## 1. 주된 결론
 
@@ -84,7 +84,7 @@ RUNNING
 | DATA-10 `ClaimControlLease` (**P2**) | Data·ControlState → Control | Data owner generation/lease/fencing record | `data/api.py` |
 | TOOL-04 `ResumePendingGroup` | Tool → Control | ToolExecutionRecord + verified pending tool requests | `tool/api.py` |
 
-**Contract Location**은 본 문서 및 [contracts.md](contracts.md), code 경로는 전부 planned이다.
+**Contract Location**은 본 문서 및 [contracts.md](../contracts.md), code 경로는 전부 planned이다.
 
 ## 7. 권고하는 재개 처리 우선순위
 

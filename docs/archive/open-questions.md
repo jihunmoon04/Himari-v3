@@ -1,14 +1,14 @@
 # 남은 미결정 사항과 구현 선행조건
 
-기준: **2026-10-13**. 이 문서는 구현된 범위와 남은 미결정 계약을 구분해 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
+기준: **2026-10-13**. 이 문서는 구현된 범위와 남은 미결정 계약을 구분해 관리한다. 이미 합의한 방향은 [Decision Register](decisions-v3.md)에 둔다.
 
-연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.2 — 검수 후보](data-contract-v0.2.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
+연관: [Prompt Composition](../prompt-composition.md) · [Data / Tools / Artifacts](../data-and-tools.md) · [Data Contract v0.2 — 검수 후보](../data-contract-v0.2.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](../module-boundaries.md)
 
-Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 검수 항목**, 이전 [v0.1](data-contract-v0.1.md)에 DC-01~DC-10 설계 쟁점을 정리했다. [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에 **CP-01~CP-07 경계 검수 항목**이 있다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
+Data [v0.2 구현 가능 후보](../data-contract-v0.2.md)에 **DR-01~DR-09 독립 검수 항목**, 이전 [v0.1](../data-contract-v0.1.md)에 DC-01~DC-10 설계 쟁점을 정리했다. [Control–Prompt–Provider v0.1](../control-prompt-provider-v0.1.md)에 **CP-01~CP-07 경계 검수 항목**이 있다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
 
-**[통합 모듈 계약 기준서](contracts.md)**에 Owner / Provider / Consumer / Source of Truth / Contract Location 메타데이터가 채워진 **검토용 공개 Port 인벤토리**를 작성했다. **메타데이터 작성 표준 자체는 V3-029로 확정**되었지만 각 함수/DTO 시그니처는 아직 확정되지 않았다.
+**[통합 모듈 계약 기준서](../contracts.md)**에 Owner / Provider / Consumer / Source of Truth / Contract Location 메타데이터가 채워진 **검토용 공개 Port 인벤토리**를 작성했다. **메타데이터 작성 표준 자체는 V3-029로 확정**되었지만 각 함수/DTO 시그니처는 아직 확정되지 않았다.
 
-**테스트 범위 정책 V3-038 확정:** 공개 계약 변경 때 전체 pytest, 내부 구현 변경 시 해당 모듈 pytest. 실제 `tests/`와 정적 CI가 존재하며 OpenRouter 라이브 테스트는 opt-in이다([Testing Policy](testing-policy.md)).
+**테스트 범위 정책 V3-038 확정:** 공개 계약 변경 때 전체 pytest, 내부 구현 변경 시 해당 모듈 pytest. 실제 `tests/`와 정적 CI가 존재하며 OpenRouter 라이브 테스트는 opt-in이다([Testing Policy](../testing-policy.md)).
 
 ## 이미 해결된 설계 방향
 
@@ -54,8 +54,8 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | ID | 항목 | 미결정 |
 | --- | --- | --- |
 | Q-29 | 기본 Workspace 스코프 | **사용자별 공유 Root + Conversation별 기본 폴더 + 같은 사용자 간 교차 접근 확정**. 정확한 principal 인증/경로 매핑·Binding 자동 등록 구현 미결정 |
-| Q-30 | 파일 바이트/메타데이터 | FileAssetRecord, upload original, version/digest, Workspace 파일과 Data 참조 정합성. **설계 초안 (V3-P66, [file-upload-download-v0.1.md](file-upload-download-v0.1.md))** |
-| Q-31 | 첨부·다운로드 | 스트리밍 제한, file_id 기반 다운로드, 접근 권한, Prompt file manifest 및 미디어 처리. **설계 초안 (V3-P66, [file-upload-download-v0.1.md](file-upload-download-v0.1.md))** |
+| Q-30 | 파일 바이트/메타데이터 | FileAssetRecord, upload original, version/digest, Workspace 파일과 Data 참조 정합성. **설계 초안 (V3-P66, [file-upload-download-v0.1.md](../file-upload-download-v0.1.md))** |
+| Q-31 | 첨부·다운로드 | 스트리밍 제한, file_id 기반 다운로드, 접근 권한, Prompt file manifest 및 미디어 처리. **설계 초안 (V3-P66, [file-upload-download-v0.1.md](../file-upload-download-v0.1.md))** |
 | Q-32 | 파일 I/O 계약 | 파일 Tool·`inside/run_command`, 사용자별 Root/cwd에 맞춘 v2 Sandbox 수정, symlink/hardlink/mount 별칭 차단, 명령 효과 충돌, 실행 제한 |
 | Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지. 대화 삭제 자체는 V3-P65(대화 폴더는 같이 지움, Root의 다른 파일은 남음); 첨부 파일 기록은 FILE-04에서 같은 영구 삭제 트랜잭션에 넣는다. 첨부 기록과 보관본 정리: V3-P66 §8 |
 
@@ -100,10 +100,10 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | --- | --- | --- |
 | Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 수동 압축(V3-P51)과 압축 표시·문맥 크기(V3-P50) 구현. 남은 것: 요약 품질 평가(gpt-5-nano가 글자 수 상한 때문에 다른 언어로 요약하는 경우 관찰), 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배). 거부 기준(모델 창)과 큰 메시지 연쇄 요약은 V3-P49로 구현. 모델 출력 몫 예약은 V3-P54로 구현(거부 기준 = 창 − 선언된 최대 출력) |
 | Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**, 압축 시 제외는 V3-P48. 남은 것: 타 모델 지원, cache-control |
-| Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 — V3-P71 설계 초안 [memory-v0.1.md](memory-v0.1.md)에서 다룸. 지난 대화 검색은 V3-P72 설계 초안 [conversation-search-v0.1.md](conversation-search-v0.1.md) |
+| Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 — V3-P71 설계 초안 [memory-v0.1.md](../memory-v0.1.md)에서 다룸. 지난 대화 검색은 V3-P72 설계 초안 [conversation-search-v0.1.md](../conversation-search-v0.1.md) |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
-| Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel — V3-P73 설계 초안 [streaming-v0.1.md](streaming-v0.1.md)에서 다룸(SSE 원본 보존, 끝나지 않은 답은 기록하지 않음). 끊긴 답 이어 쓰기는 이후 |
-| Q-19 | Lifecycle/privacy | **설계 초안 (V3-P65, [conversation-delete-v0.1.md](conversation-delete-v0.1.md)):** 휴지통 → 보관 기간 뒤 영구 삭제, Conversation의 모든 행 연쇄 제거, 대화 폴더 정리. 남은 것: 접근 감사, 외부 서버 데이터 삭제 훅 |
+| Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel — V3-P73 설계 초안 [streaming-v0.1.md](../streaming-v0.1.md)에서 다룸(SSE 원본 보존, 끝나지 않은 답은 기록하지 않음). 끊긴 답 이어 쓰기는 이후 |
+| Q-19 | Lifecycle/privacy | **설계 초안 (V3-P65, [conversation-delete-v0.1.md](../conversation-delete-v0.1.md)):** 휴지통 → 보관 기간 뒤 영구 삭제, Conversation의 모든 행 연쇄 제거, 대화 폴더 정리. 남은 것: 접근 감사, 외부 서버 데이터 삭제 훅 |
 | Q-20 | v2 migration | 데이터/기능 마이그레이션 범위, v2 검증된 Provider replay 규칙 선택적 재사용 |
 | Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
 | Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |

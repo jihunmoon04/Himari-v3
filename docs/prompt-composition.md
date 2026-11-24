@@ -6,7 +6,7 @@
 
 > 2026-10-13. **프롬프트의 논리적 순서와 Trigger 처리 규칙은 확정**. Provider별 메시지/캐시 구현과 압축 알고리즘은 미결정.
 >
-> [Architecture](architecture.md) · [Decisions](decisions.md) · [Open questions](open-questions.md)
+> [Architecture](architecture.md) · [Decisions](archive/decisions-v3.md) · [Open questions](archive/open-questions.md)
 
 > **모듈 구조 (V3-043 확정):** Prompt 핵심은 I/O 없는 순수 함수 `compose(PromptInputs) -> PreparedModelInput`이고, Data·Tool catalog·Environment 관측 수집은 얇은 `PromptContextLoader`가 맡습니다. 아래 순서·Trigger·그룹 규칙은 모두 `compose`의 계약이며 고정 입력으로 테스트합니다.
 
@@ -37,7 +37,7 @@ Provider-specific request parameters / continuation
 - Tool 목록/스키마, 지시문의 버전이나 선택이 달라지면 Stable Prefix가 달라질 수 있다. 안정성은 허용된 기능을 숨기거나 과장할 이유가 아니다.
 - Conversation의 과거 항목을 프롬프트 최적화를 이유로 임의 재정렬하지 않는다. 압축 구간만 명시적으로 대체하고, 최근 exact tail은 시간 순서를 보존한다.
 - Current State는 **과거 사실의 수정이 아니라 최신 상태의 별도 투영**이다. 사용자 데이터/Plan/Memory 등 신뢰도가 낮은 내용은 높은 우선순위의 지시문으로 승격하지 않는다. Provider 역할(role) 배정과 메시지 순서는 별개의 문제다.
-- CurrentStateProjection은 **Data의 활성 Environment/Workspace Binding/기본 선택 설정 + Plan/Note Artifact + 필요시 Environment의 현재 연결 관측**을 합성한다. 활성 Workspace 자체를 Artifact에 기록하지 않는다. 상세 DTO와 캐시·권한 제약은 [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md)을 참조한다.
+- CurrentStateProjection은 **Data의 활성 Environment/Workspace Binding/기본 선택 설정 + Plan/Note Artifact + 필요시 Environment의 현재 연결 관측**을 합성한다. 활성 Workspace 자체를 Artifact에 기록하지 않는다. 상세 DTO와 캐시·권한 제약은 [CurrentState Contract v0.1 — 검토 초안](archive/current-state-contract-v0.1.md)을 참조한다.
 - Binding의 `active` 상태는 로컬 PC의 `online`이나 실행 승인과 다른 정보다. Prompt는 표시 가능한 상태만 받고, 실제 Tool 실행 시 Environment가 권한과 접속 상태를 재검증한다.
 - 최종 State 메시지는 반드시 Provider 프로토콜과 호환되어야 한다. ToolCall ↔ ToolResult 결합을 방해하면 허용되는 provider-native 블록/역할로 표현하거나, 호환 불가 시 요청을 거부한다. 그럴듯한 가짜 Tool 메시지를 삽입하지 않는다.
 

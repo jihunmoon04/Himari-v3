@@ -2,7 +2,7 @@
 
 > 2026-10-13 · REVIEW DRAFT. Binding user decisions: V3-032~037. The isolated-only network policy is confirmed; backend DTOs, platform versions and resource limits remain PROPOSED. v3 code not yet implemented. Concrete v2 code reuse and implementation boundary proposal: [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md).
 >
-> Links: [unified contracts](contracts.md) · [default workspace](default-workspace-files-v0.2.md) · [decisions](decisions.md) · [open questions](open-questions.md).
+> Links: [unified contracts](../contracts.md) · [default workspace](default-workspace-files-v0.2.md) · [decisions](decisions-v3.md) · [open questions](open-questions.md).
 
 ## 1. Explicit decisions (CONFIRMED)
 
