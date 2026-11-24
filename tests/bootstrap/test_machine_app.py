@@ -170,3 +170,26 @@ def test_an_old_inside_conversation_is_told_of_no_files(tmp_path: Path) -> None:
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_a_purge_removes_the_folder_after_folders_are_turned_off(tmp_path: Path) -> None:
+    """V3-P109 review P2: reopened with no machine principal, a purge still removes the Conversation's folder."""
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data", ScriptedAdapter([]))
+        try:
+            scope = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
+            assert app.machine is not None
+            folder = Path(await app.machine.folder(scope.conversation_id, f"conversations/{scope.conversation_id}"))
+            (folder / "notes.txt").write_text("mine")
+        finally:
+            await app.close()
+        again = await open_app(tmp_path / "data", ScriptedAdapter([]), machine_principals=())
+        try:
+            assert again.machine is None
+            await again.trash(scope)
+            await again.purge(scope)
+            assert not folder.exists()
+        finally:
+            await again.close()
+
+    asyncio.run(scenario())

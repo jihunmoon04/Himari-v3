@@ -453,3 +453,75 @@ def test_a_write_waits_for_the_conversations_folder(env: MachineEnvironment, roo
 
     asyncio.run(scenario())
     assert (own / "own.txt").read_text() == "x"
+
+
+# --- review of V3-P109 (Codex) ---------------------------------------------------------
+
+
+def test_purge_never_follows_a_linked_root(tmp_path: Path) -> None:
+    """P1: the folders' root replaced by a link to another tree with the same id: nothing there is removed."""
+    foreign = tmp_path / "foreign"
+    (foreign / "c1").mkdir(parents=True)
+    (foreign / "c1/keep.txt").write_text("theirs")
+    os.symlink(foreign, tmp_path / "conversations")
+    env = MachineEnvironment(str(tmp_path / "conversations"))
+    with pytest.raises(MachineUnavailable):
+        asyncio.run(env.remove_conversation_folder(WORKSPACE, SCOPE, "conversations/c1"))
+    assert (foreign / "c1/keep.txt").read_text() == "theirs"
+    assert not asyncio.run(MachineEnvironment(str(tmp_path / "missing")).remove_conversation_folder(
+        WORKSPACE, SCOPE, "conversations/c1"))
+
+
+def test_ids_with_capitals_are_not_folders() -> None:
+    """P1: Data's ids are lower case; on a case-insensitive disk "C1" would be "c1"'s folder."""
+    with pytest.raises(FolderError):
+        ConversationFolders("/tmp/x").path_of("C1")
+
+
+def test_a_kept_group_write_bit_survives_the_umask(env: MachineEnvironment, root: Path) -> None:
+    """P2: the replaced file's mode is set on the new one, not filtered by the umask (022 here)."""
+    old = os.umask(0o022)
+    try:
+        call(env, "write_file", path="shared.txt", content="a")
+        (root / "c1/shared.txt").chmod(0o664)
+        call(env, "write_file", path="shared.txt", content="b")
+        assert (root / "c1/shared.txt").stat().st_mode & 0o777 == 0o664
+    finally:
+        os.umask(old)
+
+
+def test_commit_takes_only_a_regular_temporary_file(env: MachineEnvironment, root: Path, tmp_path: Path) -> None:
+    """P2: a link (or anything but a regular ``.tmp``) in uploads is never committed under a name."""
+    async def scenario() -> None:
+        uploads = Path(await env.folder("c1", "conversations/c1")) / "uploads"
+        uploads.mkdir(exist_ok=True)
+        (tmp_path / "secret").write_text("outside")
+        os.symlink(tmp_path / "secret", uploads / ".himari-x.tmp")
+        with pytest.raises(MachineUnavailable):
+            await env.commit_copy("c1", "conversations/c1", ".himari-x.tmp", str(uploads / "a.pdf"))
+        (uploads / "plain").write_text("x")
+        with pytest.raises(MachineUnavailable):
+            await env.commit_copy("c1", "conversations/c1", "plain", str(uploads / "b.pdf"))
+
+    asyncio.run(scenario())
+    assert not (root / "c1/uploads/a.pdf").exists() and not (root / "c1/uploads/b.pdf").exists()
+
+
+@pytest.mark.parametrize("name,ok", [
+    ("notes.txt", True), ("a.b.c", True), ("console.txt", True),
+    ("notes.txt.", False), ("notes ", False), ("con", False), ("NUL.txt", False), ("com1", False),
+    ("c:notes", False), ("notes:stream", False), ("..", False), ("", False),
+])
+def test_windows_components_name_one_thing(monkeypatch: pytest.MonkeyPatch, name: str, ok: bool) -> None:
+    """P1/P2: on Windows no drive or stream colon, trailing dot or space, or device name passes."""
+    from himari.environment.machine import folders as folders_module
+
+    monkeypatch.setattr(folders_module, "_POSIX", False)
+    assert folders_module._component_ok(name) is ok
+
+
+def test_paths_come_back_on_the_folders_own_spelling(env: MachineEnvironment, root: Path) -> None:
+    """P1: what is used is the trusted folder plus checked components, never the caller's prefix."""
+    folder = asyncio.run(env.folder("c1", "conversations/c1"))
+    assert env.folders.resolve(folder, f"{folder}/./a//b.txt") == os.path.join(folder, "a", "b.txt")
+    assert env.folders.resolve(folder, ".") == folder

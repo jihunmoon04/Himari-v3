@@ -112,7 +112,7 @@ runner를 빼면 대화 폴더는 HIMARI가 직접 소유하고, 파일 Tool은 
 ## 7. 남는 Linux 의존과 다음 단계
 
 이 패킷 뒤에 서버에 남는 Linux 의존:
-- `data/sqlite.py`·`data/blobs.py`·`bootstrap/operator.py`·`mcp/config.py`의 파일 잠금(`fcntl`)과 소유자·권한 검사(`geteuid`, 0600/0700), `O_NOFOLLOW`
+- `data/sqlite.py`·`data/blobs.py`·`bootstrap/operator.py`·`mcp/config.py`·`documents/__init__.py`의 파일 잠금(`fcntl`)과 소유자·권한 검사(`geteuid`, 0600/0700), `O_NOFOLLOW`·`O_DIRECTORY`
 - 문서·이미지·Tool 스키마 worker의 `resource.setrlimit`
 - 문서·이미지 worker의 server sandbox(bubblewrap + Landlock)
 
@@ -126,3 +126,4 @@ runner를 빼면 대화 폴더는 HIMARI가 직접 소유하고, 파일 Tool은 
 - MCP: `McpServerConfig.refused`(stdio 항목), `RESTART_NOTICE`는 `client.py`로.
 - 시험: `tests/environment/test_machine.py` 다시 씀(경로 탈출·링크·권한·업로드·취소된 쓰기), Bootstrap·Web 시험은 데이터 폴더 안의 대화 폴더로, MCP의 stdio 시험은 지우거나 HTTP로(프롬프트 목록 시간 초과, stdio 항목이 빠지는 것).
 - 확인(WSL, Python 3.12): 전체 pytest 2779 통과·77 건너뜀, `mypy`(strict, src+tests) 통과, `scripts/check_imports.py` 통과. 실호스트 sandbox 게이트와 운영 배포는 하지 않았다.
+- **Codex 검수(2026-11-24) 반영:** P1 링크된 루트를 따라 영구 삭제하던 것(루트를 먼저 `lstat`), P1 Windows에서 호출자 철자를 그대로 쓰던 것(신뢰하는 폴더 경로 + 검사한 부분으로 다시 만듦, 드라이브·스트림 콜론·끝의 점과 공백·장치 이름 거부, 대화 id는 소문자만), P2 폴더 사용자를 비우면 영구 삭제가 폴더를 남기던 것(`Application.folders`는 늘 있음), P2 업로드 이름·임시 파일 검사(정상 `.tmp` 파일만 확정), P2 덮어쓸 때 umask가 권한을 깎던 것(`fchmod`), P3 옛 설계 문서의 안내. 시험을 더했고, Windows 기본 Python에서 `folders.py`만 따로 돌린 스모크(쓰기·읽기·업로드·junction 거부·삭제)도 통과했다.

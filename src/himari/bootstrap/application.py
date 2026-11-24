@@ -698,6 +698,8 @@ class Application:
     # the principals whose new Conversations use it (Q1); the others only talk (V3-P101).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
+    # V3-P109 review: the folders a purge removes, whoever may still use them (also with no machine principal).
+    folders: MachineEnvironment | None = None
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -889,6 +891,7 @@ class Application:
                           presence=hub, events=events)
         application.time_zone = time_zone
         application.proactive = speaking_first
+        application.folders = machine if machine is not None else MachineEnvironment(str(root / CONVERSATIONS_NAME))
         if screens is not None:
             screens.job_of = lambda scope: runner.status(scope).job_id  # §6: the app's move context
             application.screens = screens
@@ -1563,8 +1566,9 @@ class Application:
         async with self._exclusive(scope.conversation_id):
             trashed = await self.data.begin_purge(scope)  # owner and state first
             workspace = trashed.workspace
-            if workspace is not None and self.machine is not None and self.machine.owns(workspace.workspace_id):
-                await self.machine.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            folders = self.folders or self.machine
+            if workspace is not None and folders is not None and folders.owns(workspace.workspace_id):
+                await folders.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
             # An old Inside folder (<data>/workspaces) is left: V3-P101 removes it by hand.
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)

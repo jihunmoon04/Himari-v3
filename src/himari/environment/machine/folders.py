@@ -51,7 +51,11 @@ MAX_ENUMERATED = 100_000  # a folder listing reads at most this many names (V3-P
 MAX_NAME_TRIES = 100
 UPLOADS = "uploads"
 TEMP_PREFIX = ".himari-"
-_CONVERSATION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# Lower case only (Data makes "conv_<n>"): two ids never name one folder on a case-insensitive disk.
+_CONVERSATION_ID = re.compile(r"^[a-z0-9_-]{1,128}$")
+# Names Windows treats as devices, whatever follows a dot (V3-P109 review).
+_RESERVED = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10)),
+                       "conin$", "conout$"})
 _REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
@@ -98,6 +102,18 @@ def _inside(path: str, folder: str) -> bool:
         return os.path.commonpath([os.path.normcase(path), os.path.normcase(folder)]) == os.path.normcase(folder)
     except ValueError:  # another drive (Windows)
         return False
+
+
+def _component_ok(name: str) -> bool:
+    """One path component that names exactly one thing on this platform. On
+    Windows: no drive or stream colon, no trailing dot or space (aliases of
+    another name), no device name."""
+    if not name or name in (".", "..") or "\0" in name:
+        return False
+    if _POSIX:
+        return True
+    return (":" not in name and not name.endswith((".", " ")) and "/" not in name
+            and name.split(".", 1)[0].rstrip(" ").lower() not in _RESERVED)
 
 
 def _sync_folder(path: str) -> None:
@@ -153,6 +169,11 @@ class ConversationFolders:
         """The Conversation's folder and everything in it; links inside are
         removed, never followed. False if there was none."""
         path = self.path_of(conversation_id)
+        root = _lstat(self.root)
+        if root is None:
+            return False
+        if is_link(root) or not stat.S_ISDIR(root.st_mode):  # never follow a linked root into another tree
+            raise FolderError(LINKS)
         info = _lstat(path)
         if info is None:
             return False
@@ -179,7 +200,15 @@ class ConversationFolders:
         absolute = os.path.normpath(text if os.path.isabs(text) else os.path.join(folder, text))
         if not _inside(absolute, folder):
             raise FolderError(OUTSIDE)
-        return absolute
+        # Rebuilt on the trusted spelling of ``folder`` (a case-insensitive disk takes "C1" for "c1"), each
+        # component checked to name one thing only.
+        relative = os.path.relpath(absolute, folder)
+        if relative == os.curdir:
+            return folder
+        parts = relative.split(os.sep)
+        if not all(_component_ok(part) for part in parts):
+            raise FolderError(INVALID)
+        return os.path.join(folder, *parts)
 
     def _walk(self, folder: str, absolute: str) -> Iterator[tuple[str, os.stat_result | None]]:
         """Each component from ``folder`` down to ``absolute`` with its lstat
@@ -361,6 +390,8 @@ class ConversationFolders:
             raise _error(error) from None
         try:
             try:
+                if _POSIX:
+                    os.fchmod(fd, mode)  # the umask does not take bits from a kept mode
                 fill(fd)  # type: ignore[operator]
                 os.fsync(fd)
             finally:
@@ -416,6 +447,9 @@ class ConversationFolders:
                 or not _plain(os.path.basename(path)):
             raise FolderError(INVALID)
         source = os.path.join(uploads, temp)
+        found = _lstat(source)
+        if not temp.endswith(".tmp") or found is None or is_link(found) or not stat.S_ISREG(found.st_mode):
+            raise FolderError(INVALID)
         try:
             if _POSIX:
                 os.link(source, path)
@@ -449,7 +483,7 @@ class ConversationFolders:
 
 
 def _plain(name: str) -> bool:
-    return bool(name) and name not in (".", "..") and "/" not in name and os.sep not in name and "\0" not in name
+    return "/" not in name and os.sep not in name and _component_ok(name)
 
 
 def _write_all(fd: int, data: bytes) -> None:
