@@ -121,6 +121,8 @@ from himari.data.api import (
     LifeKind,
     LifeOrigin,
     LifePlan,
+    HimariMood,
+    MoodSource,
     LifeWrite,
     LifeWriteStart,
     LifeWriteStatus,
@@ -200,7 +202,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -758,11 +760,25 @@ CREATE TABLE bond_stages (
     PRIMARY KEY (owner, persona_id)
 ) STRICT;
 """
+# v24 (character-state v0.1 §2, §3): a plan's start time (HH:MM), and each persona's mood with its owner,
+# when it was set, by what (reply, writer) and the writer's why (no row: no mood).
+_V24_ADDITIONS = """
+ALTER TABLE life_entries ADD COLUMN time_of_day TEXT;
+CREATE TABLE himari_moods (
+    owner TEXT NOT NULL,
+    persona_id INTEGER NOT NULL,
+    mood TEXT NOT NULL,
+    set_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    reason TEXT,
+    PRIMARY KEY (owner, persona_id)
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
-              _V22_ADDITIONS, _V23_ADDITIONS)  # what each version from v3 added
+              _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1229,7 +1245,15 @@ def _life_entry(row: sqlite3.Row) -> LifeEntry:
     return LifeEntry(row["entry_id"], row["persona_id"], LifeKind(row["kind"]), row["day"], row["text"],
                      LifeOrigin(row["origin"]), row["revision"], datetime.fromisoformat(row["created_at"]),
                      datetime.fromisoformat(row["updated_at"]), source, tuple(json.loads(row["source_sequences"])),
-                     row["source"], None if row["tag"] is None else BondTag(row["tag"]), row["month_day"])
+                     row["source"], None if row["tag"] is None else BondTag(row["tag"]), row["month_day"],
+                     row["time_of_day"])
+
+
+def _mood(persona_id: int, row: sqlite3.Row | None) -> HimariMood | None:
+    if row is None:
+        return None
+    return HimariMood(persona_id, row["mood"], datetime.fromisoformat(row["set_at"]), MoodSource(row["source"]),
+                      row["reason"])
 
 
 def _standing(persona_id: int, row: sqlite3.Row | None) -> BondStanding:
@@ -2493,7 +2517,7 @@ class SqliteData:
     # --- LifeStore, LifeWriteLog (character-life v0.1 §2, §3) -----------------------------
 
     _LIFE_COLUMNS = ("entry_id, persona_id, kind, day, text, origin, revision, created_at, updated_at,"
-                     " source_conversation, source_sequences, source, tag, month_day")
+                     " source_conversation, source_sequences, source, tag, month_day, time_of_day")
 
     def _live_entry(self, tx: _Tx, principal: PrincipalId, entry_id: object) -> LifeEntry:
         row = None if isinstance(entry_id, bool) or not isinstance(entry_id, int) else tx.one(
@@ -2517,11 +2541,11 @@ class SqliteData:
                    " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, entry.entry_id)
         tx.execute("INSERT INTO life_entries (owner, entry_id, persona_id, kind, day, text, origin, revision,"
                    " created_at, updated_at, retired_at, source_conversation, source_sequences, source, tag,"
-                   " month_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                   " month_day, time_of_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
                    principal, entry.entry_id, entry.persona_id, entry.kind.value, entry.day, entry.text,
                    entry.origin.value, entry.revision, _timestamp(entry.created_at), _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
-                   None if entry.tag is None else entry.tag.value, entry.month_day)
+                   None if entry.tag is None else entry.tag.value, entry.month_day, entry.time_of_day)
         return entry
 
     @staticmethod
@@ -2693,8 +2717,9 @@ class SqliteData:
         if not isinstance(plan, LifePlan):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life plan")
         diary = rules.check_life_text(LifeKind.DIARY, plan.diary)
-        plans = [(rules.check_life_day(day), rules.check_life_text(LifeKind.PLAN, text)) for day, text in plan.plans]
+        plans = rules.check_life_plans(plan)
         facts = [rules.check_life_text(LifeKind.FACT, text) for text in plan.facts]
+        mood = rules.writer_mood(plan, now)
         with self._tx() as tx:
             row = self._life_write_row(tx, write_id)
             if row["status"] != "received":
@@ -2711,15 +2736,18 @@ class SqliteData:
                 written.append(self._rewrite_life(tx, principal, dataclasses.replace(
                     before, text=diary, origin=LifeOrigin.WRITER, revision=before.revision + 1, updated_at=now,
                     source=write_id)))
-            for plan_day, text in plans:
+            for plan_day, text, at in plans:
                 written.append(self._new_life(tx, principal, LifeEntry(
-                    0, persona_id, LifeKind.PLAN, plan_day, text, LifeOrigin.WRITER, 1, now, now, source=write_id)))
+                    0, persona_id, LifeKind.PLAN, plan_day, text, LifeOrigin.WRITER, 1, now, now, source=write_id,
+                    time_of_day=at)))
             for text in facts:
                 added = self._add_fact(tx, principal, LifeEntry(
                     0, persona_id, LifeKind.FACT, None, text, LifeOrigin.WRITER, 1, now, now, source=write_id),
                     dedupe=True)
                 if isinstance(added, LifeEntry):
                     written.append(added)
+            if mood is not None:  # character-state §2: the day's end mood, kept unless a later one is stored
+                self._keep_mood(tx, principal, dataclasses.replace(mood, persona_id=persona_id))
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return tuple(written)
@@ -2878,6 +2906,34 @@ class SqliteData:
             chosen = BondStanding(persona_id, stage, datetime.now(UTC), "user", current.revision + 1)
             self._keep_standing(tx, principal, chosen)
             return chosen
+
+    # --- MoodStore (character-state v0.1 §2) -----------------------------------------------
+
+    @staticmethod
+    def _keep_mood(tx: _Tx, principal: PrincipalId, mood: HimariMood) -> HimariMood:
+        """``mood`` stored unless the stored one was set after it; the one kept."""
+        stored = _mood(mood.persona_id, tx.one("SELECT mood, set_at, source, reason FROM himari_moods WHERE owner=?"
+                                               " AND persona_id=?", principal, mood.persona_id))
+        kept = rules.kept_mood(stored, mood)
+        if kept is mood:
+            tx.execute("INSERT INTO himari_moods (owner, persona_id, mood, set_at, source, reason)"
+                       " VALUES (?, ?, ?, ?, ?, ?)"
+                       " ON CONFLICT (owner, persona_id) DO UPDATE SET mood=excluded.mood, set_at=excluded.set_at,"
+                       " source=excluded.source, reason=excluded.reason", principal, mood.persona_id, mood.mood,
+                       _timestamp(mood.set_at), mood.source.value, mood.reason)
+        return kept
+
+    async def read_mood(self, principal: PrincipalId, persona_id: int) -> HimariMood | None:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            return _mood(persona_id, tx.one("SELECT mood, set_at, source, reason FROM himari_moods WHERE owner=?"
+                                            " AND persona_id=?", principal, persona_id))
+
+    async def set_mood(self, principal: PrincipalId, persona_id: int, mood: str, *, source: MoodSource,
+                       at: datetime, reason: str | None = None) -> HimariMood:
+        checked = rules.check_mood(persona_id, mood, source, at, reason)
+        with self._tx() as tx:
+            return self._keep_mood(tx, principal, checked)
 
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 

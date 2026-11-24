@@ -20,6 +20,10 @@ from himari.data.api import (
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
     MAX_LOOP_CHARS,
+    MAX_MOOD_REASON_CHARS,
+    MOOD_NAMES,
+    HimariMood,
+    MoodSource,
     BondChange,
     BondStage,
     BondStanding,
@@ -30,6 +34,7 @@ from himari.data.api import (
     LifeEntry,
     LifeKind,
     LifeOrigin,
+    LifePlan,
     MAX_MEMORIES,
     MAX_DEVICE_NAME_CHARS,
     MAX_EFFORT_CHARS,
@@ -738,3 +743,59 @@ def settle_stage(standing: BondStanding, entries: Sequence[LifeEntry], met_on: d
     if stage is standing.stage:
         return standing
     return BondStanding(standing.persona_id, stage, since, reason, standing.revision + 1)
+
+
+# --- State: the plans' times and the lasting mood (character-state v0.1 §2, §3) -------------
+
+
+def check_time_of_day(value: object) -> str | None:
+    """A plan's start: HH:MM on a 24-hour clock, or None."""
+    if value is None:
+        return None
+    if (not isinstance(value, str) or len(value) != 5 or value[2] != ":" or not value[:2].isdigit()
+            or not value[3:].isdigit() or int(value[:2]) > 23 or int(value[3:]) > 59):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a time is HH:MM")
+    return value
+
+
+def check_mood(persona_id: object, mood: object, source: object, at: object, reason: object) -> HimariMood:
+    """§2: a mood as stored — a name in MOOD_NAMES, a reason (the writer's only) trimmed,
+    at most MAX_MOOD_REASON_CHARS and with no control characters, at an aware time."""
+    persona = check_life_persona(persona_id)
+    if not isinstance(mood, str) or mood not in MOOD_NAMES:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no lasting mood {mood!r}")
+    if not isinstance(source, MoodSource):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no mood source {source!r}")
+    if not isinstance(at, datetime) or at.utcoffset() is None:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a mood's time has its offset")
+    why: str | None = None
+    if reason is not None:
+        if source is not MoodSource.WRITER or not isinstance(reason, str):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "only the story writer gives a reason")
+        if any(unicodedata.category(c) in ("Cc", "Cs") for c in reason):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a reason may not contain control characters")
+        why = reason.strip() or None
+        if why is not None and len(why) > MAX_MOOD_REASON_CHARS:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"a reason is at most {MAX_MOOD_REASON_CHARS} characters")
+    return HimariMood(persona, mood, at, source, why)
+
+
+def check_life_plans(plan: LifePlan) -> list[tuple[str, str, str | None]]:
+    """A writer's plans as stored: each date, text and (by position in ``plan.times``) start time."""
+    if len(plan.times) > len(plan.plans):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a time for no plan")
+    return [(check_life_day(day), check_life_text(LifeKind.PLAN, text),
+             check_time_of_day(plan.times[i] if i < len(plan.times) else None))
+            for i, (day, text) in enumerate(plan.plans)]
+
+
+def writer_mood(plan: LifePlan, now: datetime) -> HimariMood | None:
+    """§2: the writer's mood as stored (its persona set by the write), at ``plan.mood_at`` or ``now``."""
+    if plan.mood is None:
+        return None
+    return check_mood(0, plan.mood, MoodSource.WRITER, plan.mood_at or now, plan.mood_reason)
+
+
+def kept_mood(stored: HimariMood | None, new: HimariMood) -> HimariMood:
+    """§2: the newer of the two; one set after ``new`` stays."""
+    return stored if stored is not None and stored.set_at > new.set_at else new

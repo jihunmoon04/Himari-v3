@@ -27,6 +27,7 @@ from enum import Enum
 from typing import BinaryIO, Protocol
 
 from himari.common import (
+    MOODS,
     DeepFrozen,
     CallId,
     CallRef,
@@ -1786,6 +1787,7 @@ class LifeEntry(DeepFrozen):
     source: str | None = None
     tag: BondTag | None = None
     month_day: str | None = None
+    time_of_day: str | None = None  # character-state §3 (S3): a plan's start, HH:MM in the user's zone
 
 
 class LifeChangeOp(Enum):
@@ -1809,11 +1811,17 @@ class LifeChange(DeepFrozen):
 
 @dataclass(frozen=True)
 class LifePlan(DeepFrozen):
-    """What one story writer call writes for its date (§3), checked by the life module."""
+    """What one story writer call writes for its date (§3), checked by the life module.
+    character-state §2, §3: the plans' start times by position (HH:MM; missing or None: no
+    time), and HIMARI's mood at the day's end with why, as of ``mood_at`` (None: when applied)."""
 
     diary: str
     plans: tuple[tuple[str, str], ...] = ()  # (YYYY-MM-DD, text)
     facts: tuple[str, ...] = ()
+    times: tuple[str | None, ...] = ()
+    mood: str | None = None  # a name in MOODS other than "neutral"
+    mood_reason: str | None = None
+    mood_at: datetime | None = None
 
 
 class LifeStore(Protocol):
@@ -1926,9 +1934,11 @@ class LifeWriteLog(Protocol):
 
     async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime) -> tuple[LifeEntry, ...]:
         """One transaction (§2, §3): the day's diary (a writer's of that date is
-        rewritten, the user's stays), the plans and the facts (one the same as a
-        live fact is skipped; at MAX_LIFE_FACTS the oldest not the user's
-        retires; all the user's: skipped); the write APPLIED. The entries
+        rewritten, the user's stays), the plans (with their times, character-state
+        §3) and the facts (one the same as a live fact is skipped; at
+        MAX_LIFE_FACTS the oldest not the user's retires; all the user's:
+        skipped), the mood (character-state §2: as MoodStore.set_mood, source
+        WRITER, at ``plan.mood_at`` or ``now``); the write APPLIED. The entries
         written. INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
@@ -2107,6 +2117,54 @@ class BondStore(Protocol):
         """§4: the user's choice of stage, up or down (reason ``user``), compare-and-set
         on the standing's revision (0: none stored). What moves it by itself
         afterwards is only what happens after this."""
+        ...
+
+
+# --- HIMARI's lasting mood (character-state v0.1 §2) -------------------------------------
+
+MOOD_HOURS = 6  # S1: a mood is told this long after it was set, then fades (it stays stored)
+MAX_MOOD_REASON_CHARS = 200  # the story writer's line of why
+MOOD_NAMES = frozenset(MOODS) - {"neutral"}  # what a lasting mood may be
+
+
+class MoodSource(Enum):
+    REPLY = "reply"  # the last mood other than neutral of one of HIMARI's final answers
+    WRITER = "writer"  # the story writer's mood at the end of the day it wrote, with why
+
+
+@dataclass(frozen=True)
+class HimariMood(DeepFrozen):
+    """§2: a persona's mood now — a name in MOOD_NAMES, when it was set, by what,
+    and (the writer's only) why."""
+
+    persona_id: int
+    mood: str
+    set_at: datetime
+    source: MoodSource
+    reason: str | None = None
+
+
+def live_mood(mood: HimariMood | None, now: datetime) -> HimariMood | None:
+    """S1: the mood while it is told (set less than MOOD_HOURS before ``now``), else None."""
+    if mood is None or not timedelta(0) <= now - mood.set_at < timedelta(hours=MOOD_HOURS):
+        return None
+    return mood
+
+
+class MoodStore(Protocol):
+    """§2: one mood per principal and persona (NO_PERSONA: no persona chosen). The
+    principal comes from the trusted entry point, never from model output: no Tool
+    reaches this port."""
+
+    async def read_mood(self, principal: PrincipalId, persona_id: int) -> HimariMood | None:
+        """The mood last set, faded or not (``live_mood`` says whether it is told); None: never set."""
+        ...
+
+    async def set_mood(self, principal: PrincipalId, persona_id: int, mood: str, *, source: MoodSource,
+                       at: datetime, reason: str | None = None) -> HimariMood:
+        """Sets it unless the stored one was set after ``at`` (then that one stays and is
+        returned). INVALID_ARGUMENT for a name not in MOOD_NAMES, a reason on a reply's
+        mood, or one past MAX_MOOD_REASON_CHARS or with control characters."""
         ...
 
 

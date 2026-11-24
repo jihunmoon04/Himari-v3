@@ -1,8 +1,10 @@
 """The principal's event stream as Server-Sent Events (V3-P83 §8.1, appendix A.3).
 
 ``GET /api/events`` sends ``hello`` first — the whole state; a reader
-replaces its own with it — then what ``EventHub`` publishes: ``activity``,
-``job``, ``conversation``, ``current``, and for a device ``revoked`` or
+replaces its own with it — and to a device its character's ``mood``
+(character-state §2), then what ``EventHub`` publishes: ``activity``,
+``job``, ``conversation``, ``current``, ``quiet``, ``persona``
+(character-state §4), and for a device ``revoked`` or
 ``replaced`` (after which the stream ends). There is no replay: a reader
 that reconnects starts again from ``hello``. A comment line comes every
 ``HEARTBEAT_SECONDS``; the stream ends after ``MAX_SECONDS`` (the reader
@@ -13,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
 from himari.common import thaw
@@ -28,11 +30,14 @@ ENDING = frozenset({"revoked", "replaced"})  # the stream ends after these
 
 async def stream(subscription: Subscription, hello: dict[str, Any], closing: asyncio.Event, *,
                  clock: Callable[[], float] = time.monotonic, heartbeat: float | None = None,
-                 limit: float | None = None) -> AsyncIterator[str]:
-    """``heartbeat`` and ``limit``: HEARTBEAT_SECONDS and MAX_SECONDS, read when it starts."""
+                 limit: float | None = None, after: Sequence[tuple[str, dict[str, Any]]] = ()) -> AsyncIterator[str]:
+    """``heartbeat`` and ``limit``: HEARTBEAT_SECONDS and MAX_SECONDS, read when it starts.
+    ``after``: events sent once right after ``hello`` (character-state §2: a device's ``mood``)."""
     heartbeat = HEARTBEAT_SECONDS if heartbeat is None else heartbeat
     yield f"retry: {RETRY_MS}\n\n"
     yield frame("hello", hello)
+    for name, data in after:
+        yield frame(name, data)
     deadline = clock() + (MAX_SECONDS if limit is None else limit)
     while not closing.is_set():
         remaining = deadline - clock()

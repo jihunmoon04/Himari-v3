@@ -66,8 +66,9 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -114,8 +115,12 @@ from himari.data.api import (
     NO_PERSONA,
     BondSnapshot,
     BondStore,
+    HimariMood,
     LifeEntry,
     LifeStore,
+    MoodSource,
+    MoodStore,
+    live_mood,
     PersonaStore,
     Memory,
     RecentEpisode,
@@ -147,6 +152,7 @@ from himari.prompt.api import (
     CompactionPlan,
     CompactionPlanner,
     ContextBudget,
+    HimariNow,
     ModelInput,
     PromptComposer,
     PromptContextLoader,
@@ -154,6 +160,7 @@ from himari.prompt.api import (
     PromptErrorCode,
     PromptInputs,
     RequestOptions,
+    doing_now,
 )
 from himari.provider.api import (
     NativeInvocationOutcome,
@@ -172,6 +179,8 @@ from himari.provider.api import (
 )
 from himari.tool.api import SCREEN_TOOL_ID, GroupDispatchResult, GroupState, ToolDispatcher, TurnSource, TurnWake
 
+
+_logger = logging.getLogger(__name__)  # ``log`` is the Driver's ConversationLog
 
 MAX_COMPACTIONS_PER_RUN = 4
 MAX_RUNS = 12  # model Runs a turn may make (V3-P62 §6)
@@ -220,6 +229,8 @@ class _UserContext(NamedTuple):
     persona: str = ""  # V3-P89 §4: the companion persona, read with the instructions
     life: tuple[LifeEntry, ...] | None = None  # character-life §5: the chosen persona's life; None: not told
     bond: BondSnapshot | None = None  # character-bond §5: that persona's bond with the user; None: not told
+    mood: HimariMood | None = None  # character-state §2: that persona's mood while told; None: not told or none
+    himari_now: HimariNow | None = None  # character-state §3: what HIMARI is doing; None: not told or nothing
 
 
 class Driver:
@@ -239,6 +250,8 @@ class Driver:
         memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
         life: LifeStore | None = None,  # character-life §5: HIMARI's life, told with the companion; None: not told
         bond: BondStore | None = None,  # character-bond §5: the bond, told with the life; None: not told
+        moods: MoodStore | None = None,  # character-state §2: the mood, told and set with the life; None: neither
+        quiet_hours: tuple[time, time] | None = None,  # character-state §3 (S2): HIMARI sleeps in them; None: never
         max_runs_per_drive: int = MAX_RUNS,
         planner: CompactionPlanner | None = None,
         turn_guidance: bool = False,  # V3-P62 §8: the model is told when few Runs are left
@@ -265,6 +278,9 @@ class Driver:
         self._memories = memories
         self._life = life
         self._bond = bond
+        self._moods = moods
+        self._quiet_hours = quiet_hours
+        self._turn_personas: dict[ConversationId, int] = {}  # the persona read when the turn started (§2)
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
         self._read_only: set[ConversationId] = set()  # a wake's turn: only Tools that read run (V3-P90 §5.6)
@@ -489,9 +505,11 @@ class Driver:
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
-            user = await self._read_user(scope)  # the user's instructions and notes, and the time (V3-P69 §5)
+            # the user's instructions and notes, and the time (V3-P69 §5); the persona whose mood a reply sets
+            user, persona_id = await self._read_user_and_persona(scope)
             self._turn_models[scope.conversation_id] = model
             self._turn_users[scope.conversation_id] = user
+            self._turn_personas[scope.conversation_id] = persona_id
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
             limit = self._max_runs if max_runs is None else min(max_runs, self._max_runs)  # V3-P87 §4.2
             self._turns[scope.conversation_id] = Turn(limit, progress)
@@ -504,6 +522,7 @@ class Driver:
                 del self._turns[scope.conversation_id]
                 del self._turn_models[scope.conversation_id]
                 del self._turn_users[scope.conversation_id]
+                self._turn_personas.pop(scope.conversation_id, None)
                 self._turn_presences.pop(scope.conversation_id, None)
                 self._turn_sources.pop(scope.conversation_id, None)
                 self._turn_inputs.pop(scope.conversation_id, None)
@@ -521,6 +540,11 @@ class Driver:
         return self._models.resolve(setting)
 
     async def _read_user(self, scope: TrustedScope) -> _UserContext:
+        return (await self._read_user_and_persona(scope))[0]
+
+    async def _read_user_and_persona(self, scope: TrustedScope) -> tuple[_UserContext, int]:
+        """What the loader takes about the user and the turn's start, and the chosen persona's id
+        (NO_PERSONA: none, or the companion is off)."""
         text = persona = ""
         persona_id = NO_PERSONA
         if self._user_instructions is not None:
@@ -533,18 +557,25 @@ class Driver:
         local = None if self._zone is None else now.astimezone(self._zone)
         life = None
         bond = None
+        mood = None
+        doing = None
         if self._life is not None and self._companion:  # character-life §5: the chosen persona's (L2: none's is 0)
             since = ((local or now).date() - LIFE_READ_DAYS).isoformat()
             life = await self._life.list_life(scope.principal_id, persona_id, since=since)
             if self._bond is not None:  # character-bond §5: with the life; its stage moves as it is read (§4)
                 bond = await self._bond.read_bond(scope.principal_id, persona_id, now=now, zone=self._zone_name)
+            if self._moods is not None:  # character-state §2: while it is told (S1: MOOD_HOURS)
+                mood = live_mood(await self._moods.read_mood(scope.principal_id, persona_id), now)
+            # character-state §3: a timed plan under way, else asleep in the quiet hours (the server's clock)
+            doing = doing_now(life, local or now, self._quiet_hours)
         if self._memories is None:
-            return _UserContext(text, None, local, persona=persona, life=life, bond=bond)
+            return _UserContext(text, None, local, persona=persona, life=life, bond=bond, mood=mood,
+                                himari_now=doing), persona_id
         notes = await self._memories.list_memories(scope.principal_id)
         episodes = await self._memories.recent_episodes(scope.principal_id, since=now - RECENT_DAYS,
                                                         besides=scope.conversation_id, limit=RECENT_EPISODES)
         count = await self._memories.count_episodes(scope.principal_id)
-        return _UserContext(text, notes, local, episodes, count, persona, life, bond)
+        return _UserContext(text, notes, local, episodes, count, persona, life, bond, mood, doing), persona_id
 
     async def _interface_at_acceptance(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
         snapshot = (await self._interfaces.read(scope, origin) if self._interfaces is not None
@@ -770,7 +801,24 @@ class Driver:
         projection = await self._log.project_model_output(
             scope, run_id, output, continuation=normalized.continuation
         )
+        if isinstance(output, AssistantFinal):
+            await self._keep_mood(scope, output.blocks)
         return projection.event
+
+    async def _keep_mood(self, scope: TrustedScope, blocks: Sequence[ContentBlock]) -> None:
+        """character-state §2 (S1): a final answer's last mood other than neutral becomes the turn's
+        persona's mood; an answer of neutral only leaves it. Best effort: the answer is committed."""
+        persona_id = self._turn_personas.get(scope.conversation_id)
+        if self._moods is None or persona_id is None:
+            return
+        mood = last_mood(blocks)
+        if mood is None:
+            return
+        try:
+            await self._moods.set_mood(scope.principal_id, persona_id, mood, source=MoodSource.REPLY,
+                                       at=self._clock())
+        except Exception:  # noqa: BLE001 — the answer stands whatever happens to the mood
+            _logger.warning("could not keep the mood of an answer in %s", scope.conversation_id, exc_info=True)
 
     async def _next_triggers(self, scope: TrustedScope) -> tuple[TriggerRef, ...]:
         """What the next Run would answer, from the persisted tail: the
@@ -1152,6 +1200,13 @@ PASS = "[[pass]]"
 
 def _text(blocks: Sequence[ContentBlock]) -> str:
     return "".join(b.text for b in blocks if isinstance(b, TextBlock))
+
+
+def last_mood(blocks: Sequence[ContentBlock]) -> str | None:
+    """character-state §2 (S1): the last mood other than neutral an answer shows (an
+    unknown name counts as neutral, V3-P83 §7.2), or None."""
+    moods = split_marks(_text(blocks), complete=True)[1]
+    return next((mood for _, mood in reversed(moods) if mood != "neutral"), None)
 
 
 def free_wake_verdict(normalized: NormalizedModelOutput, status: WakeStatus, *, live: bool) -> WakeStatus | None:

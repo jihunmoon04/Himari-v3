@@ -94,7 +94,9 @@ from himari.data.api import (
     BondStanding,
     BondTag,
     Episode,
+    HimariMood,
     LifeEntry,
+    live_mood,
     Persona,
     NoteDates,
     PassItemRecord,
@@ -170,9 +172,12 @@ from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.tools import McpConnection, PromptArgument, SourceStatus, connect
 from himari.prompt.api import (
     DOCUMENTS_READ_NOTE,
+    LIFE_READ_DAYS,
     ContextBudget,
+    HimariNow,
     SourceNote,
     SystemSpec,
+    doing_now,
 )
 from himari.prompt.system import base_instructions
 from himari.provider.api import ProviderAdapter
@@ -670,6 +675,14 @@ class LifeChanged(RuntimeError):
     """A fact added for a persona that is no longer the one chosen (§6)."""
 
 
+def quiet_hours(settings: ProactiveSettings) -> tuple[time, time] | None:
+    """character-state §3 (S2): HIMARI's sleeping hours are speaking first's quiet hours
+    (HIMARI_PROACTIVE_QUIET, whether or not HIMARI speaks first); None: no quiet hours."""
+    if settings.quiet_start is None or settings.quiet_end is None:
+        return None
+    return settings.quiet_start, settings.quiet_end
+
+
 def life_settings(provider: ProviderAdapter, *, life: bool, companion: bool, model_id: str | None, write_at: time,
                   daily_tokens: int, time_zone: str) -> tuple[LifeSettings | None, str]:
     """character-life §3 (L4): the story writer's settings, or None, and the status told
@@ -902,6 +915,7 @@ class Application:
                                                   for source, note in mcp.notes.items()],
                                     max_runs_per_drive=max_runs, turn_guidance=True, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory, life=life and companion,
+                                    quiet_hours=quiet_hours(speaking_first),  # character-state §3: asleep
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
                                     presence=presence, screen=screens,
@@ -1227,6 +1241,33 @@ class Application:
         """The user's choice of stage for the persona the page showed; LifeChanged as add_life_fact."""
         return await self.data.set_bond_stage(principal, await self._persona_shown(principal, persona_id), stage,
                                               expected_revision=revision)
+
+    # --- HIMARI's state (character-state v0.1 §2, §3) ------------------------------------------
+
+    async def _chosen_id(self, principal: PrincipalId) -> int:
+        chosen = await self.data.active_persona(principal)
+        return NO_PERSONA if chosen is None else chosen.persona_id
+
+    async def himari_state(self, principal: PrincipalId) -> tuple[HimariMood | None, HimariNow | None]:
+        """The chosen persona's mood while it is told and what HIMARI is doing now, as a turn
+        starting now sees them (the server's clock); (None, None) while the life is off."""
+        if not self.life_enabled:
+            return None, None
+        persona_id = await self._chosen_id(principal)
+        now = datetime.now(UTC)
+        local = now.astimezone(ZoneInfo(self.time_zone))
+        entries = await self.data.list_life(principal, persona_id,
+                                            since=(local.date() - LIFE_READ_DAYS).isoformat())
+        return (live_mood(await self.data.read_mood(principal, persona_id), now),
+                doing_now(entries, local, quiet_hours(self.proactive)))
+
+    async def current_mood(self, principal: PrincipalId) -> str | None:
+        """§2: the mood a device's character starts with — the chosen persona's while it is
+        told, else "neutral"; None while the life is off (no mood is kept)."""
+        if not self.life_enabled:
+            return None
+        mood = live_mood(await self.data.read_mood(principal, await self._chosen_id(principal)), datetime.now(UTC))
+        return "neutral" if mood is None else mood.mood
 
     # --- memory (V3-P71) ----------------------------------------------------------------
 

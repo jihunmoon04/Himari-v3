@@ -90,6 +90,8 @@ V22_UNDO = ("DROP INDEX life_writes_by_owner", "DROP TABLE life_writes", "DROP T
 # what v23 added (character-bond v0.1), undone
 V23_UNDO = ("DROP TABLE bond_stages", "ALTER TABLE life_entries DROP COLUMN month_day",
             "ALTER TABLE life_entries DROP COLUMN tag")
+# what v24 added (character-state v0.1), undone
+V24_UNDO = ("DROP TABLE himari_moods", "ALTER TABLE life_entries DROP COLUMN time_of_day")
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")

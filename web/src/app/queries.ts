@@ -69,7 +69,12 @@ export function usePrincipalEvents(enabled: boolean) {
         void client.invalidateQueries({ queryKey: keys.detail(conversation) });
       }
     };
-    return openStream("/api/events", ["hello", "activity", "job", "conversation"], ({ event, data }) => {
+    return openStream("/api/events", ["hello", "activity", "job", "conversation", "persona"], ({ event, data }) => {
+      if (event === "persona") {
+        // character-state §4: the persona changed (in an app, another tab): what depends on it is read again
+        for (const part of ["personas", "life", "bond"]) void client.invalidateQueries({ queryKey: ["settings", part] });
+        return;
+      }
       if (event === "hello") {
         // (re)connected: nothing is replayed, so whatever is open is read again
         refresh(null);

@@ -24,6 +24,7 @@
     <Compile Include="..\Himari.Companion\SleepPolicy.cs" Link="SleepPolicy.cs" />
     <Compile Include="..\Himari.Companion\TaskTracker.cs" Link="TaskTracker.cs" />
     <Compile Include="..\Himari.Companion\JobOrigin.cs" Link="JobOrigin.cs" />
+    <Compile Include="..\Himari.Companion\PersonaMenu.cs" Link="PersonaMenu.cs" />
     <None Include="..\Himari.Companion\Assets\character.json" Link="character.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

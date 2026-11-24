@@ -54,6 +54,7 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 - **[캐릭터 아키텍처와 로드맵](docs/character-architecture.md)** — 반려 캐릭터의 층(정체성·삶·관계·상태), 지킬 규칙, 단계별 로드맵(H-76)
 - **[히마리의 삶](docs/character-life-v0.1.md)** — 로드맵 1·2단계: 페르소나별 정사·일기·일정, 이야기 작가, 기억 정리의 `self`, Settings → Life(H-77)
 - **[관계](docs/character-bond-v0.1.md)** — 로드맵 3단계: 페르소나별 관계 정사·함께한 날·관계 단계, 기억 정리의 `bond`, 기념일 먼저 말 걸기, Settings → Life의 Bond(H-78)
+- **[상태](docs/character-state-v0.1.md)** — 로드맵 4단계: 이어지는 기분(`himari_mood`), 하루 리듬과 지금 하는 일(`himari_now`), 반려 앱 메뉴에서 페르소나 바꾸기(H-79)
 
 기준 문서:
 

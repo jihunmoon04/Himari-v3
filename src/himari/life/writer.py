@@ -6,11 +6,16 @@ the persona (or a default line), the persona's facts, its last diaries and the
 plans ahead, what HIMARI did with the user that day (the episodes, as ground
 only) and the date. The answer is checked whole: one thing out of shape and
 the call is thrown away (tried again at the next round, ATTEMPTS_PER_DAY a day).
+
+character-state v0.1 §2, §3: a plan may carry its start (``time``, HH:MM) and
+the answer HIMARI's mood at the day's end with why (``mood``). Both are
+optional extras: one out of shape is dropped alone, never the day.
 """
 
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import Any
@@ -19,6 +24,8 @@ from himari.common import EventId, JsonValue, TextBlock
 from himari.data.api import (
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
+    MAX_MOOD_REASON_CHARS,
+    MOOD_NAMES,
     LifeEntry,
     LifeKind,
     LifePlan,
@@ -58,11 +65,14 @@ WRITER_INSTRUCTIONS = (
     "comes first, then the facts, then the diaries. Keep to the date, the weekday and the season: HIMARI's time "
     "runs with the real one. Never invent anything done with the user: when the diary mentions the user, say only "
     "what the episodes say. Plans are what HIMARI will do alone in the next 7 days: 0 to 3, each a date after day "
-    "and one sentence. Facts are what this diary newly settles about HIMARI (a friend's name, a hobby it started, "
-    "a place it likes): 0 to 3, each one short sentence without a subject or a name, never one the facts already "
-    "hold.\n"
+    "and one sentence, with the time it starts (HH:MM, 24-hour) when the plan has one. Facts are what this diary "
+    "newly settles about HIMARI (a friend's name, a hobby it started, a place it likes): 0 to 3, each one short "
+    "sentence without a subject or a name, never one the facts already hold. Mood is how HIMARI feels at the end "
+    f"of the day, when the diary leaves it feeling something: one of {', '.join(sorted(MOOD_NAMES))}, with one "
+    "short reason in the diary's language; leave it out when the day leaves it calm.\n"
     'Answer with one JSON object only, like this example: {"diary": "...", "plans": [{"date": "YYYY-MM-DD", '
-    '"text": "..."}], "facts": ["..."]}. "plans" and "facts" may be empty.'
+    '"time": "HH:MM", "text": "..."}], "facts": ["..."], "mood": {"name": "...", "reason": "..."}}. "plans" and '
+    '"facts" may be empty; "time" and "mood" may be left out.'
 )
 
 
@@ -104,7 +114,8 @@ def request_data(persona: str, entries: Sequence[LifeEntry], episodes: Sequence[
         "persona": persona.strip() or DEFAULT_PERSONA,
         "facts": facts,
         "recent_days": [{"date": e.day, "diary": e.text} for e in reversed(diaries)],
-        "plans": [{"date": e.day, "text": e.text} for e in plans],
+        "plans": [{"date": e.day, **({"time": e.time_of_day} if e.time_of_day else {}), "text": e.text}
+                  for e in plans],
         "episodes": [{"when": f"{found.episode.started_at.astimezone(zone):%H:%M}-"
                               f"{found.episode.ended_at.astimezone(zone):%H:%M}", "text": found.episode.text}
                      for found in episodes[-DAY_EPISODES:]],
@@ -157,10 +168,41 @@ def _list(answer: Mapping[str, Any], key: str, most: int) -> list[Any]:
     return value
 
 
+def plan_time(value: object) -> str | None:
+    """character-state §3: a plan's start as HH:MM (a single-digit hour is padded), or
+    None when it is missing or out of shape (the plan stays, without a time)."""
+    if not isinstance(value, str):
+        return None
+    hour, sep, minute = value.strip().partition(":")
+    if not sep or not hour.isdigit() or not minute.isdigit() or len(hour) > 2 or len(minute) != 2:
+        return None
+    if int(hour) > 23 or int(minute) > 59:
+        return None
+    return f"{int(hour):02d}:{minute}"
+
+
+def answer_mood(value: object) -> tuple[str | None, str | None]:
+    """character-state §2: the day's end mood and why, or (None, None) when it is
+    missing, "neutral" or out of shape (the rest of the answer stays). A reason that
+    is not text, or too long, is left out and the mood kept."""
+    if not isinstance(value, dict):
+        return None, None
+    name = value.get("name")
+    if not isinstance(name, str) or name.strip().lower() not in MOOD_NAMES:
+        return None, None
+    reason = value.get("reason")
+    why = reason.strip() if isinstance(reason, str) and reason.strip() else None
+    if why is not None and (len(why) > MAX_MOOD_REASON_CHARS
+                            or any(unicodedata.category(c) in ("Cc", "Cs") for c in why)):
+        why = None
+    return name.strip().lower(), why
+
+
 def parse_answer(text: str, day: date) -> LifePlan:
     """§3's checks: the shape, the lengths, the counts and the plans' dates (in
     the PLAN_DAYS after ``day``). A code fence around the JSON is tolerated;
-    anything else out of shape is an AnswerError."""
+    anything else out of shape is an AnswerError — but a plan's time or the mood
+    out of shape is only left out (character-state §2, §3)."""
     body = text.strip()
     if body.startswith("```"):
         body = body.split("\n", 1)[1] if "\n" in body else ""
@@ -173,6 +215,7 @@ def parse_answer(text: str, day: date) -> LifePlan:
         raise AnswerError("the answer is not an object")
     diary = _text(answer.get("diary"), MAX_DIARY_CHARS, "the diary")
     plans: list[tuple[str, str]] = []
+    times: list[str | None] = []
     for raw in _list(answer, "plans", MAX_PLANS):
         if not isinstance(raw, dict):
             raise AnswerError("a plan is not an object")
@@ -184,8 +227,10 @@ def parse_answer(text: str, day: date) -> LifePlan:
         if planned is None or not day < planned <= day + timedelta(days=PLAN_DAYS):
             raise AnswerError(f"a plan's date {str(when)[:20]!r} is not in the {PLAN_DAYS} days after {day}")
         plans.append((planned.isoformat(), _text(raw.get("text"), MAX_LIFE_CHARS, "a plan")))
+        times.append(plan_time(raw.get("time")))
     facts = [_text(raw, MAX_LIFE_CHARS, "a fact") for raw in _list(answer, "facts", MAX_FACTS)]
-    return LifePlan(diary, tuple(plans), tuple(facts))
+    mood, reason = answer_mood(answer.get("mood"))
+    return LifePlan(diary, tuple(plans), tuple(facts), tuple(times) if any(times) else (), mood, reason)
 
 
 def answer_text(blocks: Sequence[object]) -> str:

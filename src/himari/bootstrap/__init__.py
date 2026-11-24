@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import time
 
 from himari.control.api import InterfaceSource, ModelCatalog, ModelOffer, PresenceSource
 from himari.control.driver import MAX_RUNS, Driver
@@ -77,6 +78,7 @@ def build_runtime(
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
     memory: bool = False,  # V3-P71: the memory Tools, the memory section and the notes in the state
     life: bool = False,  # character-life §5: HIMARI's life in the state and its rule (with the companion)
+    quiet_hours: tuple[time, time] | None = None,  # character-state §3 (S2): HIMARI is asleep in them; None: never
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
     time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
@@ -141,6 +143,8 @@ def build_runtime(
         memories=data if memory else None,
         life=data if spec is not None and spec.life else None,
         bond=data if spec is not None and spec.life else None,  # character-bond §5: told with the life
+        moods=data if spec is not None and spec.life else None,  # character-state §2: so is the mood
+        quiet_hours=quiet_hours,
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_guidance=turn_guidance,

@@ -89,6 +89,7 @@ from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
+from himari.prompt.api import HimariNow
 from himari.presence.api import (
     MAX_IDLE_SECONDS,
     ActivitySignal,
@@ -160,6 +161,8 @@ from himari.data.api import (
     Memory,
     Persona,
     PersonaChoice,
+    PersonaList,
+    HimariMood,
     MemoryCategory,
     MessageOrigin,
     OriginKind,
@@ -1012,9 +1015,26 @@ PERSONA_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 
 def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
     """character-life §6: one entry of HIMARI's life."""
-    return {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "text": entry.text,
-            "origin": entry.origin.value, "revision": entry.revision, "created_at": _time(entry.created_at),
-            "updated_at": _time(entry.updated_at)}
+    return {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "time": entry.time_of_day,
+            "text": entry.text, "origin": entry.origin.value, "revision": entry.revision,
+            "created_at": _time(entry.created_at), "updated_at": _time(entry.updated_at)}
+
+
+def mood_view(mood: HimariMood | None) -> dict[str, Any] | None:
+    """character-state §2: HIMARI's mood while it is told."""
+    return None if mood is None else {"mood": mood.mood, "set_at": _time(mood.set_at), "source": mood.source.value,
+                                      "reason": mood.reason}
+
+
+def now_view(now: HimariNow | None) -> dict[str, Any] | None:
+    """character-state §3: what HIMARI is doing now."""
+    return None if now is None else {"asleep": now.asleep, "doing": now.doing, "since": now.since}
+
+
+def device_personas_view(listed: PersonaList) -> dict[str, Any]:
+    """character-state §4 (H-45's exception): the personas' ids and names and the choice — never their text."""
+    return {"personas": [{"id": p.persona_id, "name": p.name} for p in listed.personas],
+            "choice": {"persona_id": listed.choice.persona_id, "revision": listed.choice.revision}}
 
 
 def bond_entry_view(entry: LifeEntry) -> dict[str, Any]:
@@ -1639,6 +1659,38 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         status, code, message = PERSONA_REFUSALS[error.code]
         return ApiError(status, code, message)
 
+    async def personas_changed(application: Application, who: PrincipalId) -> PersonaList:
+        """character-state §4: after any change to the personas or the choice, every device and the
+        Web follow the one chosen now (its id and name, never its text); the list as it is now."""
+        listed = await application.data.list_personas(who)
+        chosen = next((p for p in listed.personas if p.persona_id == listed.choice.persona_id), None)
+        application.presence.publish(who, "persona", {"persona_id": listed.choice.persona_id,
+                                                      "name": None if chosen is None else chosen.name,
+                                                      "revision": listed.choice.revision})
+        return listed
+
+    @app.get("/api/device/personas")
+    async def read_device_personas(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
+        """character-state §4 (H-45's narrow exception): the app's menu — the personas' ids and names and
+        the one chosen, never their text."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device reads personas here.")
+        return device_personas_view(await himari(request).data.list_personas(by.principal))
+
+    @app.put("/api/device/persona-choice")
+    async def choose_device_persona(body: PersonaChoiceBody, request: Request,
+                                    by: Caller = Depends(caller)) -> dict[str, Any]:
+        """character-state §4 (H-45's narrow exception): the app chooses a persona or none, from the
+        choice's revision it read; the menu as it is after."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device chooses a persona here.")
+        application = himari(request)
+        try:
+            await application.data.choose_persona(by.principal, body.persona_id, body.revision)
+        except DataError as error:
+            raise persona_refused(error) from None
+        return device_personas_view(await personas_changed(application, by.principal))
+
     @app.get("/api/personas")
     async def read_personas(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application = himari(request)
@@ -1650,37 +1702,48 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.post("/api/personas", status_code=201)
     async def add_persona(body: PersonaBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
         try:
-            return persona_view(await himari(request).data.create_persona(who, body.name, body.text))
+            made = await application.data.create_persona(who, body.name, body.text)
         except DataError as error:
             raise persona_refused(error) from None
+        await personas_changed(application, who)  # character-state §4: the apps' menus follow
+        return persona_view(made)
 
     @app.put("/api/personas/choice")  # before /{persona_id}, which would take "choice" for an id
     async def choose_persona(body: PersonaChoiceBody, request: Request,
                              who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """Used from each conversation's next turn; ``persona_id`` null: no persona."""
+        application = himari(request)
         try:
-            return choice_view(await himari(request).data.choose_persona(who, body.persona_id, body.revision))
+            chosen = await application.data.choose_persona(who, body.persona_id, body.revision)
         except DataError as error:
             raise persona_refused(error) from None
+        await personas_changed(application, who)
+        return choice_view(chosen)
 
     @app.put("/api/personas/{persona_id}")
     async def edit_persona(persona_id: int, body: PersonaEditBody, request: Request,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
         try:
-            return persona_view(await himari(request).data.update_persona(who, persona_id, body.name, body.text,
-                                                                          body.revision))
+            edited = await application.data.update_persona(who, persona_id, body.name, body.text, body.revision)
         except DataError as error:
             raise persona_refused(error) from None
+        await personas_changed(application, who)  # a new name for the menus
+        return persona_view(edited)
 
     @app.delete("/api/personas/{persona_id}")
     async def delete_persona(persona_id: int, revision: int, request: Request,
                              who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """The choice after: none when the persona deleted was the chosen one."""
+        application = himari(request)
         try:
-            return choice_view(await himari(request).data.delete_persona(who, persona_id, revision))
+            choice = await application.data.delete_persona(who, persona_id, revision)
         except DataError as error:
             raise persona_refused(error) from None
+        await personas_changed(application, who)
+        return choice_view(choice)
 
     # --- HIMARI's life (character-life §6): the chosen persona's, on the Web only (D4) ----------
 
@@ -1695,9 +1758,11 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         """The chosen persona's facts, and its plans and diaries of the last 30 days on."""
         application = himari(request)
         chosen, entries = await application.life(who)
+        mood, now = await application.himari_state(who)  # character-state §2, §3: as a turn would see them
         return {"persona": None if chosen is None else {"id": chosen.persona_id, "name": chosen.name},
                 "enabled": application.life_enabled,
                 "writer": {"running": application.life_writer is not None, "told": application.auto_life},
+                "mood": mood_view(mood), "now": now_view(now),
                 "entries": [life_entry_view(e) for e in entries],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS}}
 
@@ -2282,7 +2347,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
                 "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1,
-                             "screen_look": 1, "file_download": 1, "connection_generation": 1},
+                             "screen_look": 1, "file_download": 1, "connection_generation": 1,
+                             "persona_choice": 1},  # character-state §4: the app's persona menu
                 "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)
@@ -2383,10 +2449,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                     "revision": application.presence.signals_revision(by.principal)}
             elif subscription.connection_generation is not None:  # V3-P93 §6.1.1: this device stream's generation only
                 hello["connection_generation"] = subscription.connection_generation
+            # character-state §2: a device's character starts with HIMARI's mood now ("neutral": none)
+            mood = None if by.device is None else await application.current_mood(by.principal)
         except BaseException:
             application.presence.unsubscribe(subscription)
             raise
-        return _LiveResponse(event_stream.stream(subscription, hello, closing),
+        after = () if mood is None else (("mood", {"mood": mood}),)
+        return _LiveResponse(event_stream.stream(subscription, hello, closing, after=after),
                              lambda: application.presence.unsubscribe(subscription),
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
