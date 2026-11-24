@@ -51,6 +51,7 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 - **[지금 상태](docs/status.md)** — 한 쪽 요약: 구성, 동작하는 기능, 운영(배포·스키마), 확인하지 않은 것, 알려진 부채, 다음 후보
 - **[아키텍처](docs/architecture.md)** — 지금 구조: 앱·서버·Web, Run 반복, 서버 모듈, 반려 기능, Tool, 기억, 뺀 것
 - **[결정 기록](docs/decisions.md)** — 지금 유효한 결정(H 번호, 2026-11-24에 새로 매김)과 열린 문제. 옛 번호(`V3-…`)는 [옛 결정 기록](docs/archive/decisions-v3.md)에
+- **[캐릭터 아키텍처와 로드맵](docs/character-architecture.md)** — 반려 캐릭터의 층(정체성·삶·관계·상태), 지킬 규칙, 단계별 로드맵(H-76)
 
 기준 문서:
 
