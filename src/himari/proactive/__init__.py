@@ -8,6 +8,7 @@ Bootstrap reads Data, Presence and the Runner into a ``Situation``, asks
 
 from himari.proactive.rules import (
     CHECK_IN_WINDOW,
+    DAILY_KINDS,
     ENDED_FRESH,
     ENDED_GROUPS,
     EVENT_KINDS,
@@ -22,6 +23,7 @@ from himari.proactive.rules import (
     ProactiveSettings,
     Return,
     Situation,
+    anniversary_candidates,
     candidate_keys,
     candidates,
     decide,
@@ -39,6 +41,7 @@ from himari.proactive.rules import (
 
 __all__ = [
     "CHECK_IN_WINDOW",
+    "DAILY_KINDS",
     "ENDED_FRESH",
     "ENDED_GROUPS",
     "EVENT_KINDS",
@@ -53,6 +56,7 @@ __all__ = [
     "ProactiveSettings",
     "Return",
     "Situation",
+    "anniversary_candidates",
     "candidate_keys",
     "candidates",
     "decide",

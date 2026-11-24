@@ -1,6 +1,7 @@
 // Settings (V3-P102 W6c): one page, a section per kind, chosen on the left (above on a phone).
 import { NavLink, useParams } from "react-router";
 import { PageHeader } from "@/components/Shell";
+import { BondSettings } from "@/components/settings/Bond";
 import { DevicesSettings } from "@/components/settings/Devices";
 import { InstructionsSettings } from "@/components/settings/Instructions";
 import { LifeSettings } from "@/components/settings/Life";
@@ -12,7 +13,8 @@ import { cn } from "@/lib/cn";
 const SECTIONS = [
   { id: "instructions", label: "Instructions", body: <InstructionsSettings /> },
   { id: "personas", label: "Personas", body: <PersonaSettings /> },
-  { id: "life", label: "Life", body: <LifeSettings /> },
+  // character-bond §1: the bond with the persona in use, under its life
+  { id: "life", label: "Life", body: <div className="space-y-10"><LifeSettings /><BondSettings /></div> },
   { id: "memory", label: "Memory", body: <MemorySettings /> },
   { id: "devices", label: "Devices", body: <DevicesSettings /> },
   { id: "tools", label: "Tool servers", body: <ToolServerSettings /> },

@@ -45,7 +45,8 @@ is kept stays); on by default, used only with the companion on. The story
 writer uses the memory passes' model (``HIMARI_MEMORY_MODEL``) and writes
 after ``HIMARI_LIFE_WRITE_AT`` (HH:MM in ``HIMARI_TIME_ZONE``, default
 22:00), within ``HIMARI_LIFE_DAILY_TOKENS`` (default 200,000) per principal
-a day.
+a day. The bond (character-bond v0.1: its entries, stage and anniversary
+wakes) is on and off with it.
 
 Conversation search (V3-P72 §9): ``HIMARI_CONVERSATION_SEARCH=0`` turns
 conversation_search and conversation_read off; on by default.

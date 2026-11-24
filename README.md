@@ -53,6 +53,7 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 - **[결정 기록](docs/decisions.md)** — 지금 유효한 결정(H 번호, 2026-11-24에 새로 매김)과 열린 문제. 옛 번호(`V3-…`)는 [옛 결정 기록](docs/archive/decisions-v3.md)에
 - **[캐릭터 아키텍처와 로드맵](docs/character-architecture.md)** — 반려 캐릭터의 층(정체성·삶·관계·상태), 지킬 규칙, 단계별 로드맵(H-76)
 - **[히마리의 삶](docs/character-life-v0.1.md)** — 로드맵 1·2단계: 페르소나별 정사·일기·일정, 이야기 작가, 기억 정리의 `self`, Settings → Life(H-77)
+- **[관계](docs/character-bond-v0.1.md)** — 로드맵 3단계: 페르소나별 관계 정사·함께한 날·관계 단계, 기억 정리의 `bond`, 기념일 먼저 말 걸기, Settings → Life의 Bond(H-78)
 
 기준 문서:
 

@@ -140,6 +140,7 @@ def build_runtime(
         wakes=data,  # V3-P87: server-opened turns
         memories=data if memory else None,
         life=data if spec is not None and spec.life else None,
+        bond=data if spec is not None and spec.life else None,  # character-bond §5: told with the life
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_guidance=turn_guidance,

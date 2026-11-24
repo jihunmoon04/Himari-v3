@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 from himari.data.api import LifeEntry, LifeKind, LifeOrigin, PersistedStateBasis
 from himari.prompt.api import (
+    BOND_RULE,
     FREE_LIFE_NOTE,
     FREE_RULE,
     LIFE_ABOUT,
@@ -84,7 +85,7 @@ def test_the_runtime_state_has_himari_life_only_when_it_is_told() -> None:
 
 def test_the_companion_section_has_the_life_rule_after_the_persona_and_it_is_free() -> None:
     life = "\n\n".join(system_text(inputs(SystemSpec(companion=True, life=True, proactive=True))))
-    assert f"{PERSONA_RULE}\n{LIFE_RULE}\n{TALKING_RULE}" in life
+    assert f"{PERSONA_RULE}\n{LIFE_RULE}\n{BOND_RULE}\n{TALKING_RULE}" in life  # the bond's after it
     assert f"{FREE_RULE} {FREE_LIFE_NOTE}" in life
     assert "your own life (himari_life)" in life
     # owner 2026-11-25: she brings up her own life freely; no daily limit

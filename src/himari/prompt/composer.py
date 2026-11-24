@@ -68,8 +68,10 @@ class Composer:
                     history.append(replace(group, continuation=inputs.continuations.get(event.origin_run_id)))
                 case ToolResultRecord():
                     pass  # rendered inside its group, in ordinal order
-                case Wake():  # V3-P87 §8.1: a user-role line the server wrote
-                    history.append(UserTurn(event.event_id, (TextBlock(wake_text(event.payload, inputs.wake_notes)),),
+                case Wake():  # V3-P87 §8.1: a user-role line the server wrote (character-bond §6: a day's entry)
+                    days = {} if inputs.bond is None else {e.entry_id: e for e in inputs.bond.entries}
+                    history.append(UserTurn(event.event_id,
+                                            (TextBlock(wake_text(event.payload, inputs.wake_notes, days)),),
                                             wake=True))
         summary = read_summary(inputs.snapshot)
         snapshot_revision = None

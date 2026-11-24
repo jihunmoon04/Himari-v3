@@ -12,12 +12,15 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from himari.common import LEGACY_ASK_USER, PrincipalId, TrustedScope
 from himari.control.api import ControlError, DriveState, JobStatus
 from himari.control.driver import Driver
 from himari.control.runner import BackgroundRunner
 from himari.data.api import (
+    NO_PERSONA,
+    Anniversary,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -288,8 +291,9 @@ class ProactiveScheduler:
                  recent: Callable[[PrincipalId], Awaitable[ConversationSummary | None]],
                  zones: frozenset[str] = frozenset(), clock: Callable[[], datetime] = lambda: datetime.now(UTC),
                  poke: Callable[[float], None] = lambda after: None,
-                 free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None) -> None:
+                 free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None, bond: bool = False) -> None:
         self._data, self._hub, self._devices, self._runner = data, hub, devices, runner
+        self._bond = bond  # character-bond §6: the bond is told, so its anniversaries may open a wake
         self._inputs = inputs
         self.settings = settings
         self._zone = server_zone
@@ -352,15 +356,24 @@ class ProactiveScheduler:
             # however long it went on — read back to its start, or the step would fall to a taken key
             read_from = min(read_from, now - timedelta(seconds=device.task.for_seconds))
         wakes = await self._data.wakes_since(principal, read_from)
-        free_ok = recent is not None and self.settings.free_minutes > 0 and self._free_ok is not None \
+        # V3-P90 §7.5: a model checked for free wakes may take one that may pass (character-bond §6 too)
+        model_ok = recent is not None and self._free_ok is not None \
             and await self._free_ok(TrustedScope(principal, recent.conversation_id))
+        anniversaries: tuple[Anniversary, ...] = ()
+        bond_day = None
+        if self._bond and model_ok and device_id is not None:  # character-bond §6: the server's day, as a turn's
+            chosen = await self._data.active_persona(principal)
+            bond = await self._data.read_bond(principal, NO_PERSONA if chosen is None else chosen.persona_id,
+                                              now=now, zone=self._zone)
+            anniversaries, bond_day = bond.today, now.astimezone(ZoneInfo(self._zone)).date().isoformat()
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),
             last_user_message_at=await self._data.last_user_message_at(principal),
             working=bool(self._runner.running(principal)), unanswered_wake=unanswered,
             wakes=wakes, loops=loops, returned=self._returns.get(principal),
-            said=await self._said(principal, wakes), free_ok=free_ok), recent
+            said=await self._said(principal, wakes), free_ok=model_ok and self.settings.free_minutes > 0,
+            anniversaries=anniversaries, bond_day=bond_day), recent
 
     async def _said(self, principal: PrincipalId, wakes: Sequence[WakeRecord]) -> frozenset[str]:
         """PR #156 re-review P2-2: of the failed wakes, those whose turn left assistant

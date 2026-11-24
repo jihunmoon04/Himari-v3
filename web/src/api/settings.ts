@@ -74,6 +74,57 @@ export const addLifeFact = (text: string, personaId: number | null) =>
 export const editLife = (id: number, text: string, revision: number) => put<LifeEntry>(`/api/life/${id}`, { text, revision });
 export const deleteLife = (id: number, revision: number) => del<void>(`/api/life/${id}?revision=${revision}`);
 
+// The bond (character-bond §1): what is settled between the user and the persona in use, how close the two are, and
+// the memories' timeline (the bond's entries with the newest episodes).
+export type BondTag = "name" | "promise" | "joke" | "first" | "date";
+export const BOND_TAGS: BondTag[] = ["name", "promise", "joke", "first", "date"];
+export type BondStage = "new" | "familiar" | "close";
+export const BOND_STAGES: BondStage[] = ["new", "familiar", "close"];
+
+export interface BondEntry {
+  id: number;
+  tag: BondTag;
+  text: string;
+  month_day: string | null; // MM-DD for a date, null otherwise
+  origin: "conversation" | "user";
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BondStanding {
+  stage: BondStage;
+  since: string | null; // when it moved there; null: never moved
+  reason: string | null; // "b<id>" (an entry), "30d"/"90d" (days together) or "user"
+  revision: number; // 0: never stored
+}
+
+export type BondMemory =
+  | { kind: "bond"; id: number; at: string; tag: BondTag; text: string }
+  | { kind: "episode"; id: number; at: string; text: string; title: string | null };
+
+export interface Bond {
+  persona: { id: number; name: string } | null;
+  enabled: boolean; // whether the bond is told now (the companion and life are on)
+  stage: BondStanding;
+  together_days: number; // the first conversation's day is day 1; 0: no conversation yet
+  since: string | null; // YYYY-MM-DD of the first conversation
+  today: string[]; // today's anniversaries
+  entries: BondEntry[]; // names, promises, then the rest, newest first
+  memories: BondMemory[]; // newest first
+  limits: { entries: number; chars: number };
+}
+
+export const readBond = () => get<Bond>("/api/bond");
+/** ``personaId``: the persona the page shows (null for the default); refused with ``persona_changed`` as for life. */
+export const addBond = (tag: BondTag, text: string, monthDay: string | null, personaId: number | null) =>
+  post<BondEntry>("/api/bond", { tag, text, month_day: monthDay, persona_id: personaId });
+export const editBond = (id: number, tag: BondTag, text: string, monthDay: string | null, revision: number) =>
+  put<BondEntry>(`/api/bond/${id}`, { tag, text, month_day: monthDay, revision });
+export const deleteBond = (id: number, revision: number) => del<void>(`/api/bond/${id}?revision=${revision}`);
+export const setBondStage = (stage: BondStage, personaId: number | null, revision: number) =>
+  put<BondStanding>("/api/bond/stage", { stage, persona_id: personaId, revision });
+
 export type Category = "user" | "preference" | "project" | "reference" | "loop";
 export const CATEGORIES: Category[] = ["user", "preference", "project", "reference", "loop"];
 

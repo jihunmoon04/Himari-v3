@@ -12,6 +12,7 @@ marks ``DISPATCH_CLAIMED`` (before Provider send) and ``EXECUTION_CLAIMED``
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import mimetypes
@@ -193,6 +194,7 @@ class WakeKind(Enum):
     TASK_ENDED = "task_ended"  # V3-P90 §5.3: a game or a video that clearly ended
     FREE = "free"  # V3-P90 §7: no news — the same task went on; the model may pass
     TRY = "try"  # the operator's try (§11)
+    ANNIVERSARY = "anniversary"  # character-bond §6: a day to mark together; the model may pass
 
 
 @dataclass(frozen=True)
@@ -209,6 +211,11 @@ class WakeReason(DeepFrozen):
     late: bool = False  # REMINDER only: past its 24-hour window (§5.3)
     group: str | None = None  # TASK_ENDED (V3-P90 §5.3): "game" or "video"; FREE: the task's group
     step: int | None = None  # FREE (V3-P90 §6.2): which of the timer's steps, from 1
+    # ANNIVERSARY (character-bond §6): days together (100, 200, 300), years together, or a ``date``
+    # entry of the bond (its id only: the prompt reads its text when it draws the wake)
+    days: int | None = None
+    years: int | None = None
+    entry_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1483,9 +1490,14 @@ class WakeStatus(Enum):
         return self in (WakeStatus.OPENED, WakeStatus.SPEAKING)
 
 
+# V3-P90 §7.3, character-bond §6: what a wake may pass on — HIMARI's own openings with no news
+PASSABLE_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY})
+
+
 def free_wake(reasons: Sequence[WakeReason]) -> bool:
-    """V3-P90 §7.3: a wake whose reasons are all FREE — its own path (hidden until it speaks, may pass)."""
-    return bool(reasons) and all(r.kind is WakeKind.FREE for r in reasons)
+    """V3-P90 §7.3: a wake whose reasons are all FREE — its own path (hidden until it speaks, may pass).
+    character-bond §6: an anniversary takes the same path (it may pass too)."""
+    return bool(reasons) and all(r.kind in PASSABLE_KINDS for r in reasons)
 
 
 @dataclass(frozen=True)
@@ -1731,20 +1743,32 @@ class LifeKind(Enum):
     FACT = "fact"  # settled about HIMARI itself (canon)
     DIARY = "diary"  # one day's diary: one per persona and date
     PLAN = "plan"  # something ahead, on a date
+    BOND = "bond"  # character-bond §2: settled between the user and HIMARI (BondStore, never list_life)
 
 
 class LifeOrigin(Enum):
     """Who wrote an entry's current text."""
 
-    WRITER = "writer"  # the story writer
-    CONVERSATION = "conversation"  # a memory pass, from what HIMARI said of itself (§4)
+    WRITER = "writer"  # the story writer (never a bond entry, character-bond §2)
+    CONVERSATION = "conversation"  # a memory pass, from what HIMARI said of itself (§4) or what the two settled
     USER = "user"  # the Web's Settings → Life: automatic writes leave it alone
+
+
+class BondTag(Enum):
+    """character-bond §1: what a bond entry is."""
+
+    NAME = "name"  # what one calls the other ("앞으로 대장이라고 부를게")
+    PROMISE = "promise"  # a promise between the two
+    JOKE = "joke"  # a joke only the two share
+    FIRST = "first"  # something done together for the first time
+    DATE = "date"  # a day to mark every year (``month_day``)
 
 
 @dataclass(frozen=True)
 class LifeEntry(DeepFrozen):
     """One entry of a persona's life (§2). ``day`` (YYYY-MM-DD, the user's date)
-    only for a diary or a plan."""
+    only for a diary or a plan; ``tag`` only for a bond entry and ``month_day``
+    (MM-DD) only for a ``date`` one (character-bond §2)."""
 
     entry_id: int  # per principal, never given out again
     persona_id: int  # NO_PERSONA: the life of no chosen persona
@@ -1760,6 +1784,8 @@ class LifeEntry(DeepFrozen):
     source_conversation: ConversationId | None = None
     source_sequences: tuple[int, ...] = ()
     source: str | None = None
+    tag: BondTag | None = None
+    month_day: str | None = None
 
 
 class LifeChangeOp(Enum):
@@ -1803,7 +1829,7 @@ class LifeStore(Protocol):
                         since: str | None = None) -> tuple[LifeEntry, ...]:
         """The persona's live entries: every fact (the user's first, then newest
         first), then the plans and diaries dated ``since`` or later (None: all),
-        newest date first."""
+        newest date first. Never the bond (character-bond: BondStore.list_bond)."""
         ...
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
@@ -1917,6 +1943,170 @@ class LifeWriteLog(Protocol):
 
     async def list_life_writes(self, principal: PrincipalId, *, limit: int = 20) -> tuple[LifeWrite, ...]:
         """The newest first."""
+        ...
+
+
+# --- The bond (character-bond v0.1) -----------------------------------------------------
+
+MAX_BOND_CHARS = 300  # §2: a bond entry's text
+MAX_BOND_ENTRIES = 100  # §2: a persona's live bond entries; past it the oldest from a conversation retires
+BOND_FAMILIAR_DAYS = 30  # §4 (B3): days together that make it familiar
+BOND_CLOSE_DAYS = 90  # §4 (B3): days together that, with a promise or a first, make it close
+BOND_MILESTONES = (100, 200, 300)  # §1: the days together marked (then each year from the first day)
+
+
+class BondStage(Enum):
+    """§4: how close the two are — moved by what happens, never down by itself."""
+
+    NEW = "new"
+    FAMILIAR = "familiar"
+    CLOSE = "close"
+
+
+BOND_STAGES = (BondStage.NEW, BondStage.FAMILIAR, BondStage.CLOSE)  # in order
+
+
+@dataclass(frozen=True)
+class BondStanding(DeepFrozen):
+    """§2, §4: a persona's stage with the user. ``since``: when it moved there (None: never
+    moved); ``reason``: why — a bond entry (``b<id>``), days together (``30d``, ``90d``) or
+    the user's choice (``user``). ``revision`` 0: never stored."""
+
+    persona_id: int
+    stage: BondStage = BondStage.NEW
+    since: datetime | None = None
+    reason: str | None = None
+    revision: int = 0
+
+
+@dataclass(frozen=True)
+class BondChange(DeepFrozen):
+    """One ``bond`` decision of a memory pass (§3), checked by the memory module:
+    ADD carries the tag, the text and (a date) the month and day; UPDATE the
+    entry, the revision it was read at and its new tag, text and month and day;
+    RETIRE the entry and its revision. ``sequences``: the messages it rests on,
+    at least one of them the user's (B2)."""
+
+    op: LifeChangeOp
+    tag: BondTag | None = None
+    text: str | None = None
+    month_day: str | None = None
+    entry_id: int | None = None
+    expected_revision: int | None = None
+    sequences: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class Anniversary(DeepFrozen):
+    """§1, §6: a day to mark today — days together (``days``), years together
+    (``years``) or a ``date`` entry (``entry_id``, its text the ``name``)."""
+
+    name: str
+    days: int | None = None
+    years: int | None = None
+    entry_id: int | None = None
+
+    @property
+    def key(self) -> str:
+        """Which of the day's anniversaries (a wake key's end)."""
+        if self.years is not None:
+            return f"y{self.years}"
+        return f"d{self.days}" if self.days is not None else f"b{self.entry_id}"
+
+
+@dataclass(frozen=True)
+class BondSnapshot(DeepFrozen):
+    """§5: the bond with a persona as a turn sees it."""
+
+    standing: BondStanding
+    met_on: str | None  # YYYY-MM-DD: the principal's first conversation, in the zone read in (None: none)
+    together_days: int  # the first day is day 1 (0: no conversation yet)
+    entries: tuple[LifeEntry, ...] = ()  # the live bond entries, in list_bond's order
+    today: tuple[Anniversary, ...] = ()
+
+
+def together_days(met_on: date, today: date) -> int:
+    """B4: days together from the first conversation's day, which is day 1 (so day 100 is 99 days on)."""
+    return max(0, (today - met_on).days + 1)
+
+
+def _on_day(today: date, month: int, day: int) -> bool:
+    """A yearly day; the 29th of February is kept on the 28th in other years."""
+    if month == 2 and day == 29 and not calendar.isleap(today.year):
+        return (today.month, today.day) == (2, 28)
+    return (today.month, today.day) == (month, day)
+
+
+def anniversaries_on(today: date, met_on: date | None, entries: Sequence[LifeEntry]) -> tuple[Anniversary, ...]:
+    """§1: today's days to mark — 100, 200 or 300 days together, each year from the
+    first day, and the days of the ``date`` entries among ``entries``."""
+    found: list[Anniversary] = []
+    if met_on is not None:
+        days = together_days(met_on, today)
+        if days in BOND_MILESTONES:
+            found.append(Anniversary(f"{days} days together", days=days))
+        years = today.year - met_on.year
+        if years >= 1 and _on_day(today, met_on.month, met_on.day):
+            found.append(Anniversary(f"{years} year{'s' if years > 1 else ''} together", years=years))
+    for entry in entries:
+        if entry.tag is BondTag.DATE and entry.month_day is not None:
+            month, _, day = entry.month_day.partition("-")
+            if month.isdigit() and day.isdigit() and _on_day(today, int(month), int(day)):
+                found.append(Anniversary(entry.text, entry_id=entry.entry_id))
+    return tuple(found)
+
+
+class BondStore(Protocol):
+    """character-bond §2–§4: what is really settled between the user and HIMARI as a
+    persona (entries of kind BOND in the life's table, so ids, revisions and
+    LifeStore.retire_life are shared), and how close the two are. The principal
+    comes from the trusted entry point, never from model output. Errors as
+    LifeStore's, with TOO_LARGE past MAX_BOND_CHARS, INVALID_ARGUMENT also for a
+    month and day that is not MM-DD (a ``date`` needs one, other tags have none),
+    LIMIT_EXCEEDED at MAX_BOND_ENTRIES live entries all the user's."""
+
+    async def list_bond(self, principal: PrincipalId, persona_id: int) -> tuple[LifeEntry, ...]:
+        """The persona's live bond entries: names, then promises, then the rest; newest first within each."""
+        ...
+
+    async def add_bond(self, principal: PrincipalId, persona_id: int, tag: BondTag, text: str,
+                       month_day: str | None = None) -> LifeEntry:
+        """The user's entry (origin USER, revision 1). At MAX_BOND_ENTRIES the oldest
+        not the user's retires first."""
+        ...
+
+    async def edit_bond(self, principal: PrincipalId, entry_id: int, tag: BondTag, text: str,
+                        month_day: str | None = None, *, expected_revision: int) -> LifeEntry:
+        """The user's rewrite of a bond entry (its tag too): it becomes the user's.
+        NOT_FOUND for an entry that is not a live bond entry."""
+        ...
+
+    async def apply_bond_changes(self, principal: PrincipalId, persona_id: int, changes: Sequence[BondChange], *,
+                                 conversation: ConversationId, source: str, now: datetime) -> tuple[str, ...]:
+        """§3: a memory pass's ``bond`` decisions, in one transaction, each on its own:
+        ``applied``, or why not (``unknown``: not a live bond entry of this persona;
+        ``user_owned``; ``conflict``; ``duplicate``: the same tag and text are live;
+        ``full``; ``invalid``)."""
+        ...
+
+    async def bond_stage(self, principal: PrincipalId, persona_id: int) -> BondStanding:
+        """The persona's stage as stored, not moved (roadmap stage 5 reads it). NEW
+        at revision 0 when none is stored."""
+        ...
+
+    async def read_bond(self, principal: PrincipalId, persona_id: int, *, now: datetime,
+                        zone: str) -> BondSnapshot:
+        """§4, §5: the bond as a turn starting at ``now`` sees it, its dates in ``zone``:
+        the stage first moved up as far as what happened since it last moved
+        allows (never down), then the days together, the entries and today's
+        anniversaries."""
+        ...
+
+    async def set_bond_stage(self, principal: PrincipalId, persona_id: int, stage: BondStage, *,
+                             expected_revision: int) -> BondStanding:
+        """§4: the user's choice of stage, up or down (reason ``user``), compare-and-set
+        on the standing's revision (0: none stored). What moves it by itself
+        afterwards is only what happens after this."""
         ...
 
 

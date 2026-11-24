@@ -105,8 +105,16 @@ from himari.data.api import (
     MAX_DEVICES,
     MAX_MEMORIES,
     MAX_LIFE_FACTS,
+    MAX_BOND_ENTRIES,
     MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    BondChange,
+    BondSnapshot,
+    BondStage,
+    BondStanding,
+    BondTag,
+    anniversaries_on,
+    together_days,
     LifeChange,
     LifeChangeOp,
     LifeEntry,
@@ -192,7 +200,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -735,11 +743,26 @@ CREATE TABLE life_writes (
 ) STRICT;
 CREATE INDEX life_writes_by_owner ON life_writes (owner, created_at);
 """
+# v23 (character-bond v0.1 §2): a bond entry is a life entry of kind 'bond' with its tag and (a date) its
+# month and day; each persona's stage with its owner, when and why it last moved (no row: new).
+_V23_ADDITIONS = """
+ALTER TABLE life_entries ADD COLUMN tag TEXT;
+ALTER TABLE life_entries ADD COLUMN month_day TEXT;
+CREATE TABLE bond_stages (
+    owner TEXT NOT NULL,
+    persona_id INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    since TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    PRIMARY KEY (owner, persona_id)
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
-              _V22_ADDITIONS)  # what each version from v3 added
+              _V22_ADDITIONS, _V23_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1206,7 +1229,14 @@ def _life_entry(row: sqlite3.Row) -> LifeEntry:
     return LifeEntry(row["entry_id"], row["persona_id"], LifeKind(row["kind"]), row["day"], row["text"],
                      LifeOrigin(row["origin"]), row["revision"], datetime.fromisoformat(row["created_at"]),
                      datetime.fromisoformat(row["updated_at"]), source, tuple(json.loads(row["source_sequences"])),
-                     row["source"])
+                     row["source"], None if row["tag"] is None else BondTag(row["tag"]), row["month_day"])
+
+
+def _standing(persona_id: int, row: sqlite3.Row | None) -> BondStanding:
+    if row is None:
+        return BondStanding(persona_id)
+    return BondStanding(persona_id, BondStage(row["stage"]), datetime.fromisoformat(row["since"]), row["reason"],
+                        row["revision"])
 
 
 def _life_write(row: sqlite3.Row) -> LifeWrite:
@@ -2084,6 +2114,9 @@ class SqliteData:
         "DELETE FROM memory_pass_calls WHERE pass_id IN (SELECT pass_id FROM memory_passes WHERE conversation_id=?)",
         "DELETE FROM memory_passes WHERE conversation_id=?",
         "DELETE FROM wakes WHERE conversation_id=?",  # V3-P87 (its keys stay: what was said is not said again)
+        # character-bond §2: what the two settled in it rests on the user's words: it goes, as its notes do,
+        # unless the user has made it their own since
+        "DELETE FROM life_entries WHERE kind='bond' AND origin<>'user' AND source_conversation=?",
         # character-life §2: HIMARI's facts from it stay (its life, not the user's words); the link goes
         "UPDATE life_entries SET source_conversation=NULL, source_sequences='[]', source=NULL"
         " WHERE source_conversation=?",
@@ -2460,7 +2493,7 @@ class SqliteData:
     # --- LifeStore, LifeWriteLog (character-life v0.1 §2, §3) -----------------------------
 
     _LIFE_COLUMNS = ("entry_id, persona_id, kind, day, text, origin, revision, created_at, updated_at,"
-                     " source_conversation, source_sequences, source")
+                     " source_conversation, source_sequences, source, tag, month_day")
 
     def _live_entry(self, tx: _Tx, principal: PrincipalId, entry_id: object) -> LifeEntry:
         row = None if isinstance(entry_id, bool) or not isinstance(entry_id, int) else tx.one(
@@ -2483,20 +2516,21 @@ class SqliteData:
         tx.execute("INSERT INTO life_ids (owner, last_id) VALUES (?, ?)"
                    " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, entry.entry_id)
         tx.execute("INSERT INTO life_entries (owner, entry_id, persona_id, kind, day, text, origin, revision,"
-                   " created_at, updated_at, retired_at, source_conversation, source_sequences, source)"
-                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                   " created_at, updated_at, retired_at, source_conversation, source_sequences, source, tag,"
+                   " month_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
                    principal, entry.entry_id, entry.persona_id, entry.kind.value, entry.day, entry.text,
                    entry.origin.value, entry.revision, _timestamp(entry.created_at), _timestamp(entry.updated_at),
-                   entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source)
+                   entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
+                   None if entry.tag is None else entry.tag.value, entry.month_day)
         return entry
 
     @staticmethod
     def _rewrite_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
         tx.execute("UPDATE life_entries SET text=?, origin=?, revision=?, updated_at=?, source_conversation=?,"
-                   " source_sequences=?, source=? WHERE owner=? AND entry_id=?",
+                   " source_sequences=?, source=?, tag=?, month_day=? WHERE owner=? AND entry_id=?",
                    entry.text, entry.origin.value, entry.revision, _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
-                   principal, entry.entry_id)
+                   None if entry.tag is None else entry.tag.value, entry.month_day, principal, entry.entry_id)
         return entry
 
     @staticmethod
@@ -2522,7 +2556,7 @@ class SqliteData:
         since = None if since is None else rules.check_life_day(since)
         with self._tx() as tx:
             rows = tx.all(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
-                          " AND retired_at IS NULL AND (kind='fact' OR ? IS NULL OR day >= ?)",
+                          " AND retired_at IS NULL AND kind <> 'bond' AND (kind='fact' OR ? IS NULL OR day >= ?)",
                           principal, persona_id, since, since)
             return rules.order_life(_life_entry(r) for r in rows)
 
@@ -2709,6 +2743,141 @@ class SqliteData:
         with self._tx() as tx:
             return tuple(_life_write(r) for r in tx.all("SELECT * FROM life_writes WHERE owner=? ORDER BY seq DESC"
                                                         " LIMIT ?", principal, max(0, limit)))
+
+    # --- BondStore (character-bond v0.1 §2–§4) ---------------------------------------------
+
+    def _live_bond(self, tx: _Tx, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
+        return [_life_entry(r) for r in tx.all(
+            f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND kind='bond'"
+            " AND retired_at IS NULL", principal, persona_id)]
+
+    def _add_bond(self, tx: _Tx, principal: PrincipalId, entry: LifeEntry, *, dedupe: bool) -> LifeEntry | str:
+        """§2: a new bond entry within MAX_BOND_ENTRIES, or why not (``duplicate``, ``full``)."""
+        entries = self._live_bond(tx, principal, entry.persona_id)
+        if dedupe and rules.same_bond(entry.tag, entry.text, entries):
+            return "duplicate"
+        fits, retire = rules.bond_room(entries)
+        if not fits:
+            return "full"
+        if retire is not None:
+            self._retire_life(tx, principal, retire, entry.created_at)
+        return self._new_life(tx, principal, entry)
+
+    @staticmethod
+    def _stored_standing(tx: _Tx, principal: PrincipalId, persona_id: int) -> BondStanding:
+        return _standing(persona_id, tx.one("SELECT stage, since, reason, revision FROM bond_stages WHERE owner=?"
+                                            " AND persona_id=?", principal, persona_id))
+
+    @staticmethod
+    def _keep_standing(tx: _Tx, principal: PrincipalId, standing: BondStanding) -> None:
+        assert standing.since is not None and standing.reason is not None
+        tx.execute("INSERT INTO bond_stages (owner, persona_id, stage, since, reason, revision)"
+                   " VALUES (?, ?, ?, ?, ?, ?)"
+                   " ON CONFLICT (owner, persona_id) DO UPDATE SET stage=excluded.stage, since=excluded.since,"
+                   " reason=excluded.reason, revision=excluded.revision", principal, standing.persona_id,
+                   standing.stage.value, _timestamp(standing.since), standing.reason, standing.revision)
+
+    async def list_bond(self, principal: PrincipalId, persona_id: int) -> tuple[LifeEntry, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            return rules.order_bond(self._live_bond(tx, principal, persona_id))
+
+    async def add_bond(self, principal: PrincipalId, persona_id: int, tag: BondTag, text: str,
+                       month_day: str | None = None) -> LifeEntry:
+        persona_id = rules.check_life_persona(persona_id)
+        tag = rules.check_bond_tag(tag)
+        text = rules.check_life_text(LifeKind.BOND, text)
+        month_day = rules.check_month_day(tag, month_day)
+        now = datetime.now(UTC)
+        with self._tx() as tx:
+            added = self._add_bond(tx, principal, LifeEntry(0, persona_id, LifeKind.BOND, None, text, LifeOrigin.USER,
+                                                            1, now, now, tag=tag, month_day=month_day), dedupe=False)
+            if not isinstance(added, LifeEntry):
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_BOND_ENTRIES} bond entries, all yours")
+            return added
+
+    async def edit_bond(self, principal: PrincipalId, entry_id: int, tag: BondTag, text: str,
+                        month_day: str | None = None, *, expected_revision: int) -> LifeEntry:
+        tag = rules.check_bond_tag(tag)
+        text = rules.check_life_text(LifeKind.BOND, text)
+        month_day = rules.check_month_day(tag, month_day)
+        with self._tx() as tx:
+            entry = self._live_entry(tx, principal, entry_id)
+            if entry.kind is not LifeKind.BOND:
+                raise DataError(DataErrorCode.NOT_FOUND, f"no bond entry {entry_id}")
+            if expected_revision != entry.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+            return self._rewrite_life(tx, principal, dataclasses.replace(
+                entry, tag=tag, text=text, month_day=month_day, origin=LifeOrigin.USER, revision=entry.revision + 1,
+                updated_at=datetime.now(UTC)))
+
+    async def apply_bond_changes(self, principal: PrincipalId, persona_id: int, changes: Sequence[BondChange], *,
+                                 conversation: ConversationId, source: str, now: datetime) -> tuple[str, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            outcomes: list[str] = []
+            for change in changes:
+                outcome = rules.bond_change_outcome(change, self._live_bond(tx, principal, persona_id))
+                if outcome is not None:
+                    outcomes.append(outcome)
+                    continue
+                sequences = tuple(change.sequences)
+                if change.op is LifeChangeOp.RETIRE:
+                    self._retire_life(tx, principal, self._live_entry(tx, principal, change.entry_id), now)
+                    outcomes.append("applied")
+                    continue
+                tag = rules.check_bond_tag(change.tag)
+                text = rules.check_life_text(LifeKind.BOND, change.text)
+                month_day = rules.check_month_day(tag, change.month_day)
+                if change.op is LifeChangeOp.ADD:
+                    added = self._add_bond(tx, principal, LifeEntry(
+                        0, persona_id, LifeKind.BOND, None, text, LifeOrigin.CONVERSATION, 1, now, now, conversation,
+                        sequences, source, tag, month_day), dedupe=True)
+                    outcomes.append("applied" if isinstance(added, LifeEntry) else added)
+                    continue
+                entry = self._live_entry(tx, principal, change.entry_id)
+                self._rewrite_life(tx, principal, dataclasses.replace(
+                    entry, tag=tag, text=text, month_day=month_day, origin=LifeOrigin.CONVERSATION,
+                    revision=entry.revision + 1, updated_at=now, source_conversation=conversation,
+                    source_sequences=sequences, source=source))
+                outcomes.append("applied")
+            return tuple(outcomes)
+
+    async def bond_stage(self, principal: PrincipalId, persona_id: int) -> BondStanding:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            return self._stored_standing(tx, principal, persona_id)
+
+    async def read_bond(self, principal: PrincipalId, persona_id: int, *, now: datetime,
+                        zone: str) -> BondSnapshot:
+        persona_id = rules.check_life_persona(persona_id)
+        where = rules.check_zone(zone)
+        with self._tx() as tx:
+            standing = self._stored_standing(tx, principal, persona_id)
+            entries = rules.order_bond(self._live_bond(tx, principal, persona_id))
+            first = tx.one("SELECT MIN(created_at) AS at FROM conversations WHERE owner=?", principal)
+            met = None if first is None or first["at"] is None else \
+                datetime.fromisoformat(first["at"]).astimezone(where).date()
+            today = now.astimezone(where).date()
+            moved = rules.settle_stage(standing, entries, met, today, where, now)
+            if moved is not standing:
+                self._keep_standing(tx, principal, moved)
+            return BondSnapshot(moved, None if met is None else met.isoformat(),
+                                0 if met is None else together_days(met, today), entries,
+                                anniversaries_on(today, met, entries))
+
+    async def set_bond_stage(self, principal: PrincipalId, persona_id: int, stage: BondStage, *,
+                             expected_revision: int) -> BondStanding:
+        persona_id = rules.check_life_persona(persona_id)
+        if not isinstance(stage, BondStage):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no stage {stage!r}")
+        with self._tx() as tx:
+            current = self._stored_standing(tx, principal, persona_id)
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the stage is at revision {current.revision}")
+            chosen = BondStanding(persona_id, stage, datetime.now(UTC), "user", current.revision + 1)
+            self._keep_standing(tx, principal, chosen)
+            return chosen
 
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 
