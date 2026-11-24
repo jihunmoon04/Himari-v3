@@ -18,7 +18,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 지금 동작하는 기능
 
 - **대화와 실행:** Run = LLM 호출 1회, 한 턴은 `HIMARI_MAX_RUNS`(기본 12)에서 멈추고 Continue로 잇는다. 취소, 문맥 압축(자동·수동), 대화별 모델·추론 강도, OpenRouter 스트리밍, 원본 요청·응답 보존. 묻는 것은 답의 글로 한다. → [control-prompt-provider](control-prompt-provider-v0.1.md), [conversation-model](conversation-model-v0.1.md), [streaming](streaming-v0.1.md)
-- **Data:** SQLite(WAL) 하나, 스키마 v21(운영은 v20, 아래 운영 참고), 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
+- **Data:** SQLite(WAL) 하나, 스키마 v21, 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
 - **프롬프트:** 캐시 우선 순서, 반려 켬/끔 두 바탕 글, "지시는 시스템 글과 사용자 메시지뿐" 원칙, Current State(지금 시각·기기·활동·기억), 작업 진행 줄. → [prompt-composition](prompt-composition.md), [prompt-cleanup](prompt-cleanup-v0.1.md), [interface-capabilities](interface-capabilities-v0.1.md), [work-progress](work-progress-v0.1.md)
 - **파일:** 대화 폴더(`<데이터 폴더>/conversations/<id>`) 안에서만 읽고 쓰는 파일 Tool, 올리기·내려받기와 `present_file`, 이미지 입력, `read_document`(PDF·DOCX·XLSX·PPTX·HWPX, server sandbox). → [server-slim](server-slim-v0.1.md), [file-upload-download](file-upload-download-v0.1.md), [images](images-v0.1.md), [documents](documents-v0.1.md)
 - **MCP:** Streamable HTTP 서버, 허용 목록의 Tool, 대화별 켬/끔과 Settings의 기본값, 서버 안내문·리소스 Tool·`/` 프롬프트. → [mcp-context](mcp-context-v0.1.md), [mcp-defaults](mcp-defaults-v0.1.md)
@@ -31,9 +31,9 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 운영
 
 - 운영 서버: `rabbithole`. 서버는 loopback에 바인딩하고 TLS reverse proxy 뒤에 있다.
-- 마지막 배포: **V3-P109**(v3 #227, `176bed1`), 2026-11-24 19:24 KST. 그 뒤의 `main`은 배포하지 않았다.
-- DB 스키마: 운영은 **v20**. `main`의 v21(H-75, 옛 추상 정리)은 아직 배포하지 않았다. 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
-- 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기).
+- 마지막 배포: **H-75**(v3 #230, `d190852`), 2026-11-24 23:25 KST. 스키마 v21.
+- DB 스키마: **v21**. 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
+- 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기), [H-75](deployments/2026-11-24-v3-h75.md)(옛 추상 정리, v21).
 - 운영 서버에 남긴 것: 옛 대화 폴더 `/home/coder/HIMARI/conversations`, 옛 릴리스와 DB `.bak` 파일. 되돌릴 일이 없으면 소유자가 지운다.
 
 ## 확인하지 않은 것
@@ -55,7 +55,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 
 **캐릭터 로드맵**([character-architecture.md](character-architecture.md), H-76). 이 순서로 간다.
 
-0. **기반:** v21 배포(소유자 승인 뒤), V3-P108 실제 모델 확인, 페르소나 첫 양식(세계 접점·대사 예시)과 페르소나 규칙 강화, 캐릭터 시험 세트.
+0. **기반:** V3-P108 실제 모델 확인, 페르소나 첫 양식(세계 접점·대사 예시)과 페르소나 규칙 강화, 캐릭터 시험 세트.
 1. **일관성:** 페르소나별 삶 정사, 기억 정리가 HIMARI의 자기 주장을 정사로 모음.
 2. **삶:** 이야기 작가(밤마다 일기·일정), 먼저 말 걸기의 새 계기.
 3. **관계:** 관계 정사(호칭·약속·농담·처음), 기념일, 사건으로 넘어가는 관계 단계.
