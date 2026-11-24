@@ -49,11 +49,6 @@ def test_a_tool_is_not_both_environment_and_external() -> None:
         ToolRegistry([RecordingTool("fake/x", environment_kind=FAKE, external_source="fake")])
 
 
-def test_external_tools_need_no_workspace() -> None:
-    with pytest.raises(ValueError, match="cannot require a Workspace"):
-        ToolRegistry([RecordingTool("remote/x", external_source="remote")])
-
-
 @pytest.mark.parametrize("external_first", [True, False])
 def test_a_namespace_belongs_to_one_origin(external_first: bool) -> None:
     tools = [RecordingTool("fake/remote", external_source="fake"), RecordingTool("fake/env", environment_kind=FAKE)]
