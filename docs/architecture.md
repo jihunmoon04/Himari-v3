@@ -1,228 +1,159 @@
 # HIMARI v3 아키텍처
 
-> 상태: **설계 기준선**, 2026-10-13. 이 문서의 “확정”은 설계 방향에 대한 합의를 뜻하며 구현 완료를 뜻하지 않는다. 세부 스키마·함수 서명·명칭은 별도 확정 전까지 예시이다.
+> 상태: **현행 구조**, 2026-11-24 (V3-P106·V3-P108 기준). 2026-10-13 설계 기준선을 지금 코드에 맞춰 고쳐 썼다. 뺀 기능(작업 에이전트 쪽)은 §9에 모았고, 각 결정의 근거는 [결정 기록](decisions.md)에 있다. 세부 계약은 [통합 모듈 계약 기준서](contracts.md)와 각 설계 문서가 원본이다.
 
-## 1. 전체 실행 구조 — 확정
+## 1. 한눈에
+
+HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다.
+
+| 부분 | 위치 | 맡은 일 |
+| --- | --- | --- |
+| 몸 | `clients/windows/Himari.Companion` (C#/WPF) | 픽셀 캐릭터·말풍선·표정, 활동 신호, 화면, 단축키. 기기 토큰으로 서버와 짝지음 |
+| 두뇌 | `src/himari` (Python, FastAPI, 단일 프로세스) | 대화, 기억, 먼저 말 걸기, 기기·활동 파악, Tool 실행 |
+| 관리 도구 | `web/` (React+TypeScript) | 대화와 설정(Instructions·Personas·Memory·Devices·Tool servers·Trash) |
+| 작은 CLI | `src/himari/interfaces/cli` | 운영용 명령 |
 
 ```text
-User input
-    │
-    ▼
-Control (application / orchestration)
-    │  입력 및 진행 상황을 Data에 기록
-    ├──▶ Prompt ── Data의 원본·최신 문맥·설정 조회
-    │       │
-    │       ▼
-    │   Provider ── LLM 호출 정확히 1회 = Run
-    │       │
-    │       ▼
-    │    Data ── 해당 입출력 및 실행 관련 기록
-    │
-    └── 응답에 따라 분기
-         ├── final response ── 반복 종료
-         └── tool call      ── Tool 경로로 실행
-                  │   (ask_user = question: 반복 중단·사용자 입력 대기,
-                  │    사용자 응답이 그 call의 ToolResult가 됨 — V3-044)
-                  ▼
-               ToolResult
-                  │
-                  └── Data 기록 → 다음 Run
+Windows 반려 앱 ──┐                         ┌── OpenRouter (모델)
+Web ──────────────┼─ HTTP ─▶ HIMARI 서버 ───┼── MCP 서버 (stdio는 server sandbox 안)
+CLI ──────────────┘ (loopback 전용)         └── himari-runner (대화 폴더 파일, 별도 프로세스)
 ```
 
-- **Run은 하나의 LLM 호출**이다. 여러 호출의 집합을 Task로 정의하거나 Runtime이 Task 생명주기를 소유하지 않는다.
-- **Control**은 Run을 이어서 실행할지 결정하는 제어 모듈이다. Prompt, Provider, Tool, Data의 내부 구현은 소유하지 않는다.
-- **final response** 또는 **question**이면 Run 반복을 멈춘다. **question은 suspending Tool `ask_user` 호출**로 표현한다. 대기 중에는 Conversation lock을 해제하고, 사용자 응답이 원래 `call_id`의 ToolResult로 커밋된 뒤 다음 Run이 이어진다. 대기 여부는 영속 기록에서 파생하며 새 Task 계층은 없다(V3-044). `ask_user`와 다른 호출의 혼합은 P0에서 거부하는 안(V3-P15).
-- Tool 실패는 실패 `ToolResult`로 Data에 남아 다음 모델 입력에 반영된다. 기본 원칙은 **모델에 결과 전달(A)**이다. 모델의 판단을 대신하는 Runtime의 의미론적 자동 재시도/복구를 도입하지 않는다.
-- 호출 취소, 네트워크 단절, 미완료 tool call 재개, 한 Run의 다중 tool call 처리 등 제어의 예외 경로는 추후 계약화한다.
+- 서버는 평문 HTTP라 loopback에만 바인딩한다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 둔다.
+- 앱은 `GET /api/events`(사건 흐름)로 상태 변화를 받고, 자기가 보낸 메시지의 답과 표정은 그 대화의 `live`로 받는다([반려 1단계](companion-v0.1.md) §8).
 
-## 2. Data와 Conversation — 확정
+## 2. 한 턴의 실행 — Run 반복
 
-Data는 다음과 같이 서로 다른 성격의 정보를 관리한다.
+```text
+User input (Web·앱) 또는 wake (먼저 말 걸기)
+    │
+    ▼
+Control ── 입력을 Data에 기록
+    │
+    ├──▶ Prompt ── Data의 원본 이력·Snapshot·설정, Tool 카탈로그를 읽어 compose
+    │       ▼
+    │   Provider ── LLM 호출 정확히 1회 = Run (원본 요청·응답은 Data에)
+    │
+    └── 응답에 따라
+         ├── final response ── 턴 끝
+         └── tool call ── Tool 경로로 실행 → ToolResult를 Data에 기록 → 다음 Run
+```
+
+- **Run = LLM 호출 1회**(V3-001). Task/ManagerTurn 같은 상위 계층은 없다.
+- 한 턴은 **`HIMARI_MAX_RUNS`(기본 12) Run**에서 멈춘다(V3-P106). 멈춘 턴은 Web의 **Continue**로 잇는다. 실행 중인 턴의 취소(`/cancel`)는 있다.
+- 사용자에게 묻고 싶은 것은 **답의 글로 묻는다.** 사용자의 다음 메시지가 새 턴이다(질문 Tool `ask_user`는 V3-P106에서 뺐다).
+- **Tool 실패는 실패 ToolResult로 모델에 전달**한다. 그 뒤의 대응은 다음 Run에서 모델이 판단하며, Runtime의 숨은 의미론적 자동 복구는 없다.
+- **동시성:** 같은 Conversation의 실행은 프로세스 안 Conversation별 lock으로 직렬화한다. 크래시 후 중복은 Provider 송신·부작용 Tool 실행 직전의 영속 표시와 재시작 때의 UNKNOWN 처리(자동 재실행 없음)로 막는다(V3-045). 한 Run 안의 서로 충돌하지 않는 ToolCall은 병렬로 실행할 수 있다.
+
+예외 경로의 상세는 [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에 있다.
+
+## 3. 서버 모듈
+
+| 모듈 (`src/himari/…`) | 소유한 책임 | 소유하지 않는 책임 |
+| --- | --- | --- |
+| `control` | Run 반복·종료·취소, Tool 호출 오케스트레이션, 턴의 Run 상한 | Provider API 세부, DB 스키마, Tool 구현 |
+| `prompt` | 순수 함수 `compose(PromptInputs)`, loader, 시스템 글, 문맥 압축 | Conversation 원본 변경, Provider 전송 |
+| `provider` | 모델 API 통신(OpenRouter, 스트리밍·reasoning)·응답 정규화 | Run 반복 정책 |
+| `tool` | `ToolHandler` SPI, 카탈로그·디스패치, `ToolOutcome` 원자 커밋, Internal Tool(기억·대화 검색·화면) | Environment별 실행 방식 |
+| `data` | SQLite(WAL) 영속 저장, 원본 기록, Consumer별 공개 sub-port | 프롬프트 정책, 실제 파일 I/O |
+| `environment` | `EnvironmentPlugin` SPI. `machine` Environment가 대화 폴더 파일 Tool을 직접 제공 | Run 반복 |
+| `runner` | `himari-runner`: 사용자 권한으로 파일 연산을 하는 별도 프로세스(`runner.api`로만 닿음) | 그 밖의 HIMARI 코드(아무것도 import하지 않음) |
+| `sandbox` | server sandbox(Bubblewrap/Landlock, 네트워크 차단)와 시작 시 자체 검사 | 무엇을 실행할지의 판단 |
+| `documents`·`imaging` | 문서 읽기(`read_document`)·이미지 처리 worker, sandbox 안에서 | 대화 상태 |
+| `mcp` | 범용 MCP 클라이언트(Streamable HTTP·stdio), 프롬프트·리소스, External Tool 등록 | 효과 등급 판정(운영자가 `mcp.json`에 정함) |
+| `memory` | 대화가 잠잠해진 뒤 자동 기억·일화·열린 고리를 뽑는 worker([메모리 2단계](memory-v0.2.md)) | 대화의 Run |
+| `presence` | 기기 연결·지금 기기·활동 신호, 사건 흐름 허브(메모리에만) | 영속 저장 |
+| `proactive` | 먼저 말 걸기의 계기와 규칙(순수 함수, [v0.3](proactive-v0.3.md)) | 실행 주기(→ `bootstrap/schedule`) |
+| `interfaces` | Web 서버(라우트·보안·`event_stream`·`live`)와 CLI | 도메인 규칙 |
+| `bootstrap` | Composition Root: `Application.open`이 저장소를 열고 sandbox를 시작하고 플러그인을 등록해 공개 Port만 주입. 주기 작업(`schedule`: `proactive` 30초, `purge`) | 각 모듈의 내부 |
+
+### 3.1 계약과 확장 지점
+
+- **Contract-based Modular Architecture:** 모듈은 서로의 내부가 아니라 각자 `api.py`의 Protocol + frozen dataclass로만 닿는다. import-linter가 의존 방향을 강제한다([모듈 경계](module-boundaries.md)).
+- **확장 SPI(V3-040):** 새 Tool은 `ToolHandler`, 새 Provider는 `ProviderAdapter`, 새 Environment는 `EnvironmentPlugin` 하나를 구현해 Composition Root에 등록한다.
+- **Data Port는 Consumer별로 나뉜다(V3-039):** `ConversationLog`·`ArtifactStore`·`StateQuery` 등. 백엔드는 공유해도 계약 변경 단위는 sub-port다. 다른 모듈은 DB 테이블을 직접 읽거나 고치지 않는다.
+
+## 4. Data
 
 | 구분 | 원칙 |
 | --- | --- |
-| Conversation | 사용자 및 에이전트의 입력·출력을 **exact하게 보존**하는 원본 기록 |
-| Run / Execution Records | **모든 Run의 원본 Provider 요청·응답 전체**를 기본 보존. Tool 실행 원본 기록은 별도로 추적. 직렬화/보안/스트리밍 세부는 미결정 |
-| Conversation Tool Event | Memory 검색 결과 등은 exact ToolResult로, Plan/Note는 간결한 완료 Result로 기록 가능. Tool 실행 원본과 UI 표시는 별도 |
-| 최신 Prompt Snapshot | 압축 문맥과 이후의 exact 입력 데이터를 다음 호출에 사용하기 위한 **최신 상태 1개** |
-| Artifacts | Plan/Note처럼 별도로 조회·수정하는 지속 데이터. **원본은 Data의 conversation-scoped Artifact로 확정**. Schema/Revision/삭제 세부는 미정 |
-| Workspace Registry | 독립적인 Workspace의 식별과 연결에 필요한 메타데이터 |
-| Environment/Binding | Environment 활성화 및 Workspace 접근 관계의 메타데이터 |
-| Model/Reasoning 설정 | 모델·추론 강도 등 다음 요청 구성에 필요한 설정 및 provider가 제공한 사용량/continuation 자료 |
+| Conversation | 사용자와 HIMARI의 입력·출력을 **exact하게 보존**하는 원본 |
+| Run 원본 기록 | **모든 Run의 원본 Provider 요청·응답**(스트림은 SSE 바이트 그대로) |
+| Tool 실행 기록 | ToolCall 인자, 실행 사실과 결과. 원자 커밋은 Tool Dispatcher가 한다(V3-042) |
+| 최신 Prompt Snapshot | 압축 요약 + 이후 exact 입력. 대화별 **최신 1개**만 유지 |
+| 기억 | 메모(`user`·`preference`·`project`·`reference`), 일화, 열린 고리, 기억 작업의 원본 호출 |
+| 설정 | 대화별 모델·reasoning, Tool 서버 켬/끔, 페르소나, 기기 |
 
-- **원본 Conversation ≠ 가공된 Prompt.** Prompt가 압축/필터링한 데이터는 Conversation 원본을 덮어쓰지 않는다.
-- 최신 Prompt Snapshot은 누적 버전을 보관하는 로그가 아닌 **대체 가능한 단일 최신 상태**이다. 압축 요약과 최근 exact 항목을 포함하는 설계 방향으로 정했다.
-- **원본 Provider 요청·응답은 Run별로 모두 보존**한다. Snapshot은 최신 1개만 유지하더라도 Run별 원본 기록은 별도 데이터이며 이전 호출의 감사·재현을 지원한다. 실제 스트림/비밀 데이터 보존 방식은 추후 결정한다.
-- Conversation Events, Execution Records, Artifacts는 논리적으로 별도 계약이다. Data의 DB 엔진 또는 물리 테이블을 반드시 분리할 필요는 없다. [Data/Tool 설계](data-and-tools.md) 참조.
-- 다른 모듈은 DB 테이블을 직접 읽거나 수정하지 않고 **Data의 공개 조회/명령 계약**으로 접근한다.
+- **원본 ≠ 가공된 Prompt.** 압축해도 Conversation 원본과 Run 원본 기록은 바뀌지 않는다.
+- 삭제는 휴지통 → `HIMARI_TRASH_DAYS`일 뒤 영구 삭제다. 영구 삭제는 대화의 모든 기록과 대화 폴더, 그 대화에서 저장된 메모를 지운다([대화 삭제](conversation-delete-v0.1.md)).
+- 스키마를 올리기 전에 DB 백업을 만들고 검증한다. 실패하면 시작하지 않는다.
+- 상세: [Data Contract v0.2](data-contract-v0.2.md), [데이터·Tool·Artifact 설계](data-and-tools.md).
 
-## 3. Prompt — 캐시 우선 구성 (순서 확정)
+## 5. Prompt — 캐시 우선 구성
 
 ```text
-Stable Prefix             (고정 지시문 / 안정적인 Tool 정의)
+Stable Prefix             (시스템 글: 바탕·원칙·반려 절·페르소나·지시, Tool 정의)
     ↓
-Conversation             (압축된 과거 + 순서 유지한 exact Event / native Tool 그룹)
+Conversation             (압축 요약 + 순서를 지킨 exact Event / native Tool 그룹)
     ↓
-Current State             (활성 Environment/Workspace Binding, Plan/Note 등)
+Current State             (now, 지금 기기·활동, user_memory, 최근 일화·열린 고리, 인터페이스 능력)
     ↓
-Provider-specific config  (model/reasoning/continuation; 별도 API 필드)
+Provider 설정             (model · reasoning; 별도 API 필드)
 ```
 
-- **Stable Prefix → Conversation → Current State**를 선택했다. 현재 상태를 마지막에 두어 과거 프롬프트 접두부를 가능한 한 유지한다.
-- **Trigger는 원본 Event/이벤트 그룹에 대한 Run의 참조**이다. User input·ToolResult는 발생할 때부터 Data에 기록되며, 다음 Run에서 '이력으로 이동'시키거나 복제하지 않는다.
-- ToolCall과 대응 ToolResult는 하나의 논리적 그룹으로 인접하게 유지한다. 병렬 호출도 `call_id`와 원래 호출 순서로 구성하며, Provider native tool protocol을 위반하지 않는다.
-- **Reasoning token usage**는 실행 메타데이터다. 모델 설정 및 provider가 실제 반환한 opaque continuation과 분리한다. continuation은 임의의 프롬프트 끝 텍스트가 아니라 Provider Adapter가 네이티브 방식으로 다룬다.
-- 압축·컨텍스트 예산은 Prompt 내부 책임이다. Snapshot은 최신 1개를 대체하며 Conversation 원본과 Run raw 기록은 수정하지 않는다.
-- **CurrentState는 저장된 Activation/Binding/Settings, 현재 Plan/Note Artifact, 필요한 Environment 실시간 관측을 합성한 읽기 투영**이다. 자체적인 권한의 원본/Artifact가 아니다. DTO/일관성·기본 Binding 등 구체 계약은 [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md)에 정리했다.
-- Provider별 변환과 cache-control, 시스템/사용자 역할 부여, native tool/result 결합, continuation validation은 Provider Adapter 책임이다. **캐시 hit는 기대 효과이지 보장값이 아니다.**
+- 현재 상태를 마지막에 두어 앞쪽 접두부를 가능한 한 그대로 둔다. 캐시 hit는 기대 효과이지 보장값이 아니다.
+- 바탕 글은 반려 켬/끔 두 가지다. 반려가 켜져 있으면 Web에서 고른 **페르소나**가 모든 대화에 들어간다([반려 바탕과 여러 페르소나](companion-persona-v0.1.md)).
+- **지시가 되는 것은 시스템 글과 사용자의 메시지뿐이다.** Tool 결과, 파일, 기억, 창 제목, wake 사유 등은 정보일 뿐 지시가 아니다(V3-P89).
+- ToolCall과 그 결과는 provider-native 결합을 유지한다. Provider별 변환은 Provider Adapter의 책임이다.
+- 상세: [프롬프트 구성 계약](prompt-composition.md).
 
-세부 규칙은 [Prompt Composition Contract](prompt-composition.md)에 기록한다.
+## 6. 반려 기능
 
-## 4. Module 개요 — 확정된 책임 분리
+- **기기 짝짓기와 기기 토큰:** 좁은 권한의 토큰으로 앱이 서버에 붙는다. 서버는 기기마다 연결과 활동 신호를 보고 **지금 기기**를 정한다(`presence`).
+- **표정:** Tool이 아니라 답 안의 **`[[mood:이름]]`** 표시다. 서버가 떼어 `live`의 `moods`로 보낸다. 이름은 서버가 정한 고정 목록 8개다. 듣는 중·기다리는 중·말하는 중·졸림 같은 앱 자신의 상태는 앱이 사건을 보고 정한다.
+- **먼저 말 걸기(wake):** `bootstrap/schedule`이 30초마다 `proactive` 규칙으로 판단한다. 모든 wake는 깨어 있고 일하지 않는 지금 기기를 기다리며, 계기에 따라 조용함·대화 종료·간격·하루 개수 조건이 더해진다([v0.3](proactive-v0.3.md)).
+- **화면:** 앱이 보여 준 화면과 화면 Tool(`look_at_screen`). 확인된 모델에서만 쓴다([screen-tool-v0.1.md](screen-tool-v0.1.md)).
+- 상세: [반려 1단계](companion-v0.1.md), [활동 신호](activity-signals-v0.1.md).
 
-| 모듈 | 소유한 책임 | 소유하지 않는 책임 |
+## 7. Tool
+
+| 출처 | 예 | 특징 |
 | --- | --- | --- |
-| Control | Run 반복·종료 분기·Tool 호출 오케스트레이션, `ask_user` | Provider 세부 API, DB 스키마, 환경별 실행 메커니즘 |
-| Data | 영속 상태·원본 기록·조회/변경 계약. 공개 Port는 Consumer별 sub-port(V3-039) | 프롬프트 정책, 실제 명령 실행 |
-| Prompt | 모델 요청 입력 조립·컨텍스트 압축 (순수 `compose` + loader, V3-043) | Conversation 원본 변경, Provider 전송 |
-| Provider | 모델 API 통신·응답 정규화 | Tool의 환경별 실행, Run 반복 정책 |
-| Tool | `ToolHandler` SPI, 카탈로그·디스패치·스케줄링, `ToolOutcome` 원자 커밋 | 환경별 Workspace 수명·정책, 개별 Tool 구현 |
-| Environment | `EnvironmentPlugin` SPI. Workspace 접근 방식·실행 정책·**환경 전용 Tool 제공**(V3-041) | Workspace 자체의 수명 소유 |
-| Workspace (독립 자원, 별도 코드 모듈 아님) | Data의 Registry로 식별, Environment가 접근 | Environment에 수명을 종속시키지 않음 |
+| Internal | `memory_save`·`memory_forget`·`memory_search`, `conversation_search`·`conversation_read`, `look_at_screen` | Data 공개 API를 직접 사용 |
+| Environment (`machine`) | `machine/list_files`·`read_file`·`write_file`·`edit_file`·`delete_file`·`present_file`·`read_document` | `machine` Environment가 `tools()`로 제공. runner 경유 |
+| External (MCP) | `mcp.json`에 적은 서버의 Tool | 목록에 적은 Tool만 등록, 효과 등급(`read`·`scoped_write`·`unknown`)은 운영자가 정함, 대화마다 서버 켬/끔 |
 
-**확장 지점(V3-040):** 새 Tool은 `ToolHandler`, 새 Provider는 `ProviderAdapter`, 새 Environment는 `EnvironmentPlugin` 하나를 구현해 Composition Root에 등록하면 된다. 이 세 SPI를 내부 프로토콜보다 먼저 확정한다.
+- 모든 Tool은 같은 `ToolHandler` SPI를 구현하고 `ToolOutcome`만 반환한다.
+- **파일 범위:** 쓰기는 **대화 폴더**(사용자별 Root 아래 `conversations/<id>`)에만 한다. 읽기는 runner 사용자가 읽을 수 있는 곳에서 숨김 목록을 뺀 범위다([machine-workspace-v0.1.md](machine-workspace-v0.1.md), V3-P100).
+- **sandbox:** 문서·이미지 처리와 stdio MCP 서버는 server sandbox 안에서 돈다. 네트워크가 없고, HIMARI 데이터 폴더에는 닿지 못한다. 자체 검사를 통과하지 못하면 stdio 서버는 띄우지 않는다. `HIMARI_SANDBOX=0`으로 끈다.
 
-모듈의 실제 디렉터리명, 공유 타입의 구체화 및 객체 수명은 [모듈 경계](module-boundaries.md) 문서에서 제안 수준으로 다룬다.
+## 8. 기억
 
-## 5. Workspace와 Environment — 확정
+- **1단계(V3-P71):** 모델이 사용자가 말한 것만 `memory_save`로 저장한다. `user`·`preference`는 매 요청의 Current State에 들어가고(2,000자까지), 나머지는 검색한다.
+- **2단계(V3-P85):** 대화가 잠잠해진 뒤 `memory` worker가 싼 모델로 한 번 읽어 자동 기억·일화·열린 고리를 만든다. 자동 기억은 물러남(`retired_at`)으로 지우고 30일 안에 되살릴 수 있다. 최근 일화와 열린 고리는 Current State에 들어간다.
+- **대화 검색(V3-P72):** 지난 대화의 원문 회상은 메모리가 아니라 `conversation_search`가 맡는다.
+- 상세: [memory-v0.1.md](memory-v0.1.md), [memory-v0.2.md](memory-v0.2.md), [conversation-search-v0.1.md](conversation-search-v0.1.md).
 
-### 5.1 Workspace는 독립 자원
+## 9. 뺀 것
 
-- Workspace는 반드시 폴더가 아니다. 기본 제공 공간, 사용자 로컬 컴퓨터, 원격 컴퓨터/컨테이너 등 이종 형태를 지원한다.
-- Workspace는 Environment보다 길거나 짧게 존재할 수 있으며 **Environment의 비활성화가 Workspace의 삭제를 의미하지 않는다.**
-- 동일 Workspace를 둘 이상의 Conversation/Environment가 참조하는 것을 허용하는 방향이다.
-- Workspace의 구체적인 생성·삭제, 자원 소유자, 연결 방법은 별도 정책으로 결정한다.
+| 뺀 것 | 결정 |
+| --- | --- |
+| hub 중계·작업 콘솔, 작업 앱 | V3-P106 (V3-P102 hub 부분·V3-P103·V3-P104 철회) |
+| `run_command`와 명령용 sandbox(네트워크 프록시, cgroup) | V3-P106 |
+| 붙인·등록한 Workspace, Workspace Registry·Binding의 사용, 서버 파일 탐색기 | V3-P106 (`workspaces` 표는 스키마에 남지만 쓰지 않음) |
+| 질문 Tool `ask_user`, Pause, 남은 턴 닫기 | V3-P106 |
+| 턴의 토큰 예산·진척 없음·자리 비움 | V3-P106 (Run 상한 하나로) |
+| 붙인 Workspace 쓰기, `git_push` | V3-P100 |
+| MCP Apps | V3-P97 |
 
-### 5.2 Environment가 Workspace를 사용하는 방식
+범용 코딩 일은 Claude Code·Codex 같은 도구가 맡는다. 옛 Workspace/Environment/Binding 설계와 Pause 초안은 기록으로 남는다: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md), [Control Pause/Resume v0.1](control-pause-v0.1.md), [CurrentState Contract v0.1](current-state-contract-v0.1.md).
 
-- Environment는 Workspace **연결·접근·실행 방식**을 정의하는 모듈이다.
-- 하나의 Conversation에서 여러 Environment를 활성화할 수 있다.
-- 하나의 Environment는 여러 Workspace를 사용할 수 있다.
-- 하나의 실제 Workspace를 **서로 다른 Environment가 다른 권한/방법으로 다룰 수 있다.**
-- **Workspace 전용 소프트웨어 모듈을 두지 않는다.** Registry/Binding은 Data 계약, 연결/정책/실행은 Environment 계약으로 처리한다.
-- 최초 구체화 대상은 **Inside Environment**. 기본 Workspace에서 `inside/run_command`와 **OS Sandbox 적용**은 확정했으며, 승인 미도입·Conversation별 폴더 및 같은 사용자에게 허용된 다른 폴더 접근도 확정했다. Sandbox 구현 백엔드/실행 한도/실제 접근 정책은 추가 계약.
+## 10. v2로부터의 단순화
 
-### 5.3 Registry와 Binding — 채택한 설계 방향
+v3는 v2의 계층을 그대로 옮기지 않는다. Run 중심 실행 모델에는 Task/ManagerTurn 계층이 없다. Worktree, Git을 통한 Workspace 권한 정의, Work Apply/Discard, HumanDirection 전용 계층도 쓰지 않는다. v2의 구현·운영·데이터가 v3와 자동으로 호환된다고 가정하지 않는다.
 
-```text
-Workspace Registry
-    └── ws_A  (독립적 자원: 기본 작업 공간, 로컬 PC 등)
-          ▲                          ▲
-          │                          │
-Binding A (Inside, 접근 방식 A)  Binding B (Analysis, 접근 방식 B)
-          ▲                          ▲
-    Environment Inside          Environment Analysis
-          └─────── Conversation ─────┘
-```
+## 11. 호환성과 검증
 
-- **활성 Workspace/Environment는 Artifact가 아닌 운영 상태다.** Data에 Workspace Registry, Environment Activation/Instance, Workspace Binding, 기본 Workspace 선택 설정을 보관하고, Environment는 실제 연결 가능 여부를 별도로 판단한다.
-- `workspace_id`: Workspace 자체를 식별하는 불투명한 ID.
-- `environment_instance_id`: 활성화된 Environment 인스턴스를 식별하는 ID.
-- `binding_id`: 특정 Environment가 특정 Workspace에 접근하는 관계를 식별하는 ID.
-- **Binding은 Workspace 소유권이 아니다.** Binding 제거가 자원 삭제를 일으키지 않는다.
-- Binding은 연결 대상과 접근 설정의 기록이다. **실제 권한 판정은 실행 시점에 다시 수행**하며, Binding ID만으로 권한이 성립하지 않는다.
-- Binding을 Conversation 범위로 격리하는 것이 초기 권고안이지만 DB 컬럼, 공유/재사용 규칙, 비활성화 정책은 아직 확정 전이다.
-- Binding이 활성 상태더라도 로컬 PC가 오프라인일 수 있다. 저장된 관계와 현재 연결 가능 상태를 혼동하지 않는다.
-
-## 6. Tool 분류와 호출 — 확정
-
-**Tool의 Environment 소속 여부**와 **Workspace 요구 여부**는 서로 독립적이다.
-
-| 예시 | Environment 소속 | Workspace 필요 |
-| --- | --- | --- |
-| `inside/run_command` | Inside | **필수** |
-| `inside/read_file` | Inside | **필수** |
-| `inside/list_workspaces` | Inside | 불필요 |
-| `update_plan` | 비환경 Tool | 불필요 |
-| `memory_search` (가칭) | Memory Tool 계열 | 불필요 |
-
-Workspace를 요구하는 호출은 대상 Workspace를 지정해야 한다. **Tool 호출에서 실제로는 `binding_id`를 참조**하게 하는 방식을 권고한다. 그래야 Environment/Conversation 범위와 실행 정책을 중앙에서 검증할 수 있다.
-
-아래는 **개념 예시이며 확정 스키마가 아니다**.
-
-```json
-{
-  "tool": "inside/run_command",
-  "workspace_binding_id": "bind_A",
-  "arguments": {"command": "python main.py"}
-}
-```
-
-```json
-{
-  "tool": "update_plan",
-  "arguments": {"step": "Implement API", "status": "in_progress"}
-}
-```
-
-Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversation 적합성 → Workspace 연결·권한 확인 → 실행 → ToolResult 순서로 처리한다.
-
-### 6.1 Internal Tool과 Environment Tool
-
-- Tool은 최소한 **Internal Tool**(Memory/Plan/Note처럼 Data 공개 API 사용)과 **Environment Tool**(Inside 등 Environment의 Workspace 실행 계약 사용)을 구분하는 방향이다. 둘 다 같은 `ToolHandler` SPI를 구현하며, **Environment Tool은 해당 Environment 패키지가 `tools()`로 제공**한다(V3-041).
-- Environment 등록(V3-P19 제안): `EnvironmentPlugin`은 kind당 하나, `tools()`는 kind 수준 고정 목록이다. Conversation의 Tool 카탈로그에는 활성 Instance가 있는 kind의 Tool만 들어가고, 대상 Instance·Workspace는 `workspace_binding_id`로 해석해 `ToolContext`로 전달한다.
-- Tool 구현은 `ToolOutcome(model_result, artifact_mutations, …)`만 반환하고, Artifact 변경·ToolExecution 종결·Conversation Event의 원자 커밋은 Tool Dispatcher가 수행한다(V3-042).
-- Environment를 거칠 필요가 없는 Memory는 Data API에 직접 접근할 수 있지만 SQL/Repository private 구현에는 접근하지 않는다.
-- Workspace 요구 정책은 `None / Required / Default`로 구분하는 것을 권고한다. Outside 기본 Workspace를 암묵적으로 사용하는 Tool은 `None`과 다르다.
-- 외부 서비스 Connector는 세 번째 출처 **External Tool**로 정했다(V3-054). Workspace를 요구하지 않고, 효과 등급은 운영자가 정하며, 커넥터는 `common`·`tool.api`만 쓰는 최상위 플러그인 패키지다(V3-055·059, 첫 구현은 MCP).
-
-### 6.2 복수 ToolCall의 충돌 기준
-
-- 충돌하지 않는 여러 ToolCall은 병렬 실행 가능. 명령 문자열 동일 여부만으로 독립성을 판정하지 않는다.
-- 서로 다른 파일의 **검증된 범위 한정 수정**은 병렬 후보. 동일한 파일에 대한 쓰기 충돌 또는 같은 Workspace의 부작용 범위 불명 `run_command`는 기본 직렬 권고.
-- 병렬성 판단은 Binding ID가 아니라 Workspace/실제 공유 자원에 대한 효과를 기준으로 한다. 다른 Conversation에서도 같은 자원 충돌이 발생할 수 있다.
-- Tool/Environment가 검증 가능한 효과 범위를 제공하며 모델의 미검증 주장에 의존하지 않는다. 상세 Scheduler 계약은 아직 미결정.
-
-- **동일 Conversation의 실행 흐름과 Run은 직렬화**한다. P0는 프로세스 내 Conversation별 lock으로 **동시 실행**을 막고, **크래시 후 중복 실행**은 Provider 송신·부작용 Tool 실행 직전의 영속 표시와 재시작 시 UNKNOWN 처리(자동 재실행 없음)로 막는다. 분산 lease/fencing은 P2다(V3-045). 내부에서 독립적인 ToolCall의 병렬 처리는 허용된다.
-- Event는 종류별 불변 canonical payload, Plan/Note는 Data conversation-scoped Artifact, 모델 이력 재구성은 Prompt의 원본 선택·검증과 Provider의 native serialization으로 나눈다.
-
-자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.2](data-contract-v0.2.md)를 따른다.
-
-### 6.3 초기 기본 Workspace — Conversation별 폴더 + Sandboxed Command (확정 범위)
-
-- **우선순위:** HIMARI 제공 기본 Workspace에 채팅 업로드, 파일 생성·수정·제공과 **`inside/run_command`**를 처음부터 지원한다.
-- **기본 작업 위치:** **사용자별 공통 Workspace Root** 아래 Conversation마다 자체 기본 디렉터리를 갖는다. **같은 사용자에게 허용된 다른 Conversation 폴더도 접근 가능**하다. Conversation 폴더는 정리/기본 cwd의 개념이며, 서로의 OS 격리 경계가 아니다.
-- **보안:** `run_command`는 **OS Sandbox 안에서 실행하며 Sandbox 네트워크는 기본 차단**한다. 다른 사용자 Workspace, 앱 Data/secret/호스트 경로 접근은 차단하며 미지원 시 무격리 실행으로 대체하지 않는다. 인간 Approval과 Worktree 복제 격리는 이 초기 환경에서 요구하지 않는다. **향후 Web Search는 Sandbox의 네트워크를 열지 않고 별도 Tool로 설계 가능**하다.
-- **구조:** Data는 Registry/Binding/Conversation working-directory mapping 및 파일 메타데이터, Environment는 Sandbox 및 실제 파일 I/O, Tool은 구조화 파일 및 command Tool을 제공한다. Workspace 전용 소프트웨어 모듈은 없다.
-- **중요한 한계:** Sandbox는 현재 사용자의 Conversation들 간 파일 쓰기를 막지 않는다. `run_command`의 부작용 범위가 불명확하면 같은 Workspace의 다른 파일 작업과 충돌하는 것으로 처리한다.
-- **파일 원본:** 작업 파일의 현재 bytes는 Workspace가 원본이다. 생성/업로드 파일의 다운로드용 immutable published version을 별도로 관리하는 방안은 제안으로 유지한다. Plan/Note는 Data Artifact로 유지한다.
-- **미결정:** 사용자별 Root 정책 자체는 확정. 신뢰된 principal 식별/경로 매핑, Sandbox 백엔드 이식과 네트워크 차단 강제 검증, 정확한 리소스 제한, immutable file 버전 보존, 공유 폴더 삭제가 남았다.
-
-현행 상세 초안: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md). [v0.1](default-workspace-files-v0.1.md)은 이전 no-sandbox 구상의 기록이다.
-
-### 6.4 Pause/Resume 실행 경계 — 제안
-
-- 기존 Run raw 요청·응답과 ToolExecution 원본이 보존되어도 Control이 **어느 안전 경계에서 멈췄는지**는 별도 진행 상태가 필요하다.
-- `ConversationControlState`/ExecutionCursor를 Data에 보존하는 권고안에서는 Pause 요청 후 새 Run 또는 Tool 실행을 시작하지 않고, 이미 진행 중인 호출·효과는 가능한 범위에서 결과를 영속화한다.
-- 미실행 ToolCall은 pending 상태로 남아 Resume 시 먼저 처리하고, 완결된 ToolCall/ToolResult 그룹 이후에만 새로운 LLM Run을 호출한다.
-- `PAUSE_REQUESTED`와 실제 `PAUSED`, `WAITING_FOR_USER`, `COMPLETED`, 결과 불명/복구 필요 상태는 혼동하지 않는다. Pause 정책은 아직 사용자 확정이 아니다.
-
-관련 상세 초안: [Control Pause/Resume v0.1](control-pause-v0.1.md).
-
-## 7. Memory — 방향만 확정
-
-- Memory는 독립적인 특권 하위 시스템이 아니라 **Tool 인터페이스를 통해 호출**하는 방향이다.
-- Memory Tool은 필요할 때 Data를 읽고 관련 기억을 구성할 수 있다.
-- Memory 생성/수정/삭제 정책, 자동 삽입 여부, 권한 모델, 저장 스키마는 **미결정**이다.
-
-## 8. v2로부터의 단순화 방향
-
-v3는 v2의 계층을 그대로 이식하지 않는다. 현재 Run 중심 실행 모델에는 별도의 Task/ManagerTurn 계층이 없다. Worktree, Git을 통한 Workspace 권한 정의, Work Apply/Discard를 v3의 필수 아키텍처 구성요소로 사용하지 않는다. 특수 HumanDirection 전용 계층도 기본 전제로 두지 않는다.
-
-v2 기능의 필요성은 개별적으로 다시 판단한다. v2의 구현/운영/데이터가 v3와 자동 호환된다고 가정하지 않는다.
-
-## 9. 호환성과 검증
-
-공개 계약(타입·오류·순서·취소·권한 의미)을 유지하는 구현 교체가 다른 모듈의 수정을 요구하지 않도록 한다. 계약 자체를 바꾸거나 모듈이 실패할 때 전체 시스템까지 무조건 정상 운영한다고 **보장하지는 않는다**. 계약 테스트, import 의존성 검사, Fake 구현 교체 테스트로 이 원칙을 검증한다.
+공개 계약(타입·오류·순서·취소·권한 의미)을 지키는 구현 교체가 다른 모듈의 수정을 요구하지 않게 한다. 계약 테스트, import 의존성 검사, Fake 구현 교체 테스트로 검증한다. pytest는 계약이 바뀔 때만 전체를, 그 밖에는 바뀐 모듈만 돌린다([Pytest 운영 정책](testing-policy.md)).
 
 미해결 사항은 [open-questions.md](open-questions.md)를 따른다.
