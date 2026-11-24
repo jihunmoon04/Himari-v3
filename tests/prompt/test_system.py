@@ -10,7 +10,9 @@ from dataclasses import replace
 from himari.data.api import PersistedStateBasis
 from himari.prompt import api
 from himari.prompt.api import (
+    ABILITY_NOTE,
     COMPANION_HEAD,
+    EXPRESSION_RULE,
     MEMORY_SECTION,
     NOTES_HEADER,
     PERSONA_HEADER,
@@ -18,6 +20,7 @@ from himari.prompt.api import (
     PROGRESS_NOTE,
     SCREEN_MOVE_NOTE,
     SPEAKING_RULE,
+    TALKING_RULE,
     TURN_GUIDANCE,
     USER_INSTRUCTIONS_HEADER,
     PromptInputs,
@@ -96,6 +99,26 @@ def test_the_persona_rule_wins_over_an_earlier_voice_and_has_a_default() -> None
     assert "even where earlier replies in this conversation used another voice" in PERSONA_RULE
     assert "When there is none, speak warmly and plainly" in PERSONA_RULE
     assert PERSONA_RULE in text(inputs(companion_persona="")) and PERSONA_RULE in text(inputs(companion_persona="x"))
+
+
+def test_the_persona_rules_of_2026_11_25() -> None:
+    """companion-persona §14: what the live check of 2026-11-24 found, each answered by one fixed sentence."""
+    assert "without remarking on the change" in PERSONA_RULE  # a model apologised for the old voice
+    assert "saved memories give you another name" in PERSONA_RULE  # an old nickname from memory crept in
+    assert "do not repeat them word for word" in PERSONA_RULE  # example lines are a voice, not a script
+    assert "not like a service introducing itself" in PERSONA_RULE  # the default voice sounded like a service
+    assert "do not recite it when you talk about yourself" in COMPANION_BASE[0]  # "모르는 건 모른다고 말할게"
+    for base in (COMPANION_BASE[0], ASSISTANT_BASE[0]):
+        assert "Answer only in the language the user writes in" in base  # Chinese mid-answer
+    assert "Moods (only these)" in EXPRESSION_RULE  # [[mood:curious]]
+    assert "instead of reading the material aloud" in SPEAKING_RULE  # a failed file read out in ten sentences
+    on = text(inputs())
+    off = text(inputs(replace(ALL, companion=False), instructions=ASSISTANT_BASE))
+    # long Web answers with the companion on; the assistant keeps its own length
+    assert TALKING_RULE in on and TALKING_RULE not in off
+    assert on.index(PERSONA_RULE) < on.index(TALKING_RULE) < on.index(SPEAKING_RULE)
+    # tools that were not there, and retries it could not make, in both modes
+    assert ABILITY_NOTE in on and ABILITY_NOTE in off and "companion" not in ABILITY_NOTE.lower()
 
 
 def test_the_progress_note_has_no_coding_example() -> None:
