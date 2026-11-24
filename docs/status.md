@@ -31,9 +31,9 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 운영
 
 - 운영 서버: `rabbithole`. 서버는 loopback에 바인딩하고 TLS reverse proxy 뒤에 있다.
-- 마지막 배포: **H-75**(v3 #230, `d190852`), 2026-11-24 23:25 KST. 스키마 v21.
+- 마지막 배포: **페르소나 규칙 강화**(v3 #235, `d98bbca`), 2026-11-25 00:33 KST. 스키마 v21.
 - DB 스키마: **v21**. 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
-- 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기), [H-75](deployments/2026-11-24-v3-h75.md)(옛 추상 정리, v21).
+- 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기), [H-75](deployments/2026-11-24-v3-h75.md)(옛 추상 정리, v21), [페르소나 규칙](deployments/2026-11-25-v3-persona-rules.md)(2026-11-25).
 - 운영 서버에 남긴 것: 옛 대화 폴더 `/home/coder/HIMARI/conversations`, 옛 릴리스와 DB `.bak` 파일. 되돌릴 일이 없으면 소유자가 지운다.
 
 ## 확인하지 않은 것
@@ -55,7 +55,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 
 **캐릭터 로드맵**([character-architecture.md](character-architecture.md), H-76). 이 순서로 간다.
 
-0. **기반:** 페르소나 첫 양식(세계 접점·대사 예시)과 페르소나 규칙 강화([companion-persona §14](companion-persona-v0.1.md#14-페르소나-규칙-강화-2026-11-25), 배포 전).
+0. **기반:** 페르소나 첫 양식(세계 접점·대사 예시)과 페르소나 규칙 강화([companion-persona §14](companion-persona-v0.1.md#14-페르소나-규칙-강화-2026-11-25), 2026-11-25 배포). **남은 것: 소유자가 새 양식으로 써 보기.**
 1. **일관성:** 페르소나별 삶 정사, 기억 정리가 HIMARI의 자기 주장을 정사로 모음.
 2. **삶:** 이야기 작가(밤마다 일기·일정), 먼저 말 걸기의 새 계기.
 3. **관계:** 관계 정사(호칭·약속·농담·처음), 기념일, 사건으로 넘어가는 관계 단계.
