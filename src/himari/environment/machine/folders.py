@@ -54,8 +54,9 @@ TEMP_PREFIX = ".himari-"
 # Lower case only (Data makes "conv_<n>"): two ids never name one folder on a case-insensitive disk.
 _CONVERSATION_ID = re.compile(r"^[a-z0-9_-]{1,128}$")
 # Names Windows treats as devices, whatever follows a dot (V3-P109 review).
-_RESERVED = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10)),
-                       "conin$", "conout$"})
+_PORT_DIGITS = "0123456789¹²³"  # Windows also takes COM¹, COM², COM³ (and LPT) as devices
+_RESERVED = frozenset({"con", "prn", "aux", "nul", "conin$", "conout$",
+                       *(f"com{d}" for d in _PORT_DIGITS), *(f"lpt{d}" for d in _PORT_DIGITS)})
 _REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _BINARY = getattr(os, "O_BINARY", 0)
@@ -197,6 +198,14 @@ class ConversationFolders:
         if text.startswith("~"):
             raise FolderError(INVALID, "~ is not used here: paths are inside this conversation's folder, or "
                                        "relative to it")
+        if not _POSIX:
+            # Judged as written, before normalizing drops what Windows would read differently (V3-P109
+            # re-review): a drive-relative path ("D:notes") and every component as given.
+            drive, rest = os.path.splitdrive(text)
+            if drive and not os.path.isabs(text):
+                raise FolderError(INVALID)
+            if not all(_component_ok(part) for part in re.split(r"[\\/]", rest) if part not in ("", ".", "..")):
+                raise FolderError(INVALID)
         absolute = os.path.normpath(text if os.path.isabs(text) else os.path.join(folder, text))
         if not _inside(absolute, folder):
             raise FolderError(OUTSIDE)
@@ -390,9 +399,9 @@ class ConversationFolders:
             raise _error(error) from None
         try:
             try:
-                if _POSIX:
-                    os.fchmod(fd, mode)  # the umask does not take bits from a kept mode
                 fill(fd)  # type: ignore[operator]
+                if _POSIX:
+                    os.fchmod(fd, mode)  # after the write, which would clear set-id bits; the umask takes none
                 os.fsync(fd)
             finally:
                 os.close(fd)

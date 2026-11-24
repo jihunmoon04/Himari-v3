@@ -112,6 +112,7 @@ runner를 빼면 대화 폴더는 HIMARI가 직접 소유하고, 파일 Tool은 
 ## 7. 남는 Linux 의존과 다음 단계
 
 이 패킷 뒤에 서버에 남는 Linux 의존:
+
 - `data/sqlite.py`·`data/blobs.py`·`bootstrap/operator.py`·`mcp/config.py`·`documents/__init__.py`의 파일 잠금(`fcntl`)과 소유자·권한 검사(`geteuid`, 0600/0700), `O_NOFOLLOW`·`O_DIRECTORY`
 - 문서·이미지·Tool 스키마 worker의 `resource.setrlimit`
 - 문서·이미지 worker의 server sandbox(bubblewrap + Landlock)

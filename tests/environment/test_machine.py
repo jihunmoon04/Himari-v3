@@ -525,3 +525,34 @@ def test_paths_come_back_on_the_folders_own_spelling(env: MachineEnvironment, ro
     folder = asyncio.run(env.folder("c1", "conversations/c1"))
     assert env.folders.resolve(folder, f"{folder}/./a//b.txt") == os.path.join(folder, "a", "b.txt")
     assert env.folders.resolve(folder, ".") == folder
+
+
+@pytest.mark.parametrize("name", ["COM\u00b9", "lpt\u00b2.txt", "Com\u00b3"])
+def test_windows_superscript_ports_are_devices(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Re-review P2: Windows takes COM¹–COM³ and LPT¹–LPT³ as devices too."""
+    from himari.environment.machine import folders as folders_module
+
+    monkeypatch.setattr(folders_module, "_POSIX", False)
+    assert not folders_module._component_ok(name)
+
+
+@pytest.mark.parametrize("raw", ["a.txt./b.txt", "notes /x.txt", "sub/con/x.txt", r"sub\nul"])
+def test_windows_judges_the_path_as_written(env: MachineEnvironment, monkeypatch: pytest.MonkeyPatch,
+                                           raw: str) -> None:
+    """Re-review P2: each component is judged before normalizing could drop a trailing dot or space."""
+    from himari.environment.machine import folders as folders_module
+
+    folder = asyncio.run(env.folder("c1", "conversations/c1"))
+    monkeypatch.setattr(folders_module, "_POSIX", False)
+    with pytest.raises(FolderError):
+        env.folders.resolve(folder, raw)
+
+
+def test_set_id_bits_are_kept_too(env: MachineEnvironment, root: Path) -> None:
+    """Re-review P3: the kept mode is set after the write, which would clear a set-id bit."""
+    call(env, "write_file", path="tool.sh", content="a")
+    (root / "c1/tool.sh").chmod(0o2750)
+    if (root / "c1/tool.sh").stat().st_mode & 0o7777 != 0o2750:
+        pytest.skip("this filesystem does not keep a set-group-id bit")
+    call(env, "write_file", path="tool.sh", content="b")
+    assert (root / "c1/tool.sh").stat().st_mode & 0o7777 == 0o2750
