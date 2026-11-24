@@ -4,7 +4,7 @@
 >
 > 2026-10-13 · **초기 제품 범위는 Confirmed, 내부 스키마·수명·보호 장치는 Proposed**.
 >
-> 통합 문서: [contracts.md](contracts.md). 결정 기록: [decisions.md](decisions.md). v2 Phase 4A 기능을 그대로 이식하지 않고 **v3의 기본 Workspace 파일 기반부터 설계**한다.
+> 통합 문서: [contracts.md](../contracts.md). 결정 기록: [decisions-v3.md](decisions-v3.md). v2 Phase 4A 기능을 그대로 이식하지 않고 **v3의 기본 Workspace 파일 기반부터 설계**한다.
 
 ## 1. 명시적으로 결정된 범위
 

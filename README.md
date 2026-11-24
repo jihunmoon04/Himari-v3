@@ -2,7 +2,9 @@
 
 HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Windows 반려 앱(`clients/windows/Himari.Companion`)이 몸이고, 서버의 HIMARI가 대화·기억·먼저 말 걸기를 맡습니다. Web(`web/`)은 대화와 설정을 관리하는 도구입니다. 2026-11-23 결정(V3-P106)으로 hub 작업 콘솔, 작업 앱, 명령 실행, 붙인 폴더, 질문 Tool, 일시정지, 턴 예산 같은 작업 에이전트 기능을 걷어 냈습니다. 범용 코딩 일은 Claude Code·Codex 같은 도구가 맡습니다.
 
-## 구현 현황 (2026-11-23, V3-P106 기준)
+## 구현 현황 (2026-11-24)
+
+지금 상태(배포, 확인하지 않은 것, 부채, 다음 후보)는 [docs/status.md](docs/status.md)에 한 쪽으로 모았습니다.
 
 | 영역 | 있는 것 |
 | --- | --- |
@@ -14,13 +16,13 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 | 파일 | 올리기·내려받기, 이미지 입력, 문서 읽기(server sandbox), 대화 폴더(데이터 폴더 안, 그 대화 폴더에서만 읽고 씀, V3-P109) |
 | 인터페이스 | Web(React+TypeScript), Windows 반려 앱, 작은 CLI |
 
-뺀 것: hub 중계·작업 콘솔(V3-P102 hub 부분, V3-P103), 작업 앱(V3-P104), `run_command`와 명령용 sandbox, 붙인·등록한 Workspace, 서버 파일 탐색기와 파일 참조, `ask_user`, 일시정지, 토큰 예산·진척 없음·자리 비움. 자세한 목록은 [결정 기록](docs/decisions.md)의 V3-P106에 있습니다.
+뺀 것: hub 중계·작업 콘솔(V3-P102 hub 부분, V3-P103), 작업 앱(V3-P104), `run_command`와 명령용 sandbox, 붙인·등록한 Workspace, 서버 파일 탐색기와 파일 참조, `ask_user`, 일시정지, 토큰 예산·진척 없음·자리 비움. 자세한 목록은 [옛 결정 기록](docs/archive/decisions-v3.md)의 V3-P106에, 빠진 기능의 설계는 [보관 문서](docs/archive/README.md)에 있습니다.
 
 > 설계 원칙: **Contract-based Modular Architecture** — 모듈은 서로의 내부 구현에 의존하지 않고, 명시된 계약을 유지하는 범위에서 독립적으로 수정·교체할 수 있어야 합니다.
 
 ## 결정된 핵심 방향
 
-전체 구조는 [아키텍처](docs/architecture.md)에 있습니다.
+전체 구조는 [아키텍처](docs/architecture.md)에, 지금 유효한 결정은 [결정 기록](docs/decisions.md)에 있습니다. 아래 괄호의 `V3-…` 번호는 [옛 결정 기록](docs/archive/decisions-v3.md)의 번호입니다.
 
 - **Run = LLM 호출 1회**. Control이 Run 반복을 조정하며, 모델의 final response에서 반복을 중단하고, 한 턴은 `HIMARI_MAX_RUNS`(기본 12) Run에서 멈춥니다. 사용자에게 묻고 싶은 것은 답의 글로 묻고, 사용자의 다음 메시지가 새 턴이 됩니다(V3-P106에서 질문 Tool `ask_user` 제거; 기록에 남은 대기 중 질문은 다음 메시지에서 취소로 닫힘). v2의 Task/ManagerTurn 계층을 v3의 실행 기본 단위로 가져오지 않습니다.
 - **Data**는 Conversation의 원본 입력·출력을 exact하게 보존합니다. Prompt는 Data를 가공해 다음 모델 입력을 만들고, **최신 Prompt Snapshot 1개**(압축 문맥 + 최근 exact 입력 데이터)만 유지합니다. **모든 Run의 원본 Provider 요청·응답**도 기록합니다.
@@ -44,30 +46,37 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 
 ## 문서
 
-- **[통합 모듈 계약 기준서](docs/contracts.md)** — 모듈별 계약, Owner/Provider/Consumer, Source of Truth, 선언 위치, 상태 및 의존성 (주요 진입점)
+먼저 읽을 것:
+
+- **[지금 상태](docs/status.md)** — 한 쪽 요약: 구성, 동작하는 기능, 운영(배포·스키마), 확인하지 않은 것, 알려진 부채, 다음 후보
 - **[아키텍처](docs/architecture.md)** — 지금 구조: 앱·서버·Web, Run 반복, 서버 모듈, 반려 기능, Tool, 기억, 뺀 것
+- **[결정 기록](docs/decisions.md)** — 지금 유효한 결정(H 번호, 2026-11-24에 새로 매김)과 열린 문제. 옛 번호(`V3-…`)는 [옛 결정 기록](docs/archive/decisions-v3.md)에
+
+기준 문서:
+
+- [통합 모듈 계약 기준서](docs/contracts.md) — 모듈별 계약, Owner/Provider/Consumer, Source of Truth, 선언 위치 (Inside·`run_command` 등 옛 내용이 섞여 있음; 어긋나면 결정 기록이 우선)
 - [모듈 경계 및 계약](docs/module-boundaries.md) — 의존성 규칙, 인터페이스, 계약 검증
 - [프롬프트 구성 계약](docs/prompt-composition.md) — Cache-first 순서, Trigger 참조, Tool 그룹, Reasoning/Provider 매핑
-- **[Control–Prompt–Provider v0.1 경계 초안](docs/control-prompt-provider-v0.1.md)** — 한 Run의 네이티브 요청·응답, ToolCall 배리어, final/question 종료 및 재개
+- [Control–Prompt–Provider v0.1](docs/control-prompt-provider-v0.1.md) — 한 Run의 네이티브 요청·응답, ToolCall 배리어 (질문·Pause 부분은 V3-P106에서 빠짐)
 - [데이터·Tool·Artifact 설계](docs/data-and-tools.md) — 원본 실행 기록, Conversation, Artifact, 병렬 실행
-- **[Data Contract v0.2 독립 검수 후보](docs/data-contract-v0.2.md)** — kind별 Event, Run/Tool 상태 전이, raw 저장, 트랜잭션·원자성, Data 공개 Port
-- [Data Contract v0.1 이전 초안](docs/data-contract-v0.1.md) — 초기 원칙·설계 근거
-- [CurrentState Contract v0.1 초안](docs/current-state-contract-v0.1.md) — 활성 Environment·Workspace Binding·Artifact의 읽기 투영 및 최신 상태 검증 (검토 전; Binding 부분은 V3-P106 이전 설계, 기록으로 남김)
-- [기본 Workspace·파일/명령 실행 계약 v0.2](docs/default-workspace-files-v0.2.md) — Conversation별 폴더, 다른 대화 폴더 접근, 파일 생성 (Sandboxed `run_command` 부분은 V3-P106에서 제거됨, 기록으로 남김)
-- [Sandbox Execution v0.1 검토 초안](docs/sandbox-execution-v0.1.md) — v2 Bubblewrap/Landlock 기반 재설계, 사용자별 Root, 네트워크 기본 차단
-- [Sandbox Implementation v0.2 검토 초안](docs/sandbox-implementation-v0.2.md) — v2 코드 이식 지도, Environment 공개 계약, Sandbox 활성화·검증 및 bounded 명령 실행
-- **[Pytest 운영 정책](docs/testing-policy.md)** — 계약 변경에만 전체 pytest, 그 외에는 변경 모듈별 pytest (확정 V3-038)
-- [MCP Apps 1단계 설계 초안](docs/mcp-apps-v0.1.md) — MCP 서버가 준 Tool 화면을 sandbox에서 읽기 전용으로 표시(V3-P58). **제거됨(V3-P97)**, 기록으로 남김
-- [MCP stdio 지원](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 server sandbox 안의 격리 프로세스로 실행, Sandbox 모듈 분리(V3-P59). **stdio 실행은 제거됨(V3-P109)**, Sandbox 분리는 남음
-- [MCP 서버의 안내문·프롬프트·리소스](docs/mcp-context-v0.1.md) — 서버 안내문을 시스템 영역에, 프롬프트는 사용자가 `/`로, 리소스는 모델용 읽기 Tool로(V3-P60, 설계 초안)
-- [한 턴의 예산과 비용](docs/control-run-budget-v0.1.md) — (V3-P106에서 Run 상한 하나로 바뀜) 원래는 토큰 예산·진척 없음·자리 비움이 한 턴을 지킴; 남은 예산 알림, 사용량 표시, 대화별 캐시 경로(V3-P62)
-- [대화 삭제와 업그레이드 백업](docs/conversation-delete-v0.1.md) — 휴지통 → N일 뒤 영구 삭제, 대화 폴더도 함께, 외부 서버 데이터는 알림만; DB 업그레이드 전 백업과 되돌리기(V3-P65)
-- **[반려 에이전트 1단계](docs/companion-v0.1.md)** — Windows 앱(몸, 로컬 에이전트가 만듦)과 서버의 HIMARI(두뇌), 기기 짝짓기와 좁은 권한의 기기 토큰, 모든 대화의 지금 시각, 지금 기기, 답 안의 표정 표시(V3-P83, 설계 초안)
-- [먼저 말 걸기 간략화](docs/proactive-v0.3.md) — 잠든 캐릭터를 알림으로 깨우지 않음, 조절 규칙 세 단계, 자유 wake는 30분 한 간격·하루 10개(V3-P107)
-- **[서버 줄이기](docs/server-slim-v0.1.md)** — `himari-runner`를 빼고 대화 폴더를 데이터 폴더 안으로, 파일 Tool은 대화 폴더에서만, stdio MCP 제거(V3-P109)
-- **[반려 바탕과 여러 페르소나](docs/companion-persona-v0.1.md)** — 바탕을 반려 켬/끔 두 글로(범용 에이전트 철회), 페르소나를 여러 개 저장하고 Web에서 하나를 골라 모든 대화에(V3-P108, 설계 초안)
-- [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
-- [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
+- [Data Contract v0.2](docs/data-contract-v0.2.md) — kind별 Event, Run/Tool 상태 전이, raw 저장, 트랜잭션·원자성, Data 공개 Port ([v0.1](docs/data-contract-v0.1.md)은 그 바탕 원칙)
+- [Pytest 운영 정책](docs/testing-policy.md) — 계약 변경에만 전체 pytest, 그 외에는 변경 모듈별 pytest
+
+기능별 설계 (지금 있는 기능):
+
+- 대화와 실행: [대화별 모델](docs/conversation-model-v0.1.md), [스트리밍](docs/streaming-v0.1.md), [작업 진행 줄](docs/work-progress-v0.1.md), [대화 삭제와 업그레이드 백업](docs/conversation-delete-v0.1.md)
+- 프롬프트: [프롬프트 정비](docs/prompt-cleanup-v0.1.md), [인터페이스 능력과 반려 파일 수신](docs/interface-capabilities-v0.1.md), [사용자 지시문](docs/user-instructions-v0.1.md), [반려 바탕과 여러 페르소나](docs/companion-persona-v0.1.md)
+- 파일: [서버 줄이기(대화 폴더)](docs/server-slim-v0.1.md), [파일 올리기·내려받기](docs/file-upload-download-v0.1.md), [이미지](docs/images-v0.1.md), [문서 읽기](docs/documents-v0.1.md)
+- MCP: [서버의 안내문·프롬프트·리소스](docs/mcp-context-v0.1.md), [Settings의 기본값](docs/mcp-defaults-v0.1.md)
+- 반려: [반려 1단계](docs/companion-v0.1.md), [화면 보여 주기](docs/companion-screen-v0.1.md), [화면 도구](docs/screen-tool-v0.1.md), [활동 신호](docs/activity-signals-v0.1.md), [캐릭터 애니메이션](docs/companion-animation-v0.1.md), [앱의 답 준비 표시](docs/windows-reply-progress.md), [모델 카탈로그](docs/openrouter-model-catalog.md)
+- 먼저 말 걸기: [v0.3 간략화](docs/proactive-v0.3.md)(지금 규칙), [v0.2](docs/proactive-v0.2.md)·[v0.1](docs/proactive-v0.1.md)(나머지 세부)
+- 기억: [메모리 1단계](docs/memory-v0.1.md), [메모리 2단계](docs/memory-v0.2.md), [대화 검색](docs/conversation-search-v0.1.md)
+- Web: [Web 다시 디자인](docs/web-console-v0.1.md) — §4·§7이 지금 React Web의 설계(hub 작업 콘솔 부분은 V3-P106에서 빠짐)
+
+기록:
+
+- [배포 기록](docs/deployments/) — 운영 서버 배포마다 하나
+- [보관 문서](docs/archive/README.md) — 빠지거나 대체된 기능의 설계, 옛 결정 기록, 옛 미결정 사항(2026-10-13)
 
 ## 코드 및 실행
 
@@ -189,6 +198,6 @@ python -m pytest tests/<module>/     # 변경 모듈만; 공개 계약 변경 �
 
 이 문서는 v2 코드와 호환성을 보장하는 명세가 아닙니다. v2의 구성을 무조건 이식하지 않고, v3 결정과 모듈 경계에 따라 새로 설계합니다.
 
-**확정(Confirmed)**, **권고(Proposed)**, **미결정(Open)**을 구분합니다. 설계 예시(JSON, ID 이름, 디렉터리 등)는 명시적으로 확정하지 않는 한 구현 계약이 아닙니다.
+지금 유효한 결정은 [결정 기록](docs/decisions.md)에만 있습니다. 거기 없는 설계 예시(JSON, ID 이름, 디렉터리 등)는 구현 계약이 아닙니다. 설계 문서의 Confirmed·Proposed 표시는 그 문서를 쓸 때의 상태입니다. 아직 정하지 않은 것은 결정 기록 끝의 "열린 문제"에 있습니다.
 
-기록 기준: 2026-11-23.
+기록 기준: 2026-11-24.

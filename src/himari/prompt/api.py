@@ -1,7 +1,7 @@
 """Prompt public contract: pure ``compose`` + thin context loader (V3-043).
 
 Source documents: docs/prompt-composition.md, docs/control-prompt-provider-v0.1.md
-§2 and §6.1, docs/current-state-contract-v0.1.md.
+§2 and §6.1, docs/archive/current-state-contract-v0.1.md.
 
 Composition order is fixed: Stable Prefix → Conversation (compressed + exact
 tail, ToolCall groups as units) → Current State. Provider-specific options are

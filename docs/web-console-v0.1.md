@@ -12,8 +12,8 @@
 > 소유자 결정: 프론트엔드 구조는 **장기적으로 유리한 쪽**, 화면은 **상용·공개 UI/UX와 비슷한 느낌**,
 > 나머지는 권고대로.
 
-관련: [hub 연결 V3-P94·P95·P100](decisions.md), [Web 기본 V3-P79](web-chat-basics-v0.1.md),
-[통합 작업 공간](unified-workspace-v0.1.md), [스트리밍 V3-P73](streaming-v0.1.md),
+관련: [hub 연결 V3-P94·P95·P100](archive/decisions-v3.md), [Web 기본 V3-P79](archive/web-chat-basics-v0.1.md),
+[통합 작업 공간](archive/unified-workspace-v0.1.md), [스트리밍 V3-P73](streaming-v0.1.md),
 [인터페이스 능력 V3-P93](interface-capabilities-v0.1.md), [테스트 정책](testing-policy.md).
 
 ## 1. 목표와 범위

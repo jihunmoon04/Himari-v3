@@ -2,9 +2,9 @@
 
 > **후속 구체화:** [Data Contract v0.2 — Implementable Candidate](data-contract-v0.2.md)에 Event/Run/Tool 상태 전이, raw payload 보존, 트랜잭션·오류·공개 Port 후보가 정리되어 있습니다. 이 v0.1 문서는 초기 설계 근거로 유지합니다.
 
-> 작성: 2026-10-13 · 상태: **PROPOSED / NOT FROZEN**. 이 문서의 타입, 필드 이름, 상태 전이 및 API는 검토 초안이다. 이미 확정된 원칙과 충돌할 경우 [decisions.md](decisions.md)를 우선한다.
+> 작성: 2026-10-13 · 상태: **PROPOSED / NOT FROZEN**. 이 문서의 타입, 필드 이름, 상태 전이 및 API는 검토 초안이다. 이미 확정된 원칙과 충돌할 경우 [decisions-v3.md](archive/decisions-v3.md)를 우선한다.
 >
-> 관련 문서: [architecture](architecture.md) · [data-and-tools](data-and-tools.md) · [prompt-composition](prompt-composition.md) · [open-questions](open-questions.md).
+> 관련 문서: [architecture](architecture.md) · [data-and-tools](data-and-tools.md) · [prompt-composition](prompt-composition.md) · [open-questions](archive/open-questions.md).
 
 ## 0. 범위와 확정된 전제
 
@@ -142,7 +142,7 @@
 | Artifact | Data: Conversation-scoped Plan/Note 본문과 revision | 현재 Plan/Note 중 Prompt에 필요한 항목 |
 | Live Connectivity | Environment: 대상 Workspace의 온라인/연결/실행 가능 여부 관측 | 필요할 때만 최신 관측을 반영; 저장된 활성 상태로 온라인을 추정 금지 |
 
-`CurrentStateProjection`은 **새로운 authoritative 원본/Workspace 전용 모듈이 아니라 여러 공개 Port의 합성된 읽기 DTO**다. 상세 Port, 필드/상태 범위 및 기본 Binding 정책 초안은 [CurrentState Contract v0.1](current-state-contract-v0.1.md)을 참고한다. 누가 합성을 수행할지는 Composition Root/Prompt 경계 구현 시 결정하되, 각 원본 소유권은 이전 표에 따른다.
+`CurrentStateProjection`은 **새로운 authoritative 원본/Workspace 전용 모듈이 아니라 여러 공개 Port의 합성된 읽기 DTO**다. 상세 Port, 필드/상태 범위 및 기본 Binding 정책 초안은 [CurrentState Contract v0.1](archive/current-state-contract-v0.1.md)을 참고한다. 누가 합성을 수행할지는 Composition Root/Prompt 경계 구현 시 결정하되, 각 원본 소유권은 이전 표에 따른다.
 
 ```text
 Data: Registry + Activations + Bindings + Settings + Artifacts
@@ -154,7 +154,7 @@ Environment: optionally observed live connectivity/capabilities
 
 - **Data persisted activation ≠ 실제 온라인 상태 ≠ 현재 실행 권한**이다. Tool을 호출할 때 Environment는 현재 Binding·권한·연결 상태를 별도로 다시 검증한다. Projection의 표시용 정보 또는 Binding ID는 권한 증명이 아니다.
 - Conversation 밖에서도 Workspace 자체는 지속할 수 있지만, 그 Workspace에 접근하는 활성 Binding은 Conversation/Environment 범위에서 관리한다.
-- **V3-032~036 확정:** 기본 Workspace Root는 **신뢰된 사용자/principal별**로 소유한다. Conversation별 기본 cwd와 같은 사용자에게 허용된 다른 Conversation 디렉터리 접근이 가능하다. `inside/run_command`는 OS Sandbox 실행을 요구하며 **네트워크 기본 차단**이다. WorkingDirectory는 자원 식별과 다른 Data 설정이고 Conversation 폴더는 OS 보안 격리가 아니다. 사용자 인증·Root 매핑/지원 여부는 상세 설계 대상. 제안: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution](sandbox-execution-v0.1.md).
+- **V3-032~036 확정:** 기본 Workspace Root는 **신뢰된 사용자/principal별**로 소유한다. Conversation별 기본 cwd와 같은 사용자에게 허용된 다른 Conversation 디렉터리 접근이 가능하다. `inside/run_command`는 OS Sandbox 실행을 요구하며 **네트워크 기본 차단**이다. WorkingDirectory는 자원 식별과 다른 Data 설정이고 Conversation 폴더는 OS 보안 격리가 아니다. 사용자 인증·Root 매핑/지원 여부는 상세 설계 대상. 제안: [Default Workspace v0.2](archive/default-workspace-files-v0.2.md), [Sandbox Execution](archive/sandbox-execution-v0.1.md).
 - CurrentState는 Event나 Artifact로 복제할 필요가 없다. 마지막 Run에서 구성된 **전체 프롬프트는 최신 PromptSnapshot**, 실제 송신된 provider-specific 요청은 **각 Run의 raw_request**로 보존한다.
 - 현재 상태의 투영 값이 언제나 원본과 실시간 동기라는 보장은 없다. 요청 생성 시 읽기 버전/기준과 Tool 실행 시 재검증이 필요하다.
 

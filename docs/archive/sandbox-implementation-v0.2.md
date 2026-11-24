@@ -4,7 +4,7 @@
 
 > 2026-10-13. **REVIEW CANDIDATE; NOT IMPLEMENTED, NOT FROZEN.** Binding decisions V3-030, V3-032~037; all proposed DTO names, activation mechanics, limits, component filenames and packetization below remain design proposals.
 >
-> References: [Sandbox v0.1](sandbox-execution-v0.1.md), [Default Workspace v0.2](default-workspace-files-v0.2.md), [unified contracts](contracts.md), [Data contract v0.2](data-contract-v0.2.md), [pytest policy](testing-policy.md).
+> References: [Sandbox v0.1](sandbox-execution-v0.1.md), [Default Workspace v0.2](default-workspace-files-v0.2.md), [unified contracts](../contracts.md), [Data contract v0.2](../data-contract-v0.2.md), [pytest policy](../testing-policy.md).
 >
 > v2 baseline: [sandbox contract](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/contract.py), [protected backend](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/linux_backend.py), [Landlock helper](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/landlock_exec.py), [activation](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/activation.py), [self-test](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/self_test.py), [Workspace admission](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/workspace/admission.py), [fd-relative filesystem](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/workspace/direct_fs.py), [run_command executor](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/tools/executors/command.py).
 
@@ -175,7 +175,7 @@ Only public DTOs cross module boundaries. Helpers like `bwrap_arguments()`, root
 - Exit/timeouts/truncation truthful; process descendants reaped; no background escape; no automatic retry after uncertain effect.
 - Cross-Conversation commands conflict on same principal root even if they have different CallIDs/Bindings.
 - No v2 Task/Work import or extra Workspace software module.
-- **Test execution follows [testing policy](testing-policy.md)**: Environment-only pytest on contract-compatible internal changes; public contract change ⇒ full pytest. The host Linux confinement gate remains independently required.
+- **Test execution follows [testing policy](../testing-policy.md)**: Environment-only pytest on contract-compatible internal changes; public contract change ⇒ full pytest. The host Linux confinement gate remains independently required.
 
 ## 9. Implementation sequencing (review before code)
 

@@ -1,6 +1,6 @@
 # HIMARI v3 아키텍처
 
-> 상태: **현행 구조**, 2026-11-24 (V3-P106·V3-P108·V3-P109 기준). 2026-10-13 설계 기준선을 지금 코드에 맞춰 고쳐 썼다. 뺀 기능(작업 에이전트 쪽)은 §9에 모았고, 각 결정의 근거는 [결정 기록](decisions.md)에 있다. 세부 계약은 [통합 모듈 계약 기준서](contracts.md)와 각 설계 문서가 원본이다.
+> 상태: **현행 구조**, 2026-11-24 (V3-P106·V3-P108·V3-P109 기준). 2026-10-13 설계 기준선을 지금 코드에 맞춰 고쳐 썼다. 뺀 기능(작업 에이전트 쪽)은 §9에 모았고, 지금 유효한 결정은 [결정 기록](decisions.md)(H 번호)에 있다. 이 문서의 `V3-…` 번호는 [옛 결정 기록](archive/decisions-v3.md)의 번호다. 한 쪽 요약은 [지금 상태](status.md). 세부 계약은 [통합 모듈 계약 기준서](contracts.md)와 각 설계 문서가 원본이다.
 
 ## 1. 한눈에
 
@@ -147,7 +147,7 @@ Provider 설정             (model · reasoning; 별도 API 필드)
 | MCP Apps | V3-P97 |
 | `himari-runner`(사용자 권한의 파일 연산), 서버 전체 읽기, stdio MCP 실행 | V3-P109 |
 
-범용 코딩 일은 Claude Code·Codex 같은 도구가 맡는다. 옛 Workspace/Environment/Binding 설계와 Pause 초안은 기록으로 남는다: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md), [Control Pause/Resume v0.1](control-pause-v0.1.md), [CurrentState Contract v0.1](current-state-contract-v0.1.md).
+범용 코딩 일은 Claude Code·Codex 같은 도구가 맡는다. 옛 Workspace/Environment/Binding 설계와 Pause 초안은 [보관 문서](archive/README.md)로 옮겼다: [Default Workspace v0.2](archive/default-workspace-files-v0.2.md), [Sandbox Execution v0.1](archive/sandbox-execution-v0.1.md), [Control Pause/Resume v0.1](archive/control-pause-v0.1.md), [CurrentState Contract v0.1](archive/current-state-contract-v0.1.md).
 
 ## 10. v2로부터의 단순화
 
@@ -157,4 +157,4 @@ v3는 v2의 계층을 그대로 옮기지 않는다. Run 중심 실행 모델에
 
 공개 계약(타입·오류·순서·취소·권한 의미)을 지키는 구현 교체가 다른 모듈의 수정을 요구하지 않게 한다. 계약 테스트, import 의존성 검사, Fake 구현 교체 테스트로 검증한다. pytest는 계약이 바뀔 때만 전체를, 그 밖에는 바뀐 모듈만 돌린다([Pytest 운영 정책](testing-policy.md)).
 
-미해결 사항은 [open-questions.md](open-questions.md)를 따른다.
+아직 정하지 않은 것은 [결정 기록](decisions.md) 끝의 "열린 문제"에 있다.

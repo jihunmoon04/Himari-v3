@@ -1,6 +1,6 @@
 """Environment public contract: the EnvironmentPlugin SPI (ENV-06).
 
-Source documents: docs/contracts.md §10, docs/decisions.md V3-040/041, V3-P19.
+Source documents: docs/contracts.md §10, docs/archive/decisions-v3.md V3-040/041, V3-P19.
 
 - One plugin per kind, registered at bootstrap. ``tools()`` returns the kind's
   fixed ToolHandlers; execution mechanics stay inside the plugin package.

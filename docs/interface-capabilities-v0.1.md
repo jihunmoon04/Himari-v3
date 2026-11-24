@@ -9,7 +9,7 @@
 > 2단계는 연결 세대 협상·기기 전용 제공 파일 API·Windows 파일 카드와 저장을 구현한다.
 
 관련: [반려 앱 V3-P83](companion-v0.1.md), [파일 V3-P66](file-upload-download-v0.1.md),
-[프롬프트 정비 V3-P89](prompt-cleanup-v0.1.md), [Current State](current-state-contract-v0.1.md),
+[프롬프트 정비 V3-P89](prompt-cleanup-v0.1.md), [Current State](archive/current-state-contract-v0.1.md),
 [Prompt Composition](prompt-composition.md), [테스트 정책](testing-policy.md).
 
 ## 1. 현재 문제와 목표

@@ -1,6 +1,6 @@
 """Tool public contract: the ToolHandler SPI plus catalog/dispatch ports.
 
-Source documents: docs/contracts.md §9 (TOOL-01/02/07), docs/decisions.md
+Source documents: docs/contracts.md §9 (TOOL-01/02/07), docs/archive/decisions-v3.md
 V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
 
 - Every Tool — Internal (memory/plan/note), Environment-provided
