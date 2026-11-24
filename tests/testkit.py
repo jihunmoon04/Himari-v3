@@ -87,6 +87,9 @@ V21_UNDO = _v21_undo()  # what v21 changed (the work-agent leftovers dropped), u
 # what v22 added (character-life v0.1), undone
 V22_UNDO = ("DROP INDEX life_writes_by_owner", "DROP TABLE life_writes", "DROP TABLE life_ids",
             "DROP INDEX life_by_persona", "DROP TABLE life_entries")
+# what v23 added (character-bond v0.1), undone
+V23_UNDO = ("DROP TABLE bond_stages", "ALTER TABLE life_entries DROP COLUMN month_day",
+            "ALTER TABLE life_entries DROP COLUMN tag")
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")

@@ -243,7 +243,8 @@ def wake_reasons(reasons: tuple[WakeReason, ...] | list[WakeReason]) -> list[dic
     out = []
     for r in reasons:
         item: dict[str, object] = {"kind": r.kind.value}
-        for name in ("memory_id", "away_minutes", "via", "activity", "minutes", "group", "step"):
+        for name in ("memory_id", "away_minutes", "via", "activity", "minutes", "group", "step", "days", "years",
+                     "entry_id"):
             value = getattr(r, name)
             if value is not None:
                 item[name] = value
@@ -265,7 +266,8 @@ def wake_reasons_from(value: object) -> tuple[WakeReason, ...]:
                             away_minutes=opt_int(d.get("away_minutes")), via=opt_str(d.get("via")),
                             activity=opt_str(d.get("activity")), minutes=opt_int(d.get("minutes")),
                             late=bool(d.get("late", False)), group=opt_str(d.get("group")),
-                            step=opt_int(d.get("step")))
+                            step=opt_int(d.get("step")), days=opt_int(d.get("days")), years=opt_int(d.get("years")),
+                            entry_id=opt_int(d.get("entry_id")))
                  for d in (_obj(v) for v in cast(list[object], value)))
 
 

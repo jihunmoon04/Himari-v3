@@ -11,12 +11,13 @@ from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from himari.bootstrap.application import Application
 from himari.bootstrap.proactive import INPUT_EVERY, Inputs, away_minutes
 from himari.bootstrap.schedule import Ticker
 from himari.common import PrincipalId, TextBlock, TrustedScope
-from himari.data.api import (EventKind, MemoryCategory, MessageOrigin, NoteDates, OriginKind, Wake, WakeKind,
+from himari.data.api import (BondTag, EventKind, MemoryCategory, MessageOrigin, NoteDates, OriginKind, Wake, WakeKind,
                              WakeReason, parse_note_date)
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.presence.api import After, Returned, Session, Signals, Sleep
@@ -84,6 +85,41 @@ def test_a_due_loop_is_spoken_of_once(tmp_path: Path) -> None:
             status = await app.proactive_status(ME)
             assert status["today"] == 0 and status["daily"] == 10  # V3-P107 §4: free wakes opened only
             assert status["last_look"] == {"at": again.at, "outcome": "nothing", "held": []}
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_anniversary_is_marked_once_that_day_and_may_pass(tmp_path: Path) -> None:
+    """character-bond §6: a ``date`` entry of the chosen persona's bond on today's date (the server's zone)
+    opens a wake that may pass, once; the drawn wake names the day."""
+    async def scenario() -> None:
+        adapter = answers("응", "[[pass]]")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device = await paired(app)
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            later = datetime.now(UTC) + timedelta(minutes=15)  # past the talking
+            day = await app.data.add_bond(ME, 0, BondTag.DATE, "처음 만난 날",
+                                          later.astimezone(ZoneInfo(app.time_zone)).strftime("%m-%d"))
+            scheduler = app.scheduler
+            assert scheduler is not None
+            scheduler._clock = lambda: later
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke", look
+            assert look.decision.reasons == (WakeReason(WakeKind.ANNIVERSARY, entry_id=day.entry_id),)
+            await settled(app, scope)
+            drawn = adapter.prepared_inputs[-1].conversation[-1].blocks[-1].text  # type: ignore[union-attr]
+            assert "처음 만난 날" in drawn and "anniversary" in drawn
+            assert not any(e.kind is EventKind.ASSISTANT_FINAL for e in (await app.data.read_events(scope))[2:])
+            again = await scheduler.look(ME)
+            assert again.decision.reasons == ()  # once that day
+            assert (await app.proactive_status(ME))["today"] == 1  # counted with the free wakes
         finally:
             await app.close()
 

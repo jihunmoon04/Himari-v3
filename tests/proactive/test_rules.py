@@ -8,16 +8,19 @@ from datetime import UTC, datetime, time, timedelta
 import pytest
 
 from himari.common import ConversationId, PrincipalId
-from himari.data.api import Memory, MemoryCategory, MemoryOrigin, WakeKind, WakeReason, WakeRecord, WakeStatus, parse_note_date
+from himari.data.api import (Anniversary, Memory, MemoryCategory, MemoryOrigin, WakeKind, WakeReason, WakeRecord,
+                             WakeStatus, free_wake, parse_note_date)
 from himari.presence.api import ActivitySignal, DeviceState, EndedActivity, TaskEnded, TaskSignal
 from himari.proactive import (
     CHECK_IN_WINDOW,
+    MERGE_ORDER,
     ProactiveSettings,
     Return,
     Situation,
     candidate_keys,
     candidates,
     decide,
+    free_today,
     in_quiet_hours,
     local_midnight,
     loop_moment,
@@ -475,3 +478,47 @@ def test_a_free_wake_goes_alone() -> None:
     decided = decide(situation(device=working(31), loops=DUE, free_ok=True))
     assert [r.kind for r in decided.reasons] == [WakeKind.LOOP_DUE]
     assert [c.reason.kind for c in decided.held] == [WakeKind.FREE]
+
+
+# --- character-bond §6: anniversaries ---------------------------------------------------------
+
+HUNDRED = Anniversary("100 days together", days=100)
+BIRTHDAY = Anniversary("사용자 생일", entry_id=7)
+
+
+def test_an_anniversary_is_spoken_of_once_that_day_and_may_pass() -> None:
+    days = situation(anniversaries=(HUNDRED, BIRTHDAY), bond_day="2026-11-04")
+    decided = decide(days)
+    assert decided.reasons == (WakeReason(WakeKind.ANNIVERSARY, days=100),
+                               WakeReason(WakeKind.ANNIVERSARY, entry_id=7))
+    assert decided.keys == ("anniversary:2026-11-04:d100", "anniversary:2026-11-04:b7")
+    assert free_wake(decided.reasons)  # its own path: hidden until it speaks, and it may pass
+    assert decide(days, frozenset(decided.keys)).reasons == ()  # once
+    assert decide(situation(anniversaries=(HUNDRED,))).reasons == ()  # no day: none
+    assert decide(situation(anniversaries=(HUNDRED,), bond_day="2026-11-04", device_id=None, device=None)).reasons == ()
+
+
+def test_an_anniversary_waits_as_himaris_own_openings_do_and_counts_in_the_day() -> None:
+    days = {"anniversaries": (HUNDRED,), "bond_day": "2026-11-04"}
+    for changes, blocked in (({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
+                             ({"unanswered_wake": True}, "unanswered"),
+                             ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
+                             ({"device": device(sleeps=True, sleep="idle")}, "asleep"),
+                             ({"wakes": (wake(NOW - timedelta(minutes=5)),)}, "gap")):
+        decided = decide(situation(**{**days, **changes}))
+        assert decided.reasons == () and decided.blocked == blocked, changes
+    spoken = tuple(replace(free_at(40 + 20 * i), wake_id=f"s{i}") for i in range(10))
+    assert decide(situation(**days, wakes=spoken)).blocked == "daily"  # inside the day's count (B5)
+    marked = replace(free_at(40), reasons=(WakeReason(WakeKind.ANNIVERSARY, days=100),))
+    assert free_today(situation(wakes=(marked,))) == 1  # and counted in it
+
+
+def test_an_anniversary_goes_before_a_free_wake_and_right_after_a_reminder() -> None:
+    days = {"anniversaries": (HUNDRED,), "bond_day": "2026-11-04"}
+    decided = decide(situation(**days, device=working(31), free_ok=True))
+    assert [r.kind for r in decided.reasons] == [WakeKind.ANNIVERSARY]
+    assert [c.reason.kind for c in decided.held] == [WakeKind.FREE]
+    assert MERGE_ORDER.index(WakeKind.ANNIVERSARY) == MERGE_ORDER.index(WakeKind.REMINDER) + 1
+    merged = decide(situation(**days, loops=DUE))
+    assert [r.kind for r in merged.reasons] == [WakeKind.ANNIVERSARY, WakeKind.LOOP_DUE]
+    assert not free_wake(merged.reasons)  # with a loop it is an ordinary wake

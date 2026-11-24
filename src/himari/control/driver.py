@@ -112,6 +112,8 @@ from himari.data.api import (
     InstructionScope,
     InstructionsStore,
     NO_PERSONA,
+    BondSnapshot,
+    BondStore,
     LifeEntry,
     LifeStore,
     PersonaStore,
@@ -217,6 +219,7 @@ class _UserContext(NamedTuple):
     episode_count: int = 0
     persona: str = ""  # V3-P89 §4: the companion persona, read with the instructions
     life: tuple[LifeEntry, ...] | None = None  # character-life §5: the chosen persona's life; None: not told
+    bond: BondSnapshot | None = None  # character-bond §5: that persona's bond with the user; None: not told
 
 
 class Driver:
@@ -235,6 +238,7 @@ class Driver:
         wakes: WakeStore | None = None,  # V3-P87: server-opened turns; None: none are accepted
         memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
         life: LifeStore | None = None,  # character-life §5: HIMARI's life, told with the companion; None: not told
+        bond: BondStore | None = None,  # character-bond §5: the bond, told with the life; None: not told
         max_runs_per_drive: int = MAX_RUNS,
         planner: CompactionPlanner | None = None,
         turn_guidance: bool = False,  # V3-P62 §8: the model is told when few Runs are left
@@ -260,6 +264,7 @@ class Driver:
         self._personas = personas
         self._memories = memories
         self._life = life
+        self._bond = bond
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
         self._read_only: set[ConversationId] = set()  # a wake's turn: only Tools that read run (V3-P90 §5.6)
@@ -268,6 +273,7 @@ class Driver:
         self._planner = planner
         self._streaming = streaming
         self._zone = None if time_zone is None else ZoneInfo(time_zone)
+        self._zone_name = time_zone or "UTC"  # character-bond: the bond's days, in the server's zone
         self._clock = clock
         self._presence = presence
         self._companion = companion
@@ -526,16 +532,19 @@ class Driver:
         now = self._clock()
         local = None if self._zone is None else now.astimezone(self._zone)
         life = None
+        bond = None
         if self._life is not None and self._companion:  # character-life §5: the chosen persona's (L2: none's is 0)
             since = ((local or now).date() - LIFE_READ_DAYS).isoformat()
             life = await self._life.list_life(scope.principal_id, persona_id, since=since)
+            if self._bond is not None:  # character-bond §5: with the life; its stage moves as it is read (§4)
+                bond = await self._bond.read_bond(scope.principal_id, persona_id, now=now, zone=self._zone_name)
         if self._memories is None:
-            return _UserContext(text, None, local, persona=persona, life=life)
+            return _UserContext(text, None, local, persona=persona, life=life, bond=bond)
         notes = await self._memories.list_memories(scope.principal_id)
         episodes = await self._memories.recent_episodes(scope.principal_id, since=now - RECENT_DAYS,
                                                         besides=scope.conversation_id, limit=RECENT_EPISODES)
         count = await self._memories.count_episodes(scope.principal_id)
-        return _UserContext(text, notes, local, episodes, count, persona, life)
+        return _UserContext(text, notes, local, episodes, count, persona, life, bond)
 
     async def _interface_at_acceptance(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
         snapshot = (await self._interfaces.read(scope, origin) if self._interfaces is not None

@@ -48,6 +48,8 @@ from himari.common import (
 from himari.data.api import (
     MAX_IMAGE_BYTES_PER_REQUEST,
     MAX_IMAGES_PER_REQUEST,
+    BondSnapshot,
+    BondStage,
     ConversationEvent,
     InterfaceSnapshot,
     LifeEntry,
@@ -228,6 +230,8 @@ class CurrentStateProjection(DeepFrozen):
     # character-life §5: the chosen persona's life as read when the turn started; None: not told
     # (the companion or life is off), no himari_life entry at all.
     life: tuple[LifeEntry, ...] | None = None
+    # character-bond §5: that persona's bond with the user, read with it; None: not told, no bond entry.
+    bond: BondSnapshot | None = None
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -350,6 +354,7 @@ class PromptInputs(DeepFrozen):
     presence: PresenceView | None = None  # V3-P83 §6.2, set by the Driver when the turn started
     interface: InterfaceSnapshot | None = None  # V3-P93: accepted input, not live presence
     life: tuple[LifeEntry, ...] | None = None  # character-life §5: the turn's; None: not told
+    bond: BondSnapshot | None = None  # character-bond §5: the turn's; None: not told
 
 
 @dataclass(frozen=True)
@@ -499,6 +504,7 @@ class PromptContextLoader(Protocol):
         episode_count: int = 0,
         companion_persona: str = "",  # the turn's (V3-P89 §4)
         life: tuple[LifeEntry, ...] | None = None,  # the turn's (character-life §5); None: not told
+        bond: BondSnapshot | None = None,  # the turn's (character-bond §5); None: not told
     ) -> PromptInputs: ...
 
 
@@ -709,6 +715,43 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     return data
 
 
+# character-bond §5: the bond with the user in the runtime state, with the companion and life on; what the model
+# makes of it is BOND_RULE's (the companion section). The stage is told in words, never as a number (D5).
+BOND_ABOUT = "What is really settled between you and the user as this persona, and how close you are now."
+BOND_STAGE_WORDS = {
+    BondStage.NEW: "new: you are still getting to know each other; be warm, without acting closer than you are",
+    BondStage.FAMILIAR: "familiar: you know each other's ways and talk at ease",
+    BondStage.CLOSE: "close: you are close and at home with each other; you can be open, tease gently and show you "
+                     "care",
+}
+BOND_ENTRY_CHARS = 1_000  # the entries the state carries: names and promises first
+
+
+def himari_bond_data(bond: BondSnapshot) -> dict[str, object]:
+    """§5: the stage in words, the days together since the first conversation,
+    the entries in list_bond's order (names, promises, the rest) while their
+    text fits in BOND_ENTRY_CHARS, and today's anniversaries by name."""
+    entries: list[dict[str, object]] = []
+    room = BOND_ENTRY_CHARS
+    for entry in bond.entries:
+        if len(entry.text) > room:
+            break
+        item: dict[str, object] = {"tag": None if entry.tag is None else entry.tag.value, "text": entry.text}
+        if entry.month_day:
+            item["date"] = entry.month_day
+        entries.append(item)
+        room -= len(entry.text)
+    data: dict[str, object] = {"about": BOND_ABOUT, "stage": BOND_STAGE_WORDS[bond.standing.stage]}
+    if bond.met_on is not None:
+        data["together_days"] = bond.together_days
+        data["since"] = bond.met_on
+    if entries:
+        data["entries"] = entries
+    if bond.today:
+        data["today"] = [a.name for a in bond.today]
+    return data
+
+
 # V3-P83 §3, §6.4: told in every conversation, whatever the companion switch.
 TIME_NOTE = (
     "A line <time>…</time> at the very start of a user message is when you received it; only that leading line "
@@ -837,6 +880,21 @@ LIFE_RULE = (
 )
 # character-life §5: added to FREE_RULE when HIMARI's life is told (no daily limit, owner 2026-11-25).
 FREE_LIFE_NOTE = "Instead of their task, you may also talk about your own day or plans from himari_life."
+# character-bond §5: right after LIFE_RULE (the bond is told with HIMARI's life). A relationship the persona
+# sets wins over the stage; days are marked once; nothing shared is made up.
+BOND_RULE = (
+    "- Your bond: runtime_state.bond is what is really settled between you and the user as this persona (what you "
+    "call each other, promises, jokes of your own, firsts and days to mark) and how close you are now. Use its "
+    "names and jokes naturally and keep its promises in mind. Let its stage set how close you sound, but a "
+    "relationship the persona sets comes first. When bond.today names a day, mark it once that day. Never make up "
+    "shared memories you were not told of."
+)
+# character-bond §6: after the free wake's lines, for a model checked for them (an anniversary wake may pass).
+ANNIVERSARY_RULE = (
+    "- An anniversary: a <wake> reason \"anniversary\" is a day in bond.today. Mark it briefly, warmly and in your "
+    "own words. Answer exactly [[pass]] instead when it does not fit now (a call, a match) or you marked it already "
+    "today."
+)
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "
@@ -846,9 +904,10 @@ PROACTIVE_RULE = (
 )
 
 
-def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
+def wake_text(wake: Wake, notes: Mapping[int, Memory], bond: Mapping[int, LifeEntry] = FrozenMap()) -> str:
     """V3-P87 §8.1: the wake as the model reads it — JSON, escaped like the state;
-    a loop's text read now (a deleted one says so), never copied into the Event."""
+    a loop's text read now (a deleted one says so), never copied into the Event.
+    character-bond §6: so is an anniversary's ``date`` entry, from ``bond``."""
     reasons: list[dict[str, object]] = []
     for reason in wake.reasons:
         item: dict[str, object] = {"kind": reason.kind.value}
@@ -861,6 +920,14 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
             value = getattr(reason, name)
             if value is not None:
                 item[name] = value
+        if reason.days is not None:
+            item["together_days"] = reason.days
+        if reason.years is not None:
+            item["years_together"] = reason.years
+        if reason.entry_id is not None:
+            entry = bond.get(reason.entry_id)
+            item["day"] = {"deleted": True} if entry is None else {
+                "text": entry.text, **({"date": entry.month_day} if entry.month_day else {})}
         if reason.late:
             item["late"] = True
         reasons.append(item)
@@ -1159,6 +1226,8 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
     life = None if state.life is None else himari_life_data(state.life, state.now)
     if life is not None:
         data["himari_life"] = life
+    if state.bond is not None:
+        data["bond"] = himari_bond_data(state.bond)
     data.update(turn_state_data(turn) or {})
     if state.now is not None:
         data["now"] = time_text(state.now)

@@ -8,9 +8,10 @@ device that is awake and not working. A reminder (the user asked for it) needs
 no more. Something that just happened — a return, a game or a video that
 ended (V3-P90 §5.3, let go past ENDED_FRESH) — also waits for the user's quiet
 and for talk to end. HIMARI's own openings — a loop, a free wake (V3-P90 §6.2,
-§7) — also wait for an answer to the last wake, the quiet hours and the gap,
-and a free wake for its day's count. A long focus and a game's end by the
-program in front (V3-P87 §5.4) are made no more.
+§7), an anniversary (character-bond §6) — also wait for an answer to the last
+wake, the quiet hours and the gap, and a free wake and an anniversary for the
+day's count. A long focus and a game's end by the program in front (V3-P87
+§5.4) are made no more.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from himari.data.api import (
     MAX_WAKE_REASONS,
     REMIND_LATE,
     REMIND_ON_TIME,
+    Anniversary,
     Memory,
     MemoryCategory,
     WakeKind,
@@ -47,8 +49,12 @@ ENDED_GROUPS = frozenset({"game", "video"})  # V3-P90 §5.3: the ends the app ca
 EVENT_KINDS = frozenset({WakeKind.RETURNED, WakeKind.TASK_ENDED})
 # V3-P107 §3: the kinds the talking rule holds back — all but a reminder (and the operator's try)
 TALKING_KINDS = frozenset(set(WakeKind) - {WakeKind.REMINDER, WakeKind.TRY})
-# §6.4, V3-P90 §4: the order reasons are told in, and kept when over MAX_WAKE_REASONS
-MERGE_ORDER = (WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FREE, WakeKind.RETURNED)
+# §6.4, V3-P90 §4: the order reasons are told in, and kept when over MAX_WAKE_REASONS; character-bond §6 (B5):
+# an anniversary right after a reminder
+MERGE_ORDER = (WakeKind.REMINDER, WakeKind.ANNIVERSARY, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FREE,
+               WakeKind.RETURNED)
+# character-bond §6: the kinds the day's count holds (an anniversary counts with the free wakes)
+DAILY_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY})
 
 
 @dataclass(frozen=True)
@@ -117,6 +123,10 @@ class Situation:
     returned: Return | None
     said: frozenset[str] = frozenset()  # ended wakes (failed) whose turn left assistant output
     free_ok: bool = False  # V3-P90 §7.5: the conversation's model was checked for free wakes
+    # character-bond §6: today's anniversaries of the chosen persona's bond and the date they are of (the
+    # server's zone) — given only with the bond told and a model checked for free wakes (it may pass)
+    anniversaries: tuple[Anniversary, ...] = ()
+    bond_day: str | None = None
 
 
 @dataclass(frozen=True)
@@ -250,13 +260,22 @@ def free_candidate(s: Situation) -> Candidate | None:
         return None
     cycle = s.now - timedelta(seconds=task.for_seconds)
     since = [w for w in s.wakes if w.created_at >= cycle]
-    step = sum(1 for w in since if free_wake(w.reasons))
+    step = sum(1 for w in since if w.reasons and all(r.kind is WakeKind.FREE for r in w.reasons))
     wait_from = max([cycle, *(w.created_at for w in since)])
     if s.now - wait_from < timedelta(minutes=s.settings.free_minutes):
         return None
     key, aliases = _around(f"free:{s.device_id}", cycle)  # a task's start moves by a second from look to look
     return Candidate(WakeReason(WakeKind.FREE, group=task.group, minutes=int(task.for_seconds // 60), step=step + 1),
                      f"{key}:{step + 1}", s.now, tuple(f"{a}:{step + 1}" for a in aliases))
+
+
+def anniversary_candidates(s: Situation) -> list[Candidate]:
+    """character-bond §6: each of today's anniversaries, once that day (its key names the
+    day and which one), on the current device."""
+    if s.device_id is None or s.bond_day is None:
+        return []
+    return [Candidate(WakeReason(WakeKind.ANNIVERSARY, days=a.days, years=a.years, entry_id=a.entry_id),
+                      f"anniversary:{s.bond_day}:{a.key}", s.now) for a in s.anniversaries]
 
 
 def _sleeps(s: Situation) -> bool:
@@ -273,6 +292,7 @@ def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | Non
         found.append(back)
     if (ended := task_ended_candidate(s.device_id, s.device, s.settings, s.now)) is not None:
         found.append(ended)
+    found += anniversary_candidates(s)
     if (free := free_candidate(s)) is not None:
         found.append(free)
     return found, expired, upcoming
@@ -339,13 +359,14 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
     last = max((w.created_at for w in counted), default=None)
     if last is not None and s.now - last < timedelta(minutes=s.settings.gap_minutes):
         return "gap"
-    if kind is WakeKind.FREE and free_today(s) >= s.settings.daily:
+    if kind in DAILY_KINDS and free_today(s) >= s.settings.daily:
         return "daily"
     return None
 
 
 def free_today(s: Situation) -> int:
-    """V3-P107 §4: the free wakes opened since the device's midnight — a pass too (it cost a request)."""
+    """V3-P107 §4: the free wakes opened since the device's midnight — a pass too (it cost a request).
+    character-bond §6 (B5): an anniversary wake (one that may pass) counts with them."""
     midnight = local_midnight(s.now, s.zone)
     return sum(1 for w in s.wakes if w.created_at >= midnight and free_wake(w.reasons))
 

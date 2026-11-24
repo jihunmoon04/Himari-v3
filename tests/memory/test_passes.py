@@ -11,6 +11,8 @@ import pytest
 from himari.common import AttachmentRef, ConversationId, EventId, TextBlock
 from himari.data.api import (
     AssistantFinal,
+    BondChange,
+    BondTag,
     ConversationEvent,
     Episode,
     EventKind,
@@ -28,7 +30,10 @@ from himari.data.api import (
 )
 from himari.memory.passes import (
     ASSISTANT_CHARS,
+    BOND_INSTRUCTIONS,
     MEMORY_PASS_INSTRUCTIONS,
+    PASS_BOND_CHARS,
+    PASS_MAX_BOND,
     PASS_FACT_CHARS,
     PASS_INPUT_CHARS,
     PASS_MAX_NOTES,
@@ -41,11 +46,13 @@ from himari.memory.passes import (
     next_part,
     parse_answer,
     parse_date,
+    plan_bond,
     plan_episode,
     plan_items,
     plan_self,
     request_data,
     reservation,
+    shown_bond,
     shown_facts,
     shown_notes,
     waits,
@@ -307,6 +314,8 @@ def test_with_himaris_life_the_pass_is_shown_its_facts_and_told_to_keep_what_it_
     assert "himari_facts" not in request_data(PART, [], None, now=NOW, zone=SEOUL, kind=PassKind.LIVE)
     assert model_input(data, RequestOptions("m"), life=True).stable_prefix == (
         MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS,)
+    assert model_input(data, RequestOptions("m"), life=True, bond=True).stable_prefix == (  # character-bond §3
+        MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS + "\n" + BOND_INSTRUCTIONS,)
     assert model_input(data, RequestOptions("m")).stable_prefix == (MEMORY_PASS_INSTRUCTIONS,)  # life off: as before
     long = [fact(i, "x" * 500) for i in range(1, 20)]
     assert len(shown_facts([fact(1, "y", LifeOrigin.USER), *long])) == 1 + (PASS_FACT_CHARS - 1) // 500
@@ -336,3 +345,60 @@ def test_self_decisions_rest_on_himaris_replies_and_leave_the_users_facts_alone(
     assert plan_self(parse_answer(json.dumps({"notes": [], "self": ["odd", {"op": "add"}]})), PART, facts) == []
     many = [{"op": "add", "text": f"사실 {i}.", "himari_evidence": [2]} for i in range(PASS_MAX_SELF + 2)]
     assert len(plan_self(parse_answer(json.dumps({"notes": [], "self": many})), PART, facts)) == PASS_MAX_SELF
+
+
+# --- the bond (character-bond v0.1 §3) ----------------------------------------------------
+
+
+def bond(entry_id: int, tag: BondTag, text: str, origin: LifeOrigin = LifeOrigin.CONVERSATION, revision: int = 1,
+         month_day: str | None = None) -> LifeEntry:
+    return LifeEntry(entry_id, 1, LifeKind.BOND, None, text, origin, revision, NOW, NOW, tag=tag, month_day=month_day)
+
+
+def test_with_himaris_life_the_pass_is_shown_the_bond_and_told_to_keep_what_the_two_settled() -> None:
+    entries = [bond(4, BondTag.NAME, "대장", LifeOrigin.USER), bond(6, BondTag.DATE, "사용자 생일", month_day="03-02")]
+    data = request_data(PART, [], None, now=NOW, zone=SEOUL, kind=PassKind.LIVE, facts=[], bond=entries)
+    assert data["bond_entries"] == [
+        {"id": "b4", "tag": "name", "text": "대장", "written_by": "user"},
+        {"id": "b6", "tag": "date", "text": "사용자 생일", "month_day": "03-02", "written_by": "conversation"}]
+    assert "bond_entries" not in request_data(PART, [], None, now=NOW, zone=SEOUL, kind=PassKind.LIVE, facts=[])
+    assert "user" in BOND_INSTRUCTIONS and "at least one" in BOND_INSTRUCTIONS  # B2
+    long = [bond(i, BondTag.JOKE, "x" * 300) for i in range(1, 20)]
+    assert len(shown_bond(long)) == PASS_BOND_CHARS // 300
+
+
+def test_bond_decisions_rest_on_the_users_messages_and_leave_the_users_entries_alone() -> None:
+    entries = [bond(4, BondTag.NAME, "대장", LifeOrigin.USER), bond(6, BondTag.PROMISE, "주말마다 영화.", revision=3),
+               bond(8, BondTag.DATE, "사용자 생일", month_day="03-02")]
+    raw = parse_answer(json.dumps({"notes": [], "bond": [
+        {"op": "add", "tag": "joke", "text": " 감자 사건 ", "evidence": {"user": [3], "himari": [2]}},
+        {"op": "add", "tag": "name", "text": "HIMARI alone", "evidence": {"user": [], "himari": [2]}},  # B2
+        {"op": "add", "tag": "promise", "text": "a himari seq as the user's", "evidence": {"user": [2]}},
+        {"op": "add", "tag": "first", "text": "처음으로 같이 밤샘", "evidence": {"user": [1]}},  # no episode
+        {"op": "add", "tag": "date", "text": "처음 만난 날", "month_day": "11-04", "evidence": {"user": [1]}},
+        {"op": "update", "id": "b4", "text": "선장", "evidence": {"user": [1]}},  # the user's
+    ]}, ensure_ascii=False))
+    assert plan_bond(raw, PART, entries, episode=False) == [
+        BondChange(LifeChangeOp.ADD, BondTag.JOKE, "감자 사건", sequences=(2, 3)),
+        BondChange(LifeChangeOp.ADD, BondTag.DATE, "처음 만난 날", "11-04", sequences=(1,))]
+    with_episode = plan_bond(raw, PART, entries, episode=True)
+    assert BondChange(LifeChangeOp.ADD, BondTag.FIRST, "처음으로 같이 밤샘", sequences=(1,)) in with_episode
+    changed = parse_answer(json.dumps({"notes": [], "bond": [
+        {"op": "update", "id": "b6", "text": "토요일마다 영화.", "evidence": {"user": [3]}},
+        {"op": "update", "id": "b8", "text": "생일", "evidence": {"user": [1]}},  # keeps its day
+        {"op": "retire", "id": "8", "evidence": {"user": [1, 3], "himari": [4]}},
+        {"op": "retire", "id": "b9", "evidence": {"user": [1]}},  # not shown
+        {"op": "forget", "id": "b6", "evidence": {"user": [1]}},  # no such op
+        {"op": "add", "tag": "nickname", "text": "x", "evidence": {"user": [1]}},  # no such tag
+        "odd",
+    ]}, ensure_ascii=False))
+    assert plan_bond(changed, PART, entries, episode=False) == [
+        BondChange(LifeChangeOp.UPDATE, BondTag.PROMISE, "토요일마다 영화.", None, 6, 3, (3,)),
+        BondChange(LifeChangeOp.UPDATE, BondTag.DATE, "생일", "03-02", 8, 1, (1,)),
+        BondChange(LifeChangeOp.RETIRE, entry_id=8, expected_revision=1, sequences=(1, 3, 4))]
+    assert plan_bond(parse_answer(json.dumps({"notes": [], "bond": None})), PART, entries, episode=True) == []
+    assert plan_bond(parse_answer(json.dumps({"notes": []})), PART, entries, episode=True) == []
+    many = [{"op": "add", "tag": "joke", "text": f"농담 {i}", "evidence": {"user": [1]}}
+            for i in range(PASS_MAX_BOND + 2)]
+    assert len(plan_bond(parse_answer(json.dumps({"notes": [], "bond": many})), PART, entries,
+                         episode=False)) == PASS_MAX_BOND

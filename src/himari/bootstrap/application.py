@@ -89,6 +89,10 @@ from himari.memory.worker import MemoryPasses
 from himari.data.api import (
     NO_PERSONA,
     RETIRED_KEEP,
+    BondSnapshot,
+    BondStage,
+    BondStanding,
+    BondTag,
     Episode,
     LifeEntry,
     Persona,
@@ -659,6 +663,7 @@ def memory_pass_settings(provider: ProviderAdapter, *, memory: bool, auto: bool,
 
 LIFE_SECONDS = 600.0  # character-life §3: how often the story writer looks at each principal's day
 LIFE_SHOWN_DAYS = timedelta(days=30)  # §6: the plans and diaries the Web shows, back from today
+BOND_EPISODES = 60  # character-bond §1: the newest episodes the memories' timeline shows with the bond
 
 
 class LifeChanged(RuntimeError):
@@ -945,8 +950,10 @@ class Application:
                 return found if found in zones else time_zone
 
             # character-life §4: with HIMARI's life told, a pass also keeps what HIMARI said of itself
+            # character-bond §3: and what the two settled
             passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner), zone_for=zone_for,
-                                  life=runtime.data if life and companion else None, personas=runtime.data)
+                                  life=runtime.data if life and companion else None, personas=runtime.data,
+                                  bond=runtime.data if life and companion else None)
             listeners.listeners.append(passes)
             passes.on_applied = events.memory_applied
             application.memory_passes = passes
@@ -972,7 +979,8 @@ class Application:
                                                speaking_first, time_zone, zones=zones,
                                                poke=lambda after: ticker.poke("proactive", after),
                                                recent=application.recent_companion_conversation,
-                                               free_ok=runtime.driver.free_wake_ok)
+                                               free_ok=runtime.driver.free_wake_ok,
+                                               bond=life and companion)  # character-bond §6: anniversaries
                 hub.on_returned = scheduler.returned
                 application.scheduler = scheduler
                 ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)
@@ -1189,6 +1197,36 @@ class Application:
         if (None if chosen is None else chosen.persona_id) != persona_id:
             raise LifeChanged("another persona is chosen now")
         return await self.data.add_life_fact(principal, NO_PERSONA if persona_id is None else persona_id, text)
+
+    # --- the bond (character-bond v0.1 §1, Web) ------------------------------------------------
+
+    async def bond(self, principal: PrincipalId) -> tuple[Persona | None, BondSnapshot, tuple[RecentEpisode, ...]]:
+        """The persona chosen now (None: no persona), its bond as a turn would see it now (its days in
+        the server's zone; the stage moves as it is read) and the newest BOND_EPISODES episodes for the
+        memories' timeline."""
+        chosen = await self.data.active_persona(principal)
+        snapshot = await self.data.read_bond(principal, NO_PERSONA if chosen is None else chosen.persona_id,
+                                             now=datetime.now(UTC), zone=self.time_zone)
+        episodes = await self.data.find_episodes(principal, (), limit=BOND_EPISODES)
+        return chosen, snapshot, episodes
+
+    async def _persona_shown(self, principal: PrincipalId, persona_id: int | None) -> int:
+        chosen = await self.data.active_persona(principal)
+        if (None if chosen is None else chosen.persona_id) != persona_id:
+            raise LifeChanged("another persona is chosen now")
+        return NO_PERSONA if persona_id is None else persona_id
+
+    async def add_bond(self, principal: PrincipalId, persona_id: int | None, tag: BondTag, text: str,
+                       month_day: str | None) -> LifeEntry:
+        """The user's bond entry for the persona the page showed; LifeChanged as add_life_fact."""
+        return await self.data.add_bond(principal, await self._persona_shown(principal, persona_id), tag, text,
+                                        month_day)
+
+    async def set_bond_stage(self, principal: PrincipalId, persona_id: int | None, stage: BondStage,
+                             revision: int) -> BondStanding:
+        """The user's choice of stage for the persona the page showed; LifeChanged as add_life_fact."""
+        return await self.data.set_bond_stage(principal, await self._persona_shown(principal, persona_id), stage,
+                                              expected_revision=revision)
 
     # --- memory (V3-P71) ----------------------------------------------------------------
 

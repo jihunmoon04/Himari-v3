@@ -14,6 +14,9 @@ propose (§4.9). What depends on the store as it is when the plan is applied
 With HIMARI's life kept (character-life v0.1 §4), a live pass is also shown the
 chosen persona's facts and answers ``self``: what HIMARI said of its own life,
 resting on HIMARI's replies only (``plan_self``), applied by Data's LifeStore.
+It is also shown that persona's bond with the user and answers ``bond``: what
+the two really settled, resting on the user's messages (``plan_bond``,
+character-bond v0.1 §3), applied by Data's BondStore.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ import jsonschema
 from himari.common import AttachmentRef, EventId, FileReference, JsonValue, TextBlock, split_marks
 from himari.data.api import (
     AssistantFinal,
+    BondChange,
+    BondTag,
     ConversationEvent,
     Episode,
     EpisodePlan,
@@ -128,9 +133,31 @@ SELF_INSTRUCTIONS = (
 PASS_FACT_CHARS = 6_000  # the persona's facts a pass is shown: the user's first, then the newest
 PASS_MAX_SELF = 5  # self decisions one pass may make
 
+# character-bond §3: told after SELF_INSTRUCTIONS (the input then holds bond_entries, the chosen persona's).
+BOND_INSTRUCTIONS = (
+    "The bond (bond): bond_entries are what is already settled between the user and HIMARI, as the character it "
+    "plays now (id b<n>, a tag, and month_day for a date). In bond, record only what the two of them really "
+    "settled in this part, by tag: name (what one of them will call the other), promise (something the two "
+    "agreed to do together or for each other; the user's own plans stay loops), joke (a joke of their own they "
+    "came back to), first (something they did together for the first time, only when your episode tells of it), "
+    "date (a day to mark every year, with month_day as MM-DD: the user's birthday, the day something began; a "
+    "fact like a birthday stays a note too). It must come from the user, said or agreed to: what HIMARI alone "
+    "suggested or joked counts only when the user took it up. Cite evidence: {\"user\": [the user's seqs, at "
+    "least one], \"himari\": [HIMARI's seqs]}. Do not repeat a saved entry (skip it); update one they changed "
+    "(with its id); retire one they undid. Write each as one short sentence in the user's language; a date's "
+    "text names the day (e.g. '사용자 생일'). Shape: \"bond\": [{\"op\": \"add\", \"tag\": \"name\", \"text\": "
+    "\"...\", \"month_day\": null, \"evidence\": {\"user\": [3], \"himari\": [2]}}, {\"op\": \"update\", \"id\": "
+    "\"b4\", \"tag\": \"promise\", \"text\": \"...\", \"evidence\": {\"user\": [5]}}, {\"op\": \"retire\", \"id\": "
+    "\"b6\", \"evidence\": {\"user\": [5]}}]. \"bond\" is [] when nothing was settled between them."
+)
+PASS_BOND_CHARS = 3_000  # the persona's bond entries a pass is shown, in list_bond's order
+PASS_MAX_BOND = 5  # bond decisions one pass may make
 
-def pass_instructions(life: bool) -> str:
-    return MEMORY_PASS_INSTRUCTIONS + ("\n" + SELF_INSTRUCTIONS if life else "")
+
+def pass_instructions(life: bool, bond: bool = False) -> str:
+    """With HIMARI's life kept, its own facts (self); with the bond too, what the two settled (character-bond §3)."""
+    return (MEMORY_PASS_INSTRUCTIONS + ("\n" + SELF_INSTRUCTIONS if life else "")
+            + ("\n" + BOND_INSTRUCTIONS if bond else ""))
 
 
 _CATEGORIES = [c.value for c in MemoryCategory]
@@ -167,6 +194,7 @@ ANSWER_SCHEMA: dict[str, Any] = {
         # character-life §4: each decision is read by plan_self, so one malformed decision is dropped
         # alone and never fails the pass's notes
         "self": {"type": ["array", "null"]},
+        "bond": {"type": ["array", "null"]},  # character-bond §3: read by plan_bond, as self is
     },
 }
 
@@ -317,14 +345,31 @@ def shown_facts(entries: Sequence[LifeEntry]) -> list[LifeEntry]:
     return shown
 
 
+def shown_bond(entries: Sequence[LifeEntry]) -> list[LifeEntry]:
+    """character-bond §3: the persona's bond entries a pass is shown, within PASS_BOND_CHARS, in order."""
+    shown: list[LifeEntry] = []
+    room = PASS_BOND_CHARS
+    for entry in entries:
+        if entry.kind is LifeKind.BOND and len(entry.text) <= room:
+            shown.append(entry)
+            room -= len(entry.text)
+    return shown
+
+
 def request_data(part: Part, notes: Sequence[Memory], previous: Episode | None, *, now: datetime, zone: str,
-                 kind: PassKind, facts: Sequence[LifeEntry] | None = None) -> dict[str, JsonValue]:
+                 kind: PassKind, facts: Sequence[LifeEntry] | None = None,
+                 bond: Sequence[LifeEntry] | None = None) -> dict[str, JsonValue]:
     """The pass's input (§4.2), as JSON data; with ``facts`` (character-life §4)
-    the chosen persona's, as himari_facts."""
+    the chosen persona's, as himari_facts, and with ``bond`` (character-bond §3)
+    its bond entries, as bond_entries."""
     where = ZoneInfo(zone)
     data = _request_data(part, notes, previous, where, now=now, zone=zone, kind=kind)
     if facts is not None:
         data["himari_facts"] = [{"id": f"f{f.entry_id}", "text": f.text, "written_by": f.origin.value} for f in facts]
+    if bond is not None:
+        data["bond_entries"] = [{"id": f"b{e.entry_id}", "tag": None if e.tag is None else e.tag.value, "text": e.text,
+                                 **({"month_day": e.month_day} if e.month_day else {}),
+                                 "written_by": e.origin.value} for e in bond]
     return data
 
 
@@ -344,12 +389,14 @@ def _request_data(part: Part, notes: Sequence[Memory], previous: Episode | None,
     }
 
 
-def model_input(data: Mapping[str, JsonValue], options: RequestOptions, *, life: bool = False) -> ModelInput:
+def model_input(data: Mapping[str, JsonValue], options: RequestOptions, *, life: bool = False,
+                bond: bool = False) -> ModelInput:
     """One request, as compaction's: fixed instructions and one user turn of data;
-    with ``life``, the self instructions too (character-life §4)."""
+    with ``life``, the self instructions too (character-life §4), with ``bond``
+    the bond's (character-bond §3)."""
     empty = PersistedStateBasis(conversation_sequence=0, state_revision=0, environments=())
     return ModelInput(
-        stable_prefix=(pass_instructions(life),),
+        stable_prefix=(pass_instructions(life, bond),),
         tool_catalog=(),
         conversation=(UserTurn(EventId("memory-pass-input"), (TextBlock(json_data(data)),)),),
         current_state=CurrentStateProjection(basis=empty),
@@ -585,6 +632,73 @@ def plan_self(answer: Mapping[str, Any], part: Part, facts: Sequence[LifeEntry])
         elif op == "retire":
             changes.append(LifeChange(LifeChangeOp.RETIRE, None, target.entry_id, target.revision, tuple(evidence)))
     return changes
+
+
+def _seqs(value: object, allowed: set[int]) -> list[int] | None:
+    """A list of seqs all among ``allowed`` (missing: none), or None when it is not."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(s, int) and not isinstance(s, bool) and s in allowed
+                                              for s in value):
+        return None
+    return value
+
+
+_BOND_TAGS = {t.value: t for t in BondTag}
+
+
+def plan_bond(answer: Mapping[str, Any], part: Part, entries: Sequence[LifeEntry], *,
+              episode: bool) -> list[BondChange]:
+    """character-bond §3: the answer's ``bond`` decisions (at most PASS_MAX_BOND)
+    as Data's changes. Each rests on at least one user message of this part
+    (B2), HIMARI's replies only besides; a ``first`` is added only when the
+    pass has an episode (``episode``); an update or retire names an entry the
+    pass was shown that is not the user's. Anything else is left out, alone;
+    what only the store can tell (a month and day, repeats) is Data's."""
+    users = {m.sequence for m in part.messages if m.role == "user"}
+    himari = {m.sequence for m in part.messages if m.role == "himari"}
+    shown = {e.entry_id: e for e in entries}
+    raws = answer.get("bond")
+    changes: list[BondChange] = []
+    for raw in (raws if isinstance(raws, list) else [])[:PASS_MAX_BOND]:
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("evidence"), Mapping):
+            continue
+        said = _seqs(raw["evidence"].get("user"), users)
+        echoed = _seqs(raw["evidence"].get("himari"), himari)
+        if not said or echoed is None:
+            continue
+        sequences = tuple(sorted({*said, *echoed}))
+        op, text = raw.get("op"), raw.get("text")
+        text = text.strip() if isinstance(text, str) and text.strip() else None
+        month_day = raw.get("month_day")
+        month_day = month_day.strip() if isinstance(month_day, str) and month_day.strip() else None
+        raw_tag = raw.get("tag")
+        tag = _BOND_TAGS.get(raw_tag) if isinstance(raw_tag, str) else None
+        if op == "add":
+            if tag is not None and text is not None and (tag is not BondTag.FIRST or episode):
+                changes.append(BondChange(LifeChangeOp.ADD, tag, text, month_day, sequences=sequences))
+            continue
+        target = shown.get(_bond_id(raw.get("id")) or 0)
+        if target is None or target.origin is LifeOrigin.USER:
+            continue
+        if op == "update":
+            tag = tag or target.tag
+            text = text or target.text
+            if "month_day" not in raw:
+                month_day = target.month_day
+            changes.append(BondChange(LifeChangeOp.UPDATE, tag, text, month_day if tag is BondTag.DATE else None,
+                                      target.entry_id, target.revision, sequences))
+        elif op == "retire":
+            changes.append(BondChange(LifeChangeOp.RETIRE, entry_id=target.entry_id,
+                                      expected_revision=target.revision, sequences=sequences))
+    return changes
+
+
+def _bond_id(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    digits = value[1:] if value.startswith("b") else value
+    return int(digits) if digits.isdigit() else None
 
 
 def answer_text(blocks: Sequence[object]) -> str:

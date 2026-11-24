@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 import unicodedata
 from collections.abc import Iterable, Sequence
 
 from himari.common import ContentBlock, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
+    BOND_CLOSE_DAYS,
+    BOND_FAMILIAR_DAYS,
+    MAX_BOND_CHARS,
+    MAX_BOND_ENTRIES,
     MAX_DIARY_CHARS,
     MAX_EPISODE_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
     MAX_LOOP_CHARS,
+    BondChange,
+    BondStage,
+    BondStanding,
+    BondTag,
+    together_days,
     LifeChange,
     LifeChangeOp,
     LifeEntry,
@@ -516,7 +526,7 @@ def check_life_text(kind: LifeKind, text: object) -> str:
     text = text.strip()
     if not text:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
-    limit = MAX_DIARY_CHARS if kind is LifeKind.DIARY else MAX_LIFE_CHARS
+    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS}.get(kind, MAX_LIFE_CHARS)
     if len(text) > limit:
         raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
     return text
@@ -592,3 +602,139 @@ def fact_room(facts: Sequence[LifeEntry]) -> tuple[bool, LifeEntry | None]:
     if not others:
         return False, None
     return True, min(others, key=lambda f: (f.origin is not LifeOrigin.WRITER, f.updated_at, f.entry_id))
+
+
+# --- The bond (character-bond v0.1 §2–§4) -------------------------------------------
+
+
+def check_zone(zone: object) -> ZoneInfo:
+    """An IANA time zone's name."""
+    try:
+        if isinstance(zone, str) and zone:
+            return ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        pass
+    raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no time zone {zone!r}")
+
+
+def check_bond_tag(tag: object) -> BondTag:
+    if not isinstance(tag, BondTag):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no bond tag {tag!r}")
+    return tag
+
+
+def check_month_day(tag: BondTag, month_day: object) -> str | None:
+    """A ``date`` entry's MM-DD (a day of some year: 02-29 is one); None for any other tag."""
+    if tag is not BondTag.DATE:
+        if month_day is not None:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a date has a month and day")
+        return None
+    if (not isinstance(month_day, str) or len(month_day) != 5 or month_day[2] != "-"
+            or not month_day[:2].isdigit() or not month_day[3:].isdigit()):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date's day is MM-DD")
+    try:
+        date(2000, int(month_day[:2]), int(month_day[3:]))  # a leap year: every day some year has
+    except ValueError:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date's day is MM-DD") from None
+    return month_day
+
+
+_BOND_FIRST = {BondTag.NAME: 0, BondTag.PROMISE: 1}  # §5: names and promises are told first
+
+
+def order_bond(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
+    """Names, then promises, then the rest; newest first within each."""
+    return tuple(sorted(entries, key=lambda e: (_BOND_FIRST.get(e.tag, 2) if e.tag is not None else 2,
+                                                -e.updated_at.timestamp(), -e.entry_id)))
+
+
+def same_bond(tag: BondTag | None, text: str, entries: Iterable[LifeEntry]) -> bool:
+    """An entry whose tag and text (folded) are already a live one's."""
+    folded = fold(text)
+    return any(e.tag is tag and fold(e.text) == folded for e in entries)
+
+
+def bond_change_outcome(change: object, entries: Sequence[LifeEntry]) -> str | None:
+    """§3: why a memory pass's ``bond`` decision cannot be applied to the
+    persona's live bond ``entries`` as they are now, or None when it can (an
+    ADD's room and repeats are checked as it is added)."""
+    if not isinstance(change, BondChange) or not isinstance(change.op, LifeChangeOp):
+        return "invalid"
+    text: str | None = None
+    tag: BondTag | None = None
+    if change.op is not LifeChangeOp.RETIRE:
+        try:
+            text = check_life_text(LifeKind.BOND, change.text)
+            tag = check_bond_tag(change.tag)
+            check_month_day(tag, change.month_day)
+        except DataError:
+            return "invalid"
+    if change.op is LifeChangeOp.ADD:
+        return None
+    target = next((e for e in entries if e.entry_id == change.entry_id), None)
+    if target is None:
+        return "unknown"
+    if target.origin is LifeOrigin.USER:
+        return "user_owned"
+    if change.expected_revision != target.revision:
+        return "conflict"
+    if text is not None and same_bond(tag, text, (e for e in entries if e.entry_id != target.entry_id)):
+        return "duplicate"
+    return None
+
+
+def bond_room(entries: Sequence[LifeEntry]) -> tuple[bool, LifeEntry | None]:
+    """§2: whether one more entry fits among the persona's live bond ``entries``,
+    and the one to retire for it: the oldest not the user's. (False, None): all
+    MAX_BOND_ENTRIES are the user's."""
+    if len(entries) < MAX_BOND_ENTRIES:
+        return True, None
+    others = [e for e in entries if e.origin is not LifeOrigin.USER]
+    if not others:
+        return False, None
+    return True, min(others, key=lambda e: (e.updated_at, e.entry_id))
+
+
+def settle_stage(standing: BondStanding, entries: Sequence[LifeEntry], met_on: date | None, today: date,
+                 zone: tzinfo, now: datetime) -> BondStanding:
+    """§4 (B3): the stage moved up as far as what happened allows, never down.
+    ``new`` → ``familiar``: a ``name`` or ``joke`` entry, or BOND_FAMILIAR_DAYS
+    days together. ``familiar`` → ``close``: a ``promise`` or ``first`` entry and
+    BOND_CLOSE_DAYS days together. After the user chose the stage, only what
+    happened after that counts: an entry made later, or a day count reached on
+    a later day. The standing as it was when nothing moves (revision unchanged)."""
+    floor = standing.since if standing.reason == "user" else None
+    days = 0 if met_on is None else together_days(met_on, today)
+
+    def fresh(entry: LifeEntry) -> bool:
+        return floor is None or entry.created_at > floor
+
+    def reached(count: int) -> date | None:
+        """The day the count was reached, if it was and counts."""
+        if met_on is None or days < count:
+            return None
+        on = met_on + timedelta(days=count - 1)
+        return on if floor is None or on > floor.astimezone(zone).date() else None
+
+    stage, since, reason = standing.stage, standing.since, standing.reason
+    if stage is BondStage.NEW:
+        made = sorted((e for e in entries if e.tag in (BondTag.NAME, BondTag.JOKE) and fresh(e)),
+                      key=lambda e: (e.created_at, e.entry_id))
+        if made:
+            stage, since, reason = BondStage.FAMILIAR, made[0].created_at, f"b{made[0].entry_id}"
+        elif reached(BOND_FAMILIAR_DAYS) is not None:
+            stage, since, reason = BondStage.FAMILIAR, now, f"{BOND_FAMILIAR_DAYS}d"
+    if stage is BondStage.FAMILIAR and days >= BOND_CLOSE_DAYS:
+        keys = sorted((e for e in entries if e.tag in (BondTag.PROMISE, BondTag.FIRST)),
+                      key=lambda e: (e.created_at, e.entry_id))
+        new_keys = [e for e in keys if fresh(e)]
+        on = reached(BOND_CLOSE_DAYS)
+        if keys and (new_keys or on is not None):
+            key = (new_keys or keys)[0]
+            if on is None or key.created_at.astimezone(zone).date() > on:
+                stage, since, reason = BondStage.CLOSE, max(key.created_at, since or key.created_at), f"b{key.entry_id}"
+            else:
+                stage, since, reason = BondStage.CLOSE, now, f"{BOND_CLOSE_DAYS}d"
+    if stage is standing.stage:
+        return standing
+    return BondStanding(standing.persona_id, stage, since, reason, standing.revision + 1)

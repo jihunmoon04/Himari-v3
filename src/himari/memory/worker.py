@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.data.api import (
     AssistantFinal,
+    BondStore,
     ConversationEvent,
     DataError,
     DataErrorCode,
@@ -51,11 +52,13 @@ from himari.memory.passes import (
     model_input,
     next_part,
     parse_answer,
+    plan_bond,
     plan_episode,
     plan_items,
     plan_self,
     request_data,
     reservation,
+    shown_bond,
     shown_facts,
     shown_notes,
     waits,
@@ -85,11 +88,14 @@ class MemoryPasses:
     def __init__(self, data: MemoryPassData, provider: ProviderAdapter, settings: MemoryPassSettings,
                  probe: ActivityProbe, *, clock: Callable[[], datetime] | None = None,
                  zone_for: Callable[[TrustedScope, MessageOrigin | None], Awaitable[str]] | None = None,
-                 life: LifeStore | None = None, personas: PersonaStore | None = None) -> None:
+                 life: LifeStore | None = None, personas: PersonaStore | None = None,
+                 bond: BondStore | None = None) -> None:
         self._data = data
         # character-life §4: with ``life``, a live pass also keeps what HIMARI said of itself as the
         # facts of the persona chosen when it runs (``personas``; none chosen: NO_PERSONA's)
         self._life = life
+        # character-bond §3: with ``bond`` too (and ``life``), what the two settled, for that persona
+        self._bond = bond if life is not None else None
         self._personas = personas
         self._provider = provider
         self._settings = settings
@@ -335,10 +341,11 @@ class MemoryPasses:
         shown = shown_notes(notes)
         zone = self._settings.time_zone if self._zone_for is None else await self._zone_for(scope, part.origin)
         persona_id, facts = await self._facts(scope, now, zone) if live else (NO_PERSONA, None)
+        bond = None if facts is None else await self._bond_entries(scope, persona_id)
         options = RequestOptions(self._settings.model_id, self._settings.reasoning_effort,
                                  provider_key=self._provider.provider_key, max_output_tokens=PASS_MAX_OUTPUT_TOKENS)
-        asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=kind, facts=facts), options,
-                            life=facts is not None)
+        asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=kind, facts=facts, bond=bond),
+                            options, life=facts is not None, bond=bond is not None)
         reserve = reservation(self._provider.prepare_native_request(asked).body)
         if await self._data.pass_usage(scope.principal_id, self._day_start(now)) + reserve > self._settings.daily_tokens:
             return PassOutcome.DEFERRED
@@ -378,6 +385,8 @@ class MemoryPasses:
         if result.status is PassStatus.APPLIED:
             if facts is not None:
                 await self._apply_self(scope, pass_id, answer, part, persona_id, facts)
+            if bond is not None:
+                await self._apply_bond(scope, pass_id, answer, part, persona_id, bond, episode is not None)
             if self.on_applied is not None:
                 try:
                     self.on_applied(scope)
@@ -413,6 +422,29 @@ class MemoryPasses:
             log.exception("could not keep what HIMARI said of itself in memory pass %s", pass_id)
             return
         log.info("memory pass %s kept HIMARI's facts of persona %d: %s", pass_id, persona_id, ", ".join(outcomes))
+
+    async def _bond_entries(self, scope: TrustedScope, persona_id: int) -> list[LifeEntry] | None:
+        """character-bond §3: the persona's bond entries a pass is shown; None without the bond."""
+        if self._bond is None:
+            return None
+        return shown_bond(await self._bond.list_bond(scope.principal_id, persona_id))
+
+    async def _apply_bond(self, scope: TrustedScope, pass_id: str, answer: dict[str, Any], part: Part,
+                          persona_id: int, entries: Sequence[LifeEntry], episode: bool) -> None:
+        """After the pass applied, as ``self``: what the two settled, on its own — its trouble is
+        logged, never the pass's. The stage moves when the bond is next read (each turn)."""
+        assert self._bond is not None
+        changes = plan_bond(answer, part, entries, episode=episode)
+        if not changes:
+            return
+        try:
+            outcomes = await self._bond.apply_bond_changes(scope.principal_id, persona_id, changes,
+                                                           conversation=scope.conversation_id, source=pass_id,
+                                                           now=self._clock())
+        except Exception:  # noqa: BLE001 — the notes and the episode are applied already
+            log.exception("could not keep the bond in memory pass %s", pass_id)
+            return
+        log.info("memory pass %s kept the bond with persona %d: %s", pass_id, persona_id, ", ".join(outcomes))
 
     async def _failed(self, pass_id: str, error: str) -> PassOutcome:
         try:

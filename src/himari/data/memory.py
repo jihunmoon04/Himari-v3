@@ -58,8 +58,16 @@ from himari.data.api import (
     MAX_DEVICES,
     MAX_MEMORIES,
     MAX_LIFE_FACTS,
+    MAX_BOND_ENTRIES,
     MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    BondChange,
+    BondSnapshot,
+    BondStage,
+    BondStanding,
+    BondTag,
+    anniversaries_on,
+    together_days,
     LifeChange,
     LifeChangeOp,
     LifeEntry,
@@ -250,6 +258,7 @@ class InMemoryStore:
         self.life: dict[tuple[PrincipalId, int], tuple[LifeEntry, datetime | None]] = {}
         self.life_ids: dict[PrincipalId, int] = {}
         self.life_writes: dict[str, _LifeWrite] = {}
+        self.bond_stages: dict[tuple[PrincipalId, int], BondStanding] = {}  # character-bond §2 (none: new)
         self.memories: dict[tuple[PrincipalId, int], Memory] = {}  # V3-P71
         self.memory_ids: dict[PrincipalId, int] = {}  # the last id given out, per principal
         # V3-P85: notes an automatic forget retired (§5.4), with when, pass and item.
@@ -961,7 +970,11 @@ class InMemoryData:
             del self._store.episodes[key]  # V3-P85 §11: its episodes, reading position and passes
         self._store.memory_cursors.pop(scope.conversation_id, None)
         for key, (entry, retired) in list(self._store.life.items()):  # character-life §2: the facts stay, unlinked
-            if entry.source_conversation == scope.conversation_id:
+            if entry.source_conversation != scope.conversation_id:
+                continue
+            if entry.kind is LifeKind.BOND and entry.origin is not LifeOrigin.USER:  # character-bond §2: as notes
+                del self._store.life[key]
+            else:
                 self._store.life[key] = (replace(entry, source_conversation=None, source_sequences=(), source=None),
                                          retired)
         for pass_id in [p for p, (_, mp) in self._store.memory_passes.items()
@@ -1255,7 +1268,7 @@ class InMemoryData:
         since = None if since is None else rules.check_life_day(since)
         return rules.order_life(
             e for (owner, _), (e, retired) in self._store.life.items()
-            if owner == principal and retired is None and e.persona_id == persona_id
+            if owner == principal and retired is None and e.persona_id == persona_id and e.kind is not LifeKind.BOND
             and (e.kind is LifeKind.FACT or since is None or (e.day or "") >= since))
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
@@ -1418,6 +1431,117 @@ class InMemoryData:
     async def list_life_writes(self, principal: PrincipalId, *, limit: int = 20) -> tuple[LifeWrite, ...]:
         return tuple(reversed([w.record for w in self._store.life_writes.values() if w.owner == principal]))[
             :max(0, limit)]
+
+    # --- BondStore (character-bond v0.1 §2–§4) ---------------------------------------------
+
+    def _live_bond(self, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
+        return [e for (owner, _), (e, retired) in self._store.life.items()
+                if owner == principal and retired is None and e.persona_id == persona_id and e.kind is LifeKind.BOND]
+
+    def _add_bond(self, principal: PrincipalId, entry: LifeEntry, *, dedupe: bool) -> LifeEntry | str:
+        entries = self._live_bond(principal, entry.persona_id)
+        if dedupe and rules.same_bond(entry.tag, entry.text, entries):
+            return "duplicate"
+        fits, retire = rules.bond_room(entries)
+        if not fits:
+            return "full"
+        if retire is not None:
+            self._retire_life(principal, retire, entry.created_at)
+        return self._new_life(principal, entry)
+
+    async def list_bond(self, principal: PrincipalId, persona_id: int) -> tuple[LifeEntry, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        return rules.order_bond(self._live_bond(principal, persona_id))
+
+    async def add_bond(self, principal: PrincipalId, persona_id: int, tag: BondTag, text: str,
+                       month_day: str | None = None) -> LifeEntry:
+        persona_id = rules.check_life_persona(persona_id)
+        tag = rules.check_bond_tag(tag)
+        text = rules.check_life_text(LifeKind.BOND, text)
+        month_day = rules.check_month_day(tag, month_day)
+        now = datetime.now(UTC)
+        added = self._add_bond(principal, LifeEntry(0, persona_id, LifeKind.BOND, None, text, LifeOrigin.USER, 1, now,
+                                                    now, tag=tag, month_day=month_day), dedupe=False)
+        if not isinstance(added, LifeEntry):
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_BOND_ENTRIES} bond entries, all yours")
+        return added
+
+    async def edit_bond(self, principal: PrincipalId, entry_id: int, tag: BondTag, text: str,
+                        month_day: str | None = None, *, expected_revision: int) -> LifeEntry:
+        tag = rules.check_bond_tag(tag)
+        text = rules.check_life_text(LifeKind.BOND, text)
+        month_day = rules.check_month_day(tag, month_day)
+        entry = self._live_entry(principal, entry_id)
+        if entry.kind is not LifeKind.BOND:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no bond entry {entry_id}")
+        if expected_revision != entry.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+        return self._put_life(principal, replace(entry, tag=tag, text=text, month_day=month_day,
+                                                 origin=LifeOrigin.USER, revision=entry.revision + 1,
+                                                 updated_at=datetime.now(UTC)))
+
+    async def apply_bond_changes(self, principal: PrincipalId, persona_id: int, changes: Sequence[BondChange], *,
+                                 conversation: ConversationId, source: str, now: datetime) -> tuple[str, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        outcomes: list[str] = []
+        for change in changes:
+            outcome = rules.bond_change_outcome(change, self._live_bond(principal, persona_id))
+            if outcome is not None:
+                outcomes.append(outcome)
+                continue
+            sequences = tuple(change.sequences)
+            if change.op is LifeChangeOp.RETIRE:
+                self._retire_life(principal, self._live_entry(principal, change.entry_id), now)
+                outcomes.append("applied")
+                continue
+            tag = rules.check_bond_tag(change.tag)
+            text = rules.check_life_text(LifeKind.BOND, change.text)
+            month_day = rules.check_month_day(tag, change.month_day)
+            if change.op is LifeChangeOp.ADD:
+                added = self._add_bond(principal, LifeEntry(0, persona_id, LifeKind.BOND, None, text,
+                                                            LifeOrigin.CONVERSATION, 1, now, now, conversation,
+                                                            sequences, source, tag, month_day), dedupe=True)
+                outcomes.append("applied" if isinstance(added, LifeEntry) else added)
+                continue
+            entry = self._live_entry(principal, change.entry_id)
+            self._put_life(principal, replace(entry, tag=tag, text=text, month_day=month_day,
+                                              origin=LifeOrigin.CONVERSATION, revision=entry.revision + 1,
+                                              updated_at=now, source_conversation=conversation,
+                                              source_sequences=sequences, source=source))
+            outcomes.append("applied")
+        return tuple(outcomes)
+
+    async def bond_stage(self, principal: PrincipalId, persona_id: int) -> BondStanding:
+        persona_id = rules.check_life_persona(persona_id)
+        return self._store.bond_stages.get((principal, persona_id), BondStanding(persona_id))
+
+    async def read_bond(self, principal: PrincipalId, persona_id: int, *, now: datetime,
+                        zone: str) -> BondSnapshot:
+        persona_id = rules.check_life_persona(persona_id)
+        where = rules.check_zone(zone)
+        standing = self._store.bond_stages.get((principal, persona_id), BondStanding(persona_id))
+        entries = rules.order_bond(self._live_bond(principal, persona_id))
+        first = min((c.created_at for c in self._store._conversations.values() if c.owner == principal), default=None)
+        met = None if first is None else first.astimezone(where).date()
+        today = now.astimezone(where).date()
+        moved = rules.settle_stage(standing, entries, met, today, where, now)
+        if moved is not standing:
+            self._store.bond_stages[(principal, persona_id)] = moved
+        return BondSnapshot(moved, None if met is None else met.isoformat(),
+                            0 if met is None else together_days(met, today), entries,
+                            anniversaries_on(today, met, entries))
+
+    async def set_bond_stage(self, principal: PrincipalId, persona_id: int, stage: BondStage, *,
+                             expected_revision: int) -> BondStanding:
+        persona_id = rules.check_life_persona(persona_id)
+        if not isinstance(stage, BondStage):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no stage {stage!r}")
+        current = self._store.bond_stages.get((principal, persona_id), BondStanding(persona_id))
+        if expected_revision != current.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the stage is at revision {current.revision}")
+        chosen = BondStanding(persona_id, stage, datetime.now(UTC), "user", current.revision + 1)
+        self._store.bond_stages[(principal, persona_id)] = chosen
+        return chosen
 
     # --- DeviceStore (V3-P83 §4) ----------------------------------------------------
 

@@ -137,8 +137,13 @@ from himari.data.api import (
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
+    MAX_BOND_CHARS,
+    MAX_BOND_ENTRIES,
     MAX_MEMORIES,
     MAX_MEMORY_CHARS,
+    BondStage,
+    BondStanding,
+    BondTag,
     LifeEntry,
     AssistantFinal,
     AssistantToolCalls,
@@ -461,6 +466,29 @@ class LifeEditBody(_Body):
     revision: int = Field(ge=1)  # the revision the entry was edited from
 
 
+type BondTagName = Literal["name", "promise", "joke", "first", "date"]  # BondTag's values
+
+
+class BondBody(_Body):  # character-bond §1, Web: the limits and the day's form are Data's
+    tag: BondTagName
+    text: str
+    month_day: str | None = None  # MM-DD, a date's only
+    persona_id: int | None  # the persona whose bond the page showed; null: no persona
+
+
+class BondEditBody(_Body):
+    tag: BondTagName
+    text: str
+    month_day: str | None = None
+    revision: int = Field(ge=1)
+
+
+class BondStageBody(_Body):
+    stage: Literal["new", "familiar", "close"]  # BondStage's values
+    persona_id: int | None
+    revision: int = Field(ge=0)  # the standing's revision when it was read (0: never stored)
+
+
 class MemoryBody(_Body):
     category: Literal["user", "preference", "project", "reference", "loop"]  # MemoryCategory's values
     text: str  # its limit is Data's (V3-P71 §4.2)
@@ -615,7 +643,7 @@ def _plain(value: Any) -> Any:
 
 def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
     out: dict[str, Any] = {"kind": reason.kind.value}
-    for name in ("memory_id", "away_minutes", "via", "activity", "group", "minutes"):
+    for name in ("memory_id", "away_minutes", "via", "activity", "group", "minutes", "days", "years", "entry_id"):
         if (value := getattr(reason, name)) is not None:
             out[name] = value
     if reason.late:  # V3-P107 §2: "again" is no more (an old record's is read past)
@@ -643,6 +671,10 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
             parts.append(f"a game ended after {_span(r.minutes or 0)}")
         elif r.kind is WakeKind.TASK_ENDED:
             parts.append(f"{'a game' if r.group == 'game' else 'a video'} ended after {_span(r.minutes or 0)}")
+        elif r.kind is WakeKind.ANNIVERSARY:  # character-bond §6
+            parts.append(f"{r.days} days together" if r.days is not None else
+                         f"{r.years} year{'s' if (r.years or 0) > 1 else ''} together" if r.years is not None else
+                         f"a day to mark (b{r.entry_id})")
         else:
             parts.append("a try")
     return "HIMARI reached out · " + " · ".join(parts)
@@ -983,6 +1015,40 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
     return {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "text": entry.text,
             "origin": entry.origin.value, "revision": entry.revision, "created_at": _time(entry.created_at),
             "updated_at": _time(entry.updated_at)}
+
+
+def bond_entry_view(entry: LifeEntry) -> dict[str, Any]:
+    """character-bond §1: one entry of the bond."""
+    return {"id": entry.entry_id, "tag": None if entry.tag is None else entry.tag.value, "text": entry.text,
+            "month_day": entry.month_day, "origin": entry.origin.value, "revision": entry.revision,
+            "created_at": _time(entry.created_at), "updated_at": _time(entry.updated_at)}
+
+
+def bond_stage_view(standing: BondStanding) -> dict[str, Any]:
+    return {"stage": standing.stage.value, "since": None if standing.since is None else _time(standing.since),
+            "reason": standing.reason, "revision": standing.revision}
+
+
+def memories_view(entries: Sequence[LifeEntry], episodes: Sequence[RecentEpisode]) -> list[dict[str, Any]]:
+    """character-bond §1: the memories' timeline — episodes and bond entries, newest first."""
+    items: list[tuple[datetime, dict[str, Any]]] = [
+        (e.created_at, {"kind": "bond", "id": e.entry_id, "at": _time(e.created_at),
+                        "tag": None if e.tag is None else e.tag.value, "text": e.text}) for e in entries]
+    items += [(f.episode.ended_at, {"kind": "episode", "id": f.episode.episode_id, "at": _time(f.episode.ended_at),
+                                    "text": f.episode.text, "title": f.title}) for f in episodes]
+    return [item for _, item in sorted(items, key=lambda pair: pair[0], reverse=True)]
+
+
+# How a refused change of the bond answers (character-bond §1): status, code, message.
+BOND_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.NOT_FOUND: (404, "not_found", "No such entry."),
+    DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "It was changed elsewhere since it was opened."),
+    DataErrorCode.LIMIT_EXCEEDED: (409, "bond_full", f"At most {MAX_BOND_ENTRIES} entries, all yours; delete one "
+                                                     "first."),
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"An entry is at most {MAX_BOND_CHARS:,} characters."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_bond", "An entry needs some text and no control characters; a "
+                                                          "date needs its day as MM-DD, and only a date has one."),
+}
 
 
 # How a refused change of HIMARI's life answers (character-life §6): status, code, message.
@@ -1663,6 +1729,68 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             await himari(request).data.retire_life(who, entry_id, expected_revision=revision)
         except DataError as error:
             raise life_refused(error) from None
+
+    # --- the bond (character-bond §1): the chosen persona's, on the Web only (D4) --------------
+
+    def bond_refused(error: DataError) -> ApiError:
+        if error.code not in BOND_REFUSALS:
+            raise error
+        status, code, message = BOND_REFUSALS[error.code]
+        return ApiError(status, code, message)
+
+    @app.get("/api/bond")
+    async def read_bond(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The chosen persona's bond: its stage, the days together, today's anniversaries, the entries
+        and the memories' timeline (the bond's entries with the newest episodes)."""
+        application = himari(request)
+        chosen, bond, episodes = await application.bond(who)
+        return {"persona": None if chosen is None else {"id": chosen.persona_id, "name": chosen.name},
+                "enabled": application.life_enabled, "stage": bond_stage_view(bond.standing),
+                "together_days": bond.together_days, "since": bond.met_on, "today": [a.name for a in bond.today],
+                "entries": [bond_entry_view(e) for e in bond.entries],
+                "memories": memories_view(bond.entries, episodes),
+                "limits": {"entries": MAX_BOND_ENTRIES, "chars": MAX_BOND_CHARS}}
+
+    @app.post("/api/bond", status_code=201)
+    async def add_bond(body: BondBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return bond_entry_view(await himari(request).add_bond(who, body.persona_id, BondTag(body.tag), body.text,
+                                                                  body.month_day))
+        except LifeChanged:
+            raise ApiError(409, "persona_changed", "Another persona is in use now; look again.") from None
+        except DataError as error:
+            raise bond_refused(error) from None
+
+    @app.put("/api/bond/stage")  # before /api/bond/{entry_id}, which would take its path
+    async def set_bond_stage(body: BondStageBody, request: Request,
+                             who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The owner's choice of stage, up or down; afterwards only what happens later moves it."""
+        try:
+            return bond_stage_view(await himari(request).set_bond_stage(who, body.persona_id, BondStage(body.stage),
+                                                                        body.revision))
+        except LifeChanged:
+            raise ApiError(409, "persona_changed", "Another persona is in use now; look again.") from None
+        except DataError as error:
+            raise bond_refused(error) from None
+
+    @app.put("/api/bond/{entry_id}")
+    async def edit_bond(entry_id: int, body: BondEditBody, request: Request,
+                        who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """It becomes the user's: memory passes leave it alone."""
+        try:
+            return bond_entry_view(await himari(request).data.edit_bond(
+                who, entry_id, BondTag(body.tag), body.text, body.month_day, expected_revision=body.revision))
+        except DataError as error:
+            raise bond_refused(error) from None
+
+    @app.delete("/api/bond/{entry_id}", status_code=204)
+    async def retire_bond(entry_id: int, revision: int, request: Request,
+                          who: PrincipalId = Depends(principal)) -> None:
+        """It retires: HIMARI no longer knows it."""
+        try:
+            await himari(request).data.retire_life(who, entry_id, expected_revision=revision)
+        except DataError as error:
+            raise bond_refused(error) from None
 
     async def save_instructions(application: Application, who: PrincipalId, body: InstructionsBody,
                                 scope: InstructionScope) -> Instructions:
