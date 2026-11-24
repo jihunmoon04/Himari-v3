@@ -20,40 +20,39 @@ HIMARI v3는 **Windows 반려 에이전트**의 서버 쪽 두뇌입니다. Wind
 
 ## 결정된 핵심 방향
 
-- **Run = LLM 호출 1회**. Control이 Run 반복을 조정하며, 모델의 final response에서 반복을 중단하고, 한 턴은 `HIMARI_MAX_RUNS`(기본 12) Run에서 멈춥니다. 사용자에게 묻고 싶은 것은 답의 글로 묻고, 사용자의 다음 메시지가 새 턴이 됩니다(V3-P106에서 질문 Tool `ask_user` 제거; 기록에 남은 대기 중 질문은 다음 메시지에서 취소로 닫힘). v2의 Task/ManagerTurn 계층을 v3의 실행 기본 단위로 가져오지 않습니다.
-- **Data**는 Conversation의 원본 입력·출력을 exact하게 보존합니다. Prompt는 Data를 가공해 다음 모델 입력을 만들고, **최신 Prompt Snapshot 1개**(압축 문맥 + 최근 exact 입력 데이터)만 유지합니다.
-- **Tool 실패**는 ToolResult로 전달하며, 그 이후의 대응은 다음 Run에서 모델이 판단합니다. Runtime의 숨은 의미론적 자동 복구는 기본 동작이 아닙니다.
-- **Workspace**는 독립적인 수명을 가진 이종 작업 대상입니다(기본 제공 작업 공간, 사용자 로컬 PC, 원격 환경 등). Conversation 사이에서도 참조할 수 있습니다.
-- **Environment**는 Workspace의 연결·접근·실행 방식을 규정합니다. 한 Conversation에서 여러 Environment가 활성화될 수 있고, 동일한 Workspace를 Environment마다 다르게 다룰 수 있습니다.
-- **Workspace Registry와 Binding**을 구분합니다. Tool은 Workspace Binding이 필요한 도구와 필요하지 않은 도구로 나뉩니다. 환경 도구의 이름은 `environment/tool` 형태를 고려합니다.
-- **Memory**는 별도 특권 계층이 아니라 Tool 형태로 처리할 방향이며, 세부 설계는 보류합니다.
-- **Provider reasoning** 설정과 사용량/공개된 continuation 정보는 Data에서 관리하고 Prompt·Provider가 지원 가능한 모델 요청을 구성합니다. 비공개 내부 추론 원문은 이용 가능하다고 전제하지 않습니다.
-- **프롬프트는 Cache-first 순서**: Stable Prefix → 압축 이력 + exact Conversation → Current State. Trigger는 기존 이벤트를 가리킬 뿐 이동/복제하지 않습니다. ToolCall/Result는 provider-native 결합을 유지합니다.
-- **모든 Run의 원본 Provider 요청·응답**을 기록합니다. Execution Records, exact Conversation Events, Plan/Note 등의 Artifacts는 서로 다른 논리 영역으로 구분합니다.
-- **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다. 같은 Workspace에서 부작용 범위가 불명확한 명령은 기본 직렬 처리하도록 설계합니다.
-- **Workspace 전용 소프트웨어 모듈은 만들지 않습니다.** Memory 등 Internal Tool은 Data의 공개 API를 직접 사용할 수 있으며, 환경 Tool은 Environment를 경유합니다.
-- **기본 Workspace는 사용자별 공유 Root** 아래 Conversation별 대화 폴더를 쓰며, 파일 Tool은 대화 폴더에만 씁니다(runner 경유). 명령 실행(`run_command`)과 명령용 sandbox는 V3-P106에서 뺐습니다. 문서·이미지 처리와 stdio MCP 서버는 server sandbox에서 돕니다. 향후 Web Search는 별도 Tool로 설계합니다.
+전체 구조는 [아키텍처](docs/architecture.md)에 있습니다.
 
-### 모듈 경계 개정 (2026-10-13, V3-039~046)
+- **Run = LLM 호출 1회**. Control이 Run 반복을 조정하며, 모델의 final response에서 반복을 중단하고, 한 턴은 `HIMARI_MAX_RUNS`(기본 12) Run에서 멈춥니다. 사용자에게 묻고 싶은 것은 답의 글로 묻고, 사용자의 다음 메시지가 새 턴이 됩니다(V3-P106에서 질문 Tool `ask_user` 제거; 기록에 남은 대기 중 질문은 다음 메시지에서 취소로 닫힘). v2의 Task/ManagerTurn 계층을 v3의 실행 기본 단위로 가져오지 않습니다.
+- **Data**는 Conversation의 원본 입력·출력을 exact하게 보존합니다. Prompt는 Data를 가공해 다음 모델 입력을 만들고, **최신 Prompt Snapshot 1개**(압축 문맥 + 최근 exact 입력 데이터)만 유지합니다. **모든 Run의 원본 Provider 요청·응답**도 기록합니다.
+- **Tool 실패**는 ToolResult로 전달하며, 그 이후의 대응은 다음 Run에서 모델이 판단합니다. Runtime의 숨은 의미론적 자동 복구는 기본 동작이 아닙니다.
+- **프롬프트는 Cache-first 순서**: Stable Prefix(시스템 글·페르소나·Tool 정의) → 압축 이력 + exact Conversation → Current State(지금 시각·기기·활동, 기억, 최근 일화). ToolCall/Result는 provider-native 결합을 유지합니다.
+- **지시가 되는 것은 시스템 글과 사용자의 메시지뿐**입니다. Tool 결과, 파일, 기억, 창 제목, wake 사유는 정보일 뿐 지시가 아닙니다(V3-P89).
+- **Provider reasoning** 설정과 사용량/공개된 continuation 정보는 Data에서 관리하고 Prompt·Provider가 지원 가능한 모델 요청을 구성합니다. 비공개 내부 추론 원문은 이용 가능하다고 전제하지 않습니다.
+- **표정은 Tool이 아니라 답 안의 `[[mood:이름]]` 표시**입니다. 서버가 떼어 앱의 `live`로 보냅니다(V3-P83). 앱 자신의 상태(듣는 중·졸림 등)는 앱이 정합니다.
+- **Memory는 Tool과 worker**로 처리합니다. 모델이 `memory_save`·`memory_forget`·`memory_search`로 쓰고(V3-P71), 대화가 잠잠해진 뒤 `memory` worker가 자동 기억·일화·열린 고리를 만듭니다(V3-P85). 지난 대화의 원문 회상은 `conversation_search`가 맡습니다(V3-P72).
+- **Tool 출처는 셋**: Internal(기억·대화 검색·화면), Environment(`machine`의 대화 폴더 파일 Tool, runner 경유), External(MCP). **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다.
+- **파일 Tool은 대화 폴더에만 씁니다**(사용자별 Root 아래, runner 경유). 문서·이미지 처리와 stdio MCP 서버는 server sandbox(네트워크 차단)에서 돕니다. 명령 실행(`run_command`), 붙인 Workspace와 Binding은 V3-P106에서 뺐습니다. 향후 Web Search는 별도 Tool로 설계합니다.
+
+### 모듈 경계 (V3-039~046)
 
 - **확장 SPI 우선:** 새 Tool은 `ToolHandler`, 새 Provider는 `ProviderAdapter`, 새 Environment는 `EnvironmentPlugin` 하나를 구현해 등록합니다. Environment는 자기 Tool을 직접 제공합니다.
-- **Data Port는 Consumer별로 분리:** `ConversationLog` · `ArtifactStore` · `WorkspaceState` · `StateQuery` (P2 `ControlState`). 백엔드는 공유해도 계약 변경 단위는 sub-port입니다.
+- **Data Port는 Consumer별로 분리:** `ConversationLog` · `StateQuery` · `MemoryStore` · `PersonaStore` · `DeviceStore` 등. 백엔드는 공유해도 계약 변경 단위는 sub-port입니다.
 - **Tool 구현은 실행 원장을 모릅니다:** `ToolOutcome`을 반환하고 원자 커밋은 Tool Dispatcher가 합니다.
 - **Prompt 핵심은 순수 함수** `compose(PromptInputs)`입니다.
-- **P0는 단일 프로세스 규모:** Conversation별 in-process lock으로 동시 실행을 막고, 크래시 후 중복은 송신·부작용 직전 영속 표시와 UNKNOWN 처리(자동 재실행 없음)로 막습니다. 분산 lease·fencing·다중 worker 복구는 P2로 연기합니다.
-- **계약은 코드로:** 각 모듈 `api.py`의 Protocol + frozen dataclass가 생기면 그것이 원본이고, import-linter로 의존 방향을 강제합니다.
+- **단일 프로세스 규모:** Conversation별 in-process lock으로 동시 실행을 막고, 크래시 후 중복은 송신·부작용 직전 영속 표시와 UNKNOWN 처리(자동 재실행 없음)로 막습니다. 분산 lease·fencing·다중 worker 복구는 P2로 연기합니다.
+- **계약은 코드로:** 각 모듈 `api.py`의 Protocol + frozen dataclass가 원본이고, import-linter로 의존 방향을 강제합니다.
 
 ## 문서
 
 - **[통합 모듈 계약 기준서](docs/contracts.md)** — 모듈별 계약, Owner/Provider/Consumer, Source of Truth, 선언 위치, 상태 및 의존성 (주요 진입점)
-- [아키텍처](docs/architecture.md) — 역할, 데이터 흐름, Run·Prompt·Tool·Environment·Workspace 구조
+- **[아키텍처](docs/architecture.md)** — 지금 구조: 앱·서버·Web, Run 반복, 서버 모듈, 반려 기능, Tool, 기억, 뺀 것
 - [모듈 경계 및 계약](docs/module-boundaries.md) — 의존성 규칙, 인터페이스, 계약 검증
 - [프롬프트 구성 계약](docs/prompt-composition.md) — Cache-first 순서, Trigger 참조, Tool 그룹, Reasoning/Provider 매핑
 - **[Control–Prompt–Provider v0.1 경계 초안](docs/control-prompt-provider-v0.1.md)** — 한 Run의 네이티브 요청·응답, ToolCall 배리어, final/question 종료 및 재개
 - [데이터·Tool·Artifact 설계](docs/data-and-tools.md) — 원본 실행 기록, Conversation, Artifact, 병렬 실행
 - **[Data Contract v0.2 독립 검수 후보](docs/data-contract-v0.2.md)** — kind별 Event, Run/Tool 상태 전이, raw 저장, 트랜잭션·원자성, Data 공개 Port
 - [Data Contract v0.1 이전 초안](docs/data-contract-v0.1.md) — 초기 원칙·설계 근거
-- [CurrentState Contract v0.1 초안](docs/current-state-contract-v0.1.md) — 활성 Environment·Workspace Binding·Artifact의 읽기 투영 및 최신 상태 검증 (검토 전)
+- [CurrentState Contract v0.1 초안](docs/current-state-contract-v0.1.md) — 활성 Environment·Workspace Binding·Artifact의 읽기 투영 및 최신 상태 검증 (검토 전; Binding 부분은 V3-P106 이전 설계, 기록으로 남김)
 - [기본 Workspace·파일/명령 실행 계약 v0.2](docs/default-workspace-files-v0.2.md) — Conversation별 폴더, 다른 대화 폴더 접근, 파일 생성 (Sandboxed `run_command` 부분은 V3-P106에서 제거됨, 기록으로 남김)
 - [Sandbox Execution v0.1 검토 초안](docs/sandbox-execution-v0.1.md) — v2 Bubblewrap/Landlock 기반 재설계, 사용자별 Root, 네트워크 기본 차단
 - [Sandbox Implementation v0.2 검토 초안](docs/sandbox-implementation-v0.2.md) — v2 코드 이식 지도, Environment 공개 계약, Sandbox 활성화·검증 및 bounded 명령 실행
