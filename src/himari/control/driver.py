@@ -111,6 +111,9 @@ from himari.data.api import (
     EventRef,
     InstructionScope,
     InstructionsStore,
+    NO_PERSONA,
+    LifeEntry,
+    LifeStore,
     PersonaStore,
     Memory,
     RecentEpisode,
@@ -136,6 +139,7 @@ from himari.data.api import (
     free_wake,
 )
 from himari.prompt.api import (
+    LIFE_READ_DAYS,
     RECENT_DAYS,
     RECENT_EPISODES,
     CompactionPlan,
@@ -212,6 +216,7 @@ class _UserContext(NamedTuple):
     episodes: tuple[RecentEpisode, ...] = ()  # V3-P85 §8: of other Conversations, lately
     episode_count: int = 0
     persona: str = ""  # V3-P89 §4: the companion persona, read with the instructions
+    life: tuple[LifeEntry, ...] | None = None  # character-life §5: the chosen persona's life; None: not told
 
 
 class Driver:
@@ -229,6 +234,7 @@ class Driver:
         personas: PersonaStore | None = None,  # None: no companion persona (V3-P108)
         wakes: WakeStore | None = None,  # V3-P87: server-opened turns; None: none are accepted
         memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
+        life: LifeStore | None = None,  # character-life §5: HIMARI's life, told with the companion; None: not told
         max_runs_per_drive: int = MAX_RUNS,
         planner: CompactionPlanner | None = None,
         turn_guidance: bool = False,  # V3-P62 §8: the model is told when few Runs are left
@@ -253,6 +259,7 @@ class Driver:
         self._user_instructions = user_instructions
         self._personas = personas
         self._memories = memories
+        self._life = life
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
         self._read_only: set[ConversationId] = set()  # a wake's turn: only Tools that read run (V3-P90 §5.6)
@@ -509,20 +516,26 @@ class Driver:
 
     async def _read_user(self, scope: TrustedScope) -> _UserContext:
         text = persona = ""
+        persona_id = NO_PERSONA
         if self._user_instructions is not None:
             text = (await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
         if self._personas is not None and self._companion:  # V3-P108 §4.2: told only with the companion on
             chosen = await self._personas.active_persona(scope.principal_id)
             persona = "" if chosen is None else chosen.text
+            persona_id = NO_PERSONA if chosen is None else chosen.persona_id
         now = self._clock()
+        local = None if self._zone is None else now.astimezone(self._zone)
+        life = None
+        if self._life is not None and self._companion:  # character-life §5: the chosen persona's (L2: none's is 0)
+            since = ((local or now).date() - LIFE_READ_DAYS).isoformat()
+            life = await self._life.list_life(scope.principal_id, persona_id, since=since)
         if self._memories is None:
-            return _UserContext(text, None, None if self._zone is None else now.astimezone(self._zone), persona=persona)
+            return _UserContext(text, None, local, persona=persona, life=life)
         notes = await self._memories.list_memories(scope.principal_id)
         episodes = await self._memories.recent_episodes(scope.principal_id, since=now - RECENT_DAYS,
                                                         besides=scope.conversation_id, limit=RECENT_EPISODES)
         count = await self._memories.count_episodes(scope.principal_id)
-        return _UserContext(text, notes, None if self._zone is None else now.astimezone(self._zone), episodes, count,
-                            persona)
+        return _UserContext(text, notes, local, episodes, count, persona, life)
 
     async def _interface_at_acceptance(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
         snapshot = (await self._interfaces.read(scope, origin) if self._interfaces is not None

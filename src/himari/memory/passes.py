@@ -10,6 +10,10 @@ this part (§4.4), sensitive notes need a remember request and yield to a
 refusal, dates fall in range and become instants (§5.3), past parts only
 propose (§4.9). What depends on the store as it is when the plan is applied
 (revisions, the user's notes, the limits) is Data's (``apply_pass``).
+
+With HIMARI's life kept (character-life v0.1 §4), a live pass is also shown the
+chosen persona's facts and answers ``self``: what HIMARI said of its own life,
+resting on HIMARI's replies only (``plan_self``), applied by Data's LifeStore.
 """
 
 from __future__ import annotations
@@ -30,6 +34,11 @@ from himari.data.api import (
     ConversationEvent,
     Episode,
     EpisodePlan,
+    LifeChange,
+    LifeChangeOp,
+    LifeEntry,
+    LifeKind,
+    LifeOrigin,
     Memory,
     MemoryCategory,
     MemoryOrigin,
@@ -101,6 +110,29 @@ MEMORY_PASS_INSTRUCTIONS = (
     '"episode" is null when there is none.'
 )
 
+# character-life §4: told after MEMORY_PASS_INSTRUCTIONS when HIMARI's life is kept (the input then
+# holds himari_facts, the chosen persona's).
+SELF_INSTRUCTIONS = (
+    "HIMARI's own life (self): himari_facts are the facts already settled about HIMARI itself, as the character "
+    "it plays now (id f<n>). In self, record what HIMARI, in its replies in this part, stated as a fact about its "
+    "own life: what it likes or dislikes, what it did or went through, people and places in its life, its plans. "
+    "Never facts about the user, jokes, guesses, what-ifs, a role the user asked it to play, or what it relayed "
+    "from tool results or web pages. Cite himari_evidence: the seq of HIMARI's replies it rests on. Do not repeat "
+    "a saved fact (skip it); update one HIMARI changed (with its id); retire one HIMARI said is no longer so. "
+    "Write each as one short sentence that stands alone, without a subject or a name, in the language HIMARI "
+    "spoke (e.g. '고양이를 무서워한다.'). Shape: \"self\": [{\"op\": \"add\", \"text\": \"...\", "
+    "\"himari_evidence\": [2]}, {\"op\": \"update\", \"id\": \"f3\", \"text\": \"...\", \"himari_evidence\": [4]}, "
+    "{\"op\": \"retire\", \"id\": \"f5\", \"himari_evidence\": [4]}]. \"self\" is [] when HIMARI said nothing new "
+    "about itself."
+)
+PASS_FACT_CHARS = 6_000  # the persona's facts a pass is shown: the user's first, then the newest
+PASS_MAX_SELF = 5  # self decisions one pass may make
+
+
+def pass_instructions(life: bool) -> str:
+    return MEMORY_PASS_INSTRUCTIONS + ("\n" + SELF_INSTRUCTIONS if life else "")
+
+
 _CATEGORIES = [c.value for c in MemoryCategory]
 _SEQS: dict[str, Any] = {"type": "array", "items": {"type": "integer"}}
 _DATE: dict[str, Any] = {"type": ["string", "null"], "maxLength": 40}
@@ -132,6 +164,9 @@ ANSWER_SCHEMA: dict[str, Any] = {
                 "himari_context": _SEQS,
             },
         }]},
+        # character-life §4: each decision is read by plan_self, so one malformed decision is dropped
+        # alone and never fails the pass's notes
+        "self": {"type": ["array", "null"]},
     },
 }
 
@@ -270,10 +305,31 @@ def _local(moment: datetime, zone: tzinfo) -> str:
     return moment.astimezone(zone).isoformat(timespec="minutes")
 
 
+def shown_facts(entries: Sequence[LifeEntry]) -> list[LifeEntry]:
+    """character-life §4: the persona's facts a pass is shown, within PASS_FACT_CHARS,
+    in the store's order (the user's first, then the newest)."""
+    shown: list[LifeEntry] = []
+    room = PASS_FACT_CHARS
+    for entry in entries:
+        if entry.kind is LifeKind.FACT and len(entry.text) <= room:
+            shown.append(entry)
+            room -= len(entry.text)
+    return shown
+
+
 def request_data(part: Part, notes: Sequence[Memory], previous: Episode | None, *, now: datetime, zone: str,
-                 kind: PassKind) -> dict[str, JsonValue]:
-    """The pass's input (§4.2), as JSON data."""
+                 kind: PassKind, facts: Sequence[LifeEntry] | None = None) -> dict[str, JsonValue]:
+    """The pass's input (§4.2), as JSON data; with ``facts`` (character-life §4)
+    the chosen persona's, as himari_facts."""
     where = ZoneInfo(zone)
+    data = _request_data(part, notes, previous, where, now=now, zone=zone, kind=kind)
+    if facts is not None:
+        data["himari_facts"] = [{"id": f"f{f.entry_id}", "text": f.text, "written_by": f.origin.value} for f in facts]
+    return data
+
+
+def _request_data(part: Part, notes: Sequence[Memory], previous: Episode | None, where: ZoneInfo, *, now: datetime,
+                  zone: str, kind: PassKind) -> dict[str, JsonValue]:
     return {
         "now": _local(now, where),
         "time_zone": zone,
@@ -288,11 +344,12 @@ def request_data(part: Part, notes: Sequence[Memory], previous: Episode | None, 
     }
 
 
-def model_input(data: Mapping[str, JsonValue], options: RequestOptions) -> ModelInput:
-    """One request, as compaction's: fixed instructions and one user turn of data."""
+def model_input(data: Mapping[str, JsonValue], options: RequestOptions, *, life: bool = False) -> ModelInput:
+    """One request, as compaction's: fixed instructions and one user turn of data;
+    with ``life``, the self instructions too (character-life §4)."""
     empty = PersistedStateBasis(conversation_sequence=0, state_revision=0, environments=())
     return ModelInput(
-        stable_prefix=(MEMORY_PASS_INSTRUCTIONS,),
+        stable_prefix=(pass_instructions(life),),
         tool_catalog=(),
         conversation=(UserTurn(EventId("memory-pass-input"), (TextBlock(json_data(data)),)),),
         current_state=CurrentStateProjection(basis=empty),
@@ -489,6 +546,45 @@ def plan_episode(answer: Mapping[str, Any], part: Part, previous: Episode | None
                        extend=None if not extend or previous is None else previous.episode_id,
                        expected_revision=None if not extend or previous is None else previous.revision,
                        extend_within=EXTEND_WITHIN)
+
+
+def _fact_id(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    digits = value[1:] if value.startswith("f") else value
+    return int(digits) if digits.isdigit() else None
+
+
+def plan_self(answer: Mapping[str, Any], part: Part, facts: Sequence[LifeEntry]) -> list[LifeChange]:
+    """character-life §4: the answer's ``self`` decisions (at most PASS_MAX_SELF)
+    as Data's changes. Each rests on HIMARI's replies of this part only; an
+    update or retire names a fact the pass was shown that is not the user's.
+    Anything else is left out, alone."""
+    himari = {m.sequence for m in part.messages if m.role == "himari"}
+    shown = {f.entry_id: f for f in facts}
+    raws = answer.get("self")
+    changes: list[LifeChange] = []
+    for raw in (raws if isinstance(raws, list) else [])[:PASS_MAX_SELF]:
+        if not isinstance(raw, Mapping):
+            continue
+        evidence = raw.get("himari_evidence")
+        if (not isinstance(evidence, list) or not evidence
+                or not all(isinstance(s, int) and not isinstance(s, bool) and s in himari for s in evidence)):
+            continue
+        op, text = raw.get("op"), raw.get("text")
+        text = text.strip() if isinstance(text, str) and text.strip() else None
+        if op == "add":
+            if text is not None:
+                changes.append(LifeChange(LifeChangeOp.ADD, text=text, sequences=tuple(evidence)))
+            continue
+        target = shown.get(_fact_id(raw.get("id")) or 0)
+        if target is None or target.origin is LifeOrigin.USER:
+            continue
+        if op == "update" and text is not None:
+            changes.append(LifeChange(LifeChangeOp.UPDATE, text, target.entry_id, target.revision, tuple(evidence)))
+        elif op == "retire":
+            changes.append(LifeChange(LifeChangeOp.RETIRE, None, target.entry_id, target.revision, tuple(evidence)))
+    return changes
 
 
 def answer_text(blocks: Sequence[object]) -> str:

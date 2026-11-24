@@ -1,6 +1,6 @@
 // The settings the classic page manages (V3-P102 W6c), on the same routes: instructions (V3-P69), the companion
-// personas (V3-P108), memory, its suggestions and timeline (V3-P71, V3-P85), devices and quiet (V3-P83, V3-P88), the
-// Tool servers' defaults (V3-P53).
+// personas (V3-P108), HIMARI's life (its facts, plans and diary; character-life §6), memory, its suggestions and
+// timeline (V3-P71, V3-P85), devices and quiet (V3-P83, V3-P88), the Tool servers' defaults (V3-P53).
 import { del, enc, get, post, put, api } from "./client";
 
 export interface InstructionsText {
@@ -43,6 +43,36 @@ export const deletePersona = (id: number, revision: number) =>
   del<PersonaChoice>(`/api/personas/${id}?revision=${revision}`);
 export const choosePersona = (personaId: number | null, revision: number) =>
   put<PersonaChoice>("/api/personas/choice", { persona_id: personaId, revision });
+
+export type LifeKind = "fact" | "plan" | "diary";
+export type LifeOrigin = "writer" | "conversation" | "user"; // the story writer, a conversation, the user
+
+export interface LifeEntry {
+  id: number;
+  kind: LifeKind;
+  day: string | null; // YYYY-MM-DD for a plan or a diary, null for a fact
+  text: string;
+  origin: LifeOrigin;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Life {
+  persona: { id: number; name: string } | null; // null: no persona chosen (the default's life)
+  enabled: boolean; // whether the life is used now (the companion and life are on)
+  writer: { running: boolean; told: string };
+  entries: LifeEntry[]; // facts first, then plans and diaries, newest day first (the last 30 days and later)
+  limits: { facts: number; chars: number; diary_chars: number };
+}
+
+export const readLife = () => get<Life>("/api/life");
+/** ``personaId``: the persona the page shows (null for the default); refused with ``persona_changed`` when another
+ * one was chosen since. */
+export const addLifeFact = (text: string, personaId: number | null) =>
+  post<LifeEntry>("/api/life", { text, persona_id: personaId });
+export const editLife = (id: number, text: string, revision: number) => put<LifeEntry>(`/api/life/${id}`, { text, revision });
+export const deleteLife = (id: number, revision: number) => del<void>(`/api/life/${id}?revision=${revision}`);
 
 export type Category = "user" | "preference" | "project" | "reference" | "loop";
 export const CATEGORIES: Category[] = ["user", "preference", "project", "reference", "loop"];

@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime
+from datetime import date, datetime
 import json
 import unicodedata
 from collections.abc import Iterable, Sequence
 
 from himari.common import ContentBlock, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
+    MAX_DIARY_CHARS,
     MAX_EPISODE_CHARS,
+    MAX_LIFE_CHARS,
+    MAX_LIFE_FACTS,
     MAX_LOOP_CHARS,
+    LifeChange,
+    LifeChangeOp,
+    LifeEntry,
+    LifeKind,
+    LifeOrigin,
     MAX_MEMORIES,
     MAX_DEVICE_NAME_CHARS,
     MAX_EFFORT_CHARS,
@@ -493,3 +501,94 @@ def unreminded(note: Memory) -> Memory:
     if note.category is MemoryCategory.LOOP or note.remind_at is None:
         return note
     return dataclasses.replace(note, remind_at=None, remind_instant=None, remind_state=None, reminded_at=None)
+
+
+# --- HIMARI's life (character-life v0.1 §2) ------------------------------------------
+
+
+def check_life_text(kind: LifeKind, text: object) -> str:
+    """An entry's text as stored: newlines normalized, trimmed, a diary longer."""
+    if not isinstance(text, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry is text")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry may not contain control characters")
+    text = text.strip()
+    if not text:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
+    limit = MAX_DIARY_CHARS if kind is LifeKind.DIARY else MAX_LIFE_CHARS
+    if len(text) > limit:
+        raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
+    return text
+
+
+def check_life_day(day: object) -> str:
+    """A diary's or plan's date: YYYY-MM-DD."""
+    if not isinstance(day, str) or len(day) != 10:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date is YYYY-MM-DD")
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date is YYYY-MM-DD") from None
+    return day
+
+
+def check_life_persona(persona_id: object) -> int:
+    """NO_PERSONA (0) or a persona's id."""
+    if isinstance(persona_id, bool) or not isinstance(persona_id, int) or not 0 <= persona_id < 1 << 63:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"no persona {persona_id}")
+    return persona_id
+
+
+def order_life(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
+    """Facts first (the user's, then newest), then the dated entries, newest date first."""
+    listed = list(entries)
+    facts = sorted((e for e in listed if e.kind is LifeKind.FACT),
+                   key=lambda e: (e.origin is not LifeOrigin.USER, -e.updated_at.timestamp(), -e.entry_id))
+    dated_ = sorted((e for e in listed if e.kind is not LifeKind.FACT),
+                    key=lambda e: (e.day or "", e.kind is LifeKind.DIARY, e.entry_id), reverse=True)
+    return (*facts, *dated_)
+
+
+def same_fact(text: str, facts: Iterable[LifeEntry]) -> bool:
+    """A fact whose text is already a live fact's, compared folded."""
+    folded = fold(text)
+    return any(fold(f.text) == folded for f in facts)
+
+
+def life_change_outcome(change: object, facts: Sequence[LifeEntry]) -> str | None:
+    """§4: why a memory pass's ``self`` decision cannot be applied to the
+    persona's live ``facts`` as they are now, or None when it can (an ADD's
+    room and repeats are checked as it is added)."""
+    if not isinstance(change, LifeChange) or not isinstance(change.op, LifeChangeOp):
+        return "invalid"
+    text: str | None = None
+    if change.op is not LifeChangeOp.RETIRE:
+        try:
+            text = check_life_text(LifeKind.FACT, change.text)
+        except DataError:
+            return "invalid"
+    if change.op is LifeChangeOp.ADD:
+        return None
+    target = next((f for f in facts if f.entry_id == change.entry_id), None)
+    if target is None:
+        return "unknown"
+    if target.origin is LifeOrigin.USER:
+        return "user_owned"
+    if change.expected_revision != target.revision:
+        return "conflict"
+    if text is not None and same_fact(text, (f for f in facts if f.entry_id != target.entry_id)):
+        return "duplicate"
+    return None
+
+
+def fact_room(facts: Sequence[LifeEntry]) -> tuple[bool, LifeEntry | None]:
+    """§2: whether one more fact fits among the persona's live ``facts``, and the
+    one to retire for it: the oldest of the writer's, then of the conversations'
+    (the user's stay). (False, None): all MAX_LIFE_FACTS are the user's."""
+    if len(facts) < MAX_LIFE_FACTS:
+        return True, None
+    others = [f for f in facts if f.origin is not LifeOrigin.USER]
+    if not others:
+        return False, None
+    return True, min(others, key=lambda f: (f.origin is not LifeOrigin.WRITER, f.updated_at, f.entry_id))

@@ -39,6 +39,14 @@ turns them off, ``HIMARI_MEMORY_IDLE_MINUTES`` (1..240, default 10) is how long
 a conversation stays quiet first, ``HIMARI_MEMORY_DAILY_TOKENS`` (default
 1,000,000) each principal's daily estimate-based budget.
 
+HIMARI's life (character-life v0.1): ``HIMARI_LIFE=0`` turns it off (the
+life in the prompt, the story writer and the memory passes' self facts; what
+is kept stays); on by default, used only with the companion on. The story
+writer uses the memory passes' model (``HIMARI_MEMORY_MODEL``) and writes
+after ``HIMARI_LIFE_WRITE_AT`` (HH:MM in ``HIMARI_TIME_ZONE``, default
+22:00), within ``HIMARI_LIFE_DAILY_TOKENS`` (default 200,000) per principal
+a day.
+
 Conversation search (V3-P72 §9): ``HIMARI_CONVERSATION_SEARCH=0`` turns
 conversation_search and conversation_read off; on by default.
 
@@ -66,6 +74,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import time
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -93,6 +102,9 @@ MEMORY_AUTO_VAR = "HIMARI_MEMORY_AUTO"  # V3-P85: 0 turns memory passes off
 MEMORY_MODEL_VAR = "HIMARI_MEMORY_MODEL"  # V3-P85: their model; unset: none run
 MEMORY_IDLE_VAR = "HIMARI_MEMORY_IDLE_MINUTES"  # V3-P85: quiet before a pass
 MEMORY_TOKENS_VAR = "HIMARI_MEMORY_DAILY_TOKENS"  # V3-P85: each principal's daily budget
+LIFE_VAR = "HIMARI_LIFE"  # character-life v0.1: 0 turns HIMARI's life off
+LIFE_WRITE_AT_VAR = "HIMARI_LIFE_WRITE_AT"  # the story writer's time, HH:MM
+LIFE_TOKENS_VAR = "HIMARI_LIFE_DAILY_TOKENS"  # the story writer's daily budget per principal
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
 COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
@@ -158,6 +170,9 @@ class WebConfig:
     memory_model: str | None = None
     memory_idle_minutes: int = 10
     memory_daily_tokens: int = 1_000_000
+    life: bool = True  # character-life v0.1
+    life_write_at: time = time(22, 0)
+    life_daily_tokens: int = 200_000
     conversation_search: bool = True
     streaming: bool = True
     companion: bool = True  # V3-P83
@@ -246,6 +261,9 @@ class WebConfig:
             memory_model=source.get(MEMORY_MODEL_VAR, "").strip() or None,
             memory_idle_minutes=_required(source.get(MEMORY_IDLE_VAR), MEMORY_IDLE_VAR, 10, 1, 240),
             memory_daily_tokens=_required(source.get(MEMORY_TOKENS_VAR), MEMORY_TOKENS_VAR, 1_000_000, 10_000, 10**9),
+            life=_flag(source.get(LIFE_VAR), LIFE_VAR, default=True),
+            life_write_at=_clock_time(source.get(LIFE_WRITE_AT_VAR), LIFE_WRITE_AT_VAR, time(22, 0)),
+            life_daily_tokens=_required(source.get(LIFE_TOKENS_VAR), LIFE_TOKENS_VAR, 200_000, 10_000, 10**9),
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
@@ -344,6 +362,17 @@ def _optional(value: str | None, name: str, default: int | None, low: int, high:
     if not low <= number <= high:
         raise WebConfigError(f"{name} must be 0 (off) or between {low} and {high}")
     return number
+
+
+def _clock_time(value: str | None, name: str, default: time) -> time:
+    """``HH:MM`` (24-hour); unset: ``default``."""
+    if value is None or not value.strip():
+        return default
+    hours, _, minutes = value.strip().partition(":")
+    if not (hours.isdigit() and minutes.isdigit() and len(minutes) == 2 and 0 <= int(hours) <= 23
+            and 0 <= int(minutes) <= 59):
+        raise WebConfigError(f"{name} must be HH:MM, e.g. 22:00")
+    return time(int(hours), int(minutes))
 
 
 def _time_zone(value: str | None) -> str:

@@ -15,7 +15,8 @@ Rules:
    ``common`` only (V3-P59 §3); the image copies use ``common``,
    ``sandbox`` and ``data`` (V3-P67); presence uses ``common`` and ``data``
    (V3-P83); memory passes use ``common``, ``data``, ``prompt`` and
-   ``provider`` (V3-P85), never Control.
+   ``provider`` (V3-P85), never Control; so does the story writer (``life``,
+   character-life v0.1).
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -43,6 +44,7 @@ LAYERS = {
     "provider": 5,
     "control": 6,
     "memory": 6,  # memory passes (V3-P85): Data, Prompt's request types and the Provider, beside Control
+    "life": 6,  # the story writer (character-life v0.1): as memory passes, beside Control
     "bootstrap": 7,
     "interfaces": 8,
 }
@@ -55,6 +57,7 @@ ONLY_FROM = {
     "presence": frozenset({"common", "data"}),
     "proactive": frozenset({"common", "data", "presence"}),
     "memory": frozenset({"common", "data", "prompt", "provider"}),
+    "life": frozenset({"common", "data", "prompt", "provider"}),
 }
 
 

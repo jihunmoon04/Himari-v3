@@ -14,6 +14,11 @@ from himari.data.api import (
     ConversationEvent,
     Episode,
     EventKind,
+    LifeChange,
+    LifeChangeOp,
+    LifeEntry,
+    LifeKind,
+    LifeOrigin,
     Memory,
     MemoryCategory,
     MemoryOrigin,
@@ -24,9 +29,12 @@ from himari.data.api import (
 from himari.memory.passes import (
     ASSISTANT_CHARS,
     MEMORY_PASS_INSTRUCTIONS,
+    PASS_FACT_CHARS,
     PASS_INPUT_CHARS,
     PASS_MAX_NOTES,
+    PASS_MAX_SELF,
     PASS_MEMORY_CHARS,
+    SELF_INSTRUCTIONS,
     AnswerError,
     Part,
     model_input,
@@ -35,8 +43,10 @@ from himari.memory.passes import (
     parse_date,
     plan_episode,
     plan_items,
+    plan_self,
     request_data,
     reservation,
+    shown_facts,
     shown_notes,
     waits,
 )
@@ -280,3 +290,49 @@ def test_a_pass_does_not_forget_a_loop_whose_reminder_waits() -> None:
                               {"op": "forget", "id": "m6", "evidence": [1]}),
                        PART, [waiting, told], kind=PassKind.LIVE, now=NOW, zone=SEOUL)
     assert [(i.action, i.reason) for i in items] == [(PassAction.DROP, "reminder_pending"), (PassAction.FORGET, None)]
+
+
+# --- HIMARI's own facts (character-life v0.1 §4) ---------------------------------------
+
+
+def fact(entry_id: int, text: str, origin: LifeOrigin = LifeOrigin.CONVERSATION, revision: int = 1) -> LifeEntry:
+    return LifeEntry(entry_id, 1, LifeKind.FACT, None, text, origin, revision, NOW, NOW)
+
+
+def test_with_himaris_life_the_pass_is_shown_its_facts_and_told_to_keep_what_it_says_of_itself() -> None:
+    facts = [fact(3, "고양이를 무서워한다.", LifeOrigin.USER), fact(5, "바다를 좋아한다.")]
+    data = request_data(PART, [], None, now=NOW, zone=SEOUL, kind=PassKind.LIVE, facts=facts)
+    assert data["himari_facts"] == [{"id": "f3", "text": "고양이를 무서워한다.", "written_by": "user"},
+                                    {"id": "f5", "text": "바다를 좋아한다.", "written_by": "conversation"}]
+    assert "himari_facts" not in request_data(PART, [], None, now=NOW, zone=SEOUL, kind=PassKind.LIVE)
+    assert model_input(data, RequestOptions("m"), life=True).stable_prefix == (
+        MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS,)
+    assert model_input(data, RequestOptions("m")).stable_prefix == (MEMORY_PASS_INSTRUCTIONS,)  # life off: as before
+    long = [fact(i, "x" * 500) for i in range(1, 20)]
+    assert len(shown_facts([fact(1, "y", LifeOrigin.USER), *long])) == 1 + (PASS_FACT_CHARS - 1) // 500
+
+
+def test_self_decisions_rest_on_himaris_replies_and_leave_the_users_facts_alone() -> None:
+    facts = [fact(3, "고양이를 무서워한다.", LifeOrigin.USER), fact(5, "바다를 좋아한다.", revision=4)]
+    raw = parse_answer(json.dumps({"notes": [], "self": [
+        {"op": "add", "text": " 수채화를 배운다. ", "himari_evidence": [2]},
+        {"op": "add", "text": "from the user", "himari_evidence": [1]},  # a user message is no ground
+        {"op": "update", "id": "f3", "text": "user's", "himari_evidence": [2]},  # the user's fact
+        {"op": "update", "id": "f5", "text": "산을 더 좋아한다.", "himari_evidence": [4]},
+        {"op": "retire", "id": "5", "himari_evidence": [2, 4]},
+    ]}, ensure_ascii=False))
+    assert plan_self(raw, PART, facts) == [
+        LifeChange(LifeChangeOp.ADD, "수채화를 배운다.", sequences=(2,)),
+        LifeChange(LifeChangeOp.UPDATE, "산을 더 좋아한다.", 5, 4, (4,)),
+        LifeChange(LifeChangeOp.RETIRE, None, 5, 4, (2, 4))]
+    dropped = parse_answer(json.dumps({"notes": [], "self": [
+        {"op": "add", "text": "no ground", "himari_evidence": []},
+        {"op": "retire", "id": "f9", "himari_evidence": [4]},  # not shown
+        {"op": "forget", "id": "f5", "himari_evidence": [2]},  # no such op
+        {"op": "update", "id": "f5", "himari_evidence": [2]},  # no text
+    ]}))
+    assert plan_self(dropped, PART, facts) == []
+    assert plan_self(parse_answer(json.dumps({"notes": [], "self": None})), PART, facts) == []
+    assert plan_self(parse_answer(json.dumps({"notes": [], "self": ["odd", {"op": "add"}]})), PART, facts) == []
+    many = [{"op": "add", "text": f"사실 {i}.", "himari_evidence": [2]} for i in range(PASS_MAX_SELF + 2)]
+    assert len(plan_self(parse_answer(json.dumps({"notes": [], "self": many})), PART, facts)) == PASS_MAX_SELF

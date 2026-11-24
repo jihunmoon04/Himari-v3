@@ -1719,6 +1719,207 @@ class MemoryPassLog(Protocol):
         ...
 
 
+# --- HIMARI's life (character-life v0.1) ------------------------------------------------
+
+MAX_LIFE_CHARS = 500  # a fact or a plan, in code points after newlines are normalized
+MAX_DIARY_CHARS = 1_500  # one day's diary
+MAX_LIFE_FACTS = 200  # a persona's live facts; past it the oldest not the user's retire (§2)
+NO_PERSONA = 0  # L2: the life HIMARI has while no persona is chosen
+
+
+class LifeKind(Enum):
+    FACT = "fact"  # settled about HIMARI itself (canon)
+    DIARY = "diary"  # one day's diary: one per persona and date
+    PLAN = "plan"  # something ahead, on a date
+
+
+class LifeOrigin(Enum):
+    """Who wrote an entry's current text."""
+
+    WRITER = "writer"  # the story writer
+    CONVERSATION = "conversation"  # a memory pass, from what HIMARI said of itself (§4)
+    USER = "user"  # the Web's Settings → Life: automatic writes leave it alone
+
+
+@dataclass(frozen=True)
+class LifeEntry(DeepFrozen):
+    """One entry of a persona's life (§2). ``day`` (YYYY-MM-DD, the user's date)
+    only for a diary or a plan."""
+
+    entry_id: int  # per principal, never given out again
+    persona_id: int  # NO_PERSONA: the life of no chosen persona
+    kind: LifeKind
+    day: str | None
+    text: str
+    origin: LifeOrigin
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    # §2: where a conversation's fact came from (its Conversation and HIMARI's answers), and the
+    # write or memory pass that wrote it last.
+    source_conversation: ConversationId | None = None
+    source_sequences: tuple[int, ...] = ()
+    source: str | None = None
+
+
+class LifeChangeOp(Enum):
+    ADD = "add"
+    UPDATE = "update"
+    RETIRE = "retire"
+
+
+@dataclass(frozen=True)
+class LifeChange(DeepFrozen):
+    """One ``self`` decision of a memory pass (§4), checked by the memory module:
+    ADD carries the text; UPDATE the fact, the revision it was read at and the
+    text; RETIRE the fact and its revision. ``sequences``: HIMARI's answers it rests on."""
+
+    op: LifeChangeOp
+    text: str | None = None
+    entry_id: int | None = None
+    expected_revision: int | None = None
+    sequences: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class LifePlan(DeepFrozen):
+    """What one story writer call writes for its date (§3), checked by the life module."""
+
+    diary: str
+    plans: tuple[tuple[str, str], ...] = ()  # (YYYY-MM-DD, text)
+    facts: tuple[str, ...] = ()
+
+
+class LifeStore(Protocol):
+    """§2, §6: a persona's life. The principal comes from the trusted entry point,
+    never from model output: no Tool reaches this port. The user's changes are
+    compare-and-set on the entry's ``revision``. Errors: NOT_FOUND (no live
+    entry of this principal), VERSION_CONFLICT, TOO_LARGE (past
+    MAX_LIFE_CHARS, a diary MAX_DIARY_CHARS), INVALID_ARGUMENT (no text, a
+    control character other than newline and tab), LIMIT_EXCEEDED
+    (MAX_LIFE_FACTS live facts, all the user's)."""
+
+    async def list_life(self, principal: PrincipalId, persona_id: int, *,
+                        since: str | None = None) -> tuple[LifeEntry, ...]:
+        """The persona's live entries: every fact (the user's first, then newest
+        first), then the plans and diaries dated ``since`` or later (None: all),
+        newest date first."""
+        ...
+
+    async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
+        """The user's fact (origin USER), at revision 1. At MAX_LIFE_FACTS the
+        oldest fact not the user's retires first (§2)."""
+        ...
+
+    async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
+                        expected_revision: int) -> LifeEntry:
+        """The user's rewrite: it becomes the user's (revision + 1)."""
+        ...
+
+    async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
+        """The user's delete: the entry retires and is no longer listed."""
+        ...
+
+    async def apply_life_changes(self, principal: PrincipalId, persona_id: int, changes: Sequence[LifeChange], *,
+                                 conversation: ConversationId, source: str, now: datetime) -> tuple[str, ...]:
+        """§4: a memory pass's ``self`` decisions on the persona's facts, in one
+        transaction, each on its own: ``applied``, or why not (``unknown``: not
+        a live fact of this persona; ``user_owned``; ``conflict``: another
+        revision; ``duplicate``: the same text is a live fact; ``full``; ``invalid``)."""
+        ...
+
+
+@dataclass(frozen=True)
+class LifeWriteStart(DeepFrozen):
+    persona_id: int
+    day: str  # the date the diary is for
+    provider_key: str
+    model_id: str
+    body: bytes  # the request, stored before it is sent
+    content_type: str
+    reserved_tokens: int
+
+
+class LifeWriteStatus(Enum):
+    PREPARED = "prepared"  # stored, not sent
+    DISPATCHED = "dispatched"  # may have been sent
+    RECEIVED = "received"  # the response is stored
+    APPLIED = "applied"
+    FAILED = "failed"  # no usable answer (``error`` says why)
+    INTERRUPTED = "interrupted"  # the process ended before it was done
+
+
+@dataclass(frozen=True)
+class LifeWrite(DeepFrozen):
+    """One story writer call (§2: recorded as a memory pass's call is)."""
+
+    write_id: str
+    persona_id: int
+    day: str
+    status: LifeWriteStatus
+    provider_key: str
+    model_id: str
+    reserved_tokens: int
+    charged_tokens: int  # what counts against the daily budget
+    input_tokens: int | None
+    output_tokens: int | None
+    error: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class LifeWriteLog(Protocol):
+    """§3: the story writer's record. Every call's request is stored before it
+    is sent and charged at its reservation until the Provider reports usage."""
+
+    async def life_principals(self, active_since: datetime) -> tuple[PrincipalId, ...]:
+        """The principals who sent a message since then (in a Conversation not in the trash)."""
+        ...
+
+    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
+        """The writes made for this persona and date, whatever came of them."""
+        ...
+
+    async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
+        """The tokens charged by the principal's writes prepared since then."""
+        ...
+
+    async def begin_life_write(self, principal: PrincipalId, start: LifeWriteStart) -> str:
+        """A PREPARED write; its id. RAW_PERSISTENCE_UNAVAILABLE when the request cannot be stored."""
+        ...
+
+    async def mark_life_write_dispatched(self, write_id: str) -> None:
+        """INVALID_STATE_TRANSITION unless PREPARED."""
+        ...
+
+    async def record_life_write(self, write_id: str, outcome: RawRunOutcome) -> None:
+        """The response, if any: RECEIVED (charged at the reported usage, else at
+        its reservation) or FAILED with the error. INVALID_STATE_TRANSITION
+        unless PREPARED or DISPATCHED."""
+        ...
+
+    async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime) -> tuple[LifeEntry, ...]:
+        """One transaction (§2, §3): the day's diary (a writer's of that date is
+        rewritten, the user's stays), the plans and the facts (one the same as a
+        live fact is skipped; at MAX_LIFE_FACTS the oldest not the user's
+        retires; all the user's: skipped); the write APPLIED. The entries
+        written. INVALID_STATE_TRANSITION unless RECEIVED."""
+        ...
+
+    async def fail_life_write(self, write_id: str, error: str) -> None:
+        """A write not yet APPLIED, FAILED or INTERRUPTED becomes FAILED with why."""
+        ...
+
+    async def interrupt_life_writes(self) -> int:
+        """At startup: every write left PREPARED, DISPATCHED or RECEIVED becomes
+        INTERRUPTED (one never sent is charged nothing); how many."""
+        ...
+
+    async def list_life_writes(self, principal: PrincipalId, *, limit: int = 20) -> tuple[LifeWrite, ...]:
+        """The newest first."""
+        ...
+
+
 # --- Devices (V3-P83) -----------------------------------------------------------
 
 MAX_DEVICE_NAME_CHARS = 40

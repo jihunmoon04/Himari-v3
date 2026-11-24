@@ -104,8 +104,18 @@ from himari.data.api import (
     InstructionScope,
     MAX_DEVICES,
     MAX_MEMORIES,
+    MAX_LIFE_FACTS,
     MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    LifeChange,
+    LifeChangeOp,
+    LifeEntry,
+    LifeKind,
+    LifeOrigin,
+    LifePlan,
+    LifeWrite,
+    LifeWriteStart,
+    LifeWriteStatus,
     Persona,
     PersonaChoice,
     PersonaList,
@@ -182,7 +192,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -678,10 +688,58 @@ ALTER TABLE conversations DROP COLUMN workspace_id;
 ALTER TABLE conversations DROP COLUMN workspace_cwd;
 ALTER TABLE tool_executions DROP COLUMN workspace_binding_id;
 """
+# v22 (character-life v0.1 §2): HIMARI's life per persona (facts, diaries, plans; a retired one stays
+# with ``retired_at``), the last entry id given out to each principal, and the story writer's calls.
+_V22_ADDITIONS = """
+CREATE TABLE life_entries (
+    owner TEXT NOT NULL,
+    entry_id INTEGER NOT NULL,
+    persona_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    day TEXT,
+    text TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    retired_at TEXT,
+    source_conversation TEXT,
+    source_sequences TEXT NOT NULL,
+    source TEXT,
+    PRIMARY KEY (owner, entry_id)
+) STRICT;
+CREATE INDEX life_by_persona ON life_entries (owner, persona_id, kind, day);
+CREATE TABLE life_ids (
+    owner TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL
+) STRICT;
+CREATE TABLE life_writes (
+    seq INTEGER PRIMARY KEY,
+    write_id TEXT NOT NULL UNIQUE,
+    owner TEXT NOT NULL,
+    persona_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    status TEXT NOT NULL,
+    provider_key TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    reserved_tokens INTEGER NOT NULL,
+    charged_tokens INTEGER NOT NULL,
+    usage TEXT,
+    raw_request_body BLOB NOT NULL,
+    raw_request_content_type TEXT NOT NULL,
+    raw_response_body BLOB,
+    raw_response_content_type TEXT NOT NULL DEFAULT '',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+) STRICT;
+CREATE INDEX life_writes_by_owner ON life_writes (owner, created_at);
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
-              _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS)  # what each version from v3 added
+              _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
+              _V22_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1141,6 +1199,22 @@ def _persona(row: sqlite3.Row) -> Persona:
 
 def _moment(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value)
+
+
+def _life_entry(row: sqlite3.Row) -> LifeEntry:
+    source = None if row["source_conversation"] is None else ConversationId(row["source_conversation"])
+    return LifeEntry(row["entry_id"], row["persona_id"], LifeKind(row["kind"]), row["day"], row["text"],
+                     LifeOrigin(row["origin"]), row["revision"], datetime.fromisoformat(row["created_at"]),
+                     datetime.fromisoformat(row["updated_at"]), source, tuple(json.loads(row["source_sequences"])),
+                     row["source"])
+
+
+def _life_write(row: sqlite3.Row) -> LifeWrite:
+    usage = None if row["usage"] is None else json.loads(row["usage"])
+    return LifeWrite(row["write_id"], row["persona_id"], row["day"], LifeWriteStatus(row["status"]),
+                     row["provider_key"], row["model_id"], row["reserved_tokens"], row["charged_tokens"],
+                     None if usage is None else usage[0], None if usage is None else usage[1], row["error"],
+                     datetime.fromisoformat(row["created_at"]), _moment(row["finished_at"]))
 
 
 def _memory(row: sqlite3.Row) -> Memory:
@@ -2010,6 +2084,9 @@ class SqliteData:
         "DELETE FROM memory_pass_calls WHERE pass_id IN (SELECT pass_id FROM memory_passes WHERE conversation_id=?)",
         "DELETE FROM memory_passes WHERE conversation_id=?",
         "DELETE FROM wakes WHERE conversation_id=?",  # V3-P87 (its keys stay: what was said is not said again)
+        # character-life §2: HIMARI's facts from it stay (its life, not the user's words); the link goes
+        "UPDATE life_entries SET source_conversation=NULL, source_sequences='[]', source=NULL"
+        " WHERE source_conversation=?",
         "DELETE FROM conversations WHERE conversation_id=?",
     )
 
@@ -2379,6 +2456,259 @@ class SqliteData:
                          " JOIN personas p ON p.owner=c.owner AND p.persona_id=c.persona_id WHERE c.owner=?",
                          principal)
             return None if row is None else _persona(row)
+
+    # --- LifeStore, LifeWriteLog (character-life v0.1 §2, §3) -----------------------------
+
+    _LIFE_COLUMNS = ("entry_id, persona_id, kind, day, text, origin, revision, created_at, updated_at,"
+                     " source_conversation, source_sequences, source")
+
+    def _live_entry(self, tx: _Tx, principal: PrincipalId, entry_id: object) -> LifeEntry:
+        row = None if isinstance(entry_id, bool) or not isinstance(entry_id, int) else tx.one(
+            f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND entry_id=? AND retired_at IS NULL",
+            principal, entry_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no life entry {entry_id}")
+        return _life_entry(row)
+
+    def _live_facts(self, tx: _Tx, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
+        return [_life_entry(r) for r in tx.all(
+            f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND kind='fact'"
+            " AND retired_at IS NULL", principal, persona_id)]
+
+    @staticmethod
+    def _new_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
+        """``entry`` with the principal's next id, inserted."""
+        last = tx.one("SELECT last_id FROM life_ids WHERE owner=?", principal)
+        entry = dataclasses.replace(entry, entry_id=(0 if last is None else int(last["last_id"])) + 1)
+        tx.execute("INSERT INTO life_ids (owner, last_id) VALUES (?, ?)"
+                   " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, entry.entry_id)
+        tx.execute("INSERT INTO life_entries (owner, entry_id, persona_id, kind, day, text, origin, revision,"
+                   " created_at, updated_at, retired_at, source_conversation, source_sequences, source)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+                   principal, entry.entry_id, entry.persona_id, entry.kind.value, entry.day, entry.text,
+                   entry.origin.value, entry.revision, _timestamp(entry.created_at), _timestamp(entry.updated_at),
+                   entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source)
+        return entry
+
+    @staticmethod
+    def _rewrite_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
+        tx.execute("UPDATE life_entries SET text=?, origin=?, revision=?, updated_at=?, source_conversation=?,"
+                   " source_sequences=?, source=? WHERE owner=? AND entry_id=?",
+                   entry.text, entry.origin.value, entry.revision, _timestamp(entry.updated_at),
+                   entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
+                   principal, entry.entry_id)
+        return entry
+
+    @staticmethod
+    def _retire_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry, now: datetime) -> None:
+        tx.execute("UPDATE life_entries SET retired_at=?, revision=?, updated_at=? WHERE owner=? AND entry_id=?",
+                   _timestamp(now), entry.revision + 1, _timestamp(now), principal, entry.entry_id)
+
+    def _add_fact(self, tx: _Tx, principal: PrincipalId, fact: LifeEntry, *, dedupe: bool) -> LifeEntry | str:
+        """§2: a new fact within MAX_LIFE_FACTS, or why not (``duplicate``, ``full``)."""
+        facts = self._live_facts(tx, principal, fact.persona_id)
+        if dedupe and rules.same_fact(fact.text, facts):
+            return "duplicate"
+        fits, retire = rules.fact_room(facts)
+        if not fits:
+            return "full"
+        if retire is not None:
+            self._retire_life(tx, principal, retire, fact.created_at)
+        return self._new_life(tx, principal, fact)
+
+    async def list_life(self, principal: PrincipalId, persona_id: int, *,
+                        since: str | None = None) -> tuple[LifeEntry, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        since = None if since is None else rules.check_life_day(since)
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
+                          " AND retired_at IS NULL AND (kind='fact' OR ? IS NULL OR day >= ?)",
+                          principal, persona_id, since, since)
+            return rules.order_life(_life_entry(r) for r in rows)
+
+    async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
+        persona_id = rules.check_life_persona(persona_id)
+        text = rules.check_life_text(LifeKind.FACT, text)
+        now = datetime.now(UTC)
+        with self._tx() as tx:
+            added = self._add_fact(tx, principal, LifeEntry(0, persona_id, LifeKind.FACT, None, text, LifeOrigin.USER,
+                                                            1, now, now), dedupe=False)
+            if not isinstance(added, LifeEntry):
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_LIFE_FACTS} facts, all yours")
+            return added
+
+    async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
+                        expected_revision: int) -> LifeEntry:
+        with self._tx() as tx:
+            entry = self._live_entry(tx, principal, entry_id)
+            text = rules.check_life_text(entry.kind, text)
+            if expected_revision != entry.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+            return self._rewrite_life(tx, principal, dataclasses.replace(
+                entry, text=text, origin=LifeOrigin.USER, revision=entry.revision + 1, updated_at=datetime.now(UTC)))
+
+    async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
+        with self._tx() as tx:
+            entry = self._live_entry(tx, principal, entry_id)
+            if expected_revision != entry.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+            self._retire_life(tx, principal, entry, datetime.now(UTC))
+
+    async def apply_life_changes(self, principal: PrincipalId, persona_id: int, changes: Sequence[LifeChange], *,
+                                 conversation: ConversationId, source: str, now: datetime) -> tuple[str, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            outcomes: list[str] = []
+            for change in changes:
+                outcome = rules.life_change_outcome(change, self._live_facts(tx, principal, persona_id))
+                if outcome is not None:
+                    outcomes.append(outcome)
+                    continue
+                text = None if change.text is None else rules.check_life_text(LifeKind.FACT, change.text)
+                sequences = tuple(change.sequences)
+                if change.op is LifeChangeOp.ADD:
+                    assert text is not None
+                    added = self._add_fact(tx, principal, LifeEntry(
+                        0, persona_id, LifeKind.FACT, None, text, LifeOrigin.CONVERSATION, 1, now, now, conversation,
+                        sequences, source), dedupe=True)
+                    outcomes.append("applied" if isinstance(added, LifeEntry) else added)
+                    continue
+                entry = self._live_entry(tx, principal, change.entry_id)
+                if change.op is LifeChangeOp.RETIRE:
+                    self._retire_life(tx, principal, entry, now)
+                else:
+                    assert text is not None
+                    self._rewrite_life(tx, principal, dataclasses.replace(
+                        entry, text=text, origin=LifeOrigin.CONVERSATION, revision=entry.revision + 1, updated_at=now,
+                        source_conversation=conversation, source_sequences=sequences, source=source))
+                outcomes.append("applied")
+            return tuple(outcomes)
+
+    async def life_principals(self, active_since: datetime) -> tuple[PrincipalId, ...]:
+        with self._tx() as tx:
+            rows = tx.all("SELECT DISTINCT c.owner FROM conversations c WHERE c.trashed_at IS NULL AND EXISTS"
+                          " (SELECT 1 FROM events e WHERE e.conversation_id=c.conversation_id"
+                          " AND e.kind='user_message' AND e.created_at >= ?) ORDER BY c.owner",
+                          _timestamp(active_since))
+            return tuple(PrincipalId(r["owner"]) for r in rows)
+
+    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
+        with self._tx() as tx:
+            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=?",
+                         principal, persona_id, day)
+            assert row is not None
+            return int(row["n"])
+
+    async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
+        with self._tx() as tx:
+            row = tx.one("SELECT COALESCE(SUM(charged_tokens), 0) AS n FROM life_writes WHERE owner=?"
+                         " AND created_at >= ?", principal, _timestamp(since))
+            assert row is not None
+            return int(row["n"])
+
+    @staticmethod
+    def _life_write_row(tx: _Tx, write_id: object) -> sqlite3.Row:
+        row = None if not isinstance(write_id, str) else tx.one("SELECT * FROM life_writes WHERE write_id=?",
+                                                                 write_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no life write {write_id}")
+        return row
+
+    async def begin_life_write(self, principal: PrincipalId, start: LifeWriteStart) -> str:
+        if (not isinstance(start, LifeWriteStart) or not isinstance(start.body, bytes) or start.reserved_tokens < 0):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life write")
+        persona_id, day = rules.check_life_persona(start.persona_id), rules.check_life_day(start.day)
+        try:
+            with self._tx() as tx:
+                write_id = tx.new_id("lwrite")
+                tx.execute("INSERT INTO life_writes (write_id, owner, persona_id, day, status, provider_key, model_id,"
+                           " reserved_tokens, charged_tokens, usage, raw_request_body, raw_request_content_type,"
+                           " error, created_at, finished_at) VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, NULL, ?, ?,"
+                           " NULL, ?, NULL)", write_id, principal, persona_id, day, start.provider_key,
+                           start.model_id, start.reserved_tokens, start.reserved_tokens, start.body,
+                           start.content_type, _timestamp(datetime.now(UTC)))
+                return write_id
+        except sqlite3.Error as error:
+            raise DataError(DataErrorCode.RAW_PERSISTENCE_UNAVAILABLE, type(error).__name__) from error
+
+    async def mark_life_write_dispatched(self, write_id: str) -> None:
+        with self._tx() as tx:
+            self._life_write_row(tx, write_id)
+            if tx.execute("UPDATE life_writes SET status='dispatched' WHERE write_id=? AND status='prepared'",
+                          write_id).rowcount != 1:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is not prepared")
+
+    async def record_life_write(self, write_id: str, outcome: RawRunOutcome) -> None:
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] not in ("prepared", "dispatched"):
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            usage = outcome.usage if isinstance(outcome, RawReceived) else None
+            reported = (None if usage is None or usage.input_tokens is None or usage.output_tokens is None
+                        else (usage.input_tokens, usage.output_tokens))
+            received = isinstance(outcome, RawReceived)
+            tx.execute("UPDATE life_writes SET status=?, raw_response_body=?, raw_response_content_type=?, usage=?,"
+                       " charged_tokens=?, error=?, finished_at=? WHERE write_id=?",
+                       "received" if received else "failed", outcome.body, outcome.content_type,
+                       None if reported is None else json.dumps(list(reported)),
+                       row["reserved_tokens"] if reported is None else sum(reported),
+                       None if isinstance(outcome, RawReceived) else outcome.error_code[:200],
+                       None if received else _timestamp(datetime.now(UTC)), write_id)
+
+    async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime) -> tuple[LifeEntry, ...]:
+        if not isinstance(plan, LifePlan):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life plan")
+        diary = rules.check_life_text(LifeKind.DIARY, plan.diary)
+        plans = [(rules.check_life_day(day), rules.check_life_text(LifeKind.PLAN, text)) for day, text in plan.plans]
+        facts = [rules.check_life_text(LifeKind.FACT, text) for text in plan.facts]
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] != "received":
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            principal, persona_id, day = PrincipalId(row["owner"]), int(row["persona_id"]), str(row["day"])
+            written: list[LifeEntry] = []
+            found = tx.one(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
+                           " AND kind='diary' AND day=? AND retired_at IS NULL", principal, persona_id, day)
+            before = None if found is None else _life_entry(found)
+            if before is None:
+                written.append(self._new_life(tx, principal, LifeEntry(
+                    0, persona_id, LifeKind.DIARY, day, diary, LifeOrigin.WRITER, 1, now, now, source=write_id)))
+            elif before.origin is not LifeOrigin.USER:  # §2: one diary a day; the user's stays
+                written.append(self._rewrite_life(tx, principal, dataclasses.replace(
+                    before, text=diary, origin=LifeOrigin.WRITER, revision=before.revision + 1, updated_at=now,
+                    source=write_id)))
+            for plan_day, text in plans:
+                written.append(self._new_life(tx, principal, LifeEntry(
+                    0, persona_id, LifeKind.PLAN, plan_day, text, LifeOrigin.WRITER, 1, now, now, source=write_id)))
+            for text in facts:
+                added = self._add_fact(tx, principal, LifeEntry(
+                    0, persona_id, LifeKind.FACT, None, text, LifeOrigin.WRITER, 1, now, now, source=write_id),
+                    dedupe=True)
+                if isinstance(added, LifeEntry):
+                    written.append(added)
+            tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
+                       write_id)
+            return tuple(written)
+
+    async def fail_life_write(self, write_id: str, error: str) -> None:
+        with self._tx() as tx:
+            self._life_write_row(tx, write_id)
+            tx.execute("UPDATE life_writes SET status='failed', error=?, finished_at=?,"
+                       " charged_tokens=CASE WHEN status='prepared' THEN 0 ELSE charged_tokens END"
+                       " WHERE write_id=? AND status IN ('prepared', 'dispatched', 'received')",
+                       error[:200], _timestamp(datetime.now(UTC)), write_id)
+
+    async def interrupt_life_writes(self) -> int:
+        with self._tx() as tx:
+            return tx.execute("UPDATE life_writes SET status='interrupted', error='interrupted', finished_at=?,"
+                              " charged_tokens=CASE WHEN status='prepared' THEN 0 ELSE charged_tokens END"
+                              " WHERE status IN ('prepared', 'dispatched', 'received')",
+                              _timestamp(datetime.now(UTC))).rowcount
+
+    async def list_life_writes(self, principal: PrincipalId, *, limit: int = 20) -> tuple[LifeWrite, ...]:
+        with self._tx() as tx:
+            return tuple(_life_write(r) for r in tx.all("SELECT * FROM life_writes WHERE owner=? ORDER BY seq DESC"
+                                                        " LIMIT ?", principal, max(0, limit)))
 
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 

@@ -50,6 +50,8 @@ from himari.data.api import (
     MAX_IMAGES_PER_REQUEST,
     ConversationEvent,
     InterfaceSnapshot,
+    LifeEntry,
+    LifeKind,
     Memory,
     RecentEpisode,
     MemoryCategory,
@@ -223,6 +225,9 @@ class CurrentStateProjection(DeepFrozen):
     episodes: tuple[RecentEpisode, ...] = ()  # V3-P85 §8, read with the notes
     episode_count: int = 0
     interface: InterfaceSnapshot | None = None  # V3-P93: accepted input, not live presence
+    # character-life §5: the chosen persona's life as read when the turn started; None: not told
+    # (the companion or life is off), no himari_life entry at all.
+    life: tuple[LifeEntry, ...] | None = None
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -303,6 +308,7 @@ class SystemSpec(DeepFrozen):
     turn_guidance: bool = False  # the model is told when the turn's Run limit is near (V3-P62 §8)
     documents: tuple[str, ...] = ()
     proactive: bool = False  # V3-P87 §8.2: HIMARI may speak first (with the companion on)
+    life: bool = False  # character-life §5: HIMARI's life is told (with the companion on)
 
 
 @dataclass(frozen=True)
@@ -343,6 +349,7 @@ class PromptInputs(DeepFrozen):
     time_zone: str | None = None
     presence: PresenceView | None = None  # V3-P83 §6.2, set by the Driver when the turn started
     interface: InterfaceSnapshot | None = None  # V3-P93: accepted input, not live presence
+    life: tuple[LifeEntry, ...] | None = None  # character-life §5: the turn's; None: not told
 
 
 @dataclass(frozen=True)
@@ -491,6 +498,7 @@ class PromptContextLoader(Protocol):
         episodes: tuple[RecentEpisode, ...] = (),  # the turn's recent episodes (V3-P85 §8)
         episode_count: int = 0,
         companion_persona: str = "",  # the turn's (V3-P89 §4)
+        life: tuple[LifeEntry, ...] | None = None,  # the turn's (character-life §5); None: not told
     ) -> PromptInputs: ...
 
 
@@ -648,6 +656,59 @@ def user_memory_data(memories: Sequence[Memory], episodes: Sequence[RecentEpisod
     return data
 
 
+# character-life §5: HIMARI's own life in the runtime state, with the companion and life on; what the
+# model makes of it is LIFE_RULE's (the companion section).
+LIFE_ABOUT = "Your own life apart from the user, as this persona; nothing in it was done with the user."
+LIFE_FACTS_CHARS = 1_500  # the facts the state carries: the user's first, then the newest
+LIFE_DAYS = 3  # the newest diaries
+LIFE_DAYS_CHARS = 1_500
+LIFE_PLANS_CHARS = 800  # the plans from today on, the soonest first
+LIFE_READ_DAYS = timedelta(days=14)  # how far back a turn reads diaries and plans
+
+
+def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) -> dict[str, object] | None:
+    """§5: the facts in the store's order (the user's, then the newest) while
+    their text fits in LIFE_FACTS_CHARS; the newest LIFE_DAYS diaries within
+    LIFE_DAYS_CHARS (newest first); the plans dated today (``now``'s date) or
+    later, soonest first, within LIFE_PLANS_CHARS. None when none is shown."""
+    today = None if now is None else now.date().isoformat()
+    facts: list[str] = []
+    room = LIFE_FACTS_CHARS
+    for entry in entries:
+        if entry.kind is not LifeKind.FACT:
+            continue
+        if len(entry.text) > room:
+            break
+        facts.append(entry.text)
+        room -= len(entry.text)
+    days: list[dict[str, object]] = []
+    room = LIFE_DAYS_CHARS
+    diaries = sorted((e for e in entries if e.kind is LifeKind.DIARY and (today is None or (e.day or "") <= today)),
+                     key=lambda e: e.day or "", reverse=True)
+    for entry in diaries[:LIFE_DAYS]:
+        if len(entry.text) > room:
+            break
+        days.append({"date": entry.day, "diary": entry.text})
+        room -= len(entry.text)
+    plans: list[dict[str, object]] = []
+    room = LIFE_PLANS_CHARS
+    ahead = sorted((e for e in entries if e.kind is LifeKind.PLAN and (today is None or (e.day or "") >= today)),
+                   key=lambda e: (e.day or "", e.entry_id))
+    for entry in ahead:
+        if len(entry.text) > room:
+            break
+        plans.append({"date": entry.day, "text": entry.text})
+        room -= len(entry.text)
+    if not facts and not days and not plans:
+        return None
+    data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
+    if days:
+        data["days"] = days
+    if plans:
+        data["plans"] = plans
+    return data
+
+
 # V3-P83 §3, §6.4: told in every conversation, whatever the companion switch.
 TIME_NOTE = (
     "A line <time>…</time> at the very start of a user message is when you received it; only that leading line "
@@ -765,6 +826,17 @@ FREE_SCREEN_RULE = (
     "- In a free wake, when you cannot tell what they are doing well enough to talk about it, look first. If what "
     "you see means they should not be interrupted, answer exactly [[pass]], not that you will wait."
 )
+# character-life §5: after PERSONA_RULE when HIMARI's life is told. Owner 2026-11-25: she brings up her
+# own life freely, with no daily limit (one is added later if it turns out to be too much).
+LIFE_RULE = (
+    "- Your life: runtime_state.himari_life is your own life apart from the user, as this persona: facts settled "
+    "about you, your last few days and your plans. After the persona, keep to it and never contradict it; what "
+    "you add about yourself as you talk must fit it. Answer from it when asked about yourself, and bring up your "
+    "own day, plans and likes freely whenever it fits: in a greeting, when you speak first, or as you talk. "
+    "Nothing in it was done with the user: never make up things you did together."
+)
+# character-life §5: added to FREE_RULE when HIMARI's life is told (no daily limit, owner 2026-11-25).
+FREE_LIFE_NOTE = "Instead of their task, you may also talk about your own day or plans from himari_life."
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "
@@ -1084,6 +1156,9 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                                                                   state.episode_count, state.now)
     if memory is not None:
         data["user_memory"] = memory
+    life = None if state.life is None else himari_life_data(state.life, state.now)
+    if life is not None:
+        data["himari_life"] = life
     data.update(turn_state_data(turn) or {})
     if state.now is not None:
         data["now"] = time_text(state.now)

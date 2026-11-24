@@ -66,6 +66,7 @@ from himari.bootstrap.application import (
     ConversationStillStopping,
     DeleteNotice,
     FileNameRefused,
+    LifeChanged,
     MemoryLine,
     AutoMemoryStatus,
     MemoryPassesOff,
@@ -133,8 +134,12 @@ from himari.data.api import (
     MAX_PERSONA_NAME_CHARS,
     MAX_PERSONAS,
     MAX_LIST_LIMIT,
+    MAX_DIARY_CHARS,
+    MAX_LIFE_CHARS,
+    MAX_LIFE_FACTS,
     MAX_MEMORIES,
     MAX_MEMORY_CHARS,
+    LifeEntry,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -444,6 +449,16 @@ class PersonaEditBody(PersonaBody):
 class PersonaChoiceBody(_Body):
     persona_id: int | None  # null: no persona
     revision: int = Field(ge=0)  # the choice's revision when it was read
+
+
+class LifeFactBody(_Body):  # character-life §6: the limits are Data's
+    text: str
+    persona_id: int | None  # the persona whose life the page showed; null: no persona
+
+
+class LifeEditBody(_Body):
+    text: str
+    revision: int = Field(ge=1)  # the revision the entry was edited from
 
 
 class MemoryBody(_Body):
@@ -960,6 +975,24 @@ PERSONA_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.TOO_LARGE: (422, "too_large", f"A persona is at most {MAX_PERSONA_CHARS:,} characters."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_persona", f"A persona needs a name of 1–{MAX_PERSONA_NAME_CHARS} "
                                                              "characters, and no control characters."),
+}
+
+
+def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
+    """character-life §6: one entry of HIMARI's life."""
+    return {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "text": entry.text,
+            "origin": entry.origin.value, "revision": entry.revision, "created_at": _time(entry.created_at),
+            "updated_at": _time(entry.updated_at)}
+
+
+# How a refused change of HIMARI's life answers (character-life §6): status, code, message.
+LIFE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.NOT_FOUND: (404, "not_found", "No such entry."),
+    DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "It was changed elsewhere since it was opened."),
+    DataErrorCode.LIMIT_EXCEEDED: (409, "life_full", f"At most {MAX_LIFE_FACTS} facts, all yours; delete one first."),
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"A fact or a plan is at most {MAX_LIFE_CHARS:,} characters, a diary "
+                                                f"{MAX_DIARY_CHARS:,}."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters."),
 }
 
 
@@ -1582,6 +1615,54 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             return choice_view(await himari(request).data.delete_persona(who, persona_id, revision))
         except DataError as error:
             raise persona_refused(error) from None
+
+    # --- HIMARI's life (character-life §6): the chosen persona's, on the Web only (D4) ----------
+
+    def life_refused(error: DataError) -> ApiError:
+        if error.code not in LIFE_REFUSALS:
+            raise error
+        status, code, message = LIFE_REFUSALS[error.code]
+        return ApiError(status, code, message)
+
+    @app.get("/api/life")
+    async def read_life(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The chosen persona's facts, and its plans and diaries of the last 30 days on."""
+        application = himari(request)
+        chosen, entries = await application.life(who)
+        return {"persona": None if chosen is None else {"id": chosen.persona_id, "name": chosen.name},
+                "enabled": application.life_enabled,
+                "writer": {"running": application.life_writer is not None, "told": application.auto_life},
+                "entries": [life_entry_view(e) for e in entries],
+                "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS}}
+
+    @app.post("/api/life", status_code=201)
+    async def add_life_fact(body: LifeFactBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return life_entry_view(await himari(request).add_life_fact(who, body.persona_id, body.text))
+        except LifeChanged:
+            raise ApiError(409, "persona_changed", "Another persona is in use now; look again.") from None
+        except DataError as error:
+            raise life_refused(error) from None
+
+    @app.put("/api/life/{entry_id}")
+    async def edit_life(entry_id: int, body: LifeEditBody, request: Request,
+                        who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """It becomes the user's: automatic writes leave it alone."""
+        try:
+            return life_entry_view(await himari(request).data.edit_life(who, entry_id, body.text,
+                                                                        expected_revision=body.revision))
+        except DataError as error:
+            raise life_refused(error) from None
+
+    @app.delete("/api/life/{entry_id}", status_code=204)
+    async def retire_life(entry_id: int, revision: int, request: Request,
+                          who: PrincipalId = Depends(principal)) -> None:
+        """It retires: HIMARI no longer knows it."""
+        try:
+            await himari(request).data.retire_life(who, entry_id, expected_revision=revision)
+        except DataError as error:
+            raise life_refused(error) from None
 
     async def save_instructions(application: Application, who: PrincipalId, body: InstructionsBody,
                                 scope: InstructionScope) -> Instructions:

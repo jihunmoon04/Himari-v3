@@ -3,6 +3,7 @@ import { NavLink, useParams } from "react-router";
 import { PageHeader } from "@/components/Shell";
 import { DevicesSettings } from "@/components/settings/Devices";
 import { InstructionsSettings } from "@/components/settings/Instructions";
+import { LifeSettings } from "@/components/settings/Life";
 import { MemorySettings } from "@/components/settings/Memory";
 import { PersonaSettings } from "@/components/settings/Personas";
 import { ToolServerSettings } from "@/components/settings/ToolServers";
@@ -11,6 +12,7 @@ import { cn } from "@/lib/cn";
 const SECTIONS = [
   { id: "instructions", label: "Instructions", body: <InstructionsSettings /> },
   { id: "personas", label: "Personas", body: <PersonaSettings /> },
+  { id: "life", label: "Life", body: <LifeSettings /> },
   { id: "memory", label: "Memory", body: <MemorySettings /> },
   { id: "devices", label: "Devices", body: <DevicesSettings /> },
   { id: "tools", label: "Tool servers", body: <ToolServerSettings /> },
