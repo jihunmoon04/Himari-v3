@@ -40,7 +40,7 @@ from himari.prompt.api import (
     user_instructions_section,
 )
 from himari.prompt.composer import Composer
-from himari.prompt.system import BASE_INSTRUCTIONS
+from himari.prompt.system import COMPANION_BASE
 from himari.provider.api import NativeReceived, NormalizedFinal, NormalizedToolCalls, ProviderError
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.tool.memory import memory_tools
@@ -110,7 +110,7 @@ def model_input(scene: Scene, model: str, after: bool):  # type: ignore[no-untyp
     if scene.attachment_name is not None:
         blocks = (*blocks, AttachmentRef(FileId("f1"), 1))
         attachments = {"f1#1": AttachmentInfo(scene.attachment_name, "uploads/x.txt", "text/plain", 12)}
-    inputs = PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=tuple(t.definition for t in tools), events=(),
+    inputs = PromptInputs(instructions=COMPANION_BASE, tool_catalog=tuple(t.definition for t in tools), events=(),
                           tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, (), (), ()),
                           observations=(), request_options=RequestOptions(model), trigger_refs=(),
                           system=SystemSpec(companion=scene.companion, memory=True, attachments=True),

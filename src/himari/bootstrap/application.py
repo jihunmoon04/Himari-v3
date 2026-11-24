@@ -49,7 +49,7 @@ from zoneinfo import available_timezones
 
 import httpx
 
-from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
+from himari.bootstrap import Runtime, build_runtime
 from himari.bootstrap.interfaces import (
     ConfiguredInterfaces,
     ConnectionGenerationRequired as ConnectionGenerationRequired,
@@ -168,6 +168,7 @@ from himari.prompt.api import (
     SourceNote,
     SystemSpec,
 )
+from himari.prompt.system import base_instructions
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 from himari.tool.memory import MEMORY_FORGET, MEMORY_SAVE
@@ -865,7 +866,7 @@ class Application:
                      f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
             uploads_work = machine is not None
             views = await _image_views(root, sandbox)
-            base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
+            base = base_instructions(companion) if instructions is None else instructions  # V3-P108 §3.1
             zones = frozenset(available_timezones())
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
@@ -1135,8 +1136,8 @@ class Application:
 
     async def instructions(self, principal: PrincipalId,
                            scope: InstructionScope = InstructionScope.USER) -> Instructions:
-        """The instructions the user wrote for every Conversation, or (V3-P89 §4)
-        their companion persona, which is told only with the companion on."""
+        """The instructions the user wrote for every Conversation (the companion
+        persona is the PersonaStore's, V3-P108)."""
         return await self.data.read_instructions(principal, scope)
 
     async def set_instructions(self, principal: PrincipalId, text: str, revision: int,

@@ -13,7 +13,7 @@ import pytest
 from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
-from himari.prompt.system import BASE_INSTRUCTIONS
+from himari.prompt.system import COMPANION_BASE
 from himari.bootstrap import application as application_module
 from himari.bootstrap.application import (
     Application,
@@ -78,7 +78,7 @@ def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path)
             assert ATTACHMENT_NOTE in "\n".join(first.stable_prefix) and TOOL_IMAGES_NOTE in "\n".join(first.stable_prefix)
             prefix = list(first.stable_prefix)  # V3-P68 §3: always, after the operator's
             system = "\n\n".join(prefix)  # V3-P89: sections in order, each holding its lines
-            assert system.index(PROGRESS_NOTE) > system.index(TOOL_IMAGES_NOTE) > system.index(BASE_INSTRUCTIONS[0])
+            assert system.index(PROGRESS_NOTE) > system.index(TOOL_IMAGES_NOTE) > system.index(COMPANION_BASE[0])
             info = first.attachments[f"{record.file_id}#1"]
             assert info.path == f"{folder}/uploads/notes.txt"
             events = await app.data.read_events(scope)

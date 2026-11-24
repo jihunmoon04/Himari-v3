@@ -17,6 +17,8 @@ from himari.data.api import (
     MAX_EFFORT_CHARS,
     MAX_EXTERNAL_SETTINGS,
     MAX_INSTRUCTIONS_CHARS,
+    MAX_PERSONA_CHARS,
+    MAX_PERSONA_NAME_CHARS,
     MAX_MEMORY_CHARS,
     MAX_SEARCH_WORD_CHARS,
     MAX_SEARCH_WORDS,
@@ -107,24 +109,56 @@ def check_model_setting(setting: object) -> None:
 
 def check_instruction_scope(scope: object) -> None:
     if not isinstance(scope, InstructionScope):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only the user's own instructions and persona are offered")
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only the user's own instructions are offered")
+
+
+def _long_text(text: object, noun: str, limit: int) -> str:
+    """V3-P69 §6: newlines become \n, no control character but newline and tab,
+    only whitespace is no text, at most ``limit`` code points."""
+    if not isinstance(text, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{noun} must be text")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Before the blank check: str.strip() would take some control characters as blanks. A lone
+    # surrogate (Cs) is not text either, and SQLite could not store it.
+    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{noun} may not contain control characters")
+    if not text.strip():
+        return ""
+    if len(text) > limit:
+        raise DataError(DataErrorCode.TOO_LARGE, f"{noun} may be at most {limit} characters")
+    return text
 
 
 def check_instructions(scope: object, text: object) -> str:
     """V3-P69 §6: the text as stored, or why not."""
     check_instruction_scope(scope)
-    if not isinstance(text, str):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions are text")
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Before the blank check: str.strip() would take some control characters as blanks. A lone
-    # surrogate (Cs) is not text either, and SQLite could not store it.
-    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions may not contain control characters")
-    if not text.strip():
-        return ""
-    if len(text) > MAX_INSTRUCTIONS_CHARS:
-        raise DataError(DataErrorCode.TOO_LARGE, f"instructions are at most {MAX_INSTRUCTIONS_CHARS} characters")
-    return text
+    return _long_text(text, "instructions", MAX_INSTRUCTIONS_CHARS)
+
+
+def check_persona_text(text: object) -> str:
+    """V3-P108 §4.1: a persona's text, checked as instructions are."""
+    return _long_text(text, "a persona's text", MAX_PERSONA_CHARS)
+
+
+def check_persona_name(name: object) -> tuple[str, str]:
+    """V3-P108 §4.1: the name as stored and the key that keeps names apart
+    (trimmed, NFC, case-folded)."""
+    if not isinstance(name, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a persona's name must be text")
+    name = unicodedata.normalize("NFC", name.strip())
+    if any(unicodedata.category(c) in ("Cc", "Cs") for c in name):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a persona's name may not contain control characters")
+    if not 1 <= len(name) <= MAX_PERSONA_NAME_CHARS:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT,
+                        f"a persona's name is 1..{MAX_PERSONA_NAME_CHARS} characters")
+    return name, name.casefold()
+
+
+def check_persona_id(persona_id: object) -> int:
+    """An id is a positive int SQLite can hold; anything else is no persona."""
+    if isinstance(persona_id, bool) or not isinstance(persona_id, int) or not 1 <= persona_id < 1 << 63:
+        raise DataError(DataErrorCode.NOT_FOUND, f"no persona {persona_id}")
+    return persona_id
 
 
 def check_memory_text(text: object) -> str:

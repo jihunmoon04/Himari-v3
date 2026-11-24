@@ -111,6 +111,7 @@ from himari.data.api import (
     EventRef,
     InstructionScope,
     InstructionsStore,
+    PersonaStore,
     Memory,
     RecentEpisode,
     MemoryStore,
@@ -225,6 +226,7 @@ class Driver:
         *,
         settings: ConversationModelSettings | None = None,  # None: every Conversation uses the default model
         user_instructions: InstructionsStore | None = None,  # None: no user instructions (V3-P69)
+        personas: PersonaStore | None = None,  # None: no companion persona (V3-P108)
         wakes: WakeStore | None = None,  # V3-P87: server-opened turns; None: none are accepted
         memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
         max_runs_per_drive: int = MAX_RUNS,
@@ -249,6 +251,7 @@ class Driver:
         self._models = models
         self._settings = settings
         self._user_instructions = user_instructions
+        self._personas = personas
         self._memories = memories
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
@@ -508,8 +511,9 @@ class Driver:
         text = persona = ""
         if self._user_instructions is not None:
             text = (await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
-            persona = (await self._user_instructions.read_instructions(
-                scope.principal_id, InstructionScope.COMPANION_PERSONA)).text
+        if self._personas is not None and self._companion:  # V3-P108 §4.2: told only with the companion on
+            chosen = await self._personas.active_persona(scope.principal_id)
+            persona = "" if chosen is None else chosen.text
         now = self._clock()
         if self._memories is None:
             return _UserContext(text, None, None if self._zone is None else now.astimezone(self._zone), persona=persona)

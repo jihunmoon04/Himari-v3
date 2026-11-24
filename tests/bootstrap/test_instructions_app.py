@@ -8,7 +8,7 @@ import hashlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from himari.prompt.system import BASE_INSTRUCTIONS
+from himari.prompt.system import COMPANION_BASE
 from himari.bootstrap.application import Application
 from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
 from himari.prompt.api import USER_INSTRUCTIONS_HEADER, ModelInput, ToolGroupTurn
@@ -87,7 +87,7 @@ def test_a_turn_keeps_the_text_it_started_with_and_the_next_turn_reads_the_new_o
             assert text_in(adapter.prepared_inputs[-1]) == "Answer in English &amp; be &lt;brief&gt;."
             # After the operator's instructions and notes, before the server notes: last in the prefix here.
             prefix = adapter.prepared_inputs[-1].stable_prefix
-            assert prefix[0] == BASE_INSTRUCTIONS[0] and prefix[-1] == section_of(
+            assert prefix[0] == COMPANION_BASE[0] and prefix[-1] == section_of(
                 adapter.prepared_inputs[-1])
             assert (await app.instructions(ALICE)).text == "Answer in English & be <brief>."  # stored as written
         finally:
@@ -284,9 +284,8 @@ def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
 
 
 def test_the_companion_persona_is_told_only_with_the_companion_on(tmp_path: Path) -> None:
-    """V3-P89 §4 (owner A): read with the instructions at the turn's start, in every conversation
-    while the companion is on; kept but not told while it is off."""
-    from himari.data.api import InstructionScope
+    """V3-P89 §4 (owner A), V3-P108 §4.2: the chosen persona is read at the turn's start, in every
+    conversation while the companion is on; kept but not told while it is off."""
     from himari.prompt.api import PERSONA_HEADER
 
     async def scenario(companion: bool) -> str:
@@ -295,8 +294,9 @@ def test_the_companion_persona_is_told_only_with_the_companion_on(tmp_path: Path
         root.mkdir()
         app = await opened(root, adapter, companion=companion)
         try:
-            saved = await app.set_instructions(ALICE, "Call me 선생님.", 0, InstructionScope.COMPANION_PERSONA)
-            assert saved.revision == 1 and (await app.instructions(ALICE)).text == ""  # the instructions apart
+            made = await app.data.create_persona(ALICE, "Teacher", "Call me 선생님.")
+            await app.data.choose_persona(ALICE, made.persona_id, 0)
+            assert (await app.instructions(ALICE)).text == ""  # the instructions apart
             scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
             await app.send(scope, "hi")
             await app.runner.wait(scope)
@@ -306,5 +306,34 @@ def test_the_companion_persona_is_told_only_with_the_companion_on(tmp_path: Path
 
     told = asyncio.run(scenario(True))
     assert PERSONA_HEADER in told and "Call me 선생님." in told and "# Companion" in told
+    assert "Teacher" not in told  # the name is the user's label, never told (§4.1)
     off = asyncio.run(scenario(False))
-    assert "Call me 선생님." not in off and "# Companion" not in off
+    assert "Call me 선생님." not in off and "# Companion" not in off and "companion" not in off.lower()
+
+
+def test_the_chosen_persona_changes_from_the_next_turn(tmp_path: Path) -> None:
+    """V3-P108 §4.2: choosing another persona, or none, is told from the conversation's next turn."""
+    from himari.prompt.api import PERSONA_HEADER
+
+    async def scenario() -> list[str]:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)) for _ in range(3)])
+        app = await opened(tmp_path, adapter, companion=True)
+        try:
+            first = await app.data.create_persona(ALICE, "Teacher", "Call me 선생님.")
+            second = await app.data.create_persona(ALICE, "Friend", "Call me 친구.")
+            choice = await app.data.choose_persona(ALICE, first.persona_id, 0)
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            for chosen in (second.persona_id, None):
+                await app.send(scope, "hi")
+                await app.runner.wait(scope)
+                choice = await app.data.choose_persona(ALICE, chosen, choice.revision)
+            await app.send(scope, "hi")
+            await app.runner.wait(scope)
+            return ["\n".join(i.stable_prefix) for i in adapter.prepared_inputs]
+        finally:
+            await app.close()
+
+    teacher, friend, none = asyncio.run(scenario())
+    assert "Call me 선생님." in teacher and "Call me 친구." not in teacher
+    assert "Call me 친구." in friend and "Call me 선생님." not in friend
+    assert PERSONA_HEADER not in none and "When there is none, speak warmly" in none

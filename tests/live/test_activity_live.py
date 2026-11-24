@@ -38,7 +38,7 @@ from himari.prompt.api import (
     SystemSpec,
     UserTurn,
 )
-from himari.prompt.system import BASE_INSTRUCTIONS, companion_section, messages_section, principle_section
+from himari.prompt.system import COMPANION_BASE, companion_section, messages_section, principle_section
 from himari.provider.api import NativeReceived, NormalizedFinal
 from himari.provider.openrouter import OpenRouterAdapter
 
@@ -81,7 +81,7 @@ def answer(model: str, doing: NowDoing, said: str) -> str:
     presence = PresenceView(("device", "데스크톱"), "데스크톱", (DevicePresence("데스크톱", True, idle_minutes=0),),
                             now_doing=doing)
     state = CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ()), now=NOW, presence=presence)
-    model_input = ModelInput(stable_prefix=(*BASE_INSTRUCTIONS, principle_section(False),
+    model_input = ModelInput(stable_prefix=(*COMPANION_BASE, principle_section(False),
                                             messages_section(SystemSpec()), companion_section(False)),  # V3-P89
                              tool_catalog=(), conversation=(UserTurn(EventId("e"), (TextBlock(said),)),),
                              current_state=state, request_options=RequestOptions(model), trigger_refs=(),

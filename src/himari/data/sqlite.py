@@ -113,7 +113,11 @@ from himari.data.api import (
     InstructionScope,
     MAX_DEVICES,
     MAX_MEMORIES,
+    MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    Persona,
+    PersonaChoice,
+    PersonaList,
     Device,
     DevicePairing,
     Memory,
@@ -188,7 +192,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -631,10 +635,43 @@ ALTER TABLE wakes ADD COLUMN held_run_id TEXT;
 _V19_ADDITIONS = """
 UPDATE memories SET remind_state='delivered', remind_wake=NULL WHERE remind_state='told';
 """
+# v20 (V3-P108 §5): the companion personas a principal keeps, the last id given out to each and the
+# one chosen. The one persona text of V3-P89 (instructions, scope 'companion_persona') becomes
+# persona 1, chosen; its rows go (instructions store "" for a text that is only whitespace).
+_V20_ADDITIONS = """
+CREATE TABLE personas (
+    owner TEXT NOT NULL,
+    persona_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
+    text TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, persona_id)
+) STRICT;
+CREATE UNIQUE INDEX personas_by_name ON personas (owner, name_key);
+CREATE TABLE persona_ids (
+    owner TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL
+) STRICT;
+CREATE TABLE persona_choice (
+    owner TEXT PRIMARY KEY,
+    persona_id INTEGER,
+    revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+INSERT INTO personas (owner, persona_id, name, name_key, text, revision, created_at, updated_at)
+    SELECT owner, 1, 'Persona', 'persona', text, 1, updated_at, updated_at FROM instructions
+    WHERE scope='companion_persona' AND text <> '';
+INSERT INTO persona_ids (owner, last_id) SELECT owner, 1 FROM personas;
+INSERT INTO persona_choice (owner, persona_id, revision, updated_at) SELECT owner, 1, 1, updated_at FROM personas;
+DELETE FROM instructions WHERE scope='companion_persona';
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
-              _V18_ADDITIONS, _V19_ADDITIONS)  # what each version from v3 added
+              _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1125,6 +1162,11 @@ def _instructions(row: sqlite3.Row | None) -> Instructions:
     if row is None:
         return Instructions("", 0)
     return Instructions(row["text"], row["revision"], datetime.fromisoformat(row["updated_at"]))
+
+
+def _persona(row: sqlite3.Row) -> Persona:
+    return Persona(row["persona_id"], row["name"], row["text"], row["revision"],
+                   datetime.fromisoformat(row["created_at"]), datetime.fromisoformat(row["updated_at"]))
 
 
 def _moment(value: str | None) -> datetime | None:
@@ -2378,6 +2420,108 @@ class SqliteData:
                        " updated_at=excluded.updated_at",
                        principal, scope.value, text, current.revision + 1, _timestamp(now))
             return Instructions(text, current.revision + 1, now)
+
+    # --- PersonaStore (V3-P108 §5.2) ------------------------------------------------
+
+    _PERSONA_COLUMNS = "persona_id, name, text, revision, created_at, updated_at"
+
+    def _read_persona(self, tx: _Tx, principal: PrincipalId, persona_id: object) -> Persona:
+        row = tx.one(f"SELECT {self._PERSONA_COLUMNS} FROM personas WHERE owner=? AND persona_id=?",
+                     principal, rules.check_persona_id(persona_id))
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no persona {persona_id}")
+        return _persona(row)
+
+    @staticmethod
+    def _check_name_free(tx: _Tx, principal: PrincipalId, key: str, besides: int | None) -> None:
+        row = tx.one("SELECT persona_id FROM personas WHERE owner=? AND name_key=?", principal, key)
+        if row is not None and row["persona_id"] != besides:
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, "another persona has this name")
+
+    @staticmethod
+    def _persona_choice(tx: _Tx, principal: PrincipalId) -> PersonaChoice:
+        row = tx.one("SELECT persona_id, revision, updated_at FROM persona_choice WHERE owner=?", principal)
+        if row is None:
+            return PersonaChoice(None, 0)
+        return PersonaChoice(row["persona_id"], row["revision"], datetime.fromisoformat(row["updated_at"]))
+
+    @staticmethod
+    def _write_choice(tx: _Tx, principal: PrincipalId, choice: PersonaChoice) -> None:
+        assert choice.updated_at is not None
+        tx.execute("INSERT INTO persona_choice (owner, persona_id, revision, updated_at) VALUES (?, ?, ?, ?)"
+                   " ON CONFLICT (owner) DO UPDATE SET persona_id=excluded.persona_id, revision=excluded.revision,"
+                   " updated_at=excluded.updated_at",
+                   principal, choice.persona_id, choice.revision, _timestamp(choice.updated_at))
+
+    async def list_personas(self, principal: PrincipalId) -> PersonaList:
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT {self._PERSONA_COLUMNS} FROM personas WHERE owner=? ORDER BY persona_id", principal)
+            return PersonaList(tuple(_persona(row) for row in rows), self._persona_choice(tx, principal))
+
+    async def create_persona(self, principal: PrincipalId, name: str, text: str) -> Persona:
+        name, key = rules.check_persona_name(name)
+        text = rules.check_persona_text(text)
+        with self._tx() as tx:
+            count = tx.one("SELECT COUNT(*) AS n FROM personas WHERE owner=?", principal)
+            assert count is not None
+            if count["n"] >= MAX_PERSONAS:
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_PERSONAS} personas")
+            self._check_name_free(tx, principal, key, None)
+            last = tx.one("SELECT last_id FROM persona_ids WHERE owner=?", principal)
+            persona_id = (0 if last is None else last["last_id"]) + 1
+            tx.execute("INSERT INTO persona_ids (owner, last_id) VALUES (?, ?)"
+                       " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, persona_id)
+            now = datetime.now(UTC)
+            tx.execute("INSERT INTO personas (owner, persona_id, name, name_key, text, revision, created_at, updated_at)"
+                       " VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                       principal, persona_id, name, key, text, _timestamp(now), _timestamp(now))
+            return Persona(persona_id, name, text, 1, now, now)
+
+    async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
+                             expected_revision: int) -> Persona:
+        name, key = rules.check_persona_name(name)
+        text = rules.check_persona_text(text)
+        with self._tx() as tx:
+            current = self._read_persona(tx, principal, persona_id)
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
+            self._check_name_free(tx, principal, key, current.persona_id)
+            now = datetime.now(UTC)
+            tx.execute("UPDATE personas SET name=?, name_key=?, text=?, revision=?, updated_at=?"
+                       " WHERE owner=? AND persona_id=?",
+                       name, key, text, current.revision + 1, _timestamp(now), principal, current.persona_id)
+            return dataclasses.replace(current, name=name, text=text, revision=current.revision + 1, updated_at=now)
+
+    async def delete_persona(self, principal: PrincipalId, persona_id: int, expected_revision: int) -> PersonaChoice:
+        with self._tx() as tx:
+            current = self._read_persona(tx, principal, persona_id)
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
+            tx.execute("DELETE FROM personas WHERE owner=? AND persona_id=?", principal, current.persona_id)
+            choice = self._persona_choice(tx, principal)
+            if choice.persona_id == current.persona_id:  # §4.3: no persona is chosen after it
+                choice = PersonaChoice(None, choice.revision + 1, datetime.now(UTC))
+                self._write_choice(tx, principal, choice)
+            return choice
+
+    async def choose_persona(self, principal: PrincipalId, persona_id: int | None,
+                             expected_revision: int) -> PersonaChoice:
+        with self._tx() as tx:
+            if persona_id is not None:
+                self._read_persona(tx, principal, persona_id)
+            current = self._persona_choice(tx, principal)
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the choice is at revision {current.revision}")
+            choice = PersonaChoice(persona_id, current.revision + 1, datetime.now(UTC))
+            self._write_choice(tx, principal, choice)
+            return choice
+
+    async def active_persona(self, principal: PrincipalId) -> Persona | None:
+        with self._tx() as tx:
+            row = tx.one(f"SELECT {', '.join('p.' + c for c in self._PERSONA_COLUMNS.split(', '))} FROM persona_choice c"
+                         " JOIN personas p ON p.owner=c.owner AND p.persona_id=c.persona_id WHERE c.owner=?",
+                         principal)
+            return None if row is None else _persona(row)
 
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 
