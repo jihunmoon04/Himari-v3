@@ -242,6 +242,3 @@ def test_a_prompt_list_over_its_byte_bound_is_left_out() -> None:
     (status,) = connected(server).statuses
     assert status.available and status.tool_ids == ("calliope/echo",)
     assert "bytes" in status.problems[0]
-
-
-
