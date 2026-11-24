@@ -12,6 +12,7 @@ import pytest
 from himari.common import ConversationId, RawRepresentation, TextBlock, TrustedScope
 from himari.data.api import (
     AssistantFinal,
+    LifeOrigin,
     MemoryCategory,
     MemoryCursor,
     PassKind,
@@ -24,7 +25,7 @@ from himari.data.api import (
 )
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.memory.api import MemoryPassSettings, PassOutcome
-from himari.memory.passes import MEMORY_PASS_INSTRUCTIONS, PASS_MAX_OUTPUT_TOKENS
+from himari.memory.passes import MEMORY_PASS_INSTRUCTIONS, PASS_MAX_OUTPUT_TOKENS, SELF_INSTRUCTIONS
 from himari.memory.worker import MemoryPasses
 from himari.provider.api import NativeInvocationOutcome, NativeNoResponse, NativePreparedRequest, NormalizedFinal
 from himari.provider.scripted import Measured, RawBody, ScriptedAdapter
@@ -407,5 +408,35 @@ def test_a_retry_reads_a_skipped_part_once_more() -> None:
         assert (await data.read_pass(skipped.pass_id)).status is PassStatus.RETRIED
         assert await data.list_memories(ME) == () and len(await data.list_proposals(ME)) == 1
         assert await passes.retry(SCOPE, skipped.pass_id) is PassOutcome.NOTHING  # retried once
+
+    asyncio.run(scenario())
+
+
+def test_with_himaris_life_a_live_pass_keeps_what_himari_said_of_itself_for_the_chosen_persona() -> None:
+    """character-life §4: the chosen persona's facts go in; the self decisions apply after the pass did."""
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        lucy = await data.create_persona(ME, "Lucy", "이름: 루시.")
+        await data.choose_persona(ME, lucy.persona_id, 0)
+        known = await data.add_life_fact(ME, lucy.persona_id, "바다를 좋아한다.")
+        cats = {"op": "add", "text": "고양이를 무서워한다.", "himari_evidence": [2]}
+        answer = {"notes": [BUILDS], "episode": None, "self": [cats]}
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock(json.dumps(answer, ensure_ascii=False)),))],
+                                   memory_passes=True)
+        passes = MemoryPasses(data, provider, MemoryPassSettings("m", time_zone="Asia/Seoul"), Probe(),
+                              clock=lambda: datetime.now(UTC) + LATER, life=data, personas=data)
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.", "나는 사실 고양이를 무서워해.")
+        assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+        (asked,) = provider.prepared_inputs[1:]
+        assert asked.stable_prefix == (MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS,)
+        shown = json.loads(asked.conversation[0].blocks[0].text)  # type: ignore[union-attr]
+        assert shown["himari_facts"] == [{"id": f"f{known.entry_id}", "text": "바다를 좋아한다.", "written_by": "user"}]
+        (pass_,) = await data.list_passes(SCOPE)
+        said = [e for e in await data.list_life(ME, lucy.persona_id) if e.origin is LifeOrigin.CONVERSATION]
+        assert [(e.text, e.source_conversation, e.source_sequences, e.source) for e in said] == [
+            ("고양이를 무서워한다.", SCOPE.conversation_id, (2,), pass_.pass_id)]
+        assert len(await data.list_memories(ME)) == 1  # the notes as ever
 
     asyncio.run(scenario())

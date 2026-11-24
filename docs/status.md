@@ -1,6 +1,6 @@
 # 지금 상태
 
-기준: **2026-11-24**. 한 쪽 요약이다. 구조는 [architecture.md](architecture.md), 지금 유효한 결정은 [decisions.md](decisions.md)(H 번호), 배포 기록은 [deployments/](deployments/)에 있다.
+기준: **2026-11-25**. 한 쪽 요약이다. 구조는 [architecture.md](architecture.md), 지금 유효한 결정은 [decisions.md](decisions.md)(H 번호), 배포 기록은 [deployments/](deployments/)에 있다.
 
 ## 한 줄 정의
 
@@ -12,13 +12,13 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 | --- | --- | --- |
 | 몸 | `clients/windows/Himari.Companion` (C#/WPF) | 픽셀 캐릭터·말풍선·표정, 활동 신호, 화면 찍기, 단축키 |
 | 두뇌 | `src/himari` (Python, FastAPI, 단일 프로세스) | 대화(Run 반복), 기억, 먼저 말 걸기, 지금 기기, Tool, MCP |
-| 관리 화면 | `web/` (React + TypeScript) | 대화, Settings(Instructions·Personas·Memory·Devices·Tool servers·Trash) |
+| 관리 화면 | `web/` (React + TypeScript) | 대화, Settings(Instructions·Personas·Life·Memory·Devices·Tool servers·Trash) |
 | CLI | `himari` | 먼저 말 걸기 상태·시험, 기억 정리 다시 돌리기 |
 
 ## 지금 동작하는 기능
 
 - **대화와 실행:** Run = LLM 호출 1회, 한 턴은 `HIMARI_MAX_RUNS`(기본 12)에서 멈추고 Continue로 잇는다. 취소, 문맥 압축(자동·수동), 대화별 모델·추론 강도, OpenRouter 스트리밍, 원본 요청·응답 보존. 묻는 것은 답의 글로 한다. → [control-prompt-provider](control-prompt-provider-v0.1.md), [conversation-model](conversation-model-v0.1.md), [streaming](streaming-v0.1.md)
-- **Data:** SQLite(WAL) 하나, 스키마 v21, 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
+- **Data:** SQLite(WAL) 하나, 스키마 v22(main; 운영 서버는 배포 전까지 v21), 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
 - **프롬프트:** 캐시 우선 순서, 반려 켬/끔 두 바탕 글, "지시는 시스템 글과 사용자 메시지뿐" 원칙, Current State(지금 시각·기기·활동·기억), 작업 진행 줄. → [prompt-composition](prompt-composition.md), [prompt-cleanup](prompt-cleanup-v0.1.md), [interface-capabilities](interface-capabilities-v0.1.md), [work-progress](work-progress-v0.1.md)
 - **파일:** 대화 폴더(`<데이터 폴더>/conversations/<id>`) 안에서만 읽고 쓰는 파일 Tool, 올리기·내려받기와 `present_file`, 이미지 입력, `read_document`(PDF·DOCX·XLSX·PPTX·HWPX, server sandbox). → [server-slim](server-slim-v0.1.md), [file-upload-download](file-upload-download-v0.1.md), [images](images-v0.1.md), [documents](documents-v0.1.md)
 - **MCP:** Streamable HTTP 서버, 허용 목록의 Tool, 대화별 켬/끔과 Settings의 기본값, 서버 안내문·리소스 Tool·`/` 프롬프트. → [mcp-context](mcp-context-v0.1.md), [mcp-defaults](mcp-defaults-v0.1.md)
@@ -26,13 +26,14 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 - **먼저 말 걸기:** 알림·열린 고리·돌아옴·작업 끝남·자유 wake, 세 단계 조절 규칙, 자유 wake는 30분 간격·하루 10개, `[[pass]]`. → [proactive-v0.3](proactive-v0.3.md)(바꾼 부분), [v0.2](proactive-v0.2.md)·[v0.1](proactive-v0.1.md)(나머지 세부)
 - **기억·대화 검색:** `memory_save`·`memory_forget`·`memory_search`, 대화가 잠잠해진 뒤 자동 기억·일화·열린 고리, `conversation_search`·`conversation_read`. → [memory-v0.1](memory-v0.1.md), [memory-v0.2](memory-v0.2.md), [conversation-search](conversation-search-v0.1.md)
 - **페르소나·지시문:** 페르소나 20개까지 저장, 하나를 골라 모든 대화·기기에, 사용자 지시문 하나. → [companion-persona](companion-persona-v0.1.md), [user-instructions](user-instructions-v0.1.md)
+- **삶(구현, 배포 전, H-77):** 페르소나별 정사·일기·일정, 밤마다 도는 이야기 작가(`HIMARI_LIFE_WRITE_AT`, 기억 작업 모델), 기억 정리가 HIMARI의 자기 주장을 정사로 모음(`self`), runtime state `himari_life`와 `LIFE_RULE`, Settings → Life. `HIMARI_LIFE=0`으로 끈다. → [character-life](character-life-v0.1.md)
 - **Web·CLI:** React Web(대화, 설정, 휴지통, `/` 프롬프트, 초안 보존), CLI는 `himari proactive`·`himari memory`만. → [web-console](web-console-v0.1.md) §4·§7(hub 부분 제외)
 
 ## 운영
 
 - 운영 서버: `rabbithole`. 서버는 loopback에 바인딩하고 TLS reverse proxy 뒤에 있다.
 - 마지막 배포: **페르소나 규칙 강화**(v3 #235, `d98bbca`), 2026-11-25 00:33 KST. 스키마 v21.
-- DB 스키마: **v21**. 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
+- DB 스키마: 운영 **v21**, main **v22**(삶, 배포하면 올라감). 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
 - 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기), [H-75](deployments/2026-11-24-v3-h75.md)(옛 추상 정리, v21), [페르소나 규칙](deployments/2026-11-25-v3-persona-rules.md)(2026-11-25).
 - 운영 서버에 남긴 것: 옛 대화 폴더 `/home/coder/HIMARI/conversations`, 옛 릴리스와 DB `.bak` 파일. 되돌릴 일이 없으면 소유자가 지운다.
 
@@ -56,8 +57,8 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 **캐릭터 로드맵**([character-architecture.md](character-architecture.md), H-76). 이 순서로 간다.
 
 0. **기반:** 페르소나 첫 양식(세계 접점·대사 예시)과 페르소나 규칙 강화([companion-persona §14](companion-persona-v0.1.md#14-페르소나-규칙-강화-2026-11-25), 2026-11-25 배포). **남은 것: 소유자가 새 양식으로 써 보기.**
-1. **일관성:** 페르소나별 삶 정사, 기억 정리가 HIMARI의 자기 주장을 정사로 모음.
-2. **삶:** 이야기 작가(밤마다 일기·일정), 먼저 말 걸기의 새 계기.
+1. **일관성:** 페르소나별 삶 정사, 기억 정리가 HIMARI의 자기 주장을 정사로 모음. **구현함(2026-11-25), 배포와 써 보기가 남음**([character-life](character-life-v0.1.md)).
+2. **삶:** 이야기 작가(밤마다 일기·일정). **1단계와 함께 구현함, 배포 전.** 먼저 말 걸기의 새 계기("어제 이거 했어")는 넣지 않고 반려 절·자유 wake 문장으로만 했다. 써 보고 필요하면 더한다.
 3. **관계:** 관계 정사(호칭·약속·농담·처음), 기념일, 사건으로 넘어가는 관계 단계.
 4. **상태와 몸:** 이어지는 기분, 하루 리듬, 이벤트 그림, 페르소나별 그림, 앱에서 페르소나 바꾸기.
 5. **세계:** 날씨·뉴스·트렌드, 몇 주짜리 줄거리, 숨긴 뒷이야기.

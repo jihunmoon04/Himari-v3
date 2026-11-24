@@ -76,6 +76,7 @@ def build_runtime(
     image_views: ViewMaker | None = None,  # model copies of images (V3-P67); None: images are not prepared
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
     memory: bool = False,  # V3-P71: the memory Tools, the memory section and the notes in the state
+    life: bool = False,  # character-life §5: HIMARI's life in the state and its rule (with the companion)
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
     time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
@@ -119,7 +120,8 @@ def build_runtime(
         models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts,
                                           context_budget),), model_id)
     # the turn's rule is in the system text when the model is told the turn's state (V3-P62 §8)
-    spec = None if system is None else replace(system, memory=memory, turn_guidance=turn_guidance)
+    spec = None if system is None else replace(system, memory=memory, turn_guidance=turn_guidance,
+                                               life=life and system.companion)
     if spec is None:
         instructions = (*instructions, *((MEMORY_SECTION,) if memory else ()),
                         *((TURN_GUIDANCE,) if turn_guidance else ()))
@@ -137,6 +139,7 @@ def build_runtime(
         personas=data,  # V3-P108
         wakes=data,  # V3-P87: server-opened turns
         memories=data if memory else None,
+        life=data if spec is not None and spec.life else None,
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_guidance=turn_guidance,

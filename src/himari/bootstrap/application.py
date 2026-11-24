@@ -43,10 +43,10 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
-from zoneinfo import available_timezones
+from zoneinfo import ZoneInfo, available_timezones
 
 import httpx
 
@@ -82,11 +82,16 @@ from himari.control.api import (
 )
 from himari.control.driver import MAX_RUNS, Driver
 from himari.control.runner import BackgroundRunner
+from himari.life.api import DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS, DEFAULT_WRITE_AT, LifeSettings
+from himari.life.worker import LifeWriter
 from himari.memory.api import MemoryPassSettings, PassOutcome
 from himari.memory.worker import MemoryPasses
 from himari.data.api import (
+    NO_PERSONA,
     RETIRED_KEEP,
     Episode,
+    LifeEntry,
+    Persona,
     NoteDates,
     PassItemRecord,
     PassStatus,
@@ -652,6 +657,33 @@ def memory_pass_settings(provider: ProviderAdapter, *, memory: bool, auto: bool,
             f"on ({model_id}, after {idle_minutes} quiet minutes, {daily_tokens:,} tokens a day each)")
 
 
+LIFE_SECONDS = 600.0  # character-life §3: how often the story writer looks at each principal's day
+LIFE_SHOWN_DAYS = timedelta(days=30)  # §6: the plans and diaries the Web shows, back from today
+
+
+class LifeChanged(RuntimeError):
+    """A fact added for a persona that is no longer the one chosen (§6)."""
+
+
+def life_settings(provider: ProviderAdapter, *, life: bool, companion: bool, model_id: str | None, write_at: time,
+                  daily_tokens: int, time_zone: str) -> tuple[LifeSettings | None, str]:
+    """character-life §3 (L4): the story writer's settings, or None, and the status told
+    at startup. Its model is the memory passes' (HIMARI_MEMORY_MODEL, one the Provider
+    declares checked for them), whether or not the passes run."""
+    if not companion:
+        return None, "off (HIMARI_COMPANION=0)"
+    if not life:
+        return None, "off (HIMARI_LIFE=0)"
+    if model_id is None:
+        return None, "off (no HIMARI_MEMORY_MODEL)"
+    capabilities = provider.describe_capabilities(model_id)
+    if not capabilities.memory_passes:
+        return None, f"off ({model_id} is not checked for memory passes)"
+    effort = "low" if "low" in capabilities.reasoning_efforts else None
+    return (LifeSettings(model_id, effort, write_at, daily_tokens, time_zone),
+            f"on ({model_id}, at {write_at:%H:%M}, {daily_tokens:,} tokens a day each)")
+
+
 @dataclass
 class _Lifecycle:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -687,6 +719,11 @@ class Application:
     # V3-P85 §12: memory passes (None: they do not run) and why, as told at startup.
     memory_passes: MemoryPasses | None = field(default=None, repr=False)
     auto_memory: str = "off"
+    # character-life v0.1: HIMARI's life is told (the companion and HIMARI_LIFE on), and its story
+    # writer (None: it does not run) with why, as told at startup.
+    life_enabled: bool = False
+    life_writer: LifeWriter | None = field(default=None, repr=False)
+    auto_life: str = "off"
     time_zone: str = DEFAULT_TIME_ZONE  # HIMARI_TIME_ZONE: a date the user writes ends in it unless the page says (V3-P85)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
@@ -750,6 +787,9 @@ class Application:
         memory_model: str | None = None,  # HIMARI_MEMORY_MODEL: their model; None: they do not run
         memory_idle_minutes: int = 10,  # HIMARI_MEMORY_IDLE_MINUTES: quiet before a pass
         memory_daily_tokens: int = 1_000_000,  # HIMARI_MEMORY_DAILY_TOKENS: each principal's daily budget
+        life: bool = True,  # character-life §3, §5: HIMARI_LIFE=0 turns HIMARI's life off (prompt and writer)
+        life_write_at: time = DEFAULT_WRITE_AT,  # HIMARI_LIFE_WRITE_AT: the story writer's time (server's zone)
+        life_daily_tokens: int = LIFE_DAILY_TOKENS,  # HIMARI_LIFE_DAILY_TOKENS: each principal's daily budget
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
@@ -856,7 +896,7 @@ class Application:
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
                                     max_runs_per_drive=max_runs, turn_guidance=True, image_views=views,
-                                    file_max_bytes=file_max_bytes, memory=memory,
+                                    file_max_bytes=file_max_bytes, memory=memory, life=life and companion,
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
                                     presence=presence, screen=screens,
@@ -904,14 +944,25 @@ class Application:
                 found = (await presence.read(scope.principal_id, origin)).time_zone
                 return found if found in zones else time_zone
 
-            passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner), zone_for=zone_for)
+            # character-life §4: with HIMARI's life told, a pass also keeps what HIMARI said of itself
+            passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner), zone_for=zone_for,
+                                  life=runtime.data if life and companion else None, personas=runtime.data)
             listeners.listeners.append(passes)
             passes.on_applied = events.memory_applied
             application.memory_passes = passes
             await passes.start()
+        application.life_enabled = life and companion
+        writing, application.auto_life = life_settings(
+            provider, life=life, companion=companion, model_id=memory_model, write_at=life_write_at,
+            daily_tokens=life_daily_tokens, time_zone=time_zone)
+        if writing is not None:  # character-life §3: a periodic job, never a Conversation's Run
+            application.life_writer = LifeWriter(runtime.data, provider, writing)
+            await application.life_writer.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
             application.ticker.add("purge", cleanup_seconds, application._purge_round)
+        if application.life_writer is not None:
+            application.ticker.add("life", LIFE_SECONDS, application.life_writer.run)
         if companion:  # V3-P87 §5.2: the devices' last inputs, kept whether or not HIMARI speaks first
             application.inputs = Inputs(runtime.data)
             hub.on_input = application.inputs.seen
@@ -1119,6 +1170,25 @@ class Application:
         under way keeps the text it started with. DataError VERSION_CONFLICT
         (written since ``revision`` was read), TOO_LARGE or INVALID_ARGUMENT."""
         return await self.data.write_instructions(principal, scope, text, revision)
+
+    # --- HIMARI's life (character-life v0.1 §6) ---------------------------------------------
+
+    async def life(self, principal: PrincipalId) -> tuple[Persona | None, tuple[LifeEntry, ...]]:
+        """The persona chosen now (None: no persona, whose life is NO_PERSONA's, L2) and its
+        life: every fact, and the plans and diaries of the last LIFE_SHOWN_DAYS and later."""
+        chosen = await self.data.active_persona(principal)
+        since = (datetime.now(ZoneInfo(self.time_zone)).date() - LIFE_SHOWN_DAYS).isoformat()
+        entries = await self.data.list_life(principal, NO_PERSONA if chosen is None else chosen.persona_id,
+                                            since=since)
+        return chosen, entries
+
+    async def add_life_fact(self, principal: PrincipalId, persona_id: int | None, text: str) -> LifeEntry:
+        """The user's fact for the persona the page showed (None: no persona). LifeChanged when
+        another persona is chosen now, so a fact never lands in a life the user did not see."""
+        chosen = await self.data.active_persona(principal)
+        if (None if chosen is None else chosen.persona_id) != persona_id:
+            raise LifeChanged("another persona is chosen now")
+        return await self.data.add_life_fact(principal, NO_PERSONA if persona_id is None else persona_id, text)
 
     # --- memory (V3-P71) ----------------------------------------------------------------
 
