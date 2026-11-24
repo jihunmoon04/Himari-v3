@@ -51,7 +51,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 LIST_NAME = "list_resources"
@@ -473,7 +472,6 @@ class ResourceTool:
             tool_id=tool_id,
             description=description,
             input_schema=schema,
-            workspace_requirement=WorkspaceRequirement.NONE,
             effect_profile=policy.effect,
             external_source=source,
         )

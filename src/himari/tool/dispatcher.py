@@ -21,10 +21,9 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   gets a generic message; type and text go to ``raw_result`` only.
 - Unknown tool, an External Tool whose source is not enabled for this
   Conversation (``ExternalAccess``; V3-P53), arguments failing
-  ``input_schema``, an Environment Tool whose kind is not active in this
-  Conversation (even with no Workspace requirement: catalog exposure is
-  not authorization), or a missing/revoked/mismatched Binding → DENIED
-  result to the model; the handler never runs.
+  ``input_schema``, or an Environment Tool whose kind this Conversation
+  does not have (catalog exposure is not authorization) → DENIED result to
+  the model; the handler never runs.
 - External source check and its concurrency contract (V3-P53): the source
   is checked before validation (which may take seconds in a child
   process) and **again after it, as the last step before the claim and
@@ -48,7 +47,6 @@ from dataclasses import replace
 
 from himari.common import (
     AttachmentRef,
-    BindingId,
     CallRef,
     ContentBlock,
     JsonValue,
@@ -60,16 +58,13 @@ from himari.common import (
     UnknownOutcomePolicy,
 )
 from himari.data.api import (
-    ArtifactStore,
-    BindingAuthority,
     ConversationLog,
-    ConversationWorkspace,
     DataError,
+    EnvironmentState,
     DataErrorCode,
     ToolCompletion,
     ToolExecutionRecord,
     ToolExecutionStatus,
-    WorkspaceState,
 )
 from himari.tool.access import NoExternalAccess
 from himari.tool.api import (
@@ -87,7 +82,6 @@ from himari.tool.api import (
     ToolStatus,
     ResultImageStore,
     TurnSource,
-    WorkspaceRequirement,
 )
 from himari.tool.registry import ToolRegistry
 from himari.tool.schema import validate, validate_isolated
@@ -160,15 +154,13 @@ class Dispatcher:
         self,
         registry: ToolRegistry,
         log: ConversationLog,
-        artifacts: ArtifactStore,
-        workspaces: WorkspaceState,
+        environments: EnvironmentState,
         external_access: ExternalAccess | None = None,  # None: no External source is enabled
         images: ResultImageStore | None = None,  # None: Tool images become lines (V3-P67 §4.2)
     ) -> None:
         self._registry = registry
         self._log = log
-        self._artifacts = artifacts
-        self._workspaces = workspaces
+        self._environments = environments
         self._external_access = external_access if external_access is not None else NoExternalAccess()
         self._images = images
 
@@ -245,12 +237,7 @@ class Dispatcher:
                 violations = validate(record.arguments, d.input_schema)
             if violations:
                 raise _Denied("invalid arguments: " + "; ".join(violations))
-            binding = await self._resolve_binding(scope, d, record)
-            workspace = (
-                ConversationWorkspace(binding.workspace_id, binding.cwd_relative)
-                if binding is not None and binding.cwd_relative is not None
-                else None
-            )
+            await self._check_environment(scope, d)
             await self._check_source(scope, d)  # again, last: it may have been turned off while validating
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
@@ -260,8 +247,7 @@ class Dispatcher:
             await self._log.claim_tool_execution(
                 scope, record.call, unknown_outcome=d.unknown_outcome, record_event=record_event
             )
-        ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding, workspace=workspace, turn=turn,
-                          run_id=record.call.run_id)
+        ctx = ToolContext(scope=scope, turn=turn, run_id=record.call.run_id)
         invocation = ToolInvocation(record.tool_id, record.call.call_id, record.arguments)
         try:
             outcome = await handler.run(invocation, ctx)
@@ -285,35 +271,9 @@ class Dispatcher:
         ):
             raise _Denied(f"tool source {d.external_source} is not enabled in this conversation")
 
-    async def _resolve_binding(
-        self, scope: TrustedScope, d: ToolDefinition, record: ToolExecutionRecord
-    ) -> BindingAuthority | None:
-        activation = None
-        if d.environment_kind is not None:
-            activation = await self._workspaces.read_activation(scope, d.environment_kind)
-            if activation is None:
-                raise _Denied(f"environment {d.environment_kind} is not active in this conversation")
-        if d.workspace_requirement is WorkspaceRequirement.NONE:
-            return None
-        try:
-            if record.workspace_binding_id is not None:
-                binding = await self._workspaces.read_binding_authority(
-                    scope, BindingId(record.workspace_binding_id)
-                )
-            elif d.workspace_requirement is WorkspaceRequirement.DEFAULT and d.environment_kind:
-                found = await self._workspaces.resolve_default_binding(scope, d.environment_kind)
-                if found is None:
-                    raise _Denied("no default workspace binding")
-                binding = found
-            else:
-                raise _Denied("workspace_binding_id is required")
-        except DataError as exc:
-            raise _Denied(f"binding unavailable: {exc.code.value}") from exc
-        if binding.environment_kind != d.environment_kind or (
-            activation is not None and binding.environment_instance_id != activation.environment_instance_id
-        ):
-            raise _Denied("binding does not belong to the active environment instance")
-        return binding
+    async def _check_environment(self, scope: TrustedScope, d: ToolDefinition) -> None:
+        if d.environment_kind is not None and not await self._environments.has_environment(scope, d.environment_kind):
+            raise _Denied(f"environment {d.environment_kind} is not active in this conversation")
 
     async def _keep_images(self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome) -> tuple[ToolOutcome, bool]:
         """V3-P67 §4.2: each returned image kept and staged, an attachment at
@@ -355,7 +315,6 @@ class Dispatcher:
             status=_STATUS[outcome.status],
             model_result=outcome.model_result,
             raw_result=outcome.raw_result,
-            artifact_mutations=outcome.artifact_mutations,
             record_event=record_event,
             presented_files=outcome.presented_files if outcome.status is ToolStatus.SUCCEEDED else (),
             memory_change=outcome.memory_change if outcome.status is ToolStatus.SUCCEEDED else None,
@@ -388,7 +347,7 @@ class Dispatcher:
                               model_result: ModelToolResult, raw_result: JsonValue) -> None:
         """A success whose effect Data refused, committed as the failure it is."""
         failed = replace(
-            completion, status=ToolExecutionStatus.FAILED, presented_files=(), artifact_mutations=(),
+            completion, status=ToolExecutionStatus.FAILED, presented_files=(),
             memory_change=None, model_result=model_result, raw_result=raw_result)
         await self._log.commit_tool_outcome(scope, call, failed)
 

@@ -4,8 +4,9 @@ Source documents: docs/contracts.md §10, docs/archive/decisions-v3.md V3-040/04
 
 - One plugin per kind, registered at bootstrap. ``tools()`` returns the kind's
   fixed ToolHandlers; execution mechanics stay inside the plugin package.
-- Instances and Bindings live in Data (``WorkspaceState``). A ToolHandler gets
-  the resolved Binding through ``ToolContext`` and re-validates before effects.
+- Which Conversations have a kind lives in Data (``EnvironmentState``, set when
+  the Conversation is created). The Dispatcher runs a kind's Tools only there;
+  a handler finds its places (e.g. the Conversation's folder) from the scope.
 """
 
 from __future__ import annotations
@@ -16,26 +17,24 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from himari.common import DeepFrozen, BindingId, EnvironmentKind, TrustedScope
-from himari.data.api import BindingAuthority
+from himari.common import DeepFrozen, EnvironmentKind, TrustedScope
 from himari.tool.api import ToolHandler
 
 
 class ConnectionStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
-    UNKNOWN = "unknown"  # default; never inferred from a stored "active" Binding
+    UNKNOWN = "unknown"  # default; never inferred from the stored kind alone
 
 
 @dataclass(frozen=True)
-class BindingObservation(DeepFrozen):
-    """Time-scoped, best-effort observation. Not authorization."""
+class EnvironmentObservation(DeepFrozen):
+    """Time-scoped, best-effort observation of a Conversation's Environment. Not authorization."""
 
-    binding_id: BindingId
     status: ConnectionStatus
     observed_at: datetime
-    # What the model is told of the Binding's place, when the Environment
-    # knows it (V3-P74 §10.5): the working directory as the model writes
+    # What the model is told of the Environment's place, when it knows it
+    # (V3-P74 §10.5): the working directory as the model writes
     # paths, the folders this Conversation may write, and what it may read. None/(): not given.
     working_directory: str | None = None
     writable: tuple[str, ...] = ()
@@ -52,8 +51,6 @@ class EnvironmentPlugin(Protocol):
         equals ``kind`` and ``tool_id`` is ``"<kind>/<name>"``."""
         ...
 
-    async def observe(
-        self, scope: TrustedScope, bindings: Sequence[BindingAuthority]
-    ) -> Sequence[BindingObservation]:
-        """ENV-01: side-effect free, bounded in time; UNKNOWN on timeout."""
+    async def observe(self, scope: TrustedScope) -> EnvironmentObservation:
+        """ENV-01: this Conversation's place; side-effect free, bounded in time."""
         ...

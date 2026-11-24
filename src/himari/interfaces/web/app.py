@@ -81,7 +81,7 @@ from himari.bootstrap.application import (
     PromptView,
     ToolSourceView,
     UnknownToolSource,
-    WorkspaceBusy,
+    FolderBusy,
 )
 from himari.bootstrap.companion import origin_view
 from himari.bootstrap.screens import Answer
@@ -1231,8 +1231,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         return JSONResponse({"error": {"code": "invalid_name", "message": "A file needs a name of at most 1000 bytes."}},
                             status_code=400)
 
-    @app.exception_handler(WorkspaceBusy)
-    async def workspace_busy(request: Request, error: WorkspaceBusy) -> JSONResponse:
+    @app.exception_handler(FolderBusy)
+    async def folder_busy(request: Request, error: FolderBusy) -> JSONResponse:  # the code clients know
         return JSONResponse({"error": {"code": "workspace_busy", "message": "The conversation's folder is busy; "
                                        "send again shortly."}}, status_code=409)
 

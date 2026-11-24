@@ -105,10 +105,10 @@ def test_read_presented_files_filters_before_pagination_and_excludes_hidden_wake
     from collections.abc import AsyncIterator
     from testkit import FAKE, text_result
     from himari.common import (
-        AttachmentRef, CallId, CallRef, EventId, FileId, RawRepresentation, ToolCall, ToolId, TrustedScope, WorkspaceId,
+        AttachmentRef, CallId, CallRef, EventId, FileId, RawRepresentation, ToolCall, ToolId, TrustedScope,
     )
     from himari.data.api import (
-        NO_IMAGE, AssistantToolCalls, EventRef, InitialActivation, PresentedFile, PromptBasis, RawReceived,
+        NO_IMAGE, AssistantToolCalls, EventRef, PresentedFile, PromptBasis, RawReceived,
         RunPreparation, ToolCompletion, ToolExecutionStatus, WakeStatus,
     )
 
@@ -118,10 +118,10 @@ def test_read_presented_files_filters_before_pagination_and_excludes_hidden_wake
     async def scenario() -> None:
         data = data_for(new_store())
         cid = await data.create_conversation(
-            SCOPE.principal_id, title="c1", activations=(InitialActivation(FAKE, WorkspaceId("ws")),)
+            SCOPE.principal_id, title="c1", environments=(FAKE,)
         )
         other_cid = await data.create_conversation(
-            SCOPE.principal_id, title="c2", activations=(InitialActivation(FAKE, WorkspaceId("ws")),)
+            SCOPE.principal_id, title="c2", environments=(FAKE,)
         )
         scope = TrustedScope(SCOPE.principal_id, cid)
         other_scope = TrustedScope(SCOPE.principal_id, other_cid)

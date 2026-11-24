@@ -14,12 +14,9 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from himari.common import (
-    ArtifactId,
     AttachmentRef,
-    BindingId,
     CallRef,
     ConversationId,
-    EnvironmentInstanceId,
     EnvironmentKind,
     EventId,
     FileId,
@@ -31,7 +28,6 @@ from himari.common import (
     ToolId,
     TrustedScope,
     UnknownOutcomePolicy,
-    WorkspaceId,
 )
 from himari.data import rules
 from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
@@ -46,18 +42,13 @@ from himari.data.api import (
     PRESENT_LIMIT_BYTES,
     PRESENT_WINDOW,
     STAGED_SEND_CUTOFF,
-    Artifact,
-    ArtifactMutation,
     AssistantFinal,
     AssistantOutput,
     AssistantToolCalls,
-    BindingAuthority,
     ConversationEvent,
     ConversationSummary,
-    ConversationWorkspace,
     DataError,
     DataErrorCode,
-    EnvironmentActivation,
     EventKind,
     FileOrigin,
     FileRecord,
@@ -107,7 +98,6 @@ from himari.data.api import (
     StoredBlob,
     EventPayload,
     ExternalSourceSetting,
-    InitialActivation,
     ModelSetting,
     PairingResult,
     PersistedStateBasis,
@@ -199,12 +189,9 @@ class _Conversation:
     events: list[ConversationEvent] = field(default_factory=list)
     runs: dict[RunId, _Run] = field(default_factory=dict)  # insertion order = creation order
     executions: dict[CallRef, ToolExecutionRecord] = field(default_factory=dict)
-    artifacts: dict[ArtifactId, Artifact] = field(default_factory=dict)
     snapshot: PromptSnapshot | None = None
     state_revision: int = 0
-    activations: dict[EnvironmentInstanceId, EnvironmentActivation] = field(default_factory=dict)
-    bindings: dict[BindingId, BindingAuthority] = field(default_factory=dict)
-    workspace: ConversationWorkspace | None = None
+    environments: set[EnvironmentKind] = field(default_factory=set)
     idempotency: dict[str, EventId] = field(default_factory=dict)
     external: dict[str, bool] = field(default_factory=dict)  # V3-P53 choices by source
     model: ModelSetting | None = None  # V3-P64
@@ -276,51 +263,17 @@ class InMemoryStore:
             model=model_setting,
         )
 
-    def activate_environment(
-        self,
-        scope: TrustedScope,
-        kind: EnvironmentKind,
-        workspace_id: WorkspaceId,
-        *,
-        cwd_relative: str | None = None,
-    ) -> BindingAuthority:
+    def activate_environment(self, scope: TrustedScope, kind: EnvironmentKind) -> None:
         conv = self._authorized(scope)
-        if any(a.environment_kind == kind for a in conv.activations.values()):
-            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"active {kind} exists (P0: one per kind)")
-        instance_id = EnvironmentInstanceId(self.new_id("env"))
-        # Each Binding carries its own working directory (default: the
-        # Conversation's own folder, V3-033), so activating another
-        # Environment never changes an existing one's.
-        relative = cwd_relative if cwd_relative is not None else f"conversations/{scope.conversation_id}"
-        binding = BindingAuthority(
-            binding_id=BindingId(self.new_id("bind")),
-            environment_instance_id=instance_id,
-            environment_kind=kind,
-            workspace_id=workspace_id,
-            revision=1,
-            cwd_relative=relative,
-        )
-        conv.activations[instance_id] = EnvironmentActivation(instance_id, kind, binding.binding_id)
-        conv.bindings[binding.binding_id] = binding
-        if conv.workspace is None:  # the Conversation's first (default) working directory
-            conv.workspace = ConversationWorkspace(workspace_id, relative)
-        conv.state_revision += 1
-        return binding
-
-    def revoke_binding(self, scope: TrustedScope, binding_id: BindingId) -> None:
-        conv = self._authorized(scope)
-        conv.bindings.pop(binding_id, None)
-        for iid, act in list(conv.activations.items()):
-            if act.default_binding_id == binding_id:
-                conv.activations[iid] = replace(act, default_binding_id=None)
+        if kind in conv.environments:
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{kind} is already there")
+        conv.environments.add(kind)
         conv.state_revision += 1
 
     def deactivate_environment(self, scope: TrustedScope, kind: EnvironmentKind) -> None:
-        """Ends the activation; Bindings and the Workspace itself remain (V3-009)."""
+        """Takes the kind away; its places (the folder) remain."""
         conv = self._authorized(scope)
-        for iid, act in list(conv.activations.items()):
-            if act.environment_kind == kind:
-                del conv.activations[iid]
+        conv.environments.discard(kind)
         conv.state_revision += 1
 
     def raw_request_bodies(self, scope: TrustedScope) -> list[bytes]:
@@ -421,7 +374,7 @@ def _refused(file_id: str, why: str) -> DataError:
 
 
 class InMemoryData:
-    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
+    """Implements ConversationLog, EnvironmentState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
     FileCatalog, FileRetention, InstructionsStore (V3-P69) and MemoryStore
     (V3-P71); ``blobs`` is the BlobStore (V3-P66)."""
@@ -460,12 +413,6 @@ class InMemoryData:
     @staticmethod
     def _set_status(run: _Run, status: RunStatus, **changes: object) -> None:
         run.record = replace(run.record, status=status, **changes)  # type: ignore[arg-type]
-
-    def _conversation_binding(self, conv: _Conversation, binding_id: object) -> BindingAuthority:
-        binding = conv.bindings.get(BindingId(str(binding_id)))
-        if binding is None:
-            raise DataError(DataErrorCode.NOT_FOUND, f"no binding {binding_id}")
-        return binding
 
     # --- files (V3-P66) ---------------------------------------------------------------
 
@@ -671,7 +618,6 @@ class InMemoryData:
             ):
                 raise DataError(DataErrorCode.INVALID_EVENT_GROUP, run_id)
             for c in sorted(calls, key=lambda c: c.ordinal):
-                binding = c.arguments.get("workspace_binding_id")
                 pending.append(
                     ToolExecutionRecord(
                         call=CallRef(run_id, c.call_id),
@@ -679,7 +625,6 @@ class InMemoryData:
                         tool_id=c.tool_id,
                         arguments=c.arguments,
                         status=ToolExecutionStatus.PENDING,
-                        workspace_binding_id=BindingId(binding) if isinstance(binding, str) else None,
                     )
                 )
         event = self._new_event(conv, scope, output, run_id)
@@ -755,7 +700,6 @@ class InMemoryData:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
         if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call changes memory")
-        staged = self._stage_artifacts(conv, completion.artifact_mutations)  # validates CAS first
         presented = self._stage_presented(conv, call, completion.presented_files)
         images = self._tool_images(conv, call, completion.model_result.blocks)
         memory = (None if completion.memory_change is None
@@ -766,7 +710,6 @@ class InMemoryData:
                 del self._store.memories[key]
             else:
                 self._put_memory(key[0], note)
-        conv.artifacts.update(staged)
         conv.files.extend(presented)
         self._mark_attached(images)
         conv.executions[call] = replace(
@@ -797,23 +740,6 @@ class InMemoryData:
         if record.record_event is False:  # claim-time policy; None (legacy) records the Event
             return None
         return self._new_event(conv, scope, ToolResultRecord(call, model_result), call.run_id)
-
-    def _stage_artifacts(
-        self, conv: _Conversation, mutations: Sequence[ArtifactMutation]
-    ) -> dict[ArtifactId, Artifact]:
-        staged: dict[ArtifactId, Artifact] = {}
-        for m in mutations:
-            if m.artifact_id is None:
-                aid = ArtifactId(self._store.new_id("art"))
-                staged[aid] = Artifact(aid, m.kind, 1, m.content)
-                continue
-            current = staged.get(m.artifact_id) or conv.artifacts.get(m.artifact_id)
-            if current is None:
-                raise DataError(DataErrorCode.NOT_FOUND, m.artifact_id)
-            if m.expected_revision is not None and m.expected_revision != current.revision:
-                raise DataError(DataErrorCode.VERSION_CONFLICT, m.artifact_id)
-            staged[m.artifact_id] = replace(current, content=m.content, revision=current.revision + 1)
-        return staged
 
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
         conv = self._conv(scope)
@@ -896,53 +822,10 @@ class InMemoryData:
         self._set_status(run, RunStatus.PROJECTED)
         return revision
 
-    # --- ArtifactStore ---------------------------------------------------------
+    # --- EnvironmentState ------------------------------------------------------
 
-    async def read_artifact(self, scope: TrustedScope, artifact_id: ArtifactId) -> Artifact:
-        artifact = self._conv(scope).artifacts.get(artifact_id)
-        if artifact is None:
-            raise DataError(DataErrorCode.NOT_FOUND, artifact_id)
-        return artifact
-
-    async def list_artifacts(
-        self, scope: TrustedScope, *, kind: str | None = None
-    ) -> Sequence[Artifact]:
-        return tuple(
-            a for a in self._conv(scope).artifacts.values() if kind is None or a.kind == kind
-        )
-
-    # --- WorkspaceState --------------------------------------------------------
-
-    async def read_binding_authority(
-        self, scope: TrustedScope, binding_id: BindingId
-    ) -> BindingAuthority:
-        binding = self._conv(scope).bindings.get(binding_id)
-        if binding is None:
-            raise DataError(DataErrorCode.NOT_FOUND, binding_id)
-        return binding
-
-    async def resolve_default_binding(
-        self, scope: TrustedScope, environment_kind: EnvironmentKind
-    ) -> BindingAuthority | None:
-        conv = self._conv(scope)
-        for act in conv.activations.values():
-            if act.environment_kind == environment_kind and act.default_binding_id is not None:
-                return conv.bindings.get(act.default_binding_id)
-        return None
-
-    async def read_activation(
-        self, scope: TrustedScope, environment_kind: EnvironmentKind
-    ) -> EnvironmentActivation | None:
-        return next(
-            (a for a in self._conv(scope).activations.values() if a.environment_kind == environment_kind),
-            None,
-        )
-
-    async def resolve_conversation_workspace(self, scope: TrustedScope) -> ConversationWorkspace:
-        workspace = self._conv(scope).workspace
-        if workspace is None:
-            raise DataError(DataErrorCode.NOT_FOUND, "conversation workspace")
-        return workspace
+    async def has_environment(self, scope: TrustedScope, environment_kind: EnvironmentKind) -> bool:
+        return environment_kind in self._conv(scope).environments
 
     # --- ConversationCatalog ----------------------------------------------------
 
@@ -951,16 +834,15 @@ class InMemoryData:
         principal: PrincipalId,
         *,
         title: str | None = None,
-        activations: Sequence[InitialActivation] = (),
+        environments: Sequence[EnvironmentKind] = (),
         model_setting: ModelSetting | None = None,
     ) -> ConversationId:
         title = rules.normalize_title(title)
-        rules.check_activations(activations)
+        rules.check_environments(environments)
         rules.check_model_setting(model_setting)
         scope = TrustedScope(principal, ConversationId(self._store.new_id("conv")))
         self._store.create_conversation(scope, title=title, model_setting=model_setting)
-        for activation in activations:  # validated above: cannot fail half way
-            self._store.activate_environment(scope, activation.environment_kind, activation.workspace_id)
+        self._store._conversations[scope.conversation_id].environments.update(environments)
         return scope.conversation_id
 
     def _summary(self, conversation_id: ConversationId, conv: _Conversation) -> ConversationSummary:
@@ -1035,7 +917,7 @@ class InMemoryData:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not in the trash")
         if conv.purge_started_at is None:
             conv.purge_started_at = datetime.now(UTC)
-        return TrashedConversation(self._summary(scope.conversation_id, conv), conv.workspace)
+        return TrashedConversation(self._summary(scope.conversation_id, conv), tuple(sorted(conv.environments)))
 
     async def purge_conversation(self, scope: TrustedScope) -> None:
         conv = self._store._owned(scope)
@@ -2239,8 +2121,5 @@ class InMemoryData:
         return PersistedStateBasis(
             conversation_sequence=len(conv.events),
             state_revision=conv.state_revision,
-            environments=tuple(conv.activations.values()),
-            bindings=tuple(conv.bindings.values()),
-            artifacts=tuple(conv.artifacts.values()),
-            conversation_workspace=conv.workspace,
+            environments=tuple(sorted(conv.environments)),
         )

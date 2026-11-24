@@ -42,7 +42,7 @@ def event(sequence: int, payload: object, at: datetime) -> ConversationEvent:
 def inputs(*events: ConversationEvent, notes: dict[int, Memory] | None = None,
            spec: SystemSpec | None = None) -> PromptInputs:
     return PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=events, tool_executions=(),
-                        snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
+                        snapshot=None, state_basis=PersistedStateBasis(len(events), 0, ()), observations={},
                         request_options=RequestOptions("m", speaks_first=True), trigger_refs=(), time_zone="Asia/Seoul",
                         wake_notes=notes or {}, system=spec)
 

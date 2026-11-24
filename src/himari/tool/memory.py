@@ -36,7 +36,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 MEMORY_SAVE = ToolId("memory_save")
@@ -72,7 +71,7 @@ def _definition(tool_id: ToolId, description: str, properties: dict[str, JsonVal
     return ToolDefinition(
         tool_id=tool_id, description=description,
         input_schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False},
-        workspace_requirement=WorkspaceRequirement.NONE, effect_profile=effect)
+        effect_profile=effect)
 
 
 def note_id(raw: object) -> int | None:

@@ -134,10 +134,6 @@ ConversationId = NewType("ConversationId", str)
 EventId = NewType("EventId", str)
 RunId = NewType("RunId", str)
 CallId = NewType("CallId", str)
-ArtifactId = NewType("ArtifactId", str)
-WorkspaceId = NewType("WorkspaceId", str)
-EnvironmentInstanceId = NewType("EnvironmentInstanceId", str)
-BindingId = NewType("BindingId", str)
 FileId = NewType("FileId", str)  # V3-P66: one uploaded or presented file of a Conversation
 ToolId = NewType("ToolId", str)
 # V3-P106: the question Tool of older servers. It is gone; only older history holds its calls.

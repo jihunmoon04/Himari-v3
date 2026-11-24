@@ -200,7 +200,7 @@ def model_input(model: str, text: str = "", *, free: bool = False, web: bool = F
                             (DevicePresence("Desktop", True, idle_minutes=0),), now_doing=doing)
     inputs = PromptInputs(
         instructions=COMPANION_BASE, tool_catalog=(SCREEN,), events=(event,), tool_executions=(),
-        snapshot=None, state_basis=PersistedStateBasis(1, 0, (), (), ()), observations=(),
+        snapshot=None, state_basis=PersistedStateBasis(1, 0, ()), observations={},
         request_options=options, trigger_refs=(), system=SystemSpec(companion=True, attachments=True, proactive=True),
         companion_persona=PERSONA, now=NOW, presence=presence, time_zone="Asia/Seoul",
         attachments={} if attached is None else {"screen#1": attached.info},

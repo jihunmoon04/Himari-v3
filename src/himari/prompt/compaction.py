@@ -207,8 +207,8 @@ def part_tokens(part: HistoryPart, attachments: Mapping[str, AttachmentInfo] = F
 
 def state_tokens(model_input: ModelInput) -> int:
     """The current state block as sent — escaped JSON, with the notes placed
-    there (``api.state_block``) — not the raw values: ``<`` in an
-    artifact or a note is one character there but six in the request."""
+    there (``api.state_block``) — not the raw values: ``<`` in a
+    path or a note is one character there but six in the request."""
     block = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
     return 0 if block is None else MESSAGE_OVERHEAD_TOKENS + tokens_of_text(block)
 
@@ -269,9 +269,9 @@ def _without_clock(value: object) -> object:
 
 def state_key(inputs: PromptInputs) -> str:
     """V3-P89 post-merge review P1, PR #152 re-review P1: digest of the runtime
-    state **as it is rendered** — Environment observations (connection, paths,
-    workspaces), memory (notes with their dates, loops, recent episodes),
-    presence, "data" notes, artifacts — since much of it changes apart from the
+    state **as it is rendered** — Environment observations (connection, paths),
+    memory (notes with their dates, loops, recent episodes),
+    presence, "data" notes — since much of it changes apart from the
     state's revision. When it differs from the measured Run's, the estimate
     counts the whole state again (as for a new state revision). Left out: ``now``,
     the clock's counters and the turn's state (counted every Run anyway)."""
@@ -557,7 +557,7 @@ class Compactor:
     def step_request(self, plan: CompactionPlan, index: int, summary: str | None) -> ModelInput:
         empty = PersistedStateBasis(
             conversation_sequence=plan.covers_through_sequence, state_revision=plan.prompt_basis.state_revision,
-            environments=(), bindings=(), artifacts=(),
+            environments=(),
         )
         items = plan.pieces[index]
         assert isinstance(items, Sequence)

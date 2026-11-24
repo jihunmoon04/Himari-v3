@@ -14,14 +14,14 @@ from typing import Any
 from testkit import FAKE, SCOPE, RecordingTool, calls, final, runtime, text_result, user
 
 from himari.bootstrap import Runtime
-from himari.common import RunId, WorkspaceId
+from himari.common import RunId
 from himari.control.api import DriveState, StopSignal
 from himari.data.api import AssistantToolCalls, RunStatus, ToolExecutionStatus
 from himari.prompt.api import ContextBudget, ToolGroupTurn, UserTurn
 from himari.prompt.compaction import COMPACTION_INSTRUCTIONS
 from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived, OutputSink, RawCapture
 from himari.provider.scripted import ScriptedAdapter, ScriptStep, encode_output
-from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolOutcome, ToolStatus, WorkspaceRequirement
+from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolOutcome, ToolStatus
 
 
 class GatedProvider(ScriptedAdapter):
@@ -130,10 +130,9 @@ def test_a_cancel_interrupts_a_tool_call_and_closes_the_rest() -> None:
 
 def test_a_cancelled_write_is_reported_as_unknown_never_rerun() -> None:
     async def scenario() -> None:
-        write = SlowTool("fake/write", effect=EffectProfile.SCOPED_WRITE, environment_kind=FAKE,
-                         workspace=WorkspaceRequirement.DEFAULT)
+        write = SlowTool("fake/write", effect=EffectProfile.SCOPED_WRITE, environment_kind=FAKE)
         rt, provider = runtime([calls(("fake/write", {})), final("checked")], env_tools=[write])
-        rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+        rt.store.activate_environment(SCOPE, FAKE)
         stop = StopSignal()
         job = asyncio.create_task(rt.driver.drive(SCOPE, user("write it"), stop=stop))
         await write.entered.wait()
@@ -305,11 +304,10 @@ def test_a_cancel_while_a_writes_images_are_kept_keeps_its_definite_result() -> 
     async def scenario() -> None:
         views = Hanging()
         write = RecordingTool("fake/shot", effect=EffectProfile.SCOPED_WRITE, environment_kind=FAKE,
-                              workspace=WorkspaceRequirement.DEFAULT,
                               behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("shot"),
                                                                 result_images=(ResultImage(out.getvalue(), "image/png"),)))
         rt, _ = runtime([calls(("fake/shot", {})), final("done")], env_tools=[write], image_views=views)
-        rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+        rt.store.activate_environment(SCOPE, FAKE)
         stop = StopSignal()
         job = asyncio.create_task(rt.driver.drive(SCOPE, user("take it"), stop=stop))
         await views.entered.wait()

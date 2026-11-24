@@ -1,6 +1,6 @@
 # HIMARI v3 — 통합 모듈 계약 기준서
 
-> **2026-11-24 주의:** 이 기준서의 Inside Environment, Workspace·Binding, `run_command`, `ask_user`, Pause 부분은 V3-P101·V3-P106·V3-P109 전의 기록이다. 지금 구조는 [아키텍처](architecture.md), 지금 유효한 결정은 [결정 기록](decisions.md)이 우선이다.
+> **2026-11-24 주의:** 이 기준서의 Inside Environment, Workspace·Binding·Environment 활성화·Artifact, `run_command`, `ask_user`, Pause 부분은 V3-P101·V3-P106·V3-P109·H-75(스키마 v21) 전의 기록이다. 지금 구조는 [아키텍처](architecture.md), 지금 유효한 결정은 [결정 기록](decisions.md)이 우선이다.
 
 > 작성: 2026-10-13 · 문서 버전: **Contract Baseline v0.1** · 구현 상태(2026-10-14): **P0 계약·실제 Provider·Inside 파일 Tool·Sandbox `run_command`·SQLite 영속 Data·Web 서버 구현됨 / CLI·자원 한도 미구현**
 >

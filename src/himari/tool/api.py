@@ -35,7 +35,7 @@ from himari.common import (
     TrustedScope,
     UnknownOutcomePolicy,
 )
-from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, ConversationWorkspace, MemoryChange
+from himari.data.api import MemoryChange
 # Owned by Data, re-exported here so that a Tool implementation (e.g. the MCP
 # connector, which may import only tool.api — V3-059) can use them.
 from himari.data.api import PresentedFile as PresentedFile
@@ -46,23 +46,17 @@ from himari.data.api import DEFAULT_FILE_MAX_BYTES
 MAX_IMAGE_BASE64_CHARS = 4 * ((DEFAULT_FILE_MAX_BYTES + 2) // 3)  # padded base64 of that many bytes
 
 
-class WorkspaceRequirement(Enum):
-    NONE = "none"
-    REQUIRED = "required"  # call must carry a workspace_binding_id
-    DEFAULT = "default"  # explicit binding or the Conversation's default for the kind
-
-
 class EffectProfile(Enum):
     READ = "read"  # safe to re-run if left PENDING after a crash
     SCOPED_WRITE = "scoped_write"
-    UNKNOWN = "unknown"  # e.g. an MCP tool that declares no effect: serialized per Workspace
+    UNKNOWN = "unknown"  # e.g. an MCP tool that declares no effect
 
 
 class ToolOrigin(Enum):
     """Who carries out a Tool's effects (V3-P52)."""
 
     INTERNAL = "internal"  # effects are only its ToolOutcome
-    ENVIRONMENT = "environment"  # an Environment acting on a Workspace
+    ENVIRONMENT = "environment"  # an Environment acting on its places (the Conversation's folder)
     EXTERNAL = "external"  # a server outside HIMARI (e.g. MCP); its effects are not visible here
 
 
@@ -76,11 +70,10 @@ class ToolDefinition(DeepFrozen):
     tool_id: ToolId  # "<environment_kind>/<name>" (V3-008) or "<external_source>/<name>"
     description: str
     input_schema: Mapping[str, JsonValue]  # JSON Schema of arguments
-    workspace_requirement: WorkspaceRequirement
     effect_profile: EffectProfile
     environment_kind: EnvironmentKind | None = None  # set iff Environment-provided
     # Set iff External: the name of the server that runs the Tool (e.g. an
-    # MCP server). An External Tool needs no Workspace; it is in the catalog
+    # MCP server). An External Tool is in the catalog
     # and may run only where its source is enabled (ExternalAccess, V3-P53).
     # Its effect_profile is the operator's judgement, not the server's.
     external_source: str | None = None
@@ -133,12 +126,7 @@ class TurnSource(DeepFrozen):
 class ToolContext(DeepFrozen):
     """What a handler may use. Write effects on Data go through ToolOutcome."""
 
-    scope: TrustedScope
-    artifacts: ArtifactStore  # read-only use
-    binding: BindingAuthority | None = None  # resolved by Dispatcher; re-validate before effects
-    # The working directory of *this* Binding (its Workspace + cwd, DATA-11),
-    # so each Environment sees its own. Never a host path.
-    workspace: ConversationWorkspace | None = None
+    scope: TrustedScope  # an Environment Tool runs only where the Conversation has its kind
     turn: TurnSource | None = None  # V3-P91 §3.4: None when the Driver did not say (a resume after a restart)
     run_id: RunId | None = None  # the Run whose group this call is in (V3-P91 §3.1: one screen per Run)
 
@@ -188,7 +176,6 @@ class ToolOutcome(DeepFrozen):
 
     status: ToolStatus
     model_result: ModelToolResult
-    artifact_mutations: tuple[ArtifactMutation, ...] = ()
     raw_result: JsonValue = None
     # V3-P66 §7.1: files given to the user, recorded with the result (SUCCEEDED
     # only). If Data refuses them the call is committed FAILED instead: the
@@ -291,7 +278,7 @@ class ToolDispatcher(Protocol):
         unknown tool and never runs — it was not offered.
 
         Runs only never-claimed PENDING calls (so it is also the resume
-        path, TOOL-04). Unknown tool / invalid arguments / binding failures
+        path, TOOL-04). Unknown tool / invalid arguments / a missing Environment
         become DENIED or FAILED results, not exceptions. Uncertain calls of
         REPORT_TO_MODEL Tools get an "outcome unknown" result instead of
         being re-run (V3-047).

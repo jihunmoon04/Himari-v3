@@ -42,7 +42,6 @@ from himari.tool.api import (
     ToolOutcome,
     ToolHandler,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 if TYPE_CHECKING:
@@ -98,14 +97,11 @@ class _MachineTool:
             tool_id=ToolId(f"machine/{self.name}"),
             description=self.description,
             input_schema=_schema(self.properties, self.required),
-            workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=self.effect,
             environment_kind=EnvironmentKind("machine"),
         )
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
-        if ctx.binding is None or ctx.workspace is None:
-            return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
         from himari.environment.machine import MachineUnavailable
 
         try:
@@ -298,7 +294,6 @@ class MachineReadDocument(ReadDocument):
     async def _fetch(self, ctx: ToolContext, raw_path: object, limit: int) -> ToolOutcome | tuple[str, bytes]:
         from himari.environment.machine import MachineUnavailable
 
-        assert ctx.workspace is not None
         shown = _shown(raw_path)
         folders = self._machine.folders
 

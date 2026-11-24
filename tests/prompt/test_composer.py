@@ -42,8 +42,8 @@ def inputs(events: tuple[ConversationEvent, ...], executions: tuple[ToolExecutio
         events=events,
         tool_executions=executions,
         snapshot=None,
-        state_basis=PersistedStateBasis(len(events), 0, (), (), ()),
-        observations=(),
+        state_basis=PersistedStateBasis(len(events), 0, ()),
+        observations={},
         request_options=RequestOptions("m"),
         trigger_refs=(),
     )

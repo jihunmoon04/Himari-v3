@@ -111,8 +111,8 @@ def model_input(scene: Scene, model: str, after: bool):  # type: ignore[no-untyp
         blocks = (*blocks, AttachmentRef(FileId("f1"), 1))
         attachments = {"f1#1": AttachmentInfo(scene.attachment_name, "uploads/x.txt", "text/plain", 12)}
     inputs = PromptInputs(instructions=COMPANION_BASE, tool_catalog=tuple(t.definition for t in tools), events=(),
-                          tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, (), (), ()),
-                          observations=(), request_options=RequestOptions(model), trigger_refs=(),
+                          tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, ()),
+                          observations={}, request_options=RequestOptions(model), trigger_refs=(),
                           system=SystemSpec(companion=scene.companion, memory=True, attachments=True),
                           companion_persona=PERSONA, memories=memories, now=NOW, presence=presence,
                           attachments=attachments)

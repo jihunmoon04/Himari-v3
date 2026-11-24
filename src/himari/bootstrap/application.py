@@ -69,7 +69,6 @@ from himari.common import (
     RunId,
     TextBlock,
     TrustedScope,
-    WorkspaceId,
 )
 from himari.control.api import (
     ContextStatus,
@@ -115,7 +114,6 @@ from himari.data.api import (
     MemoryOrigin,
     ViewMaker,
     ViewState,
-    InitialActivation,
     ModelSetting,
     ToolExecutionRecord,
     ToolExecutionStatus,
@@ -146,12 +144,11 @@ from himari.proactive import ProactiveSettings
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.imaging import ImageViews, runtime_roots
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
-from himari.environment.machine import WorkspaceBusy as WorkspaceBusy
+from himari.environment.machine import FolderBusy as FolderBusy
 from himari.environment.machine import (
     MACHINE,
     MachineEnvironment,
     MachineUnavailable,
-    machine_workspace_for,
 )
 from himari.environment.machine.results import ToolFiles
 from himari.sandbox import identity
@@ -1307,8 +1304,7 @@ class Application:
         setting = ModelSetting(initial_model, None) if initial_model is not None else None
         if self.machine is not None and principal in self.machine_principals:
             return await self.data.create_conversation(
-                principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),),
-                model_setting=setting)
+                principal, title=title, environments=(MACHINE,), model_setting=setting)
         return await self.data.create_conversation(principal, title=title, model_setting=setting)
 
     # --- files (V3-P66) ----------------------------------------------------------------
@@ -1322,7 +1318,7 @@ class Application:
         if not name or len(name.encode("utf-8", "surrogatepass")) > MAX_RAW_NAME_BYTES:
             raise FileNameRefused(name[:40])
         cleaned = clean_file_name(name)
-        await self._workspace(scope)  # authorizes; FilesUnavailable without a place for uploads
+        await self._check_folder(scope)  # authorizes; FilesUnavailable without a place for uploads
         if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         blob = await self.data.blobs.put(scope.principal_id, chunks, self.file_max_bytes)
@@ -1342,18 +1338,14 @@ class Application:
         read = reader is not None and reader.available
         return {"read": read, "libraries": dict(reader.versions) if read and reader is not None else {}}
 
-    async def _workspace(self, scope: TrustedScope) -> tuple[WorkspaceId, str]:
-        if not self.uploads_work:
+    async def _check_folder(self, scope: TrustedScope) -> MachineEnvironment:
+        """The machine Environment, when this Conversation has a folder there
+        (an old Inside one has none, V3-P101); FilesUnavailable otherwise."""
+        if not self.uploads_work or self.machine is None:
             raise FilesUnavailable(scope.conversation_id)
-        try:
-            workspace = await self.data.resolve_conversation_workspace(scope)
-        except DataError as error:
-            if error.code is DataErrorCode.NOT_FOUND:
-                raise FilesUnavailable(scope.conversation_id) from None
-            raise
-        if self.machine is None or not self.machine.owns(workspace.workspace_id):  # an old Inside one (V3-P101)
+        if not await self.data.has_environment(scope, MACHINE):  # authorizes first
             raise FilesUnavailable(scope.conversation_id)
-        return workspace.workspace_id, workspace.cwd_relative
+        return self.machine
 
     async def upload_screen(self, scope: TrustedScope, chunks: AsyncIterator[bytes]) -> FileRecord:
         """V3-P84 §4.1: a device's screen, staged like an upload: a PNG or
@@ -1411,13 +1403,10 @@ class Application:
                 records = await self.data.check_attachments(scope, attachments)
                 if self.runner.status(scope).running:
                     raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-                workspace_id, cwd = await self._workspace(scope)
-                machine = self.machine
-                assert machine is not None  # _workspace: only the machine's folders take uploads
+                machine = await self._check_folder(scope)
                 try:
-                    locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
-                                            cwd_relative=cwd)
-                    placer = _machine_placer(machine, scope.conversation_id, cwd)
+                    locked = machine.locked(scope.conversation_id, PLACE_LOCK_SECONDS)
+                    placer = _machine_placer(machine, scope.conversation_id)
                     async with locked:
                         # Read again under the lock: another tab may have placed them (review C4).
                         fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
@@ -1565,10 +1554,9 @@ class Application:
         Conversation's own folder removed, then every Data row."""
         async with self._exclusive(scope.conversation_id):
             trashed = await self.data.begin_purge(scope)  # owner and state first
-            workspace = trashed.workspace
             folders = self.folders or self.machine
-            if workspace is not None and folders is not None and folders.owns(workspace.workspace_id):
-                await folders.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            if MACHINE in trashed.environments and folders is not None:
+                await folders.remove_conversation_folder(scope)
             # An old Inside folder (<data>/workspaces) is left: V3-P101 removes it by hand.
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)
@@ -1698,11 +1686,11 @@ class _Placer:
     discard_copy: Callable[[str], Awaitable[None]]
 
 
-def _machine_placer(machine: MachineEnvironment, conversation_id: str, cwd: str) -> _Placer:
+def _machine_placer(machine: MachineEnvironment, conversation_id: str) -> _Placer:
     return _Placer(
-        holds=lambda path, size, sha256: machine.holds(conversation_id, cwd, path, size, sha256),
-        copy_in=lambda source, clear: machine.copy_in(conversation_id, cwd, source, clear=clear),
-        free_path=lambda name, preferred: machine.free_path(conversation_id, cwd, name, preferred),
-        commit_copy=lambda temp, path: machine.commit_copy(conversation_id, cwd, temp, path),
-        discard_copy=lambda temp: machine.discard_copy(conversation_id, cwd, temp),
+        holds=lambda path, size, sha256: machine.holds(conversation_id, path, size, sha256),
+        copy_in=lambda source, clear: machine.copy_in(conversation_id, source, clear=clear),
+        free_path=lambda name, preferred: machine.free_path(conversation_id, name, preferred),
+        commit_copy=lambda temp, path: machine.commit_copy(conversation_id, temp, path),
+        discard_copy=lambda temp: machine.discard_copy(conversation_id, temp),
     )

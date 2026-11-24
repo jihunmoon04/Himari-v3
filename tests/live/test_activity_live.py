@@ -80,7 +80,7 @@ def answer(model: str, doing: NowDoing, said: str) -> str:
     adapter = OpenRouterAdapter(KEY)
     presence = PresenceView(("device", "데스크톱"), "데스크톱", (DevicePresence("데스크톱", True, idle_minutes=0),),
                             now_doing=doing)
-    state = CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ()), now=NOW, presence=presence)
+    state = CurrentStateProjection(PersistedStateBasis(0, 0, ()), now=NOW, presence=presence)
     model_input = ModelInput(stable_prefix=(*COMPANION_BASE, principle_section(False),
                                             messages_section(SystemSpec()), companion_section(False)),  # V3-P89
                              tool_catalog=(), conversation=(UserTurn(EventId("e"), (TextBlock(said),)),),

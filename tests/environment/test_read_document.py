@@ -13,16 +13,14 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from himari.common import BindingId, CallId, ConversationId, EnvironmentInstanceId, PrincipalId, ToolId, TrustedScope
+from himari.common import CallId, ConversationId, PrincipalId, ToolId, TrustedScope
 from himari.common import thaw
-from himari.data.api import BindingAuthority, ConversationWorkspace
 from himari.documents.api import DocumentRefused, DocumentsUnavailable, Part, Picture, Piece, Reading, Skipped
-from himari.environment.machine import MACHINE, MachineEnvironment, machine_workspace_for
+from himari.environment.machine import MachineEnvironment
 from himari.environment.machine.documents import fingerprint_of
 from himari.environment.machine.results import MAX_OBSERVATION_BYTES
 from himari.tool.api import ToolContext, ToolInvocation, ToolOutcome, ToolStatus
 
-ALICE = machine_workspace_for(PrincipalId("operator"))
 SCOPE = TrustedScope(PrincipalId("operator"), ConversationId("c1"))
 SALT = b"v1\x001"
 
@@ -92,9 +90,7 @@ def doc(env: Place) -> bytes:
 
 def call(env: Place, tool: str, args: dict[str, Any]) -> ToolOutcome:
     handler = next(t for t in env.machine.tools() if t.definition.tool_id == f"machine/{tool}")
-    binding = BindingAuthority(BindingId("b1"), EnvironmentInstanceId("e1"), MACHINE, ALICE, 1, "conversations/c1")
-    ctx = ToolContext(scope=SCOPE, artifacts=None, binding=binding,  # type: ignore[arg-type]
-                      workspace=ConversationWorkspace(ALICE, "conversations/c1"))
+    ctx = ToolContext(scope=SCOPE)
     return asyncio.run(handler.run(ToolInvocation(ToolId(f"machine/{tool}"), CallId("c"), args), ctx))
 
 

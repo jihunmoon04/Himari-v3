@@ -2,8 +2,8 @@
 
 Every type is encoded by hand with a ``type`` tag where a union is involved,
 and decoding accepts only those tags: no class is ever looked up by a name
-read from storage. Opaque values (Tool arguments, raw results, Artifact
-content, snapshot bodies, continuation payloads) are stored as their JSON
+read from storage. Opaque values (Tool arguments, raw results,
+snapshot bodies, continuation payloads) are stored as their JSON
 text; ``thaw``/``deep_freeze`` keep Mapping/Sequence semantics identical to
 the in-memory store. A malformed stored value raises ``ValueError``.
 """
@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from himari.common import (
-    ArtifactId,
     AttachmentRef,
     FileReference,
     CallId,
@@ -299,7 +298,6 @@ def prompt_basis(basis: PromptBasis) -> str:
         "event_sequence": basis.event_sequence,
         "state_revision": basis.state_revision,
         "snapshot_revision": basis.snapshot_revision,
-        "artifact_revisions": dict(basis.artifact_revisions),
         "context_key": basis.context_key,
         "state_key": basis.state_key,
     })
@@ -312,7 +310,7 @@ def prompt_basis_from(text: str) -> PromptBasis:
         int(data["event_sequence"]),
         int(data["state_revision"]),
         None if snapshot is None else int(snapshot),
-        {ArtifactId(k): int(v) for k, v in _obj(data["artifact_revisions"]).items()},
+        # "artifact_revisions", in Runs stored before schema v21, is not read: Artifacts are gone.
         _optional_str(data.get("context_key")),  # absent in Runs stored before V3-P48
         _optional_str(data.get("state_key")),  # absent in Runs stored before V3-P89
     )

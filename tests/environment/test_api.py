@@ -5,9 +5,8 @@ from datetime import UTC, datetime
 from types import ModuleType
 
 from himari.common import EnvironmentKind, ModelToolResult, TextBlock, ToolId, TrustedScope
-from himari.data.api import BindingAuthority
 from himari.environment import api
-from himari.environment.api import BindingObservation, ConnectionStatus, EnvironmentPlugin
+from himari.environment.api import ConnectionStatus, EnvironmentObservation, EnvironmentPlugin
 from himari.tool.api import (
     EffectProfile,
     ToolContext,
@@ -16,7 +15,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 
@@ -37,15 +35,13 @@ def assert_plugin_conforms(plugin: object) -> None:
 class _ListFiles:
     definition = ToolDefinition(
         tool_id=ToolId("fake/list_files"),
-        description="List files in the bound Workspace.",
+        description="List files in the Conversation's folder.",
         input_schema={"type": "object"},
-        workspace_requirement=WorkspaceRequirement.DEFAULT,
         effect_profile=EffectProfile.READ,
         environment_kind=EnvironmentKind("fake"),
     )
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
-        assert ctx.binding is not None
         return ToolOutcome(ToolStatus.SUCCEEDED, ModelToolResult((TextBlock(""),)))
 
 
@@ -60,11 +56,8 @@ class FakeEnvironment:
     def tools(self) -> Sequence[ToolHandler]:
         return self._tools
 
-    async def observe(
-        self, scope: TrustedScope, bindings: Sequence[BindingAuthority]
-    ) -> Sequence[BindingObservation]:
-        now = datetime.now(UTC)
-        return [BindingObservation(b.binding_id, ConnectionStatus.UNKNOWN, now) for b in bindings]
+    async def observe(self, scope: TrustedScope) -> EnvironmentObservation:
+        return EnvironmentObservation(ConnectionStatus.UNKNOWN, datetime.now(UTC))
 
 
 def test_dtos_are_frozen(assert_api_dataclasses_frozen: Callable[[ModuleType], None]) -> None:

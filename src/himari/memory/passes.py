@@ -290,7 +290,7 @@ def request_data(part: Part, notes: Sequence[Memory], previous: Episode | None, 
 
 def model_input(data: Mapping[str, JsonValue], options: RequestOptions) -> ModelInput:
     """One request, as compaction's: fixed instructions and one user turn of data."""
-    empty = PersistedStateBasis(conversation_sequence=0, state_revision=0, environments=(), bindings=(), artifacts=())
+    empty = PersistedStateBasis(conversation_sequence=0, state_revision=0, environments=())
     return ModelInput(
         stable_prefix=(MEMORY_PASS_INSTRUCTIONS,),
         tool_catalog=(),

@@ -42,6 +42,8 @@
 - **H-19** Tool 구현은 실행 원장을 모르고 `ToolOutcome`만 돌려준다. Tool의 효과, 실행 종결, Conversation Event는 Tool Dispatcher가 한 번에 커밋한다. 근거: V3-042, V3-P11, V3-P26
 - **H-20** 대화 삭제는 휴지통 → 복원 또는 영구 삭제다. `HIMARI_TRASH_DAYS`(기본 30)일이 지나면 서버가 영구 삭제한다. 휴지통의 대화는 다른 모든 Port에서 없는 대화와 같다. 영구 삭제는 그 대화의 모든 기록, 대화 폴더, 파일 기록, 그 대화에서 저장된 메모·일화를 지운다. MCP 서버가 자기 쪽에 둔 데이터는 지우지 않고 확인 창에 알린다. 실행 중이면 먼저 취소한다. 근거: V3-P65, V3-P71, V3-P85
 
+- **H-75** (2026-11-24) 작업 에이전트 시대의 추상을 걷었다. 대화는 자기가 가진 **Environment 종류**만 기록한다(만들 때 정함, Data `EnvironmentState.has_environment`). Dispatcher는 대화에 그 종류가 없으면 그 Environment의 Tool을 실행하지 않는다. `machine`의 대화 폴더는 언제나 `conversations/<id>`라서 Binding·Workspace id·작업 폴더 경로를 따로 두지 않는다. Artifact(Plan/Note)는 쓰는 Tool이 없어 없앴다. 스키마 v21이 `activations`를 `environments`로 옮기고 `bindings`·`workspaces`·`artifacts` 표와 Workspace·Binding 열을 지운다. 근거: V3-P19, V3-P32, V3-P101, V3-P106, V3-P109
+
 ## 4. Prompt
 
 - **H-21** 순서는 **캐시 우선**이다: Stable Prefix(시스템 글, Tool 정의) → Conversation(압축 요약 + exact Event, Tool 호출과 결과는 `call_id`로 묶은 provider-native 그룹) → Current State. Current State는 마지막 user-role `<runtime_state>` 블록에 JSON 데이터로 들어간다. 모델·추론 설정은 별도 API 필드다. 불완전한 Tool 그룹을 지어내지 않는다. 근거: V3-015, V3-017, V3-026, V3-P38
@@ -137,7 +139,6 @@
 지금 정하지 않은 것만 적는다. 정하면 위에 H 번호로 옮긴다.
 
 - **서버를 어디서 돌릴지.** Windows PC에서 서버와 앱을 함께 돌리려면 남은 Linux 의존(파일 잠금·권한 검사, `setrlimit`, Bubblewrap/Landlock sandbox)을 플랫폼 계층 하나로 모으고 Windows용 worker 격리(Job Object)를 정해야 한다([server-slim-v0.1.md](server-slim-v0.1.md) §7).
-- **옛 작업 에이전트 시대의 추상.** 코드에 남은 Workspace·Binding·Activation·Artifact(Plan/Note)를 어디까지 걷을지. 정리 중이다.
 - **문서 만들기.** 명령 실행이 빠져 모델이 DOCX·PDF 같은 문서를 만들 길이 없다(글 파일은 `write_file`로 만든다). 필요한지, 필요하면 어떤 Tool로 할지.
 - **작업 중에 온 메시지.** 지금은 `BUSY`로 거부한다. 받아 두었다가 다음 Run 사이에 넣을지([companion-v0.1.md](companion-v0.1.md) §12).
 - **기억 검색 방식.** 지금은 낱말 검색이다. 임베딩 검색(Provider의 임베딩 Port)이 필요한지.

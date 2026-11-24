@@ -47,7 +47,7 @@ def setup(through: int | None = None) -> tuple[Any, ConversationSearchTool, Conv
 
 def run(tool: Any, **arguments: Any) -> ToolOutcome:
     invocation = ToolInvocation(tool.definition.tool_id, CallId("c0"), arguments)
-    outcome: ToolOutcome = asyncio.run(tool.run(invocation, ToolContext(SCOPE, None)))  # type: ignore[arg-type]
+    outcome: ToolOutcome = asyncio.run(tool.run(invocation, ToolContext(SCOPE)))
     return outcome
 
 

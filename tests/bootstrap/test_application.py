@@ -27,6 +27,7 @@ from himari.common import EnvironmentKind, PrincipalId, TrustedScope
 from himari.control.api import DriveState
 from himari.data.api import DataError, ModelSetting
 from himari.data.sqlite import StoreLockedError
+from himari.environment.machine import MACHINE
 from himari.provider.api import ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
 
@@ -96,8 +97,7 @@ def test_conversation_flow_survives_a_restart(tmp_path: Path) -> None:
         assert summary.last_sequence == 4  # user, tool calls, the refused tool result, final
         assert await app.data.list_conversations(BOB) == ()
         bob = await app.create_conversation(BOB)
-        with pytest.raises(DataError):  # it only talks: no Workspace
-            await app.data.resolve_conversation_workspace(TrustedScope(BOB, bob))
+        assert not await app.data.has_environment(TrustedScope(BOB, bob), MACHINE)  # it only talks: no folder
         await app.close()
 
     asyncio.run(second(asyncio.run(first())))

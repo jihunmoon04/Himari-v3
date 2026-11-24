@@ -56,13 +56,10 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 
 from himari.common import (
-    ArtifactId,
     AttachmentRef,
-    BindingId,
     CallId,
     CallRef,
     ConversationId,
-    EnvironmentInstanceId,
     EnvironmentKind,
     EventId,
     FileId,
@@ -75,7 +72,6 @@ from himari.common import (
     ToolId,
     TrustedScope,
     UnknownOutcomePolicy,
-    WorkspaceId,
 )
 from himari.data import codec, rules
 from himari.data.blobs import BlobRow, DirectoryBlobFiles, FileStore
@@ -90,18 +86,13 @@ from himari.data.api import (
     PRESENT_LIMIT_BYTES,
     PRESENT_WINDOW,
     STAGED_SEND_CUTOFF,
-    Artifact,
-    ArtifactMutation,
     AssistantFinal,
     AssistantOutput,
     AssistantToolCalls,
-    BindingAuthority,
     ConversationEvent,
     ConversationSummary,
-    ConversationWorkspace,
     DataError,
     DataErrorCode,
-    EnvironmentActivation,
     EventKind,
     NO_IMAGE,
     FileOrigin,
@@ -154,7 +145,6 @@ from himari.data.api import (
     StoredBlob,
     EventPayload,
     ExternalSourceSetting,
-    InitialActivation,
     ModelSetting,
     PairingResult,
     PersistedStateBasis,
@@ -192,7 +182,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -668,10 +658,30 @@ INSERT INTO persona_ids (owner, last_id) SELECT owner, 1 FROM personas;
 INSERT INTO persona_choice (owner, persona_id, revision, updated_at) SELECT owner, 1, 1, updated_at FROM personas;
 DELETE FROM instructions WHERE scope='companion_persona';
 """
+# v21 (2026-11-24 cleanup): what is left of the work-agent era goes. A Conversation keeps only the
+# Environment kinds it has (``environments``, from ``activations``); Bindings, registered Workspaces,
+# Artifacts and the columns naming them are dropped. The machine folder of a Conversation is always
+# ``conversations/<id>`` (V3-P109), so nothing it needs is lost.
+_V21_ADDITIONS = """
+CREATE TABLE environments (
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    environment_kind TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, environment_kind)
+) STRICT;
+INSERT INTO environments (conversation_id, environment_kind)
+    SELECT DISTINCT conversation_id, environment_kind FROM activations;
+DROP TABLE activations;
+DROP TABLE bindings;
+DROP TABLE workspaces;
+DROP TABLE artifacts;
+ALTER TABLE conversations DROP COLUMN workspace_id;
+ALTER TABLE conversations DROP COLUMN workspace_cwd;
+ALTER TABLE tool_executions DROP COLUMN workspace_binding_id;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
-              _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS)  # what each version from v3 added
+              _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -927,32 +937,17 @@ class SqliteStore:
         with self.transaction() as tx:
             tx.insert_conversation(scope, title)
 
-    def activate_environment(
-        self,
-        scope: TrustedScope,
-        kind: EnvironmentKind,
-        workspace_id: WorkspaceId,
-        *,
-        cwd_relative: str | None = None,
-    ) -> BindingAuthority:
-        with self.transaction() as tx:
-            return tx.activate(scope, kind, workspace_id, cwd_relative)
-
-    def revoke_binding(self, scope: TrustedScope, binding_id: BindingId) -> None:
+    def activate_environment(self, scope: TrustedScope, kind: EnvironmentKind) -> None:
         with self.transaction() as tx:
             tx.authorized(scope)
-            tx.execute("DELETE FROM bindings WHERE conversation_id=? AND binding_id=?", scope.conversation_id, binding_id)
-            tx.execute(
-                "UPDATE activations SET default_binding_id=NULL WHERE conversation_id=? AND default_binding_id=?",
-                scope.conversation_id, binding_id,
-            )
+            tx.add_environment(scope, kind)
             tx.bump_state(scope)
 
     def deactivate_environment(self, scope: TrustedScope, kind: EnvironmentKind) -> None:
-        """Ends the activation; Bindings and the Workspace itself remain (V3-009)."""
+        """Takes the kind away; its places (the folder) remain."""
         with self.transaction() as tx:
             tx.authorized(scope)
-            tx.execute("DELETE FROM activations WHERE conversation_id=? AND environment_kind=?", scope.conversation_id, kind)
+            tx.execute("DELETE FROM environments WHERE conversation_id=? AND environment_kind=?", scope.conversation_id, kind)
             tx.bump_state(scope)
 
     def raw_request_bodies(self, scope: TrustedScope) -> list[bytes]:
@@ -1019,42 +1014,17 @@ class _Tx:
             scope.conversation_id, scope.principal_id, title, _timestamp(datetime.now(UTC)),
         )
 
-    def activate(
-        self, scope: TrustedScope, kind: EnvironmentKind, workspace_id: WorkspaceId, cwd_relative: str | None
-    ) -> BindingAuthority:
-        tx = self
-        conv = tx.authorized(scope)
-        if tx.one("SELECT 1 FROM activations WHERE conversation_id=? AND environment_kind=?", scope.conversation_id, kind):
-            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"active {kind} exists (P0: one per kind)")
-        instance_id = EnvironmentInstanceId(tx.new_id("env"))
-        # Each Binding carries its own working directory (default: the
-        # Conversation's own folder, V3-033).
-        relative = cwd_relative if cwd_relative is not None else f"conversations/{scope.conversation_id}"
-        binding = BindingAuthority(
-            binding_id=BindingId(tx.new_id("bind")),
-            environment_instance_id=instance_id,
-            environment_kind=kind,
-            workspace_id=workspace_id,
-            revision=1,
-            cwd_relative=relative,
-        )
-        tx.execute(
-            "INSERT INTO activations (conversation_id, environment_instance_id, environment_kind, default_binding_id)"
-            " VALUES (?, ?, ?, ?)",
-            scope.conversation_id, instance_id, kind, binding.binding_id,
-        )
-        tx.execute(
-            "INSERT INTO bindings (conversation_id, binding_id, environment_instance_id, environment_kind,"
-            " workspace_id, revision, cwd_relative) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            scope.conversation_id, binding.binding_id, instance_id, kind, workspace_id, 1, relative,
-        )
-        if conv["workspace_id"] is None:  # the Conversation's first (default) working directory
-            tx.execute(
-                "UPDATE conversations SET workspace_id=?, workspace_cwd=? WHERE conversation_id=?",
-                workspace_id, relative, scope.conversation_id,
-            )
-        tx.bump_state(scope)
-        return binding
+    def add_environment(self, scope: TrustedScope, kind: EnvironmentKind) -> None:
+        if self.one("SELECT 1 FROM environments WHERE conversation_id=? AND environment_kind=?",
+                    scope.conversation_id, kind):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{kind} is already there")
+        self.execute("INSERT INTO environments (conversation_id, environment_kind) VALUES (?, ?)",
+                     scope.conversation_id, kind)
+
+    def environments(self, scope: TrustedScope) -> tuple[EnvironmentKind, ...]:
+        return tuple(EnvironmentKind(r["environment_kind"]) for r in self.all(
+            "SELECT environment_kind FROM environments WHERE conversation_id=? ORDER BY environment_kind",
+            scope.conversation_id))
 
 
 class _SqliteBlobRows:
@@ -1319,40 +1289,9 @@ def _execution(row: sqlite3.Row) -> ToolExecutionRecord:
         status=ToolExecutionStatus(row["status"]),
         model_result=None if row["model_result"] is None else codec.model_result_from(row["model_result"]),
         raw_result=codec.load_json(row["raw_result"]),
-        workspace_binding_id=None if row["workspace_binding_id"] is None else BindingId(row["workspace_binding_id"]),
         unknown_outcome=None if row["unknown_outcome"] is None else UnknownOutcomePolicy(row["unknown_outcome"]),
         record_event=None if record_event is None else bool(record_event),
     )
-
-
-def _artifact(row: sqlite3.Row) -> Artifact:
-    return Artifact(ArtifactId(row["artifact_id"]), row["kind"], row["revision"], codec.load_json(row["content"]))
-
-
-def _binding(row: sqlite3.Row) -> BindingAuthority:
-    return BindingAuthority(
-        binding_id=BindingId(row["binding_id"]),
-        environment_instance_id=EnvironmentInstanceId(row["environment_instance_id"]),
-        environment_kind=EnvironmentKind(row["environment_kind"]),
-        workspace_id=WorkspaceId(row["workspace_id"]),
-        revision=row["revision"],
-        cwd_relative=row["cwd_relative"],
-    )
-
-
-def _activation(row: sqlite3.Row) -> EnvironmentActivation:
-    default = row["default_binding_id"]
-    return EnvironmentActivation(
-        EnvironmentInstanceId(row["environment_instance_id"]),
-        EnvironmentKind(row["environment_kind"]),
-        None if default is None else BindingId(default),
-    )
-
-
-def _workspace(conv: sqlite3.Row) -> ConversationWorkspace | None:
-    if conv["workspace_id"] is None:
-        return None
-    return ConversationWorkspace(WorkspaceId(conv["workspace_id"]), conv["workspace_cwd"])
 
 
 _FILE_COLUMNS = ("f.file_id, f.version, f.origin, f.name, f.media_type, f.created_at, f.workspace_path,"
@@ -1400,7 +1339,7 @@ def _refused(file_id: str, why: str) -> DataError:
 
 
 class SqliteData:
-    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
+    """Implements ConversationLog, EnvironmentState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
     FileCatalog, FileRetention, InstructionsStore (V3-P69) and MemoryStore
     (V3-P71); ``blobs`` is the BlobStore (V3-P66)."""
@@ -1669,7 +1608,6 @@ class SqliteData:
                 ):
                     raise DataError(DataErrorCode.INVALID_EVENT_GROUP, run_id)
                 for c in sorted(calls, key=lambda c: c.ordinal):
-                    binding = c.arguments.get("workspace_binding_id")
                     pending.append(
                         ToolExecutionRecord(
                             call=CallRef(run_id, c.call_id),
@@ -1677,17 +1615,15 @@ class SqliteData:
                             tool_id=c.tool_id,
                             arguments=c.arguments,
                             status=ToolExecutionStatus.PENDING,
-                            workspace_binding_id=BindingId(binding) if isinstance(binding, str) else None,
                         )
                     )
             event = self._new_event(tx, scope, output, run_id)
             for record in pending:
                 tx.execute(
                     "INSERT INTO tool_executions (conversation_id, run_id, call_id, ordinal, tool_id, arguments, status,"
-                    " raw_result, workspace_binding_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " raw_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     scope.conversation_id, run_id, record.call.call_id, record.ordinal, record.tool_id,
                     codec.dump_json(record.arguments), record.status.value, codec.dump_json(None),
-                    record.workspace_binding_id,
                 )
             stamped = (
                 None
@@ -1766,7 +1702,6 @@ class SqliteData:
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
             if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call changes memory")
-            self._apply_artifacts(tx, scope, completion.artifact_mutations)  # CAS errors roll everything back
             if completion.memory_change is not None:
                 self._apply_memory(tx, scope, call, completion.memory_change)
             if completion.presented_files:
@@ -1804,28 +1739,6 @@ class SqliteData:
             if record.record_event is False:  # claim-time policy; None (legacy) records the Event
                 return None
             return self._new_event(tx, scope, ToolResultRecord(call, model_result), call.run_id)
-
-    def _apply_artifacts(self, tx: _Tx, scope: TrustedScope, mutations: Sequence[ArtifactMutation]) -> None:
-        """Applies in order inside the transaction; a later CAS failure rolls
-        back the earlier mutations with everything else."""
-        for m in mutations:
-            if m.artifact_id is None:
-                tx.execute(
-                    "INSERT INTO artifacts (conversation_id, artifact_id, kind, revision, content) VALUES (?, ?, ?, 1, ?)",
-                    scope.conversation_id, tx.new_id("art"), m.kind, codec.dump_json(m.content),
-                )
-                continue
-            current = tx.one(
-                "SELECT revision FROM artifacts WHERE artifact_id=? AND conversation_id=?", m.artifact_id, scope.conversation_id
-            )
-            if current is None:
-                raise DataError(DataErrorCode.NOT_FOUND, m.artifact_id)
-            if m.expected_revision is not None and m.expected_revision != current["revision"]:
-                raise DataError(DataErrorCode.VERSION_CONFLICT, m.artifact_id)
-            tx.execute(
-                "UPDATE artifacts SET content=?, revision=revision+1 WHERE artifact_id=?",
-                codec.dump_json(m.content), m.artifact_id,
-            )
 
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
         with self._tx() as tx:
@@ -1944,67 +1857,13 @@ class SqliteData:
             self._set_run(tx, run_id, RunStatus.PROJECTED)
             return revision
 
-    # --- ArtifactStore ---------------------------------------------------------
+    # --- EnvironmentState ------------------------------------------------------
 
-    async def read_artifact(self, scope: TrustedScope, artifact_id: ArtifactId) -> Artifact:
+    async def has_environment(self, scope: TrustedScope, environment_kind: EnvironmentKind) -> bool:
         with self._tx() as tx:
             tx.authorized(scope)
-            row = tx.one("SELECT * FROM artifacts WHERE artifact_id=? AND conversation_id=?", artifact_id, scope.conversation_id)
-            if row is None:
-                raise DataError(DataErrorCode.NOT_FOUND, artifact_id)
-            return _artifact(row)
-
-    async def list_artifacts(
-        self, scope: TrustedScope, *, kind: str | None = None
-    ) -> Sequence[Artifact]:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            rows = tx.all("SELECT * FROM artifacts WHERE conversation_id=? ORDER BY seq", scope.conversation_id)
-            return tuple(_artifact(r) for r in rows if kind is None or r["kind"] == kind)
-
-    # --- WorkspaceState --------------------------------------------------------
-
-    async def read_binding_authority(
-        self, scope: TrustedScope, binding_id: BindingId
-    ) -> BindingAuthority:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            row = tx.one("SELECT * FROM bindings WHERE binding_id=? AND conversation_id=?", binding_id, scope.conversation_id)
-            if row is None:
-                raise DataError(DataErrorCode.NOT_FOUND, binding_id)
-            return _binding(row)
-
-    async def resolve_default_binding(
-        self, scope: TrustedScope, environment_kind: EnvironmentKind
-    ) -> BindingAuthority | None:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            for act in tx.all("SELECT * FROM activations WHERE conversation_id=? ORDER BY seq", scope.conversation_id):
-                if act["environment_kind"] == environment_kind and act["default_binding_id"] is not None:
-                    row = tx.one(
-                        "SELECT * FROM bindings WHERE binding_id=? AND conversation_id=?",
-                        act["default_binding_id"], scope.conversation_id,
-                    )
-                    return None if row is None else _binding(row)
-            return None
-
-    async def read_activation(
-        self, scope: TrustedScope, environment_kind: EnvironmentKind
-    ) -> EnvironmentActivation | None:
-        with self._tx() as tx:
-            tx.authorized(scope)
-            row = tx.one(
-                "SELECT * FROM activations WHERE conversation_id=? AND environment_kind=? ORDER BY seq LIMIT 1",
-                scope.conversation_id, environment_kind,
-            )
-            return None if row is None else _activation(row)
-
-    async def resolve_conversation_workspace(self, scope: TrustedScope) -> ConversationWorkspace:
-        with self._tx() as tx:
-            workspace = _workspace(tx.authorized(scope))
-            if workspace is None:
-                raise DataError(DataErrorCode.NOT_FOUND, "conversation workspace")
-            return workspace
+            return tx.one("SELECT 1 FROM environments WHERE conversation_id=? AND environment_kind=?",
+                          scope.conversation_id, environment_kind) is not None
 
     # --- ConversationCatalog ----------------------------------------------------
 
@@ -2013,17 +1872,17 @@ class SqliteData:
         principal: PrincipalId,
         *,
         title: str | None = None,
-        activations: Sequence[InitialActivation] = (),
+        environments: Sequence[EnvironmentKind] = (),
         model_setting: ModelSetting | None = None,
     ) -> ConversationId:
         title = rules.normalize_title(title)
-        rules.check_activations(activations)
+        rules.check_environments(environments)
         rules.check_model_setting(model_setting)
-        with self._tx() as tx:  # T0: the Conversation, its activations, and initial model, or nothing
+        with self._tx() as tx:  # T0: the Conversation, its Environments, and initial model, or nothing
             scope = TrustedScope(principal, ConversationId(tx.new_id("conv")))
             tx.insert_conversation(scope, title)
-            for activation in activations:
-                tx.activate(scope, activation.environment_kind, activation.workspace_id, None)
+            for kind in environments:
+                tx.add_environment(scope, kind)
             if model_setting is not None:
                 tx.execute("INSERT INTO model_settings (conversation_id, model_id, reasoning_effort) VALUES (?, ?, ?)",
                            scope.conversation_id, model_setting.model_id, model_setting.reasoning_effort)
@@ -2128,7 +1987,7 @@ class SqliteData:
                            _timestamp(datetime.now(UTC)), scope.conversation_id)
             row = tx.one(f"{self._SUMMARY} WHERE c.conversation_id=?", scope.conversation_id)
             assert row is not None
-            return TrashedConversation(self._summary(row), _workspace(conv))
+            return TrashedConversation(self._summary(row), tx.environments(scope))
 
     # Every table holding a Conversation's rows, children first (foreign keys
     # check the order). The tests find every table with a conversation_id.
@@ -2140,9 +1999,7 @@ class SqliteData:
         "DELETE FROM event_text WHERE conversation_id=?",  # before events: its foreign key (V3-P72)
         "DELETE FROM events WHERE conversation_id=?",
         "DELETE FROM idempotency WHERE conversation_id=?",
-        "DELETE FROM artifacts WHERE conversation_id=?",
-        "DELETE FROM bindings WHERE conversation_id=?",
-        "DELETE FROM activations WHERE conversation_id=?",
+        "DELETE FROM environments WHERE conversation_id=?",
         "DELETE FROM external_settings WHERE conversation_id=?",
         "DELETE FROM model_settings WHERE conversation_id=?",
         "DELETE FROM memories WHERE source_conversation=?",  # D5: the notes its calls wrote (V3-P71)
@@ -3664,12 +3521,8 @@ class SqliteData:
             conv = tx.authorized(scope)
             last = tx.one("SELECT COALESCE(MAX(sequence), 0) AS last FROM events WHERE conversation_id=?", scope.conversation_id)
             assert last is not None
-            cid = scope.conversation_id
             return PersistedStateBasis(
                 conversation_sequence=last["last"],
                 state_revision=conv["state_revision"],
-                environments=tuple(_activation(r) for r in tx.all("SELECT * FROM activations WHERE conversation_id=? ORDER BY seq", cid)),
-                bindings=tuple(_binding(r) for r in tx.all("SELECT * FROM bindings WHERE conversation_id=? ORDER BY seq", cid)),
-                artifacts=tuple(_artifact(r) for r in tx.all("SELECT * FROM artifacts WHERE conversation_id=? ORDER BY seq", cid)),
-                conversation_workspace=_workspace(conv),
+                environments=tx.environments(scope),
             )

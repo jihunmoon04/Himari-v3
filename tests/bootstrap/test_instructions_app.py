@@ -239,8 +239,8 @@ def test_in_the_provider_request_the_server_notes_come_before_the_users_own_text
     from himari.provider.openrouter import OpenRouterAdapter
 
     inputs = PromptInputs(instructions=("You are HIMARI.",), tool_catalog=(), events=(),
-                          tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, (), (), ()),
-                          observations=(), request_options=RequestOptions("m"), trigger_refs=(),
+                          tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, ()),
+                          observations={}, request_options=RequestOptions("m"), trigger_refs=(),
                           source_notes=(SourceNote("calliope", "system", "Calliope's notes."),),
                           system=SystemSpec(companion=True, memory=True))
     model_input = Composer().compose(replace(inputs, user_instructions="Answer in Korean.",

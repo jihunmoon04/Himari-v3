@@ -93,7 +93,6 @@ class Composer:
                 event_sequence=max((e.sequence for e in inputs.events), default=0),
                 state_revision=basis.state_revision,
                 snapshot_revision=snapshot_revision,
-                artifact_revisions={a.artifact_id: a.revision for a in basis.artifacts},
                 context_key=context_key(inputs),
                 state_key=state_key(inputs),
             ),

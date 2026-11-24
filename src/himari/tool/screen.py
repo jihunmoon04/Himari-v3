@@ -22,7 +22,6 @@ from himari.tool.api import (
     ToolOutcome,
     ToolStatus,
     TurnWake,
-    WorkspaceRequirement,
 )
 
 LOOK_AT_SCREEN = SCREEN_TOOL_ID
@@ -61,7 +60,7 @@ class ScreenTool:
         return ToolDefinition(
             tool_id=LOOK_AT_SCREEN, description=DESCRIPTION,
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            workspace_requirement=WorkspaceRequirement.NONE, effect_profile=EffectProfile.READ,
+            effect_profile=EffectProfile.READ,
             requires=SCREEN_TOOL)
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:

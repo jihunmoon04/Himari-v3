@@ -1,7 +1,7 @@
 """Prompt context loader: the only part of Prompt that does I/O (V3-043).
 
-Observations (V3-P74 §10.5): each active Environment's ``observe`` is asked
-about its Bindings, bounded in time; one that fails or is late gives none,
+Observations (V3-P74 §10.5): each of the Conversation's Environments is asked
+to ``observe`` it, bounded in time; one that fails or is late gives none,
 so its connection renders as unknown rather than guessed.
 
 With a readable compaction snapshot only the Events after its coverage are
@@ -49,7 +49,7 @@ from himari.data.api import (
     Wake,
     view_state,
 )
-from himari.environment.api import BindingObservation, EnvironmentPlugin
+from himari.environment.api import EnvironmentObservation, EnvironmentPlugin
 from himari.prompt.api import (
     AttachmentInfo,
     PromptInputs,
@@ -149,7 +149,7 @@ class ContextLoader:
                                            used.context_key, used.state_revision, run.provider_key, used.state_key)
         attachments = await self._attachments(scope, events, executions)
         basis = _registered(await self._state.read_current_state_basis(scope), self._environments)
-        active = frozenset(a.environment_kind for a in basis.environments)
+        active = frozenset(basis.environments)
         enabled = frozenset() if self._external_access is None else await self._external_access.enabled_sources(scope)
         return PromptInputs(
             instructions=self._instructions,
@@ -180,19 +180,19 @@ class ContextLoader:
             time_zone=self._time_zone,
         )
 
-    async def _observe(self, scope: TrustedScope, basis: PersistedStateBasis) -> tuple[BindingObservation, ...]:
-        found: list[BindingObservation] = []
-        for activation in basis.environments:
-            plugin = self._environments.get(activation.environment_kind)
-            bindings = [b for b in basis.bindings if b.environment_kind == activation.environment_kind]
-            if plugin is None or not bindings:
+    async def _observe(self, scope: TrustedScope,
+                       basis: PersistedStateBasis) -> dict[EnvironmentKind, EnvironmentObservation]:
+        found: dict[EnvironmentKind, EnvironmentObservation] = {}
+        for kind in basis.environments:
+            plugin = self._environments.get(kind)
+            if plugin is None:
                 continue
             try:
                 async with asyncio.timeout(OBSERVE_SECONDS):
-                    found.extend(await plugin.observe(scope, bindings))
+                    found[kind] = await plugin.observe(scope)
             except Exception:  # noqa: BLE001 — ENV-01: best effort; no observation renders as unknown
-                log.warning("could not observe %s", activation.environment_kind, exc_info=True)
-        return tuple(found)
+                log.warning("could not observe %s", kind, exc_info=True)
+        return found
 
     async def _attachments(self, scope: TrustedScope, events: Sequence[ConversationEvent],
                            executions: Sequence[ToolExecutionRecord]) -> dict[str, AttachmentInfo]:
@@ -221,12 +221,9 @@ def _info(record: FileRecord) -> AttachmentInfo:
 
 
 def _registered(basis: PersistedStateBasis, environments: Mapping[EnvironmentKind, EnvironmentPlugin]) -> PersistedStateBasis:
-    """V3-P101: an activation of an Environment this server does not have (an old
-    Inside Conversation) is not shown to the model: its Tools are not offered, and
-    its folder is not reachable. Without one left, neither is the T0 folder."""
-    if all(a.environment_kind in environments for a in basis.environments):
+    """V3-P101: an Environment this server does not have (an old Inside
+    Conversation's) is not shown to the model: its Tools are not offered, and its
+    folder is not reachable."""
+    if all(kind in environments for kind in basis.environments):
         return basis
-    kept = tuple(a for a in basis.environments if a.environment_kind in environments)
-    return replace(basis, environments=kept,
-                   bindings=tuple(b for b in basis.bindings if b.environment_kind in environments),
-                   conversation_workspace=basis.conversation_workspace if kept else None)
+    return replace(basis, environments=tuple(kind for kind in basis.environments if kind in environments))

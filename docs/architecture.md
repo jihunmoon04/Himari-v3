@@ -71,7 +71,7 @@ Control ── 입력을 Data에 기록
 
 - **Contract-based Modular Architecture:** 모듈은 서로의 내부가 아니라 각자 `api.py`의 Protocol + frozen dataclass로만 닿는다. import-linter가 의존 방향을 강제한다([모듈 경계](module-boundaries.md)).
 - **확장 SPI(V3-040):** 새 Tool은 `ToolHandler`, 새 Provider는 `ProviderAdapter`, 새 Environment는 `EnvironmentPlugin` 하나를 구현해 Composition Root에 등록한다.
-- **Data Port는 Consumer별로 나뉜다(V3-039):** `ConversationLog`·`ArtifactStore`·`StateQuery` 등. 백엔드는 공유해도 계약 변경 단위는 sub-port다. 다른 모듈은 DB 테이블을 직접 읽거나 고치지 않는다.
+- **Data Port는 Consumer별로 나뉜다(V3-039):** `ConversationLog`·`EnvironmentState`·`StateQuery` 등. 백엔드는 공유해도 계약 변경 단위는 sub-port다. 다른 모듈은 DB 테이블을 직접 읽거나 고치지 않는다.
 
 ## 4. Data
 
@@ -140,7 +140,7 @@ Provider 설정             (model · reasoning; 별도 API 필드)
 | --- | --- |
 | hub 중계·작업 콘솔, 작업 앱 | V3-P106 (V3-P102 hub 부분·V3-P103·V3-P104 철회) |
 | `run_command`와 명령용 sandbox(네트워크 프록시, cgroup) | V3-P106 |
-| 붙인·등록한 Workspace, Workspace Registry·Binding의 사용, 서버 파일 탐색기 | V3-P106 (`workspaces` 표는 스키마에 남지만 쓰지 않음) |
+| 붙인·등록한 Workspace, Workspace Registry·Binding의 사용, 서버 파일 탐색기 | V3-P106 (표와 열은 H-75, 스키마 v21에서 지움) |
 | 질문 Tool `ask_user`, Pause, 남은 턴 닫기 | V3-P106 |
 | 턴의 토큰 예산·진척 없음·자리 비움 | V3-P106 (Run 상한 하나로) |
 | 붙인 Workspace 쓰기, `git_push` | V3-P100 |

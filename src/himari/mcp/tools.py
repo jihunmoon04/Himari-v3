@@ -46,7 +46,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 MAX_DESCRIPTION_CHARS = 2000
@@ -84,7 +83,6 @@ class McpTool:
             tool_id=config.tool_id,
             description=description,
             input_schema=schema,  # deep-frozen by the definition
-            workspace_requirement=WorkspaceRequirement.NONE,
             effect_profile=config.effect,
             external_source=source,
         )

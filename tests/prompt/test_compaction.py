@@ -8,9 +8,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from himari.common import ArtifactId, ConversationId, EventId, RunId, TextBlock
+from himari.common import ConversationId, EventId, RunId, TextBlock
 from himari.data.api import (
-    Artifact,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -50,7 +49,7 @@ from himari.prompt.compaction import (
     request_tokens,
     tokens_of_text,
 )
-from himari.tool.api import EffectProfile, ToolDefinition, WorkspaceRequirement
+from himari.tool.api import EffectProfile, ToolDefinition
 from himari.prompt.composer import Composer
 
 KINDS = {UserMessage: EventKind.USER_MESSAGE, AssistantFinal: EventKind.ASSISTANT_FINAL,
@@ -75,7 +74,7 @@ def inputs(events: tuple[ConversationEvent, ...], *, snapshot: PromptSnapshot | 
            mark: UsageMark | None = None) -> PromptInputs:
     return PromptInputs(
         instructions=("be nice",), tool_catalog=(), events=events, tool_executions=(), snapshot=snapshot,
-        state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
+        state_basis=PersistedStateBasis(len(events), 0, ()), observations={},
         request_options=RequestOptions("m"), trigger_refs=(), usage_mark=mark,
     )
 
@@ -124,7 +123,7 @@ def test_a_measurement_under_another_composition_is_not_used(change: str) -> Non
     elif change == "effort":
         data = dataclasses.replace(data, request_options=RequestOptions("m", reasoning_effort="high"))
     elif change == "tools":
-        data = dataclasses.replace(data, tool_catalog=(ToolDefinition(ToolId("t"), "d", {}, WorkspaceRequirement.NONE,
+        data = dataclasses.replace(data, tool_catalog=(ToolDefinition(ToolId("t"), "d", {},
                                                                       EffectProfile.READ),))
     estimate = Compactor().estimate(data, Composer().compose(data))
     assert not estimate.measured and estimate.tokens < 5000
@@ -132,12 +131,21 @@ def test_a_measurement_under_another_composition_is_not_used(change: str) -> Non
 
 def test_a_state_change_since_the_measurement_adds_the_whole_state() -> None:
     events = history("q1", "a1", "q2")
-    note = PersistedStateBasis(len(events), 0, (), (), (Artifact(ArtifactId("a1"), "note", 1, "<" * 300),))
-    basis = Composer().compose(dataclasses.replace(inputs(events), state_basis=note)).prompt_basis
-    key, state = basis.context_key, basis.state_key  # the state as measured: the artifact was there
-    same = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, 0, state_key=state)), state_basis=note)
+    from datetime import UTC, datetime
+
+    from himari.common import EnvironmentKind
+    from himari.environment.api import ConnectionStatus, EnvironmentObservation
+
+    machine = EnvironmentKind("machine")
+    place = {machine: EnvironmentObservation(ConnectionStatus.ONLINE, datetime(2026, 11, 1, tzinfo=UTC),
+                                             working_directory="<" * 300)}
+    note = PersistedStateBasis(len(events), 0, (machine,))
+    basis = Composer().compose(dataclasses.replace(inputs(events), state_basis=note, observations=place)).prompt_basis
+    key, state = basis.context_key, basis.state_key  # the state as measured: the folder was there
+    same = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, 0, state_key=state)), state_basis=note,
+                               observations=place)
     changed = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, -1, state_key=state)),
-                                  state_basis=note)
+                                  state_basis=note, observations=place)
     compactor, composer = Compactor(), Composer()
     assert compactor.estimate(same, composer.compose(same)).tokens == 500
     grown = compactor.estimate(changed, composer.compose(changed))
@@ -408,26 +416,21 @@ def test_environment_observations_changed_since_the_measurement_add_the_whole_st
     directory) is read every turn, apart from the state's revision; ``observed_at`` is not shown."""
     from datetime import UTC, datetime, timedelta
 
-    from himari.common import BindingId, EnvironmentInstanceId, EnvironmentKind, WorkspaceId
-    from himari.data.api import BindingAuthority, EnvironmentActivation
-    from himari.environment.api import BindingObservation, ConnectionStatus
+    from himari.common import EnvironmentKind
+    from himari.environment.api import ConnectionStatus, EnvironmentObservation
     from himari.prompt.compaction import state_key
 
     at = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
-    binding = BindingId("bind_1")
-    basis = PersistedStateBasis(
-        3, 0, (EnvironmentActivation(EnvironmentInstanceId("env_1"), EnvironmentKind("machine"), binding),),
-        (BindingAuthority(binding, EnvironmentInstanceId("env_1"), EnvironmentKind("machine"), WorkspaceId("ws_1"),
-                          1),), ())
-    offline = BindingObservation(binding, ConnectionStatus.OFFLINE, at)
-    online = BindingObservation(binding, ConnectionStatus.ONLINE, at, working_directory="/srv/a",
-                                writable=("/srv/a",))
+    machine = EnvironmentKind("machine")
+    basis = PersistedStateBasis(3, 0, (machine,))
+    offline = EnvironmentObservation(ConnectionStatus.OFFLINE, at)
+    online = EnvironmentObservation(ConnectionStatus.ONLINE, at, working_directory="/srv/a", writable=("/srv/a",))
     events = history("q1", "a1", "q2")
-    base = dataclasses.replace(inputs(events), state_basis=basis, observations=(offline,))
+    base = dataclasses.replace(inputs(events), state_basis=basis, observations={machine: offline})
     key = state_key(base)
-    assert state_key(dataclasses.replace(base, observations=(dataclasses.replace(
-        offline, observed_at=at + timedelta(seconds=30)),))) == key  # observed again, nothing new
-    keys = [state_key(dataclasses.replace(base, observations=(observed,))) for observed in (
+    assert state_key(dataclasses.replace(base, observations={machine: dataclasses.replace(
+        offline, observed_at=at + timedelta(seconds=30))})) == key  # observed again, nothing new
+    keys = [state_key(dataclasses.replace(base, observations={machine: observed})) for observed in (
         online,  # offline → online, with its folder
         dataclasses.replace(online, writable=("/srv/a", "/srv/b")),
         dataclasses.replace(online, working_directory="/srv/b"),
@@ -437,6 +440,6 @@ def test_environment_observations_changed_since_the_measurement_add_the_whole_st
     mark = UsageMark(500, 3, None, composed.prompt_basis.context_key, 0, state_key=composed.prompt_basis.state_key)
     measured = dataclasses.replace(base, usage_mark=mark)
     assert Compactor().estimate(measured, Composer().compose(measured)).tokens == 500
-    grown = dataclasses.replace(measured, observations=(online,))
+    grown = dataclasses.replace(measured, observations={machine: online})
     estimate = Compactor().estimate(grown, Composer().compose(grown))
     assert estimate.measured and estimate.tokens > 500  # the whole state again, the folders included

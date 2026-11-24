@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 from testkit import FAKE, RecordingTool
 
 from himari.common import JsonValue, deep_freeze
-from himari.tool.api import SchemaError, ToolOrigin, WorkspaceRequirement
+from himari.tool.api import SchemaError, ToolOrigin
 from himari.tool.registry import ToolRegistry
 from himari.common import MAX_TOOL_NAME_CHARS
 from himari.tool.schema import (
@@ -47,11 +47,6 @@ def test_external_tools_are_namespaced_by_their_source() -> None:
 def test_a_tool_is_not_both_environment_and_external() -> None:
     with pytest.raises(ValueError, match="not both"):
         ToolRegistry([RecordingTool("fake/x", environment_kind=FAKE, external_source="fake")])
-
-
-def test_external_tools_need_no_workspace() -> None:
-    with pytest.raises(ValueError, match="cannot require a Workspace"):
-        ToolRegistry([RecordingTool("remote/x", external_source="remote", workspace=WorkspaceRequirement.DEFAULT)])
 
 
 @pytest.mark.parametrize("external_first", [True, False])
