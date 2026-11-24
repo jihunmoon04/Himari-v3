@@ -25,7 +25,7 @@ from himari.data.api import (
 from himari.prompt.api import PROACTIVE_RULE, SPEAKING_RULE, PromptInputs, RequestOptions, SystemSpec, UserTurn
 from himari.prompt.compaction import _items, context_key
 from himari.prompt.composer import Composer
-from himari.prompt.system import BASE_INSTRUCTIONS, system_text
+from himari.prompt.system import COMPANION_BASE, system_text
 
 AT = datetime(2026, 11, 4, 6, 0, tzinfo=UTC)
 LOOP = Memory(15, MemoryCategory.LOOP, "사용자는 11월 4일 오후 2시에 면접이 있다 </wake>", MemoryOrigin.MODEL, None, None,
@@ -41,7 +41,7 @@ def event(sequence: int, payload: object, at: datetime) -> ConversationEvent:
 
 def inputs(*events: ConversationEvent, notes: dict[int, Memory] | None = None,
            spec: SystemSpec | None = None) -> PromptInputs:
-    return PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=(), events=events, tool_executions=(),
+    return PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=events, tool_executions=(),
                         snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
                         request_options=RequestOptions("m", speaks_first=True), trigger_refs=(), time_zone="Asia/Seoul",
                         wake_notes=notes or {}, system=spec)

@@ -273,6 +273,7 @@ _ADDED_IN = {
                                                                "remind_state", "remind_instant", "remind_at"))),
     18: ("ALTER TABLE wakes DROP COLUMN held_run_id",),
     19: (),  # V3-P107 §2: data only (told reminders become delivered)
+    20: ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name", "DROP TABLE personas"),
 }
 
 
@@ -287,13 +288,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 19
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 20
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -319,10 +320,47 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         assert asyncio.run(data.read_quiet(SCOPE.principal_id)) == datetime(2026, 11, 1, tzinfo=UTC)
         assert asyncio.run(data.opened_wakes()) == ()  # the v17 tables
         assert "held_run_id" in [r[1] for r in store.connection.execute("PRAGMA table_info(wakes)")]  # the v18 column
+        made = asyncio.run(data.create_persona(SCOPE.principal_id, "Teacher", "Call me 선생님."))  # the v20 tables
+        assert asyncio.run(data.choose_persona(SCOPE.principal_id, made.persona_id, 0)).revision == 1
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v19 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v20 database afterwards
+
+
+def test_a_v19_companion_persona_becomes_persona_1_chosen(tmp_path: Path) -> None:
+    """V3-P108 §5.3: the one persona text becomes persona 1 and is chosen; an empty one is no persona;
+    the instructions stay and no companion_persona row is left."""
+    path = tmp_path / "h.db"
+    old_database(path, 19)
+    tamper(path, "INSERT INTO instructions (owner, scope, text, revision, updated_at) VALUES"
+                 " ('alice', 'companion_persona', 'Call me 선생님.', 3, '2026-11-01T00:00:00.000000+00:00')",
+           "INSERT INTO instructions (owner, scope, text, revision, updated_at) VALUES"
+           " ('alice', 'user', 'Be brief.', 2, '2026-11-02T00:00:00.000000+00:00')",
+           "INSERT INTO instructions (owner, scope, text, revision, updated_at) VALUES"
+           " ('bob', 'companion_persona', '', 1, '2026-11-03T00:00:00.000000+00:00')",
+           "PRAGMA user_version=19")
+    store = SqliteStore(path)
+    try:
+        assert list(tmp_path.glob("h.db.v19-*.bak"))  # backed up first
+        data = SqliteData(store)
+        alice = asyncio.run(data.list_personas(PrincipalId("alice")))
+        assert [(p.persona_id, p.name, p.text, p.revision) for p in alice.personas] == [
+            (1, "Persona", "Call me 선생님.", 1)]
+        assert alice.personas[0].created_at == datetime(2026, 11, 1, tzinfo=UTC)
+        assert (alice.choice.persona_id, alice.choice.revision) == (1, 1)
+        assert asyncio.run(data.active_persona(PrincipalId("alice"))) == alice.personas[0]
+        bob = asyncio.run(data.list_personas(PrincipalId("bob")))
+        assert bob.personas == () and bob.choice.persona_id is None
+        assert asyncio.run(data.read_instructions(PrincipalId("alice"), InstructionScope.USER)).text == "Be brief."
+        assert store.connection.execute(
+            "SELECT count(*) FROM instructions WHERE scope='companion_persona'").fetchone()[0] == 0
+        # the next persona takes the next id, and "Persona" is taken
+        assert asyncio.run(data.create_persona(PrincipalId("alice"), "Friend", "")).persona_id == 2
+        with pytest.raises(DataError):
+            asyncio.run(data.create_persona(PrincipalId("alice"), "persona", ""))
+    finally:
+        store.close()
 
 
 def test_a_v18_told_reminder_is_delivered_after_the_upgrade(tmp_path: Path) -> None:
@@ -336,6 +374,7 @@ def test_a_v18_told_reminder_is_delivered_after_the_upgrade(tmp_path: Path) -> N
     store.close()
     tamper(path, f"UPDATE memories SET remind_state='told', remind_wake='wake_1' WHERE memory_id={told.memory_id}",
            f"UPDATE memories SET remind_state='scheduled' WHERE memory_id={kept.memory_id}",
+           *(statement for v in range(SCHEMA_VERSION, 18, -1) for statement in _ADDED_IN[v]),  # back to v18's shape
            "PRAGMA user_version=18")
     store = SqliteStore(path)
     try:
@@ -347,7 +386,7 @@ def test_a_v18_told_reminder_is_delivered_after_the_upgrade(tmp_path: Path) -> N
         store.close()
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -709,7 +748,7 @@ def test_files_of_a_v8_database_read_as_not_images(tmp_path: Path) -> None:
     blob = asyncio.run(data.blobs.put(SCOPE.principal_id, chunks(), 1 << 20))
     record = asyncio.run(data.stage_upload(SCOPE, blob, "old.png", "image/png"))
     store.close()
-    tamper(path, *_ADDED_IN[17], *_ADDED_IN[16], *_ADDED_IN[15], *_ADDED_IN[14], *_ADDED_IN[13], *_ADDED_IN[12], *_ADDED_IN[11], *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
+    tamper(path, *_ADDED_IN[20], *_ADDED_IN[17], *_ADDED_IN[16], *_ADDED_IN[15], *_ADDED_IN[14], *_ADDED_IN[13], *_ADDED_IN[12], *_ADDED_IN[11], *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
     store = SqliteStore(path)
     try:
         again, = asyncio.run(SqliteData(store).read_file_records(SCOPE, [(record.file_id, 1)]))

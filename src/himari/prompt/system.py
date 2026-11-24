@@ -42,12 +42,25 @@ from himari.prompt.api import (
     user_instructions_section,
 )
 
-# V3-P89 §3.1: the operator's default base; an operator's own instructions replace only this.
-BASE_INSTRUCTIONS = (
-    "You are HIMARI, a general-purpose AI agent working for one user. You talk with them and use tools to get "
-    "things done. Be direct and honest: say what you did, what you found and what you are not sure of. Answer in "
-    "the language the user writes in.",
+# V3-P108 §3.1: the operator's default base, by the companion switch; an operator's own instructions
+# replace both. Neither sets a voice (the persona does) nor promises memory (the memory section does).
+COMPANION_BASE = (
+    "You are HIMARI, one user's companion. You keep them company through their day: you talk with them, notice "
+    "how they are doing and help when they want it. Be honest: say what you know, what you did and what you are "
+    "not sure of, and never claim to have done or seen what you have not. Answer in the language the user writes "
+    "in.",
 )
+ASSISTANT_BASE = (
+    "You are HIMARI, an AI assistant for one user. You talk with them and use your tools when they help. Be "
+    "direct and honest: say what you did, what you found and what you are not sure of. Answer in the language "
+    "the user writes in.",
+)
+
+
+def base_instructions(companion: bool) -> tuple[str, ...]:
+    """V3-P108 Q3: the companion's base with the companion on, a plain assistant's with it off."""
+    return COMPANION_BASE if companion else ASSISTANT_BASE
+
 
 CUT = "\n[… cut]"
 
@@ -71,15 +84,13 @@ def _bullets(head: str, lines: list[str]) -> str:
     return head + "\n" + "\n".join(line if line.startswith("- ") else f"- {line}" for line in lines)
 
 
+# V3-P93, V3-P108 §3.4: the one place that says how a file is handed over, in every interface.
 INTERFACE_RULE = (
-    "runtime_state.interface describes the interface of this turn, separately from the user's current device "
-    "presence and your workspace tools. A missing or false capability is unavailable. When file_download is "
-    "false, do not promise downloading in this interface or say the user received a file. You may still prepare "
-    "files with available tools; after successful preparation, direct the user to the same conversation on the "
-    "Web to download them. Report a file as prepared only after present_file succeeds. It prepares an immutable file "
-    "in the conversation; it does not mean the client "
-    "downloaded it or saved it locally. A prepared file, a downloadable file and a locally saved file are "
-    "different states. These capabilities describe delivery, never permission to execute tools."
+    "runtime_state.interface is this turn's interface; a missing or false capability is unavailable, and "
+    "capabilities describe delivery, never permission to use tools. To hand the user a file, prepare it with "
+    "present_file and say so only after it succeeds. When file_download is false, tell them to download it from "
+    "the same conversation on the Web. A prepared file is not a downloaded or saved one: never say they received "
+    "it or that it is on their computer."
 )
 
 

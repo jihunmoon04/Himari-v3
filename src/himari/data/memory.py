@@ -66,7 +66,11 @@ from himari.data.api import (
     InstructionScope,
     MAX_DEVICES,
     MAX_MEMORIES,
+    MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    Persona,
+    PersonaChoice,
+    PersonaList,
     Device,
     DevicePairing,
     Memory,
@@ -230,6 +234,10 @@ class InMemoryStore:
         self.blob_rows: dict[str, BlobRow] = {}  # V3-P66: by key, shared by a principal's Conversations
         self.blobs = FileStore(MemoryBlobFiles(), _MemoryBlobRows(self))
         self.instructions: dict[tuple[PrincipalId, InstructionScope], Instructions] = {}  # V3-P69
+        # V3-P108: each persona with its name key, the last id given out and the choice, per principal
+        self.personas: dict[tuple[PrincipalId, int], tuple[Persona, str]] = {}
+        self.persona_ids: dict[PrincipalId, int] = {}
+        self.persona_choices: dict[PrincipalId, PersonaChoice] = {}
         self.memories: dict[tuple[PrincipalId, int], Memory] = {}  # V3-P71
         self.memory_ids: dict[PrincipalId, int] = {}  # the last id given out, per principal
         # V3-P85: notes an automatic forget retired (§5.4), with when, pass and item.
@@ -1217,6 +1225,80 @@ class InMemoryData:
         record = Instructions(text, current.revision + 1, datetime.now(UTC))
         self._store.instructions[(principal, scope)] = record
         return record
+
+    # --- PersonaStore (V3-P108 §5.2) ------------------------------------------------
+
+    def _personas_of(self, principal: PrincipalId) -> list[tuple[Persona, str]]:
+        return sorted((row for (owner, _), row in self._store.personas.items() if owner == principal),
+                      key=lambda row: row[0].persona_id)
+
+    def _persona(self, principal: PrincipalId, persona_id: object) -> Persona:
+        row = self._store.personas.get((principal, rules.check_persona_id(persona_id)))
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no persona {persona_id}")
+        return row[0]
+
+    def _check_name_free(self, principal: PrincipalId, key: str, besides: int | None) -> None:
+        if any(k == key and p.persona_id != besides for p, k in self._personas_of(principal)):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, "another persona has this name")
+
+    def _choice(self, principal: PrincipalId) -> PersonaChoice:
+        return self._store.persona_choices.get(principal, PersonaChoice(None, 0))
+
+    async def list_personas(self, principal: PrincipalId) -> PersonaList:
+        return PersonaList(tuple(p for p, _ in self._personas_of(principal)), self._choice(principal))
+
+    async def create_persona(self, principal: PrincipalId, name: str, text: str) -> Persona:
+        name, key = rules.check_persona_name(name)
+        text = rules.check_persona_text(text)
+        if len(self._personas_of(principal)) >= MAX_PERSONAS:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_PERSONAS} personas")
+        self._check_name_free(principal, key, None)
+        persona_id = self._store.persona_ids.get(principal, 0) + 1
+        self._store.persona_ids[principal] = persona_id
+        now = datetime.now(UTC)
+        persona = Persona(persona_id, name, text, 1, now, now)
+        self._store.personas[(principal, persona_id)] = (persona, key)
+        return persona
+
+    async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
+                             expected_revision: int) -> Persona:
+        current = self._persona(principal, persona_id)
+        name, key = rules.check_persona_name(name)
+        text = rules.check_persona_text(text)
+        if expected_revision != current.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
+        self._check_name_free(principal, key, current.persona_id)
+        persona = replace(current, name=name, text=text, revision=current.revision + 1, updated_at=datetime.now(UTC))
+        self._store.personas[(principal, current.persona_id)] = (persona, key)
+        return persona
+
+    async def delete_persona(self, principal: PrincipalId, persona_id: int, expected_revision: int) -> PersonaChoice:
+        current = self._persona(principal, persona_id)
+        if expected_revision != current.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
+        del self._store.personas[(principal, current.persona_id)]
+        choice = self._choice(principal)
+        if choice.persona_id == current.persona_id:
+            choice = PersonaChoice(None, choice.revision + 1, datetime.now(UTC))
+            self._store.persona_choices[principal] = choice
+        return choice
+
+    async def choose_persona(self, principal: PrincipalId, persona_id: int | None,
+                             expected_revision: int) -> PersonaChoice:
+        if persona_id is not None:
+            self._persona(principal, persona_id)
+        current = self._choice(principal)
+        if expected_revision != current.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the choice is at revision {current.revision}")
+        choice = PersonaChoice(persona_id, current.revision + 1, datetime.now(UTC))
+        self._store.persona_choices[principal] = choice
+        return choice
+
+    async def active_persona(self, principal: PrincipalId) -> Persona | None:
+        chosen = self._choice(principal).persona_id
+        row = None if chosen is None else self._store.personas.get((principal, chosen))
+        return None if row is None else row[0]
 
     # --- DeviceStore (V3-P83 §4) ----------------------------------------------------
 

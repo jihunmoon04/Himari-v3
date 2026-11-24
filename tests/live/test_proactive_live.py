@@ -50,7 +50,7 @@ from himari.prompt.api import (
     SystemSpec,
 )
 from himari.prompt.composer import Composer
-from himari.prompt.system import BASE_INSTRUCTIONS
+from himari.prompt.system import COMPANION_BASE
 from himari.provider.api import NativeReceived, NormalizedFinal, NormalizedToolCalls, ProviderError
 from himari.provider.openrouter import OpenRouterAdapter
 
@@ -173,7 +173,7 @@ def model_input(scene: Scene, model: str):  # type: ignore[no-untyped-def]
         events.append(event(len(events) + 1, UserMessage((TextBlock(scene.after),)), NOW + timedelta(seconds=30)))
     presence = PresenceView(("device", "데스크톱"), "데스크톱", (DevicePresence("데스크톱", True, idle_minutes=0),),
                             now_doing=scene.doing)
-    inputs = PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=(), events=tuple(events), tool_executions=(),
+    inputs = PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=tuple(events), tool_executions=(),
                           snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
                           request_options=RequestOptions(model, speaks_first=True, free_wake=scene.free),
                           trigger_refs=(),

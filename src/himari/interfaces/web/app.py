@@ -129,6 +129,9 @@ from himari.data.api import (
     ALREADY_SENT,
     MAX_ATTACHMENTS,
     MAX_INSTRUCTIONS_CHARS,
+    MAX_PERSONA_CHARS,
+    MAX_PERSONA_NAME_CHARS,
+    MAX_PERSONAS,
     MAX_LIST_LIMIT,
     MAX_MEMORIES,
     MAX_MEMORY_CHARS,
@@ -145,6 +148,8 @@ from himari.data.api import (
     InstructionScope,
     Instructions,
     Memory,
+    Persona,
+    PersonaChoice,
     MemoryCategory,
     MessageOrigin,
     OriginKind,
@@ -425,6 +430,20 @@ class ModelBody(_Body):
 class InstructionsBody(_Body):
     text: str  # its limit is Data's (V3-P69 §6), counted after newlines are normalized
     revision: int = Field(ge=0)  # the revision the text was edited from
+
+
+class PersonaBody(_Body):  # V3-P108 §6.1: the limits are Data's
+    name: str
+    text: str
+
+
+class PersonaEditBody(PersonaBody):
+    revision: int = Field(ge=1)  # the revision the persona was edited from
+
+
+class PersonaChoiceBody(_Body):
+    persona_id: int | None  # null: no persona
+    revision: int = Field(ge=0)  # the choice's revision when it was read
 
 
 class MemoryBody(_Body):
@@ -919,6 +938,28 @@ PAIRING_MESSAGES = {
     "invalid_token": "The device's token is not usable.",
     "token_in_use": "Another device has that token; make a new token and pair again.",
     "pairing_busy": "Too many pairings are waiting; try again shortly.",
+}
+
+
+def persona_view(persona: Persona) -> dict[str, Any]:
+    """V3-P108 §6.1: one of the user's personas."""
+    return {"id": persona.persona_id, "name": persona.name, "text": persona.text, "revision": persona.revision,
+            "created_at": _time(persona.created_at), "updated_at": _time(persona.updated_at)}
+
+
+def choice_view(choice: PersonaChoice) -> dict[str, Any]:
+    return {"persona_id": choice.persona_id, "revision": choice.revision, "updated_at": _time(choice.updated_at)}
+
+
+# How a refused persona change answers (V3-P108 §6.1): status, code, message; 422, not 413, as for instructions.
+PERSONA_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.NOT_FOUND: (404, "not_found", "No such persona."),
+    DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "It was changed elsewhere since it was opened."),
+    DataErrorCode.DUPLICATE_IDENTITY: (409, "duplicate_name", "Another persona has this name."),
+    DataErrorCode.LIMIT_EXCEEDED: (409, "persona_limit", f"At most {MAX_PERSONAS} personas; delete one first."),
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"A persona is at most {MAX_PERSONA_CHARS:,} characters."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_persona", f"A persona needs a name of 1–{MAX_PERSONA_NAME_CHARS} "
+                                                             "characters, and no control characters."),
 }
 
 
@@ -1491,19 +1532,56 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         """Saved at once, used from each conversation's next turn."""
         return instructions_view(await save_instructions(himari(request), who, body, InstructionScope.USER))
 
-    @app.get("/api/instructions/persona")
-    async def read_persona(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """V3-P89 §4: the companion persona, told only while the companion is on (``companion``)."""
-        application = himari(request)
-        return {**instructions_view(await application.instructions(who, InstructionScope.COMPANION_PERSONA)),
-                "companion": application.companion_enabled}
+    # --- companion personas (V3-P108 §6.1): told only while the companion is on (``companion``) ---------
 
-    @app.put("/api/instructions/persona")
-    async def write_persona(body: InstructionsBody, request: Request,
-                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+    def persona_refused(error: DataError) -> ApiError:
+        if error.code not in PERSONA_REFUSALS:
+            raise error
+        status, code, message = PERSONA_REFUSALS[error.code]
+        return ApiError(status, code, message)
+
+    @app.get("/api/personas")
+    async def read_personas(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application = himari(request)
-        saved = await save_instructions(application, who, body, InstructionScope.COMPANION_PERSONA)
-        return {**instructions_view(saved), "companion": application.companion_enabled}
+        listed = await application.data.list_personas(who)
+        return {"personas": [persona_view(p) for p in listed.personas], "choice": choice_view(listed.choice),
+                "companion": application.companion_enabled,
+                "limits": {"count": MAX_PERSONAS, "name_chars": MAX_PERSONA_NAME_CHARS,
+                           "text_chars": MAX_PERSONA_CHARS}}
+
+    @app.post("/api/personas", status_code=201)
+    async def add_persona(body: PersonaBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return persona_view(await himari(request).data.create_persona(who, body.name, body.text))
+        except DataError as error:
+            raise persona_refused(error) from None
+
+    @app.put("/api/personas/choice")  # before /{persona_id}, which would take "choice" for an id
+    async def choose_persona(body: PersonaChoiceBody, request: Request,
+                             who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Used from each conversation's next turn; ``persona_id`` null: no persona."""
+        try:
+            return choice_view(await himari(request).data.choose_persona(who, body.persona_id, body.revision))
+        except DataError as error:
+            raise persona_refused(error) from None
+
+    @app.put("/api/personas/{persona_id}")
+    async def edit_persona(persona_id: int, body: PersonaEditBody, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return persona_view(await himari(request).data.update_persona(who, persona_id, body.name, body.text,
+                                                                          body.revision))
+        except DataError as error:
+            raise persona_refused(error) from None
+
+    @app.delete("/api/personas/{persona_id}")
+    async def delete_persona(persona_id: int, revision: int, request: Request,
+                             who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The choice after: none when the persona deleted was the chosen one."""
+        try:
+            return choice_view(await himari(request).data.delete_persona(who, persona_id, revision))
+        except DataError as error:
+            raise persona_refused(error) from None
 
     async def save_instructions(application: Application, who: PrincipalId, body: InstructionsBody,
                                 scope: InstructionScope) -> Instructions:

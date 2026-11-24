@@ -922,11 +922,10 @@ MAX_INSTRUCTIONS_CHARS = 10_000  # code points, after newlines are normalized (Q
 
 class InstructionScope(Enum):
     """Whose conversations a text applies to (V3-P69 §3.1); a project or lab
-    scope is added by its packet."""
+    scope is added by its packet. The companion persona (V3-P89 §4) moved to
+    PersonaStore (V3-P108 §5)."""
 
     USER = "user"  # every Conversation of the principal
-    # V3-P89 §4: who HIMARI is as the user's companion; told only with the companion on
-    COMPANION_PERSONA = "companion_persona"
 
 
 @dataclass(frozen=True)
@@ -955,6 +954,80 @@ class InstructionsStore(Protocol):
         whitespace is no text. VERSION_CONFLICT for another revision,
         TOO_LARGE past MAX_INSTRUCTIONS_CHARS, INVALID_ARGUMENT for a control
         character other than newline and tab, or a scope not offered."""
+        ...
+
+
+# --- Companion personas (V3-P108 §4, §5) ----------------------------------------
+
+MAX_PERSONAS = 20  # a principal's personas (Q6)
+MAX_PERSONA_NAME_CHARS = 40  # code points, after trimming
+MAX_PERSONA_CHARS = MAX_INSTRUCTIONS_CHARS  # a persona's text, counted as instructions are
+
+
+@dataclass(frozen=True)
+class Persona(DeepFrozen):
+    """One of the user's companion personas. ``name`` is the user's label in
+    the list and never reaches the model; ``text`` is who HIMARI is."""
+
+    persona_id: int  # per principal, never given out again
+    name: str
+    text: str  # "" allowed: a persona not written yet
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class PersonaChoice(DeepFrozen):
+    """Which persona is told now: one of the principal's or none."""
+
+    persona_id: int | None
+    revision: int  # 0: never chosen
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class PersonaList(DeepFrozen):
+    personas: tuple[Persona, ...]  # by id
+    choice: PersonaChoice
+
+
+class PersonaStore(Protocol):
+    """V3-P108 §5.2: the companion personas a user keeps and the one told now.
+
+    The principal comes from the trusted entry point (a signed-in user), never
+    from model output: no Tool reaches this port. Changes are compare-and-set on
+    ``revision``. A name is 1..MAX_PERSONA_NAME_CHARS characters after trimming
+    and unique per principal, compared trimmed, NFC and case-folded
+    (DUPLICATE_IDENTITY); a text is checked as instructions are (newlines become
+    ``\n``, only whitespace is no text, TOO_LARGE past MAX_PERSONA_CHARS,
+    INVALID_ARGUMENT for a control character other than newline and tab)."""
+
+    async def list_personas(self, principal: PrincipalId) -> PersonaList:
+        ...
+
+    async def create_persona(self, principal: PrincipalId, name: str, text: str) -> Persona:
+        """A new persona at revision 1. LIMIT_EXCEEDED past MAX_PERSONAS."""
+        ...
+
+    async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
+                             expected_revision: int) -> Persona:
+        """Replaces its name and text (revision + 1). NOT_FOUND, VERSION_CONFLICT."""
+        ...
+
+    async def delete_persona(self, principal: PrincipalId, persona_id: int, expected_revision: int) -> PersonaChoice:
+        """Deletes it; when it was chosen, the choice becomes none in the same
+        transaction (its revision + 1). The choice after. NOT_FOUND, VERSION_CONFLICT."""
+        ...
+
+    async def choose_persona(self, principal: PrincipalId, persona_id: int | None,
+                             expected_revision: int) -> PersonaChoice:
+        """Chooses the persona told from each conversation's next turn, or none.
+        NOT_FOUND for an id that is not the principal's, VERSION_CONFLICT."""
+        ...
+
+    async def active_persona(self, principal: PrincipalId) -> Persona | None:
+        """The chosen persona, read at the start of a turn; None when none is chosen."""
         ...
 
 

@@ -23,7 +23,7 @@ from himari.prompt.api import (
     SystemSpec, ToolGroupTurn,
 )
 from himari.prompt.composer import Composer
-from himari.prompt.system import BASE_INSTRUCTIONS
+from himari.prompt.system import COMPANION_BASE
 from himari.provider.api import NormalizedFinal, NormalizedModelOutput, NormalizedToolCalls
 from himari.provider.openrouter import KNOWN_CAPABILITIES
 from himari.tool.api import ScreenRefusal
@@ -199,7 +199,7 @@ def model_input(model: str, text: str = "", *, free: bool = False, web: bool = F
     presence = PresenceView(("web", None) if web else ("device", "Desktop"), "Desktop",
                             (DevicePresence("Desktop", True, idle_minutes=0),), now_doing=doing)
     inputs = PromptInputs(
-        instructions=BASE_INSTRUCTIONS, tool_catalog=(SCREEN,), events=(event,), tool_executions=(),
+        instructions=COMPANION_BASE, tool_catalog=(SCREEN,), events=(event,), tool_executions=(),
         snapshot=None, state_basis=PersistedStateBasis(1, 0, (), (), ()), observations=(),
         request_options=options, trigger_refs=(), system=SystemSpec(companion=True, attachments=True, proactive=True),
         companion_persona=PERSONA, now=NOW, presence=presence, time_zone="Asia/Seoul",

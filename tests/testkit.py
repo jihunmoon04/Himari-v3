@@ -43,6 +43,9 @@ from himari.tool.api import (
 )
 
 SCOPE = TrustedScope(PrincipalId("alice"), ConversationId("conv_1"))
+# what v20 added (V3-P108), undone
+V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
+            "DROP TABLE personas")
 V17_UNDO = ("DROP TABLE wake_keys", "DROP INDEX wakes_opened", "DROP INDEX wakes_by_owner", "DROP TABLE wakes",
             "ALTER TABLE devices DROP COLUMN last_input_at",
             *(f"ALTER TABLE memories DROP COLUMN {c}" for c in ("reminded_at", "remind_attempts", "remind_wake",

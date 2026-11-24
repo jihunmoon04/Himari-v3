@@ -1,5 +1,5 @@
-// The settings the classic page manages (V3-P102 W6c), on the same routes: instructions and the companion persona
-// (V3-P69, V3-P89), memory, its suggestions and timeline (V3-P71, V3-P85), devices and quiet (V3-P83, V3-P88), the
+// The settings the classic page manages (V3-P102 W6c), on the same routes: instructions (V3-P69), the companion
+// personas (V3-P108), memory, its suggestions and timeline (V3-P71, V3-P85), devices and quiet (V3-P83, V3-P88), the
 // Tool servers' defaults (V3-P53).
 import { del, enc, get, post, put, api } from "./client";
 
@@ -8,13 +8,41 @@ export interface InstructionsText {
   revision: number;
   updated_at: string | null;
   max_chars: number;
-  companion?: boolean; // the persona only: whether the companion is on (it is told only then)
 }
 
 export const readInstructions = () => get<InstructionsText>("/api/instructions");
 export const saveInstructions = (text: string, revision: number) => put<InstructionsText>("/api/instructions", { text, revision });
-export const readPersona = () => get<InstructionsText>("/api/instructions/persona");
-export const savePersona = (text: string, revision: number) => put<InstructionsText>("/api/instructions/persona", { text, revision });
+
+export interface Persona {
+  id: number;
+  name: string; // the user's label in the list, never told to HIMARI
+  text: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PersonaChoice {
+  persona_id: number | null; // null: no persona
+  revision: number;
+  updated_at: string | null;
+}
+
+export interface Personas {
+  personas: Persona[];
+  choice: PersonaChoice;
+  companion: boolean; // whether the companion is on (personas are told only then)
+  limits: { count: number; name_chars: number; text_chars: number };
+}
+
+export const readPersonas = () => get<Personas>("/api/personas");
+export const addPersona = (name: string, text: string) => post<Persona>("/api/personas", { name, text });
+export const editPersona = (id: number, name: string, text: string, revision: number) =>
+  put<Persona>(`/api/personas/${id}`, { name, text, revision });
+export const deletePersona = (id: number, revision: number) =>
+  del<PersonaChoice>(`/api/personas/${id}?revision=${revision}`);
+export const choosePersona = (personaId: number | null, revision: number) =>
+  put<PersonaChoice>("/api/personas/choice", { persona_id: personaId, revision });
 
 export type Category = "user" | "preference" | "project" | "reference" | "loop";
 export const CATEGORIES: Category[] = ["user", "preference", "project", "reference", "loop"];
