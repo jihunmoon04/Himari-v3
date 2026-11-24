@@ -29,7 +29,10 @@ public partial class MainWindow
                             () => StartOwnJobs(Prop(data, "activity"), local, ct),
                             async () => { if (currentConversation is not null) await ReadConversation(currentConversation, ct); }, ct);
                         if (unknownText is not null) await CheckUnknownText(false, ct);
+                        _ = RefreshPersonas(local, ct);  // character-state §4: the menu as the server has it
                     }
+                    else if (type == "mood") StartingMood(Str(data, "mood"));  // character-state §2: once, after hello
+                    else if (type == "persona") _ = RefreshPersonas(local, ct);  // §4: changed here, elsewhere or on the Web
                     else if (type == "activity")
                     {
                         StartOwnJobs(data, local, ct);

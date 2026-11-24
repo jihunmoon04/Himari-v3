@@ -913,6 +913,22 @@ var evening = new DateTimeOffset(2026, 11, 1, 22, 30, 0, TimeSpan.FromHours(9));
 Check(QuietTimes.NextMorning(evening) == new DateTimeOffset(2026, 11, 2, 8, 0, 0, TimeSpan.FromHours(9))
     && QuietTimes.NextMorning(evening.AddHours(-16)) == new DateTimeOffset(2026, 11, 1, 8, 0, 0, TimeSpan.FromHours(9)), "until morning is the next 08:00");
 Check(QuietTimes.Describe(null, evening).Contains("먼저 말을 걸 수") && QuietTimes.Describe(evening.AddHours(1), evening).StartsWith("조용히"), "the menu says whether quiet is on");
+// character-state §4: the persona submenu from the server's ids and names, and what a choice sends.
+using (var personaAnswer = JsonDocument.Parse("{\"personas\":[{\"id\":1,\"name\":\"Lucy\"},{\"id\":3,\"name\":\"\"},{\"name\":\"no id\"}],\"choice\":{\"persona_id\":3,\"revision\":7}}"))
+{
+    var menu = PersonaMenu.Parse(personaAnswer.RootElement);
+    Check(menu is not null && menu.Revision == 7 && menu.Chosen == 3, "persona menu reads the choice and its revision");
+    Check(menu!.Items.Select(i => (i.Id, i.Name, i.Chosen)).SequenceEqual(new (int?, string, bool)[] { (1, "Lucy", false), (3, "페르소나 3", true), (null, "없음", false) }),
+        "personas by id, a nameless one numbered, then none; the chosen one marked");
+}
+using (var noneAnswer = JsonDocument.Parse("{\"personas\":[{\"id\":1,\"name\":\"Lucy\"}],\"choice\":{\"persona_id\":null,\"revision\":0}}"))
+    Check(PersonaMenu.Parse(noneAnswer.RootElement) is { Chosen: null } noPersona && noPersona.Items[^1].Chosen && !noPersona.Items[0].Chosen, "no persona chosen marks none");
+using (var goneAnswer = JsonDocument.Parse("{\"personas\":[],\"choice\":{\"persona_id\":5,\"revision\":2}}"))
+    Check(PersonaMenu.Parse(goneAnswer.RootElement) is { } gone && gone.Items.Count == 1 && gone.Items[0].Chosen, "a choice not listed marks none");
+using (var badAnswer = JsonDocument.Parse("{\"personas\":[]}"))
+    Check(PersonaMenu.Parse(badAnswer.RootElement) is null, "an answer without a choice is not a menu");
+Check(JsonSerializer.Serialize(PersonaMenu.Choice(null, 4)) == "{\"persona_id\":null,\"revision\":4}"
+    && JsonSerializer.Serialize(PersonaMenu.Choice(2, 4)) == "{\"persona_id\":2,\"revision\":4}", "a choice sends the persona (or none) and the revision read");
 var withSignals = new WindowPreferences(1, 2, 330, Signals: new SignalSettings(Media: true, TitleExclusions: "a"));
 Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(withSignals)) is { Signals: { Media: true, TitleExclusions: "a", Activity: true } }, "signal settings persist");
 Check(JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330}")!.Signals is null, "old preferences have no signals (the defaults are used)");

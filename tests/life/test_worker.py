@@ -66,6 +66,27 @@ def test_a_day_is_written_once_for_the_persona_chosen_now() -> None:
     asyncio.run(scenario())
 
 
+def test_the_days_mood_is_kept_at_the_days_end_or_now_if_that_is_earlier() -> None:
+    """character-state §2: written tonight, the mood is as of now; a day written late is as of its end."""
+    async def scenario() -> None:
+        def answered() -> NormalizedFinal:
+            return day_answer(mood={"name": "happy", "reason": "전시가 좋았다"},
+                              plans=[{"date": "2026-11-27", "time": "14:00", "text": "전시를 보러 간다."}])
+
+        _, data, _, writer = setup(Measured(answered(), 900, 90))
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        kept = await data.read_mood(ME, NO_PERSONA)
+        assert kept is not None and (kept.mood, kept.reason, kept.set_at) == ("happy", "전시가 좋았다", NOW)
+        assert [e.time_of_day for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.PLAN] == ["14:00"]
+        morning = NOW + timedelta(hours=10)  # 08:30 the next day, before the write time: the 25th is written
+        _, data, _, writer = setup(Measured(answered(), 900, 90), clock=lambda: morning)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        kept = await data.read_mood(ME, NO_PERSONA)
+        assert kept is not None and kept.set_at == datetime(2026, 11, 25, 15, 0, tzinfo=UTC)  # midnight in Seoul
+
+    asyncio.run(scenario())
+
+
 def test_before_the_write_time_the_day_before_is_written_and_no_earlier_one() -> None:
     async def scenario() -> None:
         morning = datetime(2026, 11, 25, 1, 0, tzinfo=UTC)  # 10:00 in Seoul

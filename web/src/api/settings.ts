@@ -51,6 +51,7 @@ export interface LifeEntry {
   id: number;
   kind: LifeKind;
   day: string | null; // YYYY-MM-DD for a plan or a diary, null for a fact
+  time?: string | null; // HH:MM when a plan starts (character-state §3), null otherwise
   text: string;
   origin: LifeOrigin;
   revision: number;
@@ -58,10 +59,17 @@ export interface LifeEntry {
   updated_at: string;
 }
 
+/** HIMARI's mood while it is told (character-state §2): a reply's last mood or the story writer's, with why. */
+export interface HimariMood { mood: string; set_at: string; source: "reply" | "writer"; reason: string | null }
+/** What HIMARI is doing now (character-state §3): asleep in the quiet hours, or a timed plan under way. */
+export interface HimariNow { asleep: boolean; doing: string | null; since: string | null }
+
 export interface Life {
   persona: { id: number; name: string } | null; // null: no persona chosen (the default's life)
   enabled: boolean; // whether the life is used now (the companion and life are on)
   writer: { running: boolean; told: string };
+  mood?: HimariMood | null; // null: none now (or the life is off)
+  now?: HimariNow | null; // null: nothing now (or the life is off)
   entries: LifeEntry[]; // facts first, then plans and diaries, newest day first (the last 30 days and later)
   limits: { facts: number; chars: number; diary_chars: number };
 }

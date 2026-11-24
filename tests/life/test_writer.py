@@ -93,6 +93,27 @@ def test_a_well_formed_answer_becomes_the_days_plan() -> None:
     assert parse_answer(json.dumps({"diary": "짧은 하루."}), DAY) == LifePlan("짧은 하루.")
 
 
+def test_a_plans_time_and_the_days_mood_come_with_it_and_a_bad_one_is_only_left_out() -> None:
+    """character-state §2, §3: both optional; out of shape, the plan or the diary stays without it."""
+    plan = parse_answer(answer(plans=[{"date": "2026-11-26", "time": "7:30", "text": "산책"},
+                                      {"date": "2026-11-27", "time": "25:00", "text": "빵 굽기"},
+                                      {"date": "2026-11-28", "text": "청소"}],
+                               mood={"name": " Happy ", "reason": " 새 붓을 샀다 "}), DAY)
+    assert plan.times == ("07:30", None, None) and (plan.mood, plan.mood_reason) == ("happy", "새 붓을 샀다")
+    assert [day for day, _ in plan.plans] == ["2026-11-26", "2026-11-27", "2026-11-28"]
+    untimed = parse_answer(answer(plans=[{"date": "2026-11-26", "time": "아침", "text": "산책"}]), DAY)
+    assert untimed.times == () and untimed.mood is None  # no time at all: none kept
+    for mood in ({"name": "neutral"}, {"name": "angry"}, "happy", {"reason": "x"}, None):
+        assert parse_answer(answer(mood=mood), DAY).mood is None
+    long_reason = parse_answer(answer(mood={"name": "sad", "reason": "x" * 201}), DAY)
+    assert (long_reason.mood, long_reason.mood_reason) == ("sad", None)
+    assert '"time": "HH:MM"' in WRITER_INSTRUCTIONS and '"mood"' in WRITER_INSTRUCTIONS
+    timed = LifeEntry(9, 1, LifeKind.PLAN, "2026-11-27", "전시", LifeOrigin.WRITER, 1, NOW, NOW, time_of_day="14:00")
+    assert request_data("", (timed,), (), day=DAY, now=NOW, zone=SEOUL)["plans"] == [
+        {"date": "2026-11-27", "time": "14:00", "text": "전시"}]  # the writer is shown the times it gave
+    assert "neutral" not in WRITER_INSTRUCTIONS.split("Mood is")[1].split("\n")[0]  # only lasting moods offered
+
+
 @pytest.mark.parametrize("bad", [
     "not json",
     "[]",

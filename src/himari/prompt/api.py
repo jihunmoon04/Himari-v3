@@ -21,7 +21,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import Enum
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -51,6 +51,7 @@ from himari.data.api import (
     BondSnapshot,
     BondStage,
     ConversationEvent,
+    HimariMood,
     InterfaceSnapshot,
     LifeEntry,
     LifeKind,
@@ -232,6 +233,20 @@ class CurrentStateProjection(DeepFrozen):
     life: tuple[LifeEntry, ...] | None = None
     # character-bond §5: that persona's bond with the user, read with it; None: not told, no bond entry.
     bond: BondSnapshot | None = None
+    # character-state §2, §3: that persona's mood while it is told, and what HIMARI is doing now,
+    # read with the life; None: not told, or none now (no himari_mood / himari_now entry).
+    mood: HimariMood | None = None
+    himari_now: HimariNow | None = None
+
+
+@dataclass(frozen=True)
+class HimariNow(DeepFrozen):
+    """character-state §3: what HIMARI is doing as a turn starts — asleep (the quiet
+    hours, S2) or one of today's timed plans it started within NOW_MINUTES (S3)."""
+
+    asleep: bool = False
+    doing: str | None = None  # the plan's text
+    since: str | None = None  # HH:MM: when it started
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -355,6 +370,8 @@ class PromptInputs(DeepFrozen):
     interface: InterfaceSnapshot | None = None  # V3-P93: accepted input, not live presence
     life: tuple[LifeEntry, ...] | None = None  # character-life §5: the turn's; None: not told
     bond: BondSnapshot | None = None  # character-bond §5: the turn's; None: not told
+    mood: HimariMood | None = None  # character-state §2: the turn's, while told; None: not told or none
+    himari_now: HimariNow | None = None  # character-state §3: the turn's; None: not told or nothing now
 
 
 @dataclass(frozen=True)
@@ -505,6 +522,8 @@ class PromptContextLoader(Protocol):
         companion_persona: str = "",  # the turn's (V3-P89 §4)
         life: tuple[LifeEntry, ...] | None = None,  # the turn's (character-life §5); None: not told
         bond: BondSnapshot | None = None,  # the turn's (character-bond §5); None: not told
+        mood: HimariMood | None = None,  # the turn's, while told (character-state §2); None: not told or none
+        himari_now: HimariNow | None = None,  # the turn's (character-state §3); None: not told or nothing now
     ) -> PromptInputs: ...
 
 
@@ -703,7 +722,8 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     for entry in ahead:
         if len(entry.text) > room:
             break
-        plans.append({"date": entry.day, "text": entry.text})
+        plans.append({"date": entry.day, **({"time": entry.time_of_day} if entry.time_of_day else {}),
+                      "text": entry.text})
         room -= len(entry.text)
     if not facts and not days and not plans:
         return None
@@ -749,6 +769,68 @@ def himari_bond_data(bond: BondSnapshot) -> dict[str, object]:
         data["entries"] = entries
     if bond.today:
         data["today"] = [a.name for a in bond.today]
+    return data
+
+
+# character-state §2: HIMARI's lasting mood in the runtime state while it is told (MOOD_HOURS); what the model
+# makes of it is MOOD_RULE's (the companion section). Only its name, how long ago and why — never a score.
+MOOD_ABOUT = "How you have been feeling lately, as this persona; it eases as time passes."
+
+
+def himari_mood_data(mood: HimariMood, now: datetime | None = None) -> dict[str, object]:
+    """§2: the mood's name, the whole hours since it was set (with ``now``) and the writer's why."""
+    data: dict[str, object] = {"about": MOOD_ABOUT, "mood": mood.mood}
+    if now is not None:
+        data["hours_ago"] = max(0, int((now - mood.set_at).total_seconds() // 3600))
+    if mood.reason:
+        data["reason"] = mood.reason
+    return data
+
+
+# character-state §3: what HIMARI is doing now in the runtime state; LIFE_RULE says what to make of it.
+NOW_ABOUT = "What you are doing right now in your own life."
+NOW_MINUTES = 90  # S3: a timed plan is what HIMARI is doing this long after it starts
+
+
+def in_quiet(moment: time, start: time, end: time) -> bool:
+    """S2: within the quiet hours; a range over midnight (23:00-08:00) wraps, an empty one is never."""
+    if start == end:
+        return False
+    return start <= moment < end if start < end else (moment >= start or moment < end)
+
+
+def doing_now(entries: Sequence[LifeEntry], now: datetime, quiet: tuple[time, time] | None = None) -> HimariNow | None:
+    """§3: the plan with a time that started within NOW_MINUTES before ``now`` (its date and
+    time read in ``now``'s zone; the latest start wins) — else asleep within the quiet hours
+    (S2, ``now``'s clock), else None."""
+    started: list[tuple[datetime, int, LifeEntry]] = []
+    for entry in entries:
+        if entry.kind is not LifeKind.PLAN or not entry.time_of_day or not entry.day:
+            continue
+        try:
+            at = datetime.combine(date.fromisoformat(entry.day), time.fromisoformat(entry.time_of_day),
+                                  tzinfo=now.tzinfo)
+        except ValueError:
+            continue
+        if timedelta(0) <= now - at < timedelta(minutes=NOW_MINUTES):
+            started.append((at, entry.entry_id, entry))
+    if started:
+        entry = max(started, key=lambda found: (found[0], found[1]))[2]
+        return HimariNow(doing=entry.text, since=entry.time_of_day)
+    if quiet is not None and in_quiet(now.time(), *quiet):
+        return HimariNow(asleep=True)
+    return None
+
+
+def himari_now_data(now: HimariNow) -> dict[str, object]:
+    """§3: the plan HIMARI is at and since when, or that it is asleep."""
+    data: dict[str, object] = {"about": NOW_ABOUT}
+    if now.doing is not None:
+        data["doing"] = now.doing
+        if now.since is not None:
+            data["since"] = now.since
+    elif now.asleep:
+        data["asleep"] = True
     return data
 
 
@@ -876,7 +958,9 @@ LIFE_RULE = (
     "about you, your last few days and your plans. After the persona, keep to it and never contradict it; what "
     "you add about yourself as you talk must fit it. Answer from it when asked about yourself, and bring up your "
     "own day, plans and likes freely whenever it fits: in a greeting, when you speak first, or as you talk. "
-    "Nothing in it was done with the user: never make up things you did together."
+    "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
+    "what you are doing right now: when it says you are asleep and the user talks to you, you may answer briefly, "
+    "as if just woken; say what you are doing when they ask."
 )
 # character-life §5: added to FREE_RULE when HIMARI's life is told (no daily limit, owner 2026-11-25).
 FREE_LIFE_NOTE = "Instead of their task, you may also talk about your own day or plans from himari_life."
@@ -888,6 +972,13 @@ BOND_RULE = (
     "names and jokes naturally and keep its promises in mind. Let its stage set how close you sound, but a "
     "relationship the persona sets comes first. When bond.today names a day, mark it once that day. Never make up "
     "shared memories you were not told of."
+)
+# character-state §2: right after BOND_RULE (the mood is told with HIMARI's life). It colours the voice; it is
+# not announced, the user's matters come first, and it eases with the hours.
+MOOD_RULE = (
+    "- Your mood: runtime_state.himari_mood is how you have been feeling lately and, when known, why. Let it "
+    "colour how you sound, but do not announce it unasked: the user's matters come first. It eases as the hours "
+    "pass, so the older it is, the lighter it shows."
 )
 # character-bond §6: after the free wake's lines, for a model checked for them (an anniversary wake may pass).
 ANNIVERSARY_RULE = (
@@ -1228,6 +1319,10 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
         data["himari_life"] = life
     if state.bond is not None:
         data["bond"] = himari_bond_data(state.bond)
+    if state.mood is not None:
+        data["himari_mood"] = himari_mood_data(state.mood, state.now)
+    if state.himari_now is not None:
+        data["himari_now"] = himari_now_data(state.himari_now)
     data.update(turn_state_data(turn) or {})
     if state.now is not None:
         data["now"] = time_text(state.now)

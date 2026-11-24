@@ -36,14 +36,16 @@ def error_code(response: Any) -> str:
 
 def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Server) -> None:
     empty = server.client.get("/api/life").json()
+    now = empty.pop("now")  # character-state §3: asleep in the default quiet hours (23:00-08:00), else nothing
+    assert now in (None, {"asleep": True, "doing": None, "since": None})
     assert empty == {"persona": None, "enabled": True,
-                     "writer": {"running": False, "told": "off (no HIMARI_MEMORY_MODEL)"}, "entries": [],
+                     "writer": {"running": False, "told": "off (no HIMARI_MEMORY_MODEL)"}, "mood": None, "entries": [],
                      "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS}}
     added = server.post("/api/life", {"text": " 비 오는 날을 좋아한다. ", "persona_id": None})
     assert added.status_code == 201
     fact = added.json()
-    assert (fact["kind"], fact["day"], fact["text"], fact["origin"], fact["revision"]) == (
-        "fact", None, "비 오는 날을 좋아한다.", "user", 1)
+    assert (fact["kind"], fact["day"], fact["time"], fact["text"], fact["origin"], fact["revision"]) == (
+        "fact", None, None, "비 오는 날을 좋아한다.", "user", 1)
 
     lucy = server.post("/api/personas", {"name": "Lucy", "text": "이름: 루시."}).json()
     assert server.client.put("/api/personas/choice", json={"persona_id": lucy["id"], "revision": 0},

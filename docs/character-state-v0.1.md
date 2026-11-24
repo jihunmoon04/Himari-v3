@@ -49,3 +49,63 @@
 | S2 | 자는 시간은 먼저 말 걸기의 조용한 시간과 같다 |
 | S3 | 지금 하는 일 = 시각이 붙은 오늘 일정 중 90분 안에 시작한 것 |
 | S4 | 앱의 페르소나 바꾸기는 기기 토큰의 좁은 예외 둘로 한다. 글은 기기에 주지 않는다 |
+
+## 7. 구현에서 정한 것 (2026-11-25)
+
+설계대로 만들었다. 배포하지 않았다(H-79). 아래는 만든 것과, 설계가 비워 둔 곳에서 기존 방식에 맞춰 정한 것이다(소유자 방침: 묻지 않고 권고안으로 정하고, 써 보며 고친다).
+
+### 7.1 만든 것
+
+| 부분 | 자리 |
+| --- | --- |
+| 계약 | `data/api.py`: `MoodSource`(`reply`·`writer`), `HimariMood`, `MOOD_HOURS`(6), `MOOD_NAMES`, 순수 함수 `live_mood`, Port `MoodStore`(`read_mood`·`set_mood`). `LifeEntry.time_of_day`, `LifePlan.times`·`mood`·`mood_reason`·`mood_at` |
+| 저장 | 스키마 v24: `life_entries`에 `time_of_day` 열, 새 표 `himari_moods`(주인·페르소나·기분·정한 시각·출처·까닭). `data/sqlite.py`와 `data/memory.py` 둘 다, 공통 규칙(시각·기분 검사, 더 새 것이 이김)은 `data/rules.py`. 작가의 기분은 `apply_life_write`가 같은 트랜잭션에서 둔다 |
+| 이야기 작가 | `life/writer.py`: `WRITER_INSTRUCTIONS`에 일정 `time`(선택)과 `mood`(선택, 이름·까닭), 입력의 일정에도 시각, `plan_time`·`answer_mood`. `life/worker.py`: 기분의 시각을 정함 |
+| 답의 기분 | `control/driver.py`: 최종 답을 기록한 뒤(`_project`) `last_mood`가 찾은 마지막 비중립 표정을 그 턴의 페르소나 기분으로 둔다(`_keep_mood`) |
+| 프롬프트 | `prompt/api.py`: `HimariNow`, `doing_now`, `in_quiet`, `NOW_MINUTES`(90), `himari_mood_data`·`himari_now_data`, `MOOD_RULE`, `LIFE_RULE`의 한 구절, `himari_life`의 일정에 `time`. `prompt/system.py`: `BOND_RULE` 뒤 `MOOD_RULE`, 원칙 문단에 `himari_mood`·`himari_now`. Control은 턴 시작에 삶과 함께 기분을 읽고 지금 하는 일을 계산한다(`driver._read_user_and_persona`) |
+| 서버 | `GET /api/device/personas`, `PUT /api/device/persona-choice`(기기만, 다른 쪽은 403 `not_a_device`), 페르소나가 바뀌면 사건 흐름에 `persona`. 기기의 사건 흐름은 `hello` 바로 뒤 `mood` 사건 하나. `features.persona_choice = 1`. `/api/life`에 `mood`·`now`, 삶 항목에 `time` |
+| 앱 | `clients/windows`: 캐릭터 우클릭 메뉴 "조용히" 아래 "페르소나" 하위 메뉴(`PersonaControls.cs`, 규칙은 `PersonaMenu.cs`), 실패하면 캐릭터 위 작은 알림 3초, `mood` 사건으로 시작 표정 |
+| Web | Settings → Life에 일정의 시각과 기분·지금 하는 일 한 줄. 사건 흐름의 `persona`를 받으면 Personas·Life·Bond를 다시 읽는다 |
+| 시험 | `tests/data/test_state.py`(두 저장소), `tests/data/test_sqlite.py`(v23 → v24, `V24_UNDO`·`_ADDED_IN[24]`), `tests/prompt/test_state_prompt.py`, `tests/life/`(시각·기분), `tests/bootstrap/test_state_app.py`, `tests/interfaces/test_web_devices.py`(예외 둘·`persona`·`mood` 사건), `Life.test.tsx`, 앱 계약 시험(`PersonaMenu`), 실제 모델 확인 `tests/live/test_life_live.py` |
+
+### 7.2 정한 것
+
+1. **저장:** 기분은 새 표 `himari_moods`에 주인 × 페르소나마다 한 줄(없으면 기분 없음). 일정의 시각은 일정 글에 섞지 않고 `life_entries`의 새 열 `time_of_day`(HH:MM, 일정만)로 둔다. 둘 다 스키마 v24 하나로 묶었다.
+2. **기분 목록은 표정 목록과 같다**(`MOODS`에서 `neutral`을 뺀 7개, `MOOD_NAMES`). `neutral`은 "기분 없음"이라 저장하지 않는다. `thinking`도 지금은 기분이 될 수 있다.
+3. **답의 기분:** 최종 답의 표정 중 **마지막 비중립 표정**이다(마지막이 `neutral`이어도 그 앞의 비중립 표정을 쓴다). 목록 밖 이름은 표정처럼 `neutral`로 친다. 코드 블록 안의 표시는 표정이 아니다. 숨긴 채 끝난 자유 wake(`[[pass]]`)는 답이 없으니 기분도 없다. 기분은 **턴을 시작할 때 읽은 페르소나**의 것이 된다. 기분을 두다 실패해도 답은 그대로다(경고만 남김).
+4. **새 기분이 이긴다:** 정한 시각이 더 늦은 것이 이긴다. 늦게 들어온 작가의 기분이 그 뒤 답의 기분을 덮지 않는다.
+5. **작가의 기분 시각**은 그 날의 끝(서버 시간대의 자정)과 지금 중 이른 것이다. 밤에 쓰면 지금부터 6시간, 다음 날 아침에 어제를 쓰면 이미 흐려진 것으로 저장된다.
+6. **작가 답의 새 칸은 선택이고 하나만 버린다:** 모양이 틀린 `time`은 그 일정의 시각만, 틀린 `mood`(목록 밖·`neutral`·객체 아님)는 기분만 빠진다. 일기를 통째로 버리지 않는다(기존 칸은 지금처럼 통째로 검사). `7:30`은 `07:30`으로 맞춘다. 까닭이 200자를 넘거나 글이 아니면 까닭만 뺀다. 옛 모양 답(시각·기분 없음)은 그대로 통과한다.
+7. **흐려짐:** 정한 지 6시간 이상이면 턴과 앱에 알리지 않는다(저장은 남음). 프롬프트에는 `himari_mood`(이름, `hours_ago` 정수 시간, 까닭)만 넣는다. 점수는 없다(D5).
+8. **지금 하는 일(S3):** 일정의 날짜와 시각을 **턴의 시계(서버 시간대)**로 읽어, 지금이 시작부터 90분 안이면 그 일정이다(같으면 늦게 시작한 것). 자정을 넘는 일정(23:30 → 00:30)도 된다. 시각이 붙은 일정이 90분 안에 있으면 **조용한 시간이어도 일정이 이긴다**(작가가 일부러 밤 일정을 썼으므로). 아니면 조용한 시간에는 `asleep`, 둘 다 아니면 `himari_now`를 넣지 않는다.
+9. **자는 시간(S2)**은 `HIMARI_PROACTIVE_QUIET`(기본 23:00–08:00)를 먼저 말 걸기가 꺼져 있어도 쓴다. 비우면 자지 않는다. 기기의 시간대가 아니라 서버 시간대로 본다(먼저 말 걸기는 기기 시간대로 막는다. 운영은 둘 다 Asia/Seoul).
+10. **켜고 끄기:** 기분과 지금 하는 일은 관계처럼 반려와 삶이 켜졌을 때만 알리고 둔다(`HIMARI_LIFE=0`이면 둘 다 없음, 저장된 것은 남음). 앱의 페르소나 메뉴는 삶과 상관없이 반려가 켜지면 된다.
+11. **`MOOD_RULE`**은 `BOND_RULE` 바로 뒤다. `LIFE_RULE`에는 "himari_now가 자는 중이면 깬 듯 짧게 답해도 된다, 물으면 지금 하는 일을 말한다"를 한 구절로 더했다. 시스템 글은 Web·앱·CLI에서 같다(interface만 다름, 시험 있음).
+12. **기기의 시작 표정:** 기기의 사건 흐름은 `hello` 바로 뒤에 `mood` 사건 하나(`{"mood": 이름}`, 기분이 없으면 `"neutral"`)를 보낸다. 사건 흐름은 5분마다 다시 열리므로 그때마다 다시 온다. Web 흐름에는 보내지 않는다. 삶이 꺼져 있으면 보내지 않는다. 앱은 답을 준비하거나 말하는 중이 아니면 그 표정으로 바꾼다. "새 사건 없이 지금의 표정 사건을 쓴다"는 기존 표정 표시(`{"mood": 이름}`과 앱의 얼굴들)를 그대로 쓴다는 뜻으로 읽었다. 사건 이름 `mood` 하나는 새로 생겼다.
+13. **기기 예외 둘(H-45):** 두 경로는 **기기 토큰 전용**이다(Web·CLI는 403 `not_a_device`, Web은 `/api/personas`를 쓴다). `GET`은 번호·이름·고른 것·리비전만 주고 글은 주지 않는다. `PUT`은 `{persona_id(없음은 null), revision}`을 받아 바뀐 뒤의 메뉴를 같은 모양으로 돌려준다. 거절은 Web과 같다(404 `not_found`, 409 `revision_conflict`).
+14. **`persona` 사건:** 고르기뿐 아니라 페르소나를 더하고·이름을 바꾸고·지울 때도(Web에서) 보낸다. 앱 메뉴의 목록이 따라가야 하기 때문이다. 내용은 지금 고른 것의 `{persona_id, name, revision}`(없음은 null)이고 글은 없다. 모든 흐름(기기·Web)에 간다.
+15. **앱 메뉴:** "조용히" 바로 아래 "페르소나". 목록(번호순) + 구분선 + "없음", 지금 것에 체크. 서버가 `features.persona_choice`를 알리지 않으면 "서버가 아직 지원하지 않아요". `hello`마다, 그리고 `persona` 사건마다 다시 읽는다. 고르면 PUT하고 답으로 메뉴를 바로 고친다. 실패하면 캐릭터 위에 "페르소나를 바꾸지 못했어요"를 3초 띄우고 메뉴를 다시 읽는다. 이름이 빈 페르소나는 "페르소나 N"으로 보인다.
+16. **Web:** Life 화면에 일정의 시각(`2026-11-26 14:00`)과 "Mood: …(까닭) · since …", "Doing: …(from …)" 또는 "Asleep" 한 줄. 사건 흐름의 `persona`로 Personas·Life·Bond 화면을 다시 읽는다(다른 탭·앱에서 바꿔도 따라감).
+
+### 7.3 시험
+
+- 전체 pytest(WSL): **2921 passed, 85 skipped**(4분 13초. 관계 때보다 28개 늘었다). `mypy --strict` 문제 없음(265 파일). `scripts/check_imports.py` OK. `scripts/device_client.py --self-test` OK.
+- Web: `npx vitest run` 7파일 34개 통과(Life 2개 더함), `npm run typecheck`, `npm run lint` 통과.
+- 앱: Windows의 .NET 10 SDK로 `Himari.Companion` 빌드(오류 없음, 경고는 원래 있던 하나), 계약 시험(`Himari.Companion.ContractTests`) 통과, `Himari.Companion.UiTests` 빌드. 실제 화면에서 메뉴를 눌러 보지는 않았다.
+
+### 7.4 실제 모델 확인 (2026-11-25)
+
+`tests/live/test_life_live.py`의 이야기 작가 확인(`-k story_writer`, `HIMARI_LIVE=1`)을 운영 키로 한 번 돌렸다. 모델 `deepseek/deepseek-v4.1-flash-1017`. 작가 호출 하나. **1 passed.**
+
+- 입력 997·출력 670 토큰, 약 1,700토큰(1센트 아래, 키 사용량 숫자는 실행 직후 바뀌지 않았다).
+- 새 칸이 모두 모양대로 와서 검사가 그대로 받았다: 일정 둘에 시각 `15:00`·`21:00`, 기분 `thinking`과 까닭 "발표 자료 문장을 고치다 보니 말버릇까지 신경 쓰였다." 일기·정사는 예전처럼 왔다.
+- 본 것: 그날 일화(발표 자료 다듬기)에서 기분을 골랐고 `thinking`이 나왔다. "생각하는 중"이 몇 시간 이어지는 기분으로 어울리는지는 써 보며 본다(어색하면 작가의 목록에서 뺀다).
+
+### 7.5 알려진 한계
+
+- 지금 하는 일과 자는 시간은 서버 시간대로 본다. 기기가 다른 시간대면 어긋난다.
+- 답의 기분은 그 답의 마지막 비중립 표정 하나만 본다. 답 하나의 짧은 표정이 몇 시간 이어질 수 있다(6시간 뒤 흐려짐).
+- 앱은 시작 표정만 받는다. 답이 끝난 뒤에는 지금처럼 그 답의 마지막 표정을 보이고, 이어지는 기분은 다음 연결(5분마다) 때 다시 맞춘다.
+- 대화 도중 페르소나를 바꾸면 그 턴의 답 기분은 턴을 시작할 때의 페르소나에 들어간다.
+- 앱 메뉴는 연결이 없으면 고를 수 없다. 메뉴를 실제 화면에서 눌러 보지 않았다(빌드와 계약 시험만).
+- 이벤트 그림·애니메이션, 페르소나별 그림은 하지 않았다(그림 먼저, §5).

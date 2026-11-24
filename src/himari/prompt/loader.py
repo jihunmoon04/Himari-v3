@@ -40,6 +40,7 @@ from himari.data.api import (
     FileCatalog,
     FileRecord,
     BondSnapshot,
+    HimariMood,
     LifeEntry,
     Memory,
     MemoryStore,
@@ -54,6 +55,7 @@ from himari.data.api import (
 from himari.environment.api import EnvironmentObservation, EnvironmentPlugin
 from himari.prompt.api import (
     AttachmentInfo,
+    HimariNow,
     PromptInputs,
     RequestOptions,
     SourceNote,
@@ -123,6 +125,8 @@ class ContextLoader:
         companion_persona: str = "",  # the turn's, read with the instructions (V3-P89 §4)
         life: tuple[LifeEntry, ...] | None = None,  # the turn's, read with the persona (character-life §5)
         bond: BondSnapshot | None = None,  # the turn's, read with the life (character-bond §5)
+        mood: HimariMood | None = None,  # the turn's, while told (character-state §2)
+        himari_now: HimariNow | None = None,  # the turn's (character-state §3)
     ) -> PromptInputs:
         snapshot = await self._log.get_latest_snapshot(scope)
         events: tuple[ConversationEvent, ...] = ()
@@ -184,6 +188,8 @@ class ContextLoader:
             time_zone=self._time_zone,
             life=life,
             bond=bond,
+            mood=mood,
+            himari_now=himari_now,
         )
 
     async def _observe(self, scope: TrustedScope,

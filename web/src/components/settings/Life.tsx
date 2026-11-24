@@ -71,7 +71,9 @@ function Row({ entry, locked, onEdit, onDelete }: {
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
         <p className="whitespace-pre-wrap break-words">{entry.text}</p>
-        <p className="mt-1 text-xs text-faint">{entry.day ? `${entry.day} · ` : ""}{ORIGINS[entry.origin]}</p>
+        <p className="mt-1 text-xs text-faint">
+          {entry.day ? `${entry.day}${entry.time ? ` ${entry.time}` : ""} · ` : ""}{ORIGINS[entry.origin]}
+        </p>
       </div>
       <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>Edit</Button>
       <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger" disabled={locked} onClick={onDelete}>
@@ -135,7 +137,7 @@ export function LifeSettings() {
   const [busy, setBusy] = useState(false);
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read HIMARI's life.</p>;
-  const { persona, enabled, writer, entries, limits } = query.data;
+  const { persona, enabled, writer, entries, limits, mood, now } = query.data;
   const remove = async (entry: LifeEntry) => {
     const what = NAMES[entry.kind];
     if (!window.confirm(`Delete this ${what}? HIMARI will not know it any more; there is no undo.`)) return;
@@ -181,6 +183,14 @@ export function LifeSettings() {
         </p>
       )}
       <p className="text-xs text-faint">Story writer: {writer.told}</p>
+      {(mood || now) && (
+        <p className="text-sm text-muted" aria-label="Now">
+          {mood && <>Mood: <span className="text-ink">{mood.mood}</span>{mood.reason ? ` (${mood.reason})` : ""}
+            {` · since ${new Date(mood.set_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}</>}
+          {mood && now && " · "}
+          {now && (now.doing ? `Doing: ${now.doing}${now.since ? ` (from ${now.since})` : ""}` : "Asleep")}
+        </p>
+      )}
       <Group title="Facts" note={`${facts.length} of ${limits.facts}`} empty="No facts yet."
         top={<AddFact personaId={persona?.id ?? null} full={full} max={limits.chars} />}>
         {facts}

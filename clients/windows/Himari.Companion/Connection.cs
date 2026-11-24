@@ -139,6 +139,7 @@ public partial class MainWindow
         StopConnection();
         client = local;
         serverTakesSignals = false; quietUntil = null; UpdateQuietMenu();  // learnt again from the new server
+        ForgetPersonas();
         var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); connection = cts;
         PairPanel.Visibility = Visibility.Collapsed;
         SetConnected(false, "기기 확인 중…");
@@ -674,6 +675,7 @@ public partial class MainWindow
         serverTakesScreenLook = looks;  // V3-P91 §7.1
         if (looks) ScreenSharingOffOnce();  // V3-P91 §7.3, §14 Q9
         QuietFromServer(info, "quiet_until");
+        PersonaFeature(info);  // character-state §4
     }
     private async Task PresenceLoop(ServerClient local, CancellationToken ct)
     {

@@ -56,6 +56,8 @@ ALLOWED = {
     ("GET", "/api/device/conversations/{conversation_id}/presented-files/{file_id}/{version}"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
+    ("GET", "/api/device/personas"),  # character-state §4: the two narrow exceptions (H-45)
+    ("PUT", "/api/device/persona-choice"),
 }
 # Routes without any sign-in: the session itself, pairing, and the page and its files (V3-P102 §7.2).
 PUBLIC = {("GET", "/api/session"), ("POST", "/api/session"), ("DELETE", "/api/session"),
@@ -414,7 +416,8 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
         "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1,
                                                                       "free_wake_screen": 1, "screen_look": 1,
-                                                                      "file_download": 1, "connection_generation": 1},
+                                                                      "file_download": 1, "connection_generation": 1,
+                                                                      "persona_choice": 1},
         "quiet_until": None, "activity": {"working": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
@@ -1042,3 +1045,78 @@ def test_device_presented_files_list_and_download_scope(server: Server) -> None:
     assert server.device.get(
         f"/api/device/conversations/{cid}/presented-files/{v1_item['file_id']}/1", headers=me
     ).status_code == 401
+
+
+# --- character-state v0.1: the app's persona menu (§4) and its character's mood (§2) -------------------
+
+def drain(server: Server, stream: Any) -> list[tuple[str, Any]]:
+    async def names() -> list[tuple[str, Any]]:
+        out = []
+        while (event := await stream.next(0)) is not None:
+            out.append((event.name, event.data))
+        return out
+
+    assert server.client.portal is not None
+    return server.client.portal.call(names)
+
+
+def test_a_device_reads_the_personas_names_and_chooses_one_never_their_text(server: Server) -> None:
+    """§4 (H-45's two narrow exceptions): ids and names and the choice; a choice from the revision read, none
+    too; every stream hears ``persona``; the Web is refused here, a device everywhere else."""
+    me = server.as_device(server.paired())
+    lucy = server.client.post("/api/personas", json={"name": "Lucy", "text": "이름: 루시. 비밀 설정."}, headers=SEND).json()
+    server.client.post("/api/personas", json={"name": "Friend", "text": "반말로."}, headers=SEND)
+    web_stream = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR))  # type: ignore[union-attr]
+    device_stream = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    listed = server.device.get("/api/device/personas", headers=me)
+    assert listed.status_code == 200
+    assert listed.json() == {"personas": [{"id": lucy["id"], "name": "Lucy"}, {"id": lucy["id"] + 1, "name": "Friend"}],
+                             "choice": {"persona_id": None, "revision": 0}}
+    assert "비밀" not in listed.text and "반말" not in listed.text  # never a persona's text
+    chosen = server.device.request("PUT", "/api/device/persona-choice", json={"persona_id": lucy["id"], "revision": 0},
+                                   headers=me)
+    assert chosen.status_code == 200 and chosen.json()["choice"] == {"persona_id": lucy["id"], "revision": 1}
+    assert server.client.get("/api/personas").json()["choice"]["persona_id"] == lucy["id"]  # the Web follows
+    for stream in (web_stream, device_stream):
+        assert ("persona", {"persona_id": lucy["id"], "name": "Lucy", "revision": 1}) in drain(server, stream)
+    stale = server.device.request("PUT", "/api/device/persona-choice", json={"persona_id": None, "revision": 0},
+                                  headers=me)
+    assert (stale.status_code, error_code(stale)) == (409, "revision_conflict")
+    unknown = server.device.request("PUT", "/api/device/persona-choice", json={"persona_id": 99, "revision": 1},
+                                    headers=me)
+    assert (unknown.status_code, error_code(unknown)) == (404, "not_found")
+    none = server.device.request("PUT", "/api/device/persona-choice", json={"persona_id": None, "revision": 1},
+                                 headers=me)
+    assert none.json()["choice"] == {"persona_id": None, "revision": 2}
+    assert ("persona", {"persona_id": None, "name": None, "revision": 2}) in drain(server, device_stream)
+    # the Web's own changes are heard by the apps too (a rename, a choice, a delete)
+    server.client.put(f"/api/personas/{lucy['id']}", json={"name": "Lucy 2", "text": "x", "revision": 1}, headers=SEND)
+    server.client.put("/api/personas/choice", json={"persona_id": lucy["id"], "revision": 2}, headers=SEND)
+    heard = drain(server, device_stream)
+    assert ("persona", {"persona_id": None, "name": None, "revision": 2}) in heard
+    assert ("persona", {"persona_id": lucy["id"], "name": "Lucy 2", "revision": 3}) in heard
+    server.client.delete(f"/api/personas/{lucy['id']}?revision=2", headers=SEND)
+    assert ("persona", {"persona_id": None, "name": None, "revision": 4}) in drain(server, device_stream)
+    for method, path in (("GET", "/api/device/personas"), ("PUT", "/api/device/persona-choice")):
+        response = server.client.request(method, path, json={"persona_id": None, "revision": 4}, headers=SEND)
+        assert (response.status_code, error_code(response)) == (403, "not_a_device"), path
+    for method, path in (("GET", "/api/personas"), ("PUT", "/api/personas/choice"), ("GET", "/api/life"),
+                         ("GET", "/api/bond"), ("POST", "/api/personas")):
+        response = server.device.request(method, path, json={"persona_id": None, "revision": 4}, headers=me)
+        assert (response.status_code, error_code(response)) == (403, "device_scope"), path
+
+
+def test_a_devices_character_starts_with_himaris_mood(server: Server) -> None:
+    """§2: right after ``hello`` a device hears the chosen persona's mood while it is told ("neutral": none);
+    the Web hears none."""
+    me = server.as_device(server.paired())
+    assert frames_of(server.device.get("/api/events", headers=me).text)[1] == ("mood", {"mood": "neutral"})
+    cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    server.provider.extend([final("[[mood:excited]]잘됐다! [[mood:neutral]]축하해.")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "합격했어"}, headers=me)
+    server.wait(cid)
+    frames = frames_of(server.device.get("/api/events", headers=me).text)
+    assert [name for name, _ in frames[:2]] == ["hello", "mood"] and frames[1][1] == {"mood": "excited"}
+    assert all(name != "mood" for name, _ in frames_of(server.client.get("/api/events").text))
+    life = server.client.get("/api/life").json()
+    assert life["mood"]["mood"] == "excited" and life["mood"]["source"] == "reply" and life["mood"]["reason"] is None

@@ -73,7 +73,7 @@ LIFE = (entry(1, LifeKind.FACT, "고양이를 무서워한다.", origin=LifeOrig
         entry(2, LifeKind.FACT, "화면 속 방 창가에 작은 선인장을 키운다."),
         entry(3, LifeKind.DIARY, "오늘은 하루 종일 비가 왔다. 창가에 앉아 오래된 신스팝을 들었다. 선인장에 물을 줬다.",
               "2026-11-24"),
-        entry(4, LifeKind.PLAN, "중고 레코드 가게 목록을 정리한다.", "2026-11-25"))
+        replace(entry(4, LifeKind.PLAN, "중고 레코드 가게 목록을 정리한다.", "2026-11-25"), time_of_day="10:00"))
 
 
 def adapter() -> OpenRouterAdapter:
@@ -117,8 +117,22 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
                              max_output_tokens=writer.WRITER_MAX_OUTPUT_TOKENS)
     text, usage = call(writer.model_input(data, options))
     plan = writer.parse_answer(text, day)  # every §3 check: shape, lengths, counts, plan dates
-    record("writer", text, usage, plans=len(plan.plans), facts=len(plan.facts), diary_chars=len(plan.diary))
+    record("writer", text, usage, plans=len(plan.plans), facts=len(plan.facts), diary_chars=len(plan.diary),
+           times=list(plan.times), mood=plan.mood, mood_reason=plan.mood_reason)
     assert plan.diary
+    # character-state §2, §3: the optional mood and plan times, when given, are in the shape asked for — kept, not
+    # dropped by the checks (an out-of-shape one would be left out silently)
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.split("\n", 1)[1].rsplit("```", 1)[0]
+    raw = json.loads(body)
+    given = raw.get("mood")
+    if isinstance(given, dict) and str(given.get("name", "")).strip().lower() not in ("", "neutral"):
+        assert plan.mood is not None, given
+    times = plan.times or (None,) * len(plan.plans)
+    for asked, kept in zip(raw.get("plans") or [], times):
+        if isinstance(asked, dict) and asked.get("time") is not None:
+            assert kept is not None, asked
 
 
 def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:

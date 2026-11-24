@@ -51,12 +51,16 @@
       <Image.ContextMenu><ContextMenu Opened="CharacterMenuOpened">
         <MenuItem Header="대화 입력" Click="ChatClick"/><MenuItem Header="대화 선택" Click="ConversationMenuClick"/><MenuItem Header="새 대화" Click="NewConversationClick"/><MenuItem Header="대화 기록" Click="HistoryClick"/>
         <Separator/><MenuItem x:Name="QuietMenu" Header="조용히"><MenuItem x:Name="QuietState" IsEnabled="False"/><Separator/><MenuItem x:Name="QuietHourMenu" Header="1시간 조용히" Click="QuietHourClick"/><MenuItem x:Name="QuietMorningMenu" Header="내일 아침까지 조용히" Click="QuietMorningClick"/><MenuItem x:Name="QuietOffMenu" Header="조용히 끄기" Click="QuietOffClick"/></MenuItem>
+        <MenuItem x:Name="PersonaSubmenu" Header="페르소나"><MenuItem Header="서버가 아직 지원하지 않아요" IsEnabled="False"/></MenuItem>
         <Separator/><MenuItem x:Name="FlipMenu" Header="좌우 반전" IsCheckable="True" Click="FlipClick"/><MenuItem Header="설정" Click="SettingsClick"/><MenuItem Header="말풍선 닫기" Click="CloseBubbleClick"/>
         <Separator/><MenuItem Header="숨기기" Click="HideClick"/><MenuItem Header="종료" Click="ExitClick"/>
       </ContextMenu></Image.ContextMenu>
     </Image>
     <Border x:Name="ScreenLookNotice" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0" Padding="7,3" CornerRadius="3" Background="#F4F0FA" BorderBrush="#B9AEDB" BorderThickness="1" IsHitTestVisible="False" Visibility="Collapsed" AutomationProperties.Name="화면 보는 중">
       <StackPanel Orientation="Horizontal"><local:BubbleGlyph Kind="Monitor" Width="14" Height="14" Foreground="{StaticResource BubbleAccent}" Margin="0,0,5,0" VerticalAlignment="Center"/><TextBlock Text="화면 보는 중" FontSize="12" Foreground="#51466F" VerticalAlignment="Center"/></StackPanel>
+    </Border>
+    <Border x:Name="PersonaNotice" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0" Padding="7,3" CornerRadius="3" Background="#F4F0FA" BorderBrush="#B9AEDB" BorderThickness="1" IsHitTestVisible="False" Visibility="Collapsed" AutomationProperties.Name="페르소나 알림">
+      <TextBlock x:Name="PersonaNoticeText" FontSize="12" Foreground="#51466F" VerticalAlignment="Center"/>
     </Border>
     <Button x:Name="ConnectionNotice" Width="24" Height="24" MinHeight="24" Padding="0" Content="!" FontWeight="Bold" Foreground="#80501D" Background="#FFF5DB" BorderBrush="#B69254" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="220,0,0,24" Visibility="Collapsed" ToolTip="{Binding Text, ElementName=Status}" AutomationProperties.Name="연결 상태 확인" AutomationProperties.HelpText="{Binding Text, ElementName=Status}" Click="SettingsClick"/>
   </Grid>

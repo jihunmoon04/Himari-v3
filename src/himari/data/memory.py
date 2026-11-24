@@ -74,6 +74,8 @@ from himari.data.api import (
     LifeKind,
     LifeOrigin,
     LifePlan,
+    HimariMood,
+    MoodSource,
     LifeWrite,
     LifeWriteStart,
     LifeWriteStatus,
@@ -259,6 +261,7 @@ class InMemoryStore:
         self.life_ids: dict[PrincipalId, int] = {}
         self.life_writes: dict[str, _LifeWrite] = {}
         self.bond_stages: dict[tuple[PrincipalId, int], BondStanding] = {}  # character-bond §2 (none: new)
+        self.moods: dict[tuple[PrincipalId, int], HimariMood] = {}  # character-state §2 (none: no mood)
         self.memories: dict[tuple[PrincipalId, int], Memory] = {}  # V3-P71
         self.memory_ids: dict[PrincipalId, int] = {}  # the last id given out, per principal
         # V3-P85: notes an automatic forget retired (§5.4), with when, pass and item.
@@ -1382,8 +1385,9 @@ class InMemoryData:
         if not isinstance(plan, LifePlan):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life plan")
         diary = rules.check_life_text(LifeKind.DIARY, plan.diary)
-        plans = [(rules.check_life_day(day), rules.check_life_text(LifeKind.PLAN, text)) for day, text in plan.plans]
+        plans = rules.check_life_plans(plan)
         facts = [rules.check_life_text(LifeKind.FACT, text) for text in plan.facts]
+        mood = rules.writer_mood(plan, now)
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
@@ -1399,14 +1403,17 @@ class InMemoryData:
             written.append(self._put_life(principal, replace(before, text=diary, origin=LifeOrigin.WRITER,
                                                              revision=before.revision + 1, updated_at=now,
                                                              source=write_id)))
-        for plan_day, text in plans:
+        for plan_day, text, at in plans:
             written.append(self._new_life(principal, LifeEntry(0, persona_id, LifeKind.PLAN, plan_day, text,
-                                                               LifeOrigin.WRITER, 1, now, now, source=write_id)))
+                                                               LifeOrigin.WRITER, 1, now, now, source=write_id,
+                                                               time_of_day=at)))
         for text in facts:
             added = self._add_fact(principal, LifeEntry(0, persona_id, LifeKind.FACT, None, text, LifeOrigin.WRITER,
                                                         1, now, now, source=write_id), dedupe=True)
             if isinstance(added, LifeEntry):
                 written.append(added)
+        if mood is not None:  # character-state §2: the day's end mood, kept unless a later one is stored
+            self._keep_mood(principal, replace(mood, persona_id=persona_id))
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return tuple(written)
 
@@ -1542,6 +1549,21 @@ class InMemoryData:
         chosen = BondStanding(persona_id, stage, datetime.now(UTC), "user", current.revision + 1)
         self._store.bond_stages[(principal, persona_id)] = chosen
         return chosen
+
+    # --- MoodStore (character-state v0.1 §2) -----------------------------------------------
+
+    def _keep_mood(self, principal: PrincipalId, mood: HimariMood) -> HimariMood:
+        kept = rules.kept_mood(self._store.moods.get((principal, mood.persona_id)), mood)
+        self._store.moods[(principal, mood.persona_id)] = kept
+        return kept
+
+    async def read_mood(self, principal: PrincipalId, persona_id: int) -> HimariMood | None:
+        persona_id = rules.check_life_persona(persona_id)
+        return self._store.moods.get((principal, persona_id))
+
+    async def set_mood(self, principal: PrincipalId, persona_id: int, mood: str, *, source: MoodSource,
+                       at: datetime, reason: str | None = None) -> HimariMood:
+        return self._keep_mood(principal, rules.check_mood(persona_id, mood, source, at, reason))
 
     # --- DeviceStore (V3-P83 §4) ----------------------------------------------------
 

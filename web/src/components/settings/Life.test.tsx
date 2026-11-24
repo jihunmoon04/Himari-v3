@@ -66,6 +66,29 @@ describe("the life screen", () => {
     expect(part("Diary").getByText(/우산을 잃어버렸다/)).toBeTruthy();
   });
 
+  it("shows a plan's time, HIMARI's mood and what it is doing now (character-state)", async () => {
+    state.data = {
+      ...aLife(),
+      entries: [{ ...entry(9, "plan", "2026-11-26", "도서관에 간다.", "writer"), time: "14:00" }],
+      mood: { mood: "happy", set_at: at, source: "writer", reason: "새 책을 찾았다" },
+      now: { asleep: false, doing: "빵집 들르기", since: "13:30" },
+    };
+    await shown();
+    expect(part("Plans").getByText("2026-11-26 14:00 · written by the story writer")).toBeTruthy();
+    const line = screen.getByLabelText("Now").textContent ?? "";
+    expect(line).toContain("Mood: happy (새 책을 찾았다)");
+    expect(line).toContain("Doing: 빵집 들르기 (from 13:30)");
+    state.data = { ...aLife(), now: { asleep: true, doing: null, since: null } };
+    cleanup();
+    await shown();
+    expect(screen.getByLabelText("Now").textContent).toBe("Asleep");
+  });
+
+  it("shows no mood line when there is nothing to tell", async () => {
+    await shown();
+    expect(screen.queryByLabelText("Now")).toBeNull();
+  });
+
   it("shows the default's life and says when the life is not used", async () => {
     state.data = { ...aLife(), persona: null, enabled: false, entries: [] };
     await shown();

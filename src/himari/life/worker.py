@@ -14,6 +14,7 @@ budget first (L4: apart from the memory passes').
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
@@ -168,8 +169,11 @@ class LifeWriter:
             await self._data.fail_life_write(write_id, f"malformed answer: {error}")
             log.warning("story writer call %s thrown away: %s", write_id, error)
             return WriteOutcome.FAILED
+        now = self._clock()
+        if plan.mood is not None:  # character-state §2: the mood at the day's end — or now, if that is still to come
+            plan = dataclasses.replace(plan, mood_at=min(now, day_bounds(day, self._zone)[1]))
         try:
-            entries = await self._data.apply_life_write(write_id, plan, now=self._clock())
+            entries = await self._data.apply_life_write(write_id, plan, now=now)
         except DataError as error:
             if error.code not in (DataErrorCode.INVALID_ARGUMENT, DataErrorCode.TOO_LARGE):
                 raise
