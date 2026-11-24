@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from mcp_fake import URL, FakeMcpServer
-from mcp_stdio_fake import FakeLauncher
 from testkit import final
 
 from himari.bootstrap.application import Application, PromptRefused, UnknownToolSource
@@ -197,26 +196,6 @@ def test_another_principals_conversation_is_refused_before_anything_else(tmp_pat
         assert "prompts/get" not in server.methods
 
     run(scenario, root, mcp_transport=server.transport())
-
-
-def test_per_conversation_a_prompt_is_expanded_by_that_conversations_process(tmp_path: Path) -> None:
-    root = open_root(tmp_path, {"calliope": {"command": "/usr/bin/fake-server", "timeout_seconds": 5,
-                                             "processes": {"scope": "per_conversation", "max": 4}}})
-    launcher = FakeLauncher()
-    launcher.capabilities = {"prompts": {}}
-    launcher.prompts = [CHECK]
-
-    async def scenario(app: Application, scope: TrustedScope) -> None:
-        other = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
-        first = await app.expand_prompt(scope, "calliope", "calliope_check", {})
-        second = await app.expand_prompt(other, "calliope", "calliope_check", {})
-        again = await app.expand_prompt(scope, "calliope", "calliope_check", {})
-        assert first.endswith("from process 1") and second.endswith("from process 2") and again == first
-
-    run(scenario, root, mcp_launcher_for=lambda source, stdio: launcher)
-
-
-# --- through the Web API ------------------------------------------------------------------------
 
 
 @pytest.fixture

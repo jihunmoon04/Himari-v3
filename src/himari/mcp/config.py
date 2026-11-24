@@ -19,30 +19,10 @@ Anything unexpected is refused, never guessed: unknown keys, a URL that is
 not ``https://`` (or ``http://`` to a loopback address), a token variable
 that is not set.
 
-**stdio servers (V3-P59 §5.1).** A server has ``url`` (HTTP) or ``command``
-(stdio), never both. HIMARI runs a stdio server itself, only inside the
-server sandbox (no network; the listed directories at their host paths;
-HIMARI's data never reachable), and talks to it over its stdin/stdout::
-
-    {"servers": {"calliope": {
-        "command": "/home/coder/Calliope/.venv/bin/python",
-        "args": ["-m", "tools.mcp"],                       optional: at most 64, each at most 4096 characters
-        "cwd": "/home/coder/Calliope",                     optional: default /tmp
-        "env": {"PYTHONPATH": "."},                        optional: added to the sandbox's fixed environment
-        "env_from": ["CALLIOPE_TOKEN"],                    optional: copied from HIMARI's environment (must be set)
-        "read_only": ["/home/coder/Calliope"],             optional: at most 16 directories
-        "writable": ["/home/coder/.local/share/calliope"], optional: at most 4 directories, owned by HIMARI's user
-        "processes": {"scope": "shared", "idle_seconds": 1800, "max": 4},
-        "tools": {...}, "default": "on", "timeout_seconds": 60
-    }}}
-
-``command`` lies in a ``read_only`` directory or the system's (``/usr``,
-``/bin``, ``/sbin``, ``/lib*``), the only places visible in the sandbox.
-``processes.scope`` is ``shared`` (one process for every Conversation, the
-default) or ``per_conversation`` (one per Conversation, at most ``max``);
-``idle_seconds`` (60..86400) ends an unused process. ``token_env`` is HTTP
-only (use ``env_from``). Paths are checked again, by identity, by the
-sandbox at every launch.
+**stdio servers (V3-P59) are no longer run (V3-P109 Q2).** An entry with
+``command`` instead of ``url`` does not stop the start: its server is left
+out, and its status says why (serve it over HTTP instead). Its other keys
+are not read.
 
 **Instructions, prompts and resources (V3-P60).** ``instructions`` places
 the server's ``initialize`` instructions: ``"system"`` (default, a labelled
@@ -85,17 +65,7 @@ HASH_CHARS = 8
 _EFFECTS = {"read": EffectProfile.READ, "scoped_write": EffectProfile.SCOPED_WRITE, "unknown": EffectProfile.UNKNOWN}
 _SOURCE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _LOOPBACK_NAMES = frozenset({"localhost"})
-MAX_ARGS = 64
-MAX_ARG_CHARS = 4096
-MAX_ENV = 32
-MAX_ENV_CHARS = 4096
-MAX_READ_ONLY = 16
-MAX_WRITABLE = 4
-DEFAULT_IDLE_SECONDS = 1800.0
-DEFAULT_MAX_PROCESSES = 4
-_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_SYSTEM_DIRS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32")
-SCOPES = ("shared", "per_conversation")
+STDIO_REFUSED = "stdio servers are not run since V3-P109: serve it over HTTP (url)"
 # An origin as it appears in a CSP source list: scheme, an optional "*."
 # label, a host of DNS labels (or an IPv4 address) and an optional port.
 
@@ -109,21 +79,6 @@ class McpToolConfig:
     name: str  # the server's name for it
     tool_id: ToolId  # HIMARI's id: "<server>/<mapped name>"
     effect: EffectProfile
-
-
-@dataclass(frozen=True)
-class McpStdioConfig:
-    """How HIMARI runs a stdio server (V3-P59 §5.1)."""
-
-    command: str
-    args: tuple[str, ...]
-    cwd: str
-    env: tuple[tuple[str, str], ...] = field(repr=False)  # env_from values may be credentials
-    read_only: tuple[str, ...]
-    writable: tuple[str, ...]
-    scope: str  # "shared" | "per_conversation"
-    idle_seconds: float
-    max_processes: int  # 1 when shared
 
 
 PLACEMENTS = ("system", "data", "off")
@@ -141,12 +96,12 @@ class McpResourcePolicy:
 @dataclass(frozen=True)
 class McpServerConfig:
     name: str  # the External source: the namespace of its Tools' ids
-    url: str | None  # None: a stdio server
+    url: str | None  # None: an entry HIMARI does not run (``refused`` says why)
     token: str | None = field(repr=False)  # never in reprs, logs or tracebacks
     enabled_by_default: bool
     timeout_seconds: float
     tools: tuple[McpToolConfig, ...]
-    stdio: McpStdioConfig | None = None  # set exactly when url is None
+    refused: str | None = None  # set exactly when url is None (a stdio entry, V3-P109)
     instructions: str = "system"  # one of PLACEMENTS (V3-P60 §3)
     prompts: bool = True
     resources: McpResourcePolicy | None = field(default_factory=McpResourcePolicy)  # None: not offered
@@ -259,19 +214,14 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
             raise McpConfigError(f"{where}: a server name is lowercase letters, digits and single '-' "
                                  f"(at most {MAX_SOURCE_CHARS})")
         common = {"default", "timeout_seconds", "ui", "tools", "instructions", "prompts", "resources"}
-        if isinstance(raw, dict) and "command" in raw and "url" in raw:
-            raise McpConfigError(f"{where}: a server has either url or command, not both")
-        stdio: McpStdioConfig | None = None
-        url: str | None = None
-        if isinstance(raw, dict) and "command" in raw:
-            entry = _keys(raw, where, {"command"}, common | {
-                "args", "cwd", "env", "env_from", "read_only", "writable", "processes"})
-            stdio = _stdio(entry, where, environ)
-        else:
-            entry = _keys(raw, where, {"url"}, common | {"token_env"})
-            if not isinstance(entry["url"], str):
-                raise McpConfigError(f"{where}.url must be a string")
-            url = check_url(entry["url"])
+        if isinstance(raw, dict) and "command" in raw and "url" not in raw:  # V3-P109 §3 D10: left out, said why
+            out.append(McpServerConfig(name=name, url=None, token=None, enabled_by_default=raw.get("default") != "off",
+                                       timeout_seconds=DEFAULT_TIMEOUT_SECONDS, tools=(), refused=STDIO_REFUSED))
+            continue
+        entry = _keys(raw, where, {"url"}, common | {"token_env"})
+        if not isinstance(entry["url"], str):
+            raise McpConfigError(f"{where}.url must be a string")
+        url = check_url(entry["url"])
         token: str | None = None
         if "token_env" in entry:
             variable = entry["token_env"]
@@ -301,7 +251,6 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
         out.append(McpServerConfig(
             name=name, url=url, token=token, enabled_by_default=default == "on", timeout_seconds=float(timeout),
             tools=tuple(McpToolConfig(n, ids[n], effects[n]) for n in sorted(effects)),
-            stdio=stdio,
             instructions=_placement(entry.get("instructions", "system"), f"{where}.instructions"),
             prompts=_flag(entry.get("prompts", True), f"{where}.prompts"),
             resources=_resource_policy(entry.get("resources", True), f"{where}.resources"),
@@ -334,70 +283,6 @@ def _resource_policy(value: object, where: str) -> McpResourcePolicy | None:
     if not isinstance(uris, str) or uris not in URI_SCOPES:
         raise McpConfigError(f"{where}.uris must be one of {list(URI_SCOPES)}")
     return McpResourcePolicy(_EFFECTS[effect], uris)
-
-
-def _path(value: object, where: str) -> str:
-    if not isinstance(value, str) or not os.path.isabs(value) or os.path.normpath(value) != value or "\0" in value:
-        raise McpConfigError(f"{where} must be an absolute, normalized path")
-    return value
-
-
-def _inside(path: str, root: str) -> bool:
-    return path == root or path.startswith(root.rstrip("/") + "/")
-
-
-def _paths(value: object, where: str, limit: int) -> tuple[str, ...]:
-    if not isinstance(value, list) or len(value) > limit:
-        raise McpConfigError(f"{where} must list at most {limit} directories")
-    return tuple(_path(item, f"{where}[{i}]") for i, item in enumerate(value))
-
-
-def _stdio(entry: dict[str, object], where: str, environ: Mapping[str, str]) -> McpStdioConfig:
-    command = _path(entry["command"], f"{where}.command")
-    args = entry.get("args", [])
-    if not isinstance(args, list) or len(args) > MAX_ARGS or not all(
-            isinstance(a, str) and len(a) <= MAX_ARG_CHARS and "\0" not in a for a in args):
-        raise McpConfigError(f"{where}.args must be at most {MAX_ARGS} strings of at most {MAX_ARG_CHARS} characters")
-    cwd = _path(entry.get("cwd", "/tmp"), f"{where}.cwd")
-    read_only = _paths(entry.get("read_only", []), f"{where}.read_only", MAX_READ_ONLY)
-    writable = _paths(entry.get("writable", []), f"{where}.writable", MAX_WRITABLE)
-    if not any(_inside(command, root) for root in (*read_only, *_SYSTEM_DIRS)):
-        raise McpConfigError(f"{where}.command must lie in a read_only directory or {', '.join(_SYSTEM_DIRS[:3])}: "
-                             "nothing else is visible in the sandbox")
-    raw_env = entry.get("env", {})
-    if not isinstance(raw_env, dict):
-        raise McpConfigError(f"{where}.env must be an object of strings")
-    env: dict[str, str] = {}
-    for name, value in raw_env.items():
-        if not _ENV_NAME.fullmatch(name) or not isinstance(value, str) or len(value) > MAX_ENV_CHARS or "\0" in value:
-            raise McpConfigError(f"{where}.env.{name}: a variable name and a string of at most {MAX_ENV_CHARS} characters")
-        env[name] = value
-    names = entry.get("env_from", [])
-    if not isinstance(names, list) or not all(isinstance(n, str) and _ENV_NAME.fullmatch(n) for n in names):
-        raise McpConfigError(f"{where}.env_from must list environment variable names")
-    for name in names:
-        if name in env:
-            raise McpConfigError(f"{where}: {name} is in both env and env_from")
-        value = environ.get(name)
-        if not value:
-            raise McpConfigError(f"{where}: the environment variable {name} is not set")
-        env[name] = value
-    if len(env) > MAX_ENV:
-        raise McpConfigError(f"{where}: at most {MAX_ENV} environment variables")
-    processes = _keys(entry.get("processes", {}), f"{where}.processes", set(), {"scope", "idle_seconds", "max"})
-    scope = processes.get("scope", "shared")
-    if scope not in SCOPES:
-        raise McpConfigError(f"{where}.processes.scope must be one of {list(SCOPES)}")
-    idle = processes.get("idle_seconds", DEFAULT_IDLE_SECONDS)
-    if isinstance(idle, bool) or not isinstance(idle, (int, float)) or not 60 <= idle <= 86400:
-        raise McpConfigError(f"{where}.processes.idle_seconds must be 60..86400")
-    most = processes.get("max", DEFAULT_MAX_PROCESSES)
-    if isinstance(most, bool) or not isinstance(most, int) or not 1 <= most <= 16:
-        raise McpConfigError(f"{where}.processes.max must be 1..16")
-    if scope == "shared" and "max" in processes:
-        raise McpConfigError(f"{where}.processes.max applies to per_conversation only")
-    return McpStdioConfig(command, tuple(args), cwd, tuple(sorted(env.items())), read_only, writable, str(scope),
-                          float(idle), most if scope == "per_conversation" else 1)
 
 
 def load_config(path: str, environ: Mapping[str, str]) -> McpConfig:

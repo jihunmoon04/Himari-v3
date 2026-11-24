@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-from runnerkit import start_runner
 
 from himari.bootstrap.application import SCREEN_MAX_BYTES, Application, ScreenRefused
 from himari.common import AttachmentRef, CallId, FileId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope, thaw
@@ -99,10 +98,8 @@ def test_the_move_note_only_for_a_model_that_points_and_neither_with_the_compani
 
 
 def test_a_screen_is_a_png_or_a_jpeg(tmp_path: Path) -> None:
-    kit = start_runner(tmp_path / "runner")  # the text upload below needs the machine Environment (V3-P101)
-
     async def scenario() -> None:
-        app = await opened(tmp_path, answers(companion=True), machine_socket=kit.socket, machine_principals=(ME,))
+        app = await opened(tmp_path, answers(companion=True), machine_principals=(ME,))  # the upload needs a folder
         try:
             scope = TrustedScope(ME, await app.create_conversation(ME))
             before = app.data.blobs.rows.live_total()
@@ -120,10 +117,7 @@ def test_a_screen_is_a_png_or_a_jpeg(tmp_path: Path) -> None:
         finally:
             await app.close()
 
-    try:
-        asyncio.run(scenario())
-    finally:
-        kit.close()
+    asyncio.run(scenario())
 
 
 def test_the_screen_mark_is_kept_only_when_true() -> None:

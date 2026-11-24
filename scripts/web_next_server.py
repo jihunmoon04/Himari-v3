@@ -149,8 +149,9 @@ def main() -> None:
                        "scripted-model", None, False)
 
     async def opener() -> Application:
+        # No Conversation folders (V3-P109: no machine principal), so uploads are refused, as the checks expect.
         application = await Application.open(data, scripted(), model_id="scripted-model", sandbox=False,
-                                             cleanup_seconds=None)
+                                             cleanup_seconds=None, machine_principals=())
         out = Path(args.token_out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(application.operator_secret, encoding="ascii")

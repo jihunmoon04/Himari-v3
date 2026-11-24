@@ -6,6 +6,7 @@ One data root, private to the server user::
         himari.db (+ .lock)      SQLite Data (V3-P42), 0600
         control/operator.secret  the local operator's credential (0600)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
+        conversations/<id>/      each Conversation's own folder (0700, V3-P109)
 
 ``Application.open`` checks the layout, opens the store (single writer),
 starts the Sandbox when asked and the host supports it, and composes the
@@ -157,11 +158,10 @@ from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
 from himari.sandbox.backend import discover_capability, supports_tmp_size
 from himari.sandbox.server import ServerSandbox
-from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, load_config
+from himari.mcp.config import CONFIG_NAME, load_config
 from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
-from himari.mcp.stdio import ProcessLauncher
-from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
+from himari.mcp.tools import McpConnection, PromptArgument, SourceStatus, connect
 from himari.prompt.api import (
     DOCUMENTS_READ_NOTE,
     ContextBudget,
@@ -175,6 +175,7 @@ from himari.tool.memory import MEMORY_FORGET, MEMORY_SAVE
 from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
+CONVERSATIONS_NAME = "conversations"  # V3-P109 §3 D1: <data root>/conversations/<conversation id>
 DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 DEFAULT_TIME_ZONE = "Asia/Seoul"  # V3-P83 §6.4: HIMARI_TIME_ZONE when unset
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
@@ -578,24 +579,6 @@ def _documents_notes(reader: DocumentReader | None, toolkit: Toolkit | None) -> 
     return (DOCUMENTS_READ_NOTE,)
 
 
-async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None:
-    """The server sandbox for stdio servers (V3-P59 §4), made only when one is
-    configured. HIMARI's data root — the database, the operator secret,
-    mcp.json and every Workspace — is the root it protects, fixed for every
-    launch. Not ENFORCED: no stdio server starts (the reason is shown)."""
-    if not any(server.stdio is not None for server in config.servers):
-        return None
-    sandbox = ServerSandbox.discover([str(root)])
-    state = await sandbox.start()
-
-    def launcher_for(source: str, stdio: McpStdioConfig) -> ProcessLauncher:
-        if state is not SandboxState.ENFORCED:
-            raise RuntimeError(f"stdio servers run only in the server sandbox, which is {state.value} on this host")
-        return sandbox.launcher(ServerProfile(stdio.read_only, stdio.writable))
-
-    return launcher_for
-
-
 @dataclass(frozen=True)
 class AutoMemoryStatus:
     """V3-P85 §10.3: automatic memory as the Memory screen tells it."""
@@ -711,10 +694,12 @@ class Application:
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
     companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
-    # V3-P74: the machine Environment (its runner's socket was configured) and
+    # V3-P74, V3-P109: the machine Environment (each Conversation's folder under the data root) and
     # the principals whose new Conversations use it (Q1); the others only talk (V3-P101).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
+    # V3-P109 review: the folders a purge removes, whoever may still use them (also with no machine principal).
+    folders: MachineEnvironment | None = None
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -751,7 +736,6 @@ class Application:
         instructions: Sequence[str] | None = None,
         environ: Mapping[str, str] | None = None,  # where mcp.json's token variables are read
         mcp_transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake MCP server
-        mcp_launcher_for: LauncherFor | None = None,  # tests: stdio servers without the server sandbox
         max_runs: int = MAX_RUNS,
         # The offered models with their default efforts (V3-P64 §3), in the
         # operator's order; empty: ``model_id`` alone. The default model's
@@ -775,8 +759,7 @@ class Application:
         companion_default_model: str | None = None,  # V3-P92: None selects the offered companion default automatically
         companion_models_only: bool = False,  # only models satisfying all companion features (needs screen_tool, screen_points, image_input, speaks_first, free_wake)
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
-        machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
-        machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
+        machine_principals: Iterable[str] = ("operator",),  # V3-P74 Q1: whose new Conversations have a folder; (): none
         proactive: ProactiveSettings | None = None,  # V3-P87 §11: HIMARI_PROACTIVE…; None: off
     ) -> Application:
         speaking_first = proactive if proactive is not None else ProactiveSettings()
@@ -841,27 +824,20 @@ class Application:
         toolkit: Toolkit | None = None
         try:
             store.blobs.configure(max_bytes=file_store_max_bytes, keep_days=file_keep_days)
-            launcher_for = mcp_launcher_for
-            if launcher_for is None and sandbox:
-                launcher_for = await _server_launchers(mcp_config, root)
-            mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport,
-                                launcher_for=launcher_for)
+            mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport)
             saved_defaults = read_defaults(root / "control/mcp-defaults.json")
             mcp.statuses = tuple(replace(s, enabled_by_default=saved_defaults.get(s.source, s.enabled_by_default))
                                  for s in mcp.statuses)
             toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
+            machine_allowed = frozenset(PrincipalId(p) for p in machine_principals)
             machine = None
-            if machine_socket is not None:
-                machine = MachineEnvironment(machine_socket,
+            if machine_allowed:  # V3-P109 §3 D1: each Conversation's folder under the data root
+                machine = MachineEnvironment(str(root / CONVERSATIONS_NAME),
                                              files=ToolFiles(store.blobs, SqliteData(store), file_max_bytes),
                                              documents=reader)
-                try:
-                    hello = await machine.hello()
-                    log.info("machine runner: HIMARI home %s", hello.get("himari_home"))
-                except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
-                    log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
+                log.info("conversation folders: %s", machine.root)
             else:
-                log.warning("HIMARI_MACHINE_SOCKET is not set: Conversations only talk (no files or uploads; V3-P101)")
+                log.warning("no principal has conversation folders: Conversations only talk (no files or uploads)")
             log.info("documents: read_document %s%s", documents_reason,
                      f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
             uploads_work = machine is not None
@@ -871,7 +847,6 @@ class Application:
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
             screens = ScreenRequests(hub) if companion else None  # V3-P91: the screen Tool's requests
-            machine_allowed = frozenset(PrincipalId(p) for p in machine_principals)
             runtime = build_runtime(provider, store=store, environments=[machine] if machine else [],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -916,6 +891,7 @@ class Application:
                           presence=hub, events=events)
         application.time_zone = time_zone
         application.proactive = speaking_first
+        application.folders = machine if machine is not None else MachineEnvironment(str(root / CONVERSATIONS_NAME))
         if screens is not None:
             screens.job_of = lambda scope: runner.status(scope).job_id  # §6: the app's move context
             application.screens = screens
@@ -1590,8 +1566,9 @@ class Application:
         async with self._exclusive(scope.conversation_id):
             trashed = await self.data.begin_purge(scope)  # owner and state first
             workspace = trashed.workspace
-            if workspace is not None and self.machine is not None and self.machine.owns(workspace.workspace_id):
-                await self.machine.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            folders = self.folders or self.machine
+            if workspace is not None and folders is not None and folders.owns(workspace.workspace_id):
+                await folders.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
             # An old Inside folder (<data>/workspaces) is left: V3-P101 removes it by hand.
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)

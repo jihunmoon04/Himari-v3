@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 from mcp_fake import URL, FakeMcpServer
-from mcp_stdio_fake import FakeLauncher
 from testkit import calls, final, user
 
 from himari.bootstrap.application import Application
@@ -25,7 +24,6 @@ from himari.data.api import ToolExecutionStatus
 from himari.mcp import resources as resources_module
 from himari.mcp.config import parse_config
 from himari.mcp.resources import OMITTED, PAGE_CHARS, ResourceTool
-from himari.mcp.stdio import RESTART_NOTICE
 from himari.mcp.tools import McpConnection, connect
 from himari.mcp.uritemplate import UriTemplate
 from himari.provider.scripted import ScriptedAdapter
@@ -53,13 +51,6 @@ async def open_http(server: FakeMcpServer, declared: tuple[str, ...] = ("tools",
     server.capabilities = {name: {} for name in declared}
     entry = {"url": URL, "tools": {"echo": {"effect": "read"}}, **changes}
     return await connect(config_of(entry), check_schema=check_tool_input_schema, transport=server.transport())
-
-
-async def open_stdio(launcher: FakeLauncher, **changes: Any) -> McpConnection:
-    launcher.capabilities = {"tools": {}, "resources": {}}
-    entry = {"command": "/usr/bin/fake-server", "timeout_seconds": 5, "tools": {"echo": {"effect": "read"}}, **changes}
-    return await connect(config_of(entry), check_schema=check_tool_input_schema,
-                         launcher_for=lambda source, stdio: launcher)
 
 
 def tool(connection: McpConnection, name: str) -> ResourceTool:
@@ -517,62 +508,6 @@ def test_http_a_session_renewed_at_the_read_is_judged_again_on_the_new_one(monke
         await connection.aclose()
 
     run(scenario)
-
-
-def test_stdio_a_process_replaced_between_list_and_read_is_judged_again() -> None:
-    """C6 on stdio: the process that was judged ends before the read; the
-    read is not sent to the new process until its own list allows it."""
-    launcher = FakeLauncher()
-    launcher.listed_for = lambda index: [{"uri": GLOSSARY, "name": "g"}] if index == 1 else []
-    launcher.resources = {GLOSSARY: answer(text_entry(GLOSSARY, "g"))}
-    launcher.after_method["resources/list"] = lambda process: process.crash()  # once: process 1, right after its list
-
-    async def scenario() -> None:
-        connection = await open_stdio(launcher)
-        outcome = await use(connection, "read_resource", uri=GLOSSARY)
-        assert outcome.status is ToolStatus.FAILED and "neither lists it" in text_of(outcome)
-        assert len(launcher.processes) == 3  # listing, the judged one, its replacement
-        assert "resources/read" not in launcher.lines(1) + launcher.lines(2)
-        await connection.aclose()
-
-    run(scenario)
-
-
-def test_stdio_after_a_replacement_the_new_process_is_read_and_says_so() -> None:
-    launcher = FakeLauncher()
-    launcher.listed = [{"uri": GLOSSARY, "name": "g"}]
-    launcher.resources = {GLOSSARY: answer(text_entry(GLOSSARY, "g"))}
-
-    async def scenario() -> None:
-        connection = await open_stdio(launcher)
-        assert (await use(connection, "read_resource", uri=GLOSSARY)).status is ToolStatus.SUCCEEDED
-        launcher.processes[1].crash()
-        await asyncio.sleep(0.05)
-        outcome = await use(connection, "read_resource", uri=GLOSSARY)
-        assert outcome.status is ToolStatus.SUCCEEDED and text_of(outcome).startswith(RESTART_NOTICE)
-        assert launcher.lines(2).count("resources/list") == 1  # judged on its own list
-        await connection.aclose()
-
-    run(scenario)
-
-
-def test_per_conversation_a_uri_one_process_lists_is_not_read_by_another_conversation() -> None:
-    launcher = FakeLauncher()
-    launcher.listed_for = lambda index: [{"uri": GLOSSARY, "name": "g"}] if index == 1 else []
-    launcher.resources = {GLOSSARY: answer(text_entry(GLOSSARY, "g"))}
-
-    async def scenario() -> None:
-        connection = await open_stdio(launcher, processes={"scope": "per_conversation", "max": 4})
-        assert (await use(connection, "read_resource", "conv-a", uri=GLOSSARY)).status is ToolStatus.SUCCEEDED
-        refused = await use(connection, "read_resource", "conv-b", uri=GLOSSARY)
-        assert refused.status is ToolStatus.FAILED
-        assert "resources/read" not in launcher.lines(2)
-        await connection.aclose()
-
-    run(scenario)
-
-
-# --- how they are offered ----------------------------------------------------------------------------
 
 
 def test_effect_is_unknown_by_default_and_the_operators_otherwise() -> None:

@@ -260,8 +260,8 @@ const PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQD
 
 test("files are taken from the button and from a paste; one the server refuses says why and is not sent", async ({ page, isMobile }) => {
   test.skip(isMobile, "the conversations list is a drawer there");
-  // This server has no machine runner, so it takes no uploads (V3-P101): each file says so, and the message goes
-  // without it. An upload that is taken is checked on a server with a runner.
+  // This server gives no Conversation a folder (machine_principals=(), V3-P109), so it takes no uploads: each file
+  // says so, and the message goes without it. An upload that is taken is checked in the Python tests.
   const done = await watch(page);
   await signIn(page);
   await page.getByRole("list", { name: "Conversations" }).getByRole("link", { name: /W6A-COPY/ }).click();

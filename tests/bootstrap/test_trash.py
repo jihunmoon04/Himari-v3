@@ -4,12 +4,11 @@ permanent delete, one at a time per Conversation, and the periodic purge."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from runnerkit import RunnerKit, start_runner
 from testkit import RecordingTool, calls, final, text_result, user
 
 from himari.bootstrap import application as application_module
@@ -30,17 +29,6 @@ from himari.provider.scripted import ScriptedAdapter, ScriptStep
 from himari.tool.api import ToolContext, ToolInvocation, ToolOutcome, ToolStatus
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
-KIT: RunnerKit | None = None
-
-
-@pytest.fixture(autouse=True)
-def runner(tmp_path: Path) -> Iterator[RunnerKit]:
-    """The machine Environment's runner (V3-P101): a Conversation's own folder lives there."""
-    global KIT
-    KIT = start_runner(tmp_path / "runner")
-    yield KIT
-    KIT.close()
-    KIT = None
 
 
 class HoldingTool(RecordingTool):
@@ -67,8 +55,6 @@ class HoldingTool(RecordingTool):
 
 async def open_app(root: Path, script: Sequence[ScriptStep] = (), **kwargs: object) -> Application:
     kwargs.setdefault("cleanup_seconds", None)
-    assert KIT is not None
-    kwargs.setdefault("machine_socket", KIT.socket)
     kwargs.setdefault("machine_principals", (ALICE, BOB))
     return await Application.open(root, ScriptedAdapter(script), model_id="scripted-model", sandbox=False,
                                   **kwargs)  # type: ignore[arg-type]
@@ -77,8 +63,8 @@ async def open_app(root: Path, script: Sequence[ScriptStep] = (), **kwargs: obje
 async def conversation(app: Application, owner: PrincipalId = ALICE) -> tuple[TrustedScope, Path]:
     """A Conversation and its own folder, with a file in it."""
     scope = TrustedScope(owner, await app.create_conversation(owner))
-    assert KIT is not None
-    folder = KIT.himari_home / "conversations" / scope.conversation_id
+    assert app.machine is not None  # V3-P109: the Conversation's folder is under the data root
+    folder = Path(app.machine.root) / scope.conversation_id
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "notes.txt").write_text("mine")
     return scope, folder

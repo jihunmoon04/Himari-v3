@@ -5,9 +5,11 @@ used for is a profile. Bootstrap builds the backends and hands them to their
 consumers, which see only this module (or, for the MCP connector, a Protocol
 of their own with the same shape: V3-059).
 
-- **Server** (stdio MCP servers, V3-P59 §4): a long-lived process with pipes,
-  the operator's ``read_only`` and ``writable`` directories bound at their
-  host paths, no network. It has its own self-test and state.
+- **Server** (V3-P59 §4): a process with pipes, its ``read_only`` and
+  ``writable`` directories bound at their host paths, no network. It has
+  its own self-test and state. Its users are the image copies (V3-P67) and
+  the document reader (V3-P70); stdio MCP servers, its first user, are no
+  longer run (V3-P109).
 
 States::
 
@@ -80,7 +82,7 @@ def validate_argv(argv: object) -> list[str]:
 
 @dataclass(frozen=True)
 class ServerProfile:
-    """What one stdio server's process may reach (V3-P59 §4.1). Paths are
+    """What one server-profile process may reach (V3-P59 §4.1). Paths are
     absolute host directories, bound at the same paths inside. The roots
     whose contents must not be reachable are fixed by the server sandbox
     itself (HIMARI's data root, which holds the Workspaces) and checked by

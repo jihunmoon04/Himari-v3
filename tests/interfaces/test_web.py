@@ -5,7 +5,6 @@ Environment through an in-process runner, V3-P101)."""
 from __future__ import annotations
 
 import asyncio
-import itertools
 import threading
 import time
 from collections.abc import Iterator
@@ -20,7 +19,6 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import FakeMcpServer  # noqa: E402
-from runnerkit import start_runner  # noqa: E402
 from testkit import NoWakes, calls, final  # noqa: E402
 
 from himari.bootstrap import application as bootstrap  # noqa: E402
@@ -36,7 +34,6 @@ from himari.provider.api import ProviderCapabilities  # noqa: E402
 from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep  # noqa: E402
 
 ORIGIN = "http://testserver"
-_RUNNERS = itertools.count()
 
 
 def config(tmp_path: Path) -> WebConfig:
@@ -52,17 +49,21 @@ class Server:
                  models: tuple[tuple[str, str | None], ...] = ()) -> None:
         self.provider = ScriptedAdapter(script) if provider is None else provider
         self.application: Application | None = None
-        self.kit = start_runner(tmp_path / f"runner{next(_RUNNERS)}")
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
                                                       sandbox=False, context_tokens=context_tokens,
-                                                      machine_socket=self.kit.socket,
                                                       mcp_transport=None if mcp is None else mcp.transport(),
                                                       models=models, **(turn or {}))
             return self.application
 
         self.client = TestClient(web.create_app(config(tmp_path), opener))
+
+    @property
+    def machine_root(self) -> str:
+        """Where the Conversations' own folders are (V3-P109: under the data root)."""
+        assert self.application is not None and self.application.machine is not None
+        return self.application.machine.root
 
     @property
     def secret(self) -> str:
@@ -91,7 +92,6 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
     s = Server(tmp_path, [])
     with s.client:
         yield s
-    s.kit.close()
 
 
 def queue(server: Server, *steps: ScriptStep) -> None:
@@ -814,7 +814,7 @@ def test_trash_restore_and_delete_for_good(server: Server) -> None:
     server.post(f"/api/conversations/{cid}/messages", {"text": "write it down"})
     server.wait_idle(cid)
     assert server.application is not None
-    folder = server.kit.himari_home / "conversations" / cid
+    folder = Path(server.machine_root) / cid
     assert (folder / "plan.txt").read_text() == "draft"
     assert server.client.get(f"/api/conversations/{cid}/delete-notice").json() == {
         "servers": [], "unconfigured": [], "running": False, "trash_days": 30,

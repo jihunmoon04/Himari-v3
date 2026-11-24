@@ -77,6 +77,7 @@ class FakeMcpServer:
         self.prompt_messages: dict[str, list[dict[str, Any]]] = {}
         self.methods: list[str] = []
         self.initialize_delay = 0.0
+        self.prompts_list_delay = 0.0  # seconds before answering prompts/list
         # V3-P60 §5: resources/list and resources/templates/list (None: the method is unknown).
         self.listed: list[Any] = []
         self.templates: list[Any] | None = []
@@ -129,6 +130,8 @@ class FakeMcpServer:
             return httpx.Response(404 if "mcp-session-id" in request.headers else 400)
         self.methods.append(method)
         if method == "prompts/list":
+            if self.prompts_list_delay:
+                await asyncio.sleep(self.prompts_list_delay)
             return self._answer(request_id, {"prompts": self.prompts})
         if method == "prompts/get":
             if self.prompt_delay.get(params["name"]):

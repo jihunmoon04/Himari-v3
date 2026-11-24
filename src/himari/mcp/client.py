@@ -1,8 +1,8 @@
 """A minimal MCP client (the initialize-handshake revisions, 2025-03-26 .. 2025-11-25).
 
 Three layers (V3-P59 §5.2): ``McpClient`` holds the operations HIMARI uses
-over a ``Channel`` (how messages travel: ``HttpChannel`` here, a stdio
-channel beside it); ``revision`` says how a connection starts; ``jsonrpc``
+over a ``Channel`` (how messages travel: ``HttpChannel``; stdio was
+removed by V3-P109); ``revision`` says how a connection starts; ``jsonrpc``
 matches answers to requests and says what an answer means.
 
 Only what HIMARI uses: ``initialize``, ``tools/list``, ``tools/call``,
@@ -99,6 +99,11 @@ CANCEL_SECONDS = 5.0  # sending one cancellation notification
 MAX_TOOL_PAGES = 20
 
 
+# Said once on a result when a key's calls moved to a new connection (``take_restart``, V3-P59 §5.3).
+RESTART_NOTICE = ("This server was restarted: identifiers from its earlier answers may no longer apply; "
+                  "check them before relying on them.")
+
+
 class _SessionExpired(Exception):
     pass
 
@@ -107,8 +112,8 @@ class Channel(Protocol):
     """How one server's messages travel. ``start`` connects (and returns the
     server's ``initialize`` result); ``request`` sends one request and
     returns its result, starting or renewing the connection as needed.
-    ``key`` is the calling Conversation (a stdio server may run a process
-    per Conversation); ``take_restart`` says, once, that the key's calls
+    ``key`` is the calling Conversation (a connection may be one
+    Conversation's); ``take_restart`` says, once, that the key's calls
     moved to a new connection since its previous answer.
 
     Sessions (V3-P60 C6): ``current_session`` names the session the key's

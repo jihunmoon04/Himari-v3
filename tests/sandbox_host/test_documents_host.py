@@ -90,13 +90,13 @@ def _pdf() -> bytes:
     return subprocess.run(["/usr/bin/python3", "-I", "-S", "-c", code], capture_output=True, check=True).stdout
 
 
-def test_the_application_opens_the_toolkit_and_tells_nothing_without_the_runner(tmp_path: Path) -> None:
+def test_the_application_opens_the_toolkit_and_tells_nothing_without_folders(tmp_path: Path) -> None:
     async def go() -> None:
         app = await Application.open(tmp_path / "data", ScriptedAdapter([]), model_id="m", cleanup_seconds=None,
-                                     documents_dir=BASE, documents_owners=ME)
+                                     documents_dir=BASE, documents_owners=ME, machine_principals=())
         try:
-            assert app.documents is not None  # no runner here (V3-P101)
-            # read_document is the machine Environment's: without the runner the model is not told of it.
+            assert app.documents is not None and app.machine is None  # nobody has folders (V3-P101, V3-P109)
+            # read_document is the machine Environment's: without it the model is not told of it.
             assert DOCUMENTS_READ_NOTE not in app.runtime.driver._loader._system.documents  # type: ignore[attr-defined]
         finally:
             await app.close()

@@ -19,8 +19,6 @@ on:
       - "src/himari/sandbox/**"
       - "tests/mcp/**"
       - "tests/mcp_fake.py"
-      - "tests/mcp_stdio_fake.py"
-      - "tests/bootstrap/test_stdio_application.py"
       - "tests/scripts/test_mcp_conformance_client.py"
       - "pyproject.toml"
       - "scripts/mcp_conformance/**"
@@ -63,5 +61,5 @@ jobs:
       - name: Show the HTTP stack it got
         run: pip show httpx httpcore | grep -E "^(Name|Version)"
       - name: MCP tests
-        run: python -m pytest -q tests/mcp tests/bootstrap/test_stdio_application.py tests/scripts/test_mcp_conformance_client.py
+        run: python -m pytest -q tests/mcp tests/scripts/test_mcp_conformance_client.py
 

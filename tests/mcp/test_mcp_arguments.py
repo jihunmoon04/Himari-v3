@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 from mcp_fake import URL, FakeMcpServer
-from mcp_stdio_fake import FakeLauncher
 from testkit import calls, final, user
 
 from himari.bootstrap.application import Application
@@ -77,24 +76,6 @@ def test_nested_arguments_reach_an_http_server_intact() -> None:
     run(scenario)
 
 
-def test_nested_arguments_reach_a_stdio_server_intact() -> None:
-    launcher = FakeLauncher()
-    launcher.tools = [SUBMIT]
-    launcher.handlers["submit"] = answer
-
-    async def scenario() -> None:
-        connection = await connect(
-            config_of({"command": "/usr/bin/fake-server", "timeout_seconds": 5,
-                       "tools": {"submit": {"effect": "scoped_write"}}}),
-            check_schema=check_tool_input_schema, launcher_for=lambda source, stdio: launcher)
-        outcome = await invoke(connection, NESTED)
-        assert outcome.status is ToolStatus.SUCCEEDED
-        assert [arguments for _, name, arguments in launcher.calls() if name == "submit"] == [NESTED]
-        await connection.aclose()
-
-    run(scenario)
-
-
 def test_a_claimed_call_with_nested_arguments_runs_through_the_application(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir(mode=0o700)
@@ -124,7 +105,6 @@ def test_a_claimed_call_with_nested_arguments_runs_through_the_application(tmp_p
 def test_what_cannot_be_encoded_is_refused_unsent(bad: float) -> None:
     """Strict JSON: such a request is refused (it never left), never uncertain."""
     server = FakeMcpServer()
-    launcher = FakeLauncher()
 
     async def scenario() -> None:
         http = await connect(config_of({"url": URL, "tools": {"echo": {"effect": "read"}}}),
@@ -134,16 +114,5 @@ def test_what_cannot_be_encoded_is_refused_unsent(bad: float) -> None:
             await http.by_source["calliope"].call_tool("echo", {"text": bad}, key="conv-a")
         assert len(server.requests) == sent  # nothing went out
         await http.aclose()
-        stdio = await connect(
-            config_of({"command": "/usr/bin/fake-server", "timeout_seconds": 5, "tools": {"echo": {"effect": "read"}}}),
-            check_schema=check_tool_input_schema, launcher_for=lambda source, s: launcher)
-        client = stdio.by_source["calliope"]
-        await client.call_tool("echo", {"text": "first"}, key="conv-a")
-        with pytest.raises(McpRefused, match="could not be encoded"):
-            await client.call_tool("echo", {"text": bad}, key="conv-a")
-        session = client.current_session("conv-a")
-        assert session is not None and not session.busy  # type: ignore[attr-defined]  # no request left waiting
-        assert (await client.call_tool("echo", {"text": "after"}, key="conv-a"))["content"][0]["text"] == "echo: after"
-        await stdio.aclose()
 
     run(scenario)
