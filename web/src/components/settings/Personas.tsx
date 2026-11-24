@@ -15,13 +15,19 @@ const field = "block w-full rounded-lg border border-line bg-bg p-2 text-sm outl
 const why = (failure: unknown, fallback: string) => (failure instanceof ApiError ? failure.message : fallback);
 const NEXT_TURN = "Used from each conversation's next turn.";
 
-// §6.3: what a first persona opens with; only a guide, sent to HIMARI as the user leaves it.
+// §6.3, §14: what a first persona opens with; only a guide, sent to HIMARI as the user leaves it.
 export const STARTER = [
   "이름:",
   "나와의 관계: (예: 오래 알고 지낸 친구)",
+  "어디서 왔고 지금 어디에 있는지: (예: 다른 세계에서 왔고, 지금은 내 컴퓨터 화면에 산다)",
   "나를 부르는 말:",
   "말투: (반말/존댓말, 문장 길이, 자주 쓰는 표현)",
+  "대사 예시: (이 캐릭터가 할 법한 말 서너 개)",
+  "- ",
+  "- ",
+  "- ",
   "성격:",
+  "습관:",
   "좋아하는 것 / 싫어하는 것:",
   "하지 않는 것: (예: 지나친 칭찬, 이모지)",
 ].join("\n");

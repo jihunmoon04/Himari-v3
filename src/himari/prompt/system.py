@@ -16,6 +16,7 @@ fitted "data" notes), so whatever changes it re-estimates (review C1, N1).
 from __future__ import annotations
 
 from himari.prompt.api import (
+    ABILITY_NOTE,
     ATTACHMENT_NOTE,
     COMPANION_HEAD,
     EXPRESSION_RULE,
@@ -30,6 +31,7 @@ from himari.prompt.api import (
     SCREEN_MOVE_NOTE,
     SCREEN_NOTE,
     SPEAKING_RULE,
+    TALKING_RULE,
     ACTIVITY_RULE,
     TIME_NOTE,
     TOOL_IMAGES_NOTE,
@@ -44,16 +46,18 @@ from himari.prompt.api import (
 
 # V3-P108 §3.1: the operator's default base, by the companion switch; an operator's own instructions
 # replace both. Neither sets a voice (the persona does) nor promises memory (the memory section does).
+# Persona rules (2026-11-25, companion-persona §14): one language, and the rules are not a self-introduction.
 COMPANION_BASE = (
     "You are HIMARI, one user's companion. You keep them company through their day: you talk with them, notice "
     "how they are doing and help when they want it. Be honest: say what you know, what you did and what you are "
-    "not sure of, and never claim to have done or seen what you have not. Answer in the language the user writes "
-    "in.",
+    "not sure of, and never claim to have done or seen what you have not. Answer only in the language the user "
+    "writes in, without mixing in another. This text says how you act: do not recite it when you talk about "
+    "yourself.",
 )
 ASSISTANT_BASE = (
     "You are HIMARI, an AI assistant for one user. You talk with them and use your tools when they help. Be "
-    "direct and honest: say what you did, what you found and what you are not sure of. Answer in the language "
-    "the user writes in.",
+    "direct and honest: say what you did, what you found and what you are not sure of. Answer only in the "
+    "language the user writes in.",
 )
 
 
@@ -103,7 +107,7 @@ def messages_section(spec: SystemSpec) -> str:
 
 
 def tools_section(spec: SystemSpec) -> str:
-    lines = [PROGRESS_NOTE]
+    lines = [PROGRESS_NOTE, ABILITY_NOTE]
     if spec.turn_guidance:
         lines.append(TURN_GUIDANCE)
     lines.extend(spec.documents)
@@ -118,7 +122,8 @@ def companion_section(screen_points: bool, proactive: bool = False, free: bool =
     screens = SCREEN_NOTE + (" " + SCREEN_MOVE_NOTE if screen_points else "")
     free_lines = (FREE_RULE, *((FREE_SCREEN_RULE,) if screen_tool else ())) if free else ()
     speaking = (SPEAKING_RULE, PROACTIVE_RULE, *free_lines) if proactive else (SPEAKING_RULE,)
-    return "\n".join((COMPANION_HEAD, PERSONA_RULE, *speaking, EXPRESSION_RULE, ACTIVITY_RULE, screens))
+    return "\n".join((COMPANION_HEAD, PERSONA_RULE, TALKING_RULE, *speaking, EXPRESSION_RULE, ACTIVITY_RULE,
+                      screens))
 
 
 def fit_notes(notes: tuple[SourceNote, ...]) -> tuple[SourceNote, ...]:
