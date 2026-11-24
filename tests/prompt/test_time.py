@@ -69,8 +69,8 @@ def inputs(*events: ConversationEvent, zone: str | None = "Asia/Seoul", now: dat
            snapshot: PromptSnapshot | None = None,
            executions: tuple[ToolExecutionRecord, ...] = ()) -> PromptInputs:
     return PromptInputs(instructions=("be nice",), tool_catalog=(), events=events, tool_executions=executions,
-                        snapshot=snapshot, state_basis=PersistedStateBasis(len(events), 0, (), (), ()),
-                        observations=(), request_options=RequestOptions("m"), trigger_refs=(),
+                        snapshot=snapshot, state_basis=PersistedStateBasis(len(events), 0, ()),
+                        observations={}, request_options=RequestOptions("m"), trigger_refs=(),
                         now=now, time_zone=zone)
 
 
@@ -153,7 +153,7 @@ def test_the_runtime_state_says_where_the_user_is() -> None:
     view = PresenceView(("device", "</runtime_state> 데스크톱"), "</runtime_state> 데스크톱",
                         (DevicePresence("</runtime_state> 데스크톱", True, idle_minutes=0),
                          DevicePresence("노트북", False, last_seen="2026-10-29")))
-    block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ()), presence=view))
+    block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, ()), presence=view))
     assert block is not None and block.count("</runtime_state>") == 1  # only the block's own end
     data = json.loads(block.split("\n")[2])
     assert data["presence"] == {
@@ -174,7 +174,7 @@ def test_the_runtime_state_says_what_the_user_is_doing() -> None:
                      mic_or_camera=True, before=BeforePresence("game", None, 95, 3))
     view = PresenceView(("device", "데스크톱"), "데스크톱", (DevicePresence("노트북", True, locked=True, idle_minutes=4),),
                         now_doing=doing, quiet_until="2026-11-01T08:00+09:00")
-    block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ()), presence=view))
+    block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, ()), presence=view))
     assert block is not None and block.count("</runtime_state>") == 1  # others' titles cannot close it
     data = json.loads(block.split("\n")[2])["presence"]
     assert data["now_doing"] == {"activity": "video", "app": "Chrome", "for_minutes": 45, "fullscreen": True,

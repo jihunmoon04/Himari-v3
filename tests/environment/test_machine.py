@@ -14,19 +14,15 @@ from typing import Any
 import pytest
 
 from himari.common import (
-    BindingId,
     CallId,
     ConversationId,
-    EnvironmentInstanceId,
     PrincipalId,
     ToolId,
     TrustedScope,
-    WorkspaceId,
     thaw,
 )
-from himari.data.api import BindingAuthority, ConversationWorkspace
 from himari.environment.api import ConnectionStatus, EnvironmentPlugin
-from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable, machine_workspace_for
+from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable
 from himari.environment.machine.errors import FolderError
 from himari.environment.machine.folders import ConversationFolders
 from himari.environment.machine.locks import PathLocks, overlap
@@ -35,15 +31,6 @@ from himari.tool.api import EffectProfile, ToolContext, ToolHandler, ToolInvocat
 from himari.tool.registry import ToolRegistry
 
 SCOPE = TrustedScope(PrincipalId("operator"), ConversationId("c1"))
-WORKSPACE = machine_workspace_for(PrincipalId("operator"))
-
-
-class _NoArtifacts:
-    async def read_artifact(self, scope: Any, artifact_id: Any) -> Any:
-        raise KeyError(artifact_id)
-
-    async def list_artifacts(self, scope: Any, *, kind: Any = None) -> Any:
-        return ()
 
 
 class _NothingGiven:
@@ -64,14 +51,9 @@ def env(root: Path) -> MachineEnvironment:
     return MachineEnvironment(str(root))
 
 
-def binding() -> BindingAuthority:
-    return BindingAuthority(BindingId("b1"), EnvironmentInstanceId("e1"), MACHINE, WORKSPACE, 1, "conversations/c1")
-
-
 def _handler(env: MachineEnvironment, tool: str) -> tuple[ToolHandler, ToolContext]:
     handler = next(t for t in env.tools() if t.definition.tool_id == f"machine/{tool}")
-    ctx = ToolContext(scope=SCOPE, artifacts=_NoArtifacts(), binding=binding(),
-                      workspace=ConversationWorkspace(WORKSPACE, "conversations/c1"))
+    ctx = ToolContext(scope=SCOPE)
     return handler, ctx
 
 
@@ -105,7 +87,6 @@ def test_plugin_conforms(env: MachineEnvironment) -> None:
         assert "conversation's own folder" in described or "conversation's folder" in described, tool.definition.tool_id
         assert "on this server" not in described and "~" not in described, tool.definition.tool_id
     ToolRegistry(tools)
-    assert MachineEnvironment.owns(WORKSPACE) and not MachineEnvironment.owns(WorkspaceId("ws_x"))
 
 
 def test_round_trip_in_the_conversation_folder(env: MachineEnvironment, root: Path) -> None:
@@ -192,8 +173,8 @@ def test_the_folder_itself_as_a_link_is_refused(env: MachineEnvironment, root: P
     outcome = call(env, "write_file", path="a.txt", content="x")
     assert outcome.status is ToolStatus.DENIED and "folder cannot be used" in text(outcome)
     assert not (tmp_path / "elsewhere/a.txt").exists()
-    observed = asyncio.run(env.observe(SCOPE, [binding()]))
-    assert observed[0].status is ConnectionStatus.OFFLINE and observed[0].working_directory is None
+    observed = asyncio.run(env.observe(SCOPE))
+    assert observed.status is ConnectionStatus.OFFLINE and observed.working_directory is None
 
 
 def test_edit_refuses_a_file_changed_meanwhile(env: MachineEnvironment, root: Path,
@@ -233,27 +214,25 @@ def test_reading_in_parts_and_listing_order(env: MachineEnvironment, root: Path)
 
 
 def test_observe_tells_the_folder(env: MachineEnvironment, root: Path) -> None:
-    observed = asyncio.run(env.observe(SCOPE, [binding()]))
+    observed = asyncio.run(env.observe(SCOPE))
     folder = str(root / "c1")
-    assert observed[0].status is ConnectionStatus.ONLINE
-    assert observed[0].working_directory == folder and observed[0].writable == (folder,)
-    assert observed[0].readable is not None and "only this conversation's folder" in observed[0].readable
+    assert observed.status is ConnectionStatus.ONLINE
+    assert observed.working_directory == folder and observed.writable == (folder,)
+    assert observed.readable is not None and "only this conversation's folder" in observed.readable
 
 
-def test_another_binding_folder_is_not_used(env: MachineEnvironment) -> None:
+def test_a_conversation_id_that_is_not_a_folder_name_is_not_used(env: MachineEnvironment) -> None:
     with pytest.raises(MachineUnavailable):
-        asyncio.run(env.folder("c1", "conversations/c2"))
-    with pytest.raises(MachineUnavailable):
-        asyncio.run(env.folder("../x", "conversations/../x"))
+        asyncio.run(env.folder("../x"))
 
 
 def test_uploads_and_removal(env: MachineEnvironment, root: Path) -> None:
     async def place(data: bytes, preferred: str | None = None) -> str:
-        async with env.locked(WORKSPACE, 5, conversation_id="c1", cwd_relative="conversations/c1"):
-            temp = await env.copy_in("c1", "conversations/c1", io.BytesIO(data), clear=True)
-            path = await env.free_path("c1", "conversations/c1", "report.pdf", preferred)
-            assert await env.commit_copy("c1", "conversations/c1", temp, path)
-            await env.discard_copy("c1", "conversations/c1", temp)
+        async with env.locked("c1", 5):
+            temp = await env.copy_in("c1", io.BytesIO(data), clear=True)
+            path = await env.free_path("c1", "report.pdf", preferred)
+            assert await env.commit_copy("c1", temp, path)
+            await env.discard_copy("c1", temp)
             return path
 
     uploads = root / "c1/uploads"
@@ -266,16 +245,16 @@ def test_uploads_and_removal(env: MachineEnvironment, root: Path) -> None:
     assert asyncio.run(place(b"fourth", preferred=old)) == f"{uploads}/report (3).pdf"
     assert sorted(p.name for p in uploads.iterdir()) == ["mine.pdf", "report (2).pdf", "report (3).pdf", "report.pdf"]
     digest = hashlib.sha256(b"bytes").hexdigest()
-    assert asyncio.run(env.holds("c1", "conversations/c1", path, 5, digest))
-    assert not asyncio.run(env.holds("c1", "conversations/c1", path, 6, digest))
-    assert not asyncio.run(env.holds("c1", "conversations/c1", old, 5, digest))
+    assert asyncio.run(env.holds("c1", path, 5, digest))
+    assert not asyncio.run(env.holds("c1", path, 6, digest))
+    assert not asyncio.run(env.holds("c1", old, 5, digest))
 
     async def taken() -> bool:
-        temp = await env.copy_in("c1", "conversations/c1", io.BytesIO(b"x"))
+        temp = await env.copy_in("c1", io.BytesIO(b"x"))
         try:
-            return await env.commit_copy("c1", "conversations/c1", temp, path)
+            return await env.commit_copy("c1", temp, path)
         finally:
-            await env.discard_copy("c1", "conversations/c1", temp)
+            await env.discard_copy("c1", temp)
 
     assert not asyncio.run(taken()) and Path(path).read_bytes() == b"bytes"
     assert not [p for p in uploads.iterdir() if p.name.endswith(".tmp")]
@@ -283,22 +262,21 @@ def test_uploads_and_removal(env: MachineEnvironment, root: Path) -> None:
     outside.mkdir()
     (outside / "f").write_text("kept")
     os.symlink(outside, root / "c1/link-inside")
-    assert asyncio.run(env.remove_conversation_folder(WORKSPACE, SCOPE, "conversations/c1"))
+    assert asyncio.run(env.remove_conversation_folder(SCOPE))
     assert not (root / "c1").exists() and (outside / "f").read_text() == "kept"
-    assert not asyncio.run(env.remove_conversation_folder(WORKSPACE, SCOPE, "conversations/c1"))
-    assert not asyncio.run(env.remove_conversation_folder(WORKSPACE, SCOPE, "projects"))
+    assert not asyncio.run(env.remove_conversation_folder(SCOPE))
 
 
 def test_upload_steps_refuse_names_outside_uploads(env: MachineEnvironment, root: Path) -> None:
     async def scenario() -> None:
-        temp = await env.copy_in("c1", "conversations/c1", io.BytesIO(b"x"))
+        temp = await env.copy_in("c1", io.BytesIO(b"x"))
         with pytest.raises(MachineUnavailable):
-            await env.commit_copy("c1", "conversations/c1", temp, str(root / "c1/escaped.pdf"))
+            await env.commit_copy("c1", temp, str(root / "c1/escaped.pdf"))
         with pytest.raises(MachineUnavailable):
-            await env.commit_copy("c1", "conversations/c1", "../x.tmp", str(root / "c1/uploads/a.pdf"))
+            await env.commit_copy("c1", "../x.tmp", str(root / "c1/uploads/a.pdf"))
         with pytest.raises(MachineUnavailable):
-            await env.free_path("c1", "conversations/c1", "../a.pdf", None)
-        await env.discard_copy("c1", "conversations/c1", temp)
+            await env.free_path("c1", "../a.pdf", None)
+        await env.discard_copy("c1", temp)
 
     asyncio.run(scenario())
     assert not (root / "c1/escaped.pdf").exists() and not (root / "c1/uploads/a.pdf").exists()
@@ -466,10 +444,9 @@ def test_purge_never_follows_a_linked_root(tmp_path: Path) -> None:
     os.symlink(foreign, tmp_path / "conversations")
     env = MachineEnvironment(str(tmp_path / "conversations"))
     with pytest.raises(MachineUnavailable):
-        asyncio.run(env.remove_conversation_folder(WORKSPACE, SCOPE, "conversations/c1"))
+        asyncio.run(env.remove_conversation_folder(SCOPE))
     assert (foreign / "c1/keep.txt").read_text() == "theirs"
-    assert not asyncio.run(MachineEnvironment(str(tmp_path / "missing")).remove_conversation_folder(
-        WORKSPACE, SCOPE, "conversations/c1"))
+    assert not asyncio.run(MachineEnvironment(str(tmp_path / "missing")).remove_conversation_folder(SCOPE))
 
 
 def test_ids_with_capitals_are_not_folders() -> None:
@@ -493,15 +470,15 @@ def test_a_kept_group_write_bit_survives_the_umask(env: MachineEnvironment, root
 def test_commit_takes_only_a_regular_temporary_file(env: MachineEnvironment, root: Path, tmp_path: Path) -> None:
     """P2: a link (or anything but a regular ``.tmp``) in uploads is never committed under a name."""
     async def scenario() -> None:
-        uploads = Path(await env.folder("c1", "conversations/c1")) / "uploads"
+        uploads = Path(await env.folder("c1")) / "uploads"
         uploads.mkdir(exist_ok=True)
         (tmp_path / "secret").write_text("outside")
         os.symlink(tmp_path / "secret", uploads / ".himari-x.tmp")
         with pytest.raises(MachineUnavailable):
-            await env.commit_copy("c1", "conversations/c1", ".himari-x.tmp", str(uploads / "a.pdf"))
+            await env.commit_copy("c1", ".himari-x.tmp", str(uploads / "a.pdf"))
         (uploads / "plain").write_text("x")
         with pytest.raises(MachineUnavailable):
-            await env.commit_copy("c1", "conversations/c1", "plain", str(uploads / "b.pdf"))
+            await env.commit_copy("c1", "plain", str(uploads / "b.pdf"))
 
     asyncio.run(scenario())
     assert not (root / "c1/uploads/a.pdf").exists() and not (root / "c1/uploads/b.pdf").exists()
@@ -522,7 +499,7 @@ def test_windows_components_name_one_thing(monkeypatch: pytest.MonkeyPatch, name
 
 def test_paths_come_back_on_the_folders_own_spelling(env: MachineEnvironment, root: Path) -> None:
     """P1: what is used is the trusted folder plus checked components, never the caller's prefix."""
-    folder = asyncio.run(env.folder("c1", "conversations/c1"))
+    folder = asyncio.run(env.folder("c1"))
     assert env.folders.resolve(folder, f"{folder}/./a//b.txt") == os.path.join(folder, "a", "b.txt")
     assert env.folders.resolve(folder, ".") == folder
 
@@ -542,7 +519,7 @@ def test_windows_judges_the_path_as_written(env: MachineEnvironment, monkeypatch
     """Re-review P2: each component is judged before normalizing could drop a trailing dot or space."""
     from himari.environment.machine import folders as folders_module
 
-    folder = asyncio.run(env.folder("c1", "conversations/c1"))
+    folder = asyncio.run(env.folder("c1"))
     monkeypatch.setattr(folders_module, "_POSIX", False)
     with pytest.raises(FolderError):
         env.folders.resolve(folder, raw)

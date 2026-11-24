@@ -110,7 +110,7 @@ def build_runtime(
     if not sources <= defaults.keys():
         raise ValueError(f"no default for the external sources {sorted(sources - defaults.keys())}")
     access = ConfiguredExternalAccess(defaults, data)
-    dispatcher = Dispatcher(registry, data, data, data, access,
+    dispatcher = Dispatcher(registry, data, data, access,
                             images=StoredResultImages(data.blobs, data, image_views, file_max_bytes))
     if isinstance(provider, ReadsImageCopies):  # V3-P67 §7.4: image copies are read when a request is sent
         provider.use_blobs(data.blobs.read_bytes)

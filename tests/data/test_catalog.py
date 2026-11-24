@@ -7,42 +7,44 @@ import asyncio
 import pytest
 from testkit import FAKE, data_for, new_store, restart, user
 
-from himari.common import ConversationId, EnvironmentKind, PrincipalId, TrustedScope, WorkspaceId
-from himari.data.api import MAX_LIST_LIMIT, MAX_TITLE_CHARS, PREVIEW_CHARS, DataError, DataErrorCode, InitialActivation
+from himari.common import ConversationId, EnvironmentKind, PrincipalId, TrustedScope
+from himari.data.api import MAX_LIST_LIMIT, MAX_TITLE_CHARS, PREVIEW_CHARS, DataError, DataErrorCode
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
 OTHER = EnvironmentKind("other")
 
 
-def test_create_is_one_t0_with_its_activations() -> None:
+def test_create_is_one_t0_with_its_environments() -> None:
     async def scenario() -> None:
         store = new_store()
         data = data_for(store)
         cid = await data.create_conversation(ALICE, title="  Plan   the\ttrip ",
-                                             activations=(InitialActivation(FAKE, WorkspaceId("ws_a")),))
+                                             environments=(FAKE,))
         scope = TrustedScope(ALICE, cid)
         summary = await data.read_conversation(scope)
         assert summary.conversation_id == cid and summary.title == "Plan the trip"
         assert summary.last_sequence == 0 and summary.preview == "" and summary.last_activity_at == summary.created_at
-        workspace = await data.resolve_conversation_workspace(scope)
-        assert workspace.workspace_id == "ws_a" and workspace.cwd_relative == f"conversations/{cid}"
-        binding = await data.resolve_default_binding(scope, FAKE)
-        assert binding is not None and binding.cwd_relative == f"conversations/{cid}"
+        assert await data.has_environment(scope, FAKE) and not await data.has_environment(scope, OTHER)
+        assert (await data.read_current_state_basis(scope)).environments == (FAKE,)
         second = await data.create_conversation(ALICE)
         assert second != cid and (await data.read_conversation(TrustedScope(ALICE, second))).title is None
+        assert not await data.has_environment(TrustedScope(ALICE, second), FAKE)
+        with pytest.raises(DataError) as exc:  # another's Conversation
+            await data.has_environment(TrustedScope(BOB, cid), FAKE)
+        assert exc.value.code is DataErrorCode.NOT_AUTHORIZED
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("title, activations", [
+@pytest.mark.parametrize("title, environments", [
     ("x" * (MAX_TITLE_CHARS + 1), ()),
-    ("ok", (InitialActivation(FAKE, WorkspaceId("a")), InitialActivation(FAKE, WorkspaceId("b")))),
+    ("ok", (FAKE, FAKE)),
 ])
-def test_invalid_create_creates_nothing(title: str, activations: tuple[InitialActivation, ...]) -> None:
+def test_invalid_create_creates_nothing(title: str, environments: tuple[EnvironmentKind, ...]) -> None:
     async def scenario() -> None:
         data = data_for(new_store())
         with pytest.raises(DataError) as exc:
-            await data.create_conversation(ALICE, title=title, activations=activations)
+            await data.create_conversation(ALICE, title=title, environments=environments)
         assert exc.value.code is DataErrorCode.INVALID_ARGUMENT
         assert await data.list_conversations(ALICE) == ()
 

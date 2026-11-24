@@ -41,7 +41,7 @@ USAGE = {"prompt_tokens": 12, "completion_tokens": 5, "completion_tokens_details
 def model_input(model: str = STREAMING, *, stream: bool = True) -> ModelInput:
     return ModelInput(stable_prefix=("You are HIMARI.",), tool_catalog=(),
                       conversation=(UserTurn(EventId("e1"), (TextBlock("hi"),)),),
-                      current_state=CurrentStateProjection(basis=PersistedStateBasis(0, 0, (), (), ())),
+                      current_state=CurrentStateProjection(basis=PersistedStateBasis(0, 0, ())),
                       request_options=RequestOptions(model, stream=stream), trigger_refs=(),
                       prompt_basis=PromptBasis(0, 0))
 

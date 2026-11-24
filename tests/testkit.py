@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from datetime import UTC, datetime
@@ -24,10 +25,10 @@ from himari.common import (
     TrustedScope,
 )
 from himari.control.api import ControlError, ControlErrorCode, DriveResult, ModelCatalog, StopSignal, TurnProgress
-from himari.data.api import ArtifactMutation, BindingAuthority, ConversationEvent, UserMessage, ViewMaker, WakeReason
+from himari.data.api import ConversationEvent, UserMessage, ViewMaker, WakeReason
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
-from himari.environment.api import BindingObservation, ConnectionStatus
+from himari.environment.api import ConnectionStatus, EnvironmentObservation
 from himari.prompt.api import ContextBudget
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
@@ -39,10 +40,50 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 SCOPE = TrustedScope(PrincipalId("alice"), ConversationId("conv_1"))
+
+
+def _v21_undo() -> tuple[str, ...]:
+    """What v21 changed, undone: the dropped tables made again and the two tables that lost a
+    column rebuilt, each with the exact text v20 has (an added column would go last, so SQLite's
+    ADD COLUMN cannot undo a DROP COLUMN). ``environments`` rows go back as activations."""
+    from himari.data.sqlite import _UPGRADES
+
+    ref = sqlite3.connect(":memory:")
+    try:
+        for statement in _UPGRADES[20][0].split(";"):
+            if statement.strip():
+                ref.execute(statement)
+        sql = {name: text for name, text in ref.execute("SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL")}
+
+        def indexes(table: str) -> list[str]:
+            return [text for (text,) in ref.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,))]
+
+        def columns(table: str) -> list[str]:
+            return [row[1] for row in ref.execute(f"PRAGMA table_info({table})")]
+
+        undo = ["PRAGMA legacy_alter_table=ON"]  # a rename leaves the other tables' references as they are
+        for table, gone in (("conversations", {"workspace_id", "workspace_cwd"}),
+                            ("tool_executions", {"workspace_binding_id"})):
+            kept = ", ".join(c for c in columns(table) if c not in gone)
+            undo += [f"ALTER TABLE {table} RENAME TO {table}_v21", sql[table],
+                     f"INSERT INTO {table} ({kept}) SELECT {kept} FROM {table}_v21", f"DROP TABLE {table}_v21",
+                     *indexes(table)]
+        undo += [sql[t] for t in ("artifacts", "activations", "bindings", "workspaces")]
+        undo += [*indexes("bindings"), *indexes("workspaces")]
+        undo += ["INSERT INTO activations (conversation_id, environment_instance_id, environment_kind)"
+                 " SELECT conversation_id, 'env_' || conversation_id || '_' || environment_kind, environment_kind"
+                 " FROM environments",
+                 "DROP TABLE environments", "PRAGMA legacy_alter_table=OFF"]
+        return tuple(undo)
+    finally:
+        ref.close()
+
+
+V21_UNDO = _v21_undo()  # what v21 changed (the work-agent leftovers dropped), undone
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")
@@ -162,14 +203,12 @@ class RecordingTool:
         effect: EffectProfile = EffectProfile.READ,
         environment_kind: EnvironmentKind | None = None,
         external_source: str | None = None,
-        workspace: WorkspaceRequirement = WorkspaceRequirement.NONE,
         behavior: Callable[[ToolInvocation, ToolContext], ToolOutcome] | None = None,
     ) -> None:
         self.definition = ToolDefinition(
             tool_id=ToolId(tool_id),
             description=f"test tool {tool_id}",
             input_schema={"type": "object"},
-            workspace_requirement=workspace,
             effect_profile=effect,
             environment_kind=environment_kind,
             external_source=external_source,
@@ -194,14 +233,6 @@ class RecordingTool:
         return ToolOutcome(ToolStatus.SUCCEEDED, text_result(f"{self.definition.tool_id} ok"))
 
 
-def note_writer(invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
-    return ToolOutcome(
-        ToolStatus.SUCCEEDED,
-        text_result("complete"),
-        artifact_mutations=(ArtifactMutation(kind="note", content=invocation.arguments.get("text")),),
-    )
-
-
 class FakeEnvironment:
     def __init__(self, *tools: RecordingTool) -> None:
         self._tools = tools
@@ -213,10 +244,8 @@ class FakeEnvironment:
     def tools(self) -> Sequence[ToolHandler]:
         return self._tools
 
-    async def observe(
-        self, scope: TrustedScope, bindings: Sequence[BindingAuthority]
-    ) -> Sequence[BindingObservation]:
-        return [BindingObservation(b.binding_id, ConnectionStatus.UNKNOWN, datetime.now(UTC)) for b in bindings]
+    async def observe(self, scope: TrustedScope) -> EnvironmentObservation:
+        return EnvironmentObservation(ConnectionStatus.UNKNOWN, datetime.now(UTC))
 
 
 def runtime(
@@ -292,7 +321,7 @@ def image_model_input(parts: Sequence[Any], attachments: Mapping[str, Any], *, i
     from himari.data.api import PersistedStateBasis, PromptBasis
     from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions
     return ModelInput(stable_prefix=("You are HIMARI.",), tool_catalog=(), conversation=tuple(parts),
-                      current_state=CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ())),
+                      current_state=CurrentStateProjection(PersistedStateBasis(0, 0, ())),
                       request_options=RequestOptions(model, image_input=image_input,
                                                      screen_points=screen_points), trigger_refs=(),
                       prompt_basis=PromptBasis(0, 0), attachments=dict(attachments))

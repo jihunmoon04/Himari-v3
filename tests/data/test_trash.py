@@ -20,13 +20,11 @@ from himari.common import (
     ToolId,
     TrustedScope,
     UnknownOutcomePolicy,
-    WorkspaceId,
 )
 from himari.data.api import (
     AssistantToolCalls,
     DataError,
     DataErrorCode,
-    InitialActivation,
     ModelSetting,
     PromptBasis,
     RawReceived,
@@ -43,7 +41,7 @@ Data = InMemoryData | SqliteData
 
 
 async def conversation(data: Data, owner: PrincipalId = ALICE) -> TrustedScope:
-    cid = await data.create_conversation(owner, title="t", activations=(InitialActivation(FAKE, WorkspaceId("ws")),))
+    cid = await data.create_conversation(owner, title="t", environments=(FAKE,))
     return TrustedScope(owner, cid)
 
 
@@ -76,10 +74,7 @@ OTHER_PORTS: list[tuple[str, Port]] = [
         b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))),
     ("recover_interrupted", lambda d, s: d.recover_interrupted(s)),
     ("get_latest_snapshot", lambda d, s: d.get_latest_snapshot(s)),
-    ("list_artifacts", lambda d, s: d.list_artifacts(s)),
-    ("resolve_default_binding", lambda d, s: d.resolve_default_binding(s, FAKE)),
-    ("read_activation", lambda d, s: d.read_activation(s, FAKE)),
-    ("resolve_conversation_workspace", lambda d, s: d.resolve_conversation_workspace(s)),
+    ("has_environment", lambda d, s: d.has_environment(s, FAKE)),
     ("read_conversation", lambda d, s: d.read_conversation(s)),
     ("rename_conversation", lambda d, s: d.rename_conversation(s, "x")),
     ("read_external_settings", lambda d, s: d.read_external_settings(s)),
@@ -155,8 +150,7 @@ def test_wrong_transitions_are_refused() -> None:
 
         first = await data.begin_purge(scope)
         again = await data.begin_purge(scope)  # idempotent: a purge cut short resumes
-        assert first == again and first.workspace is not None
-        assert first.workspace.cwd_relative == f"conversations/{scope.conversation_id}"
+        assert first == again and first.environments == (FAKE,)  # whose folder goes with it
         with pytest.raises(DataError) as exc:
             await data.restore_conversation(scope)  # its files may already be gone
         assert code(exc) is DataErrorCode.INVALID_STATE_TRANSITION

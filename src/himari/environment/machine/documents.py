@@ -32,7 +32,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 TAIL_RESERVE = 4096  # the lines after the units: shown, notes, images, view
@@ -241,7 +240,6 @@ def document_definition(namespace: str, *, description: str = DESCRIPTION) -> To
                                                               "like \"5-8\" (at most 4 per call); when given, pages "
                                                               "and view are ignored."},
             }, ["path"]),
-            workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=EffectProfile.READ,
             environment_kind=EnvironmentKind(namespace),
         )
@@ -262,8 +260,6 @@ class ReadDocument:
         raise NotImplementedError
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
-        if ctx.binding is None or ctx.workspace is None:
-            return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
         args = invocation.arguments
         # An optional argument a model fills with "" means it is not given: models often send every property
         # of the schema (seen live with openai/gpt-6-luna, which then never saw the page). A null never gets

@@ -49,8 +49,7 @@ def config_of(entry: dict[str, Any]) -> Any:
 
 async def invoke(connection: McpConnection, arguments: dict[str, Any]) -> Any:
     (tool,) = connection.handlers
-    ctx = ToolContext(scope=TrustedScope(PrincipalId("alice"), ConversationId("conv-a")),
-                      artifacts=None)  # type: ignore[arg-type]
+    ctx = ToolContext(scope=TrustedScope(PrincipalId("alice"), ConversationId("conv-a")))
     # A ToolInvocation deep-freezes its arguments, as every call the model makes.
     return await tool.run(ToolInvocation(ToolId("calliope/submit"), "c1", arguments), ctx)  # type: ignore[arg-type]
 

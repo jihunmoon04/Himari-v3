@@ -15,9 +15,9 @@ from testkit import final, user
 
 from himari.bootstrap.application import Application
 from himari.bootstrap.operator import OPERATOR
-from himari.common import ArtifactId, EventId, TextBlock, TrustedScope
+from himari.common import EventId, TextBlock, TrustedScope
 from himari.control.api import DriveState
-from himari.data.api import Artifact, PersistedStateBasis, PromptBasis
+from himari.data.api import PersistedStateBasis, PromptBasis
 from himari.prompt.api import (
     NOTE_CHARS,
     NOTES_HEADER,
@@ -34,7 +34,7 @@ from himari.prompt.system import CUT, fit_notes
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import ScriptedAdapter
 
-EMPTY_STATE = PersistedStateBasis(0, 0, (), (), ())
+EMPTY_STATE = PersistedStateBasis(0, 0, ())
 
 
 # --- the bounds ---------------------------------------------------------------------------
@@ -144,9 +144,17 @@ def test_notes_count_in_the_token_estimate_as_they_are_sent() -> None:
 
 
 def test_the_state_is_measured_as_sent_too() -> None:
-    """The same rule for the rest of the state block: an artifact of "<"."""
-    basis = dataclasses.replace(EMPTY_STATE, artifacts=(Artifact(ArtifactId("a1"), "note", 1, "<" * 3000),))
-    noted = dataclasses.replace(model_input(()), current_state=CurrentStateProjection(basis=basis))
+    """The same rule for the rest of the state block: a folder path of "<"."""
+    from datetime import UTC, datetime
+
+    from himari.common import EnvironmentKind
+    from himari.environment.api import ConnectionStatus, EnvironmentObservation
+
+    machine = EnvironmentKind("machine")
+    basis = dataclasses.replace(EMPTY_STATE, environments=(machine,))
+    seen = {machine: EnvironmentObservation(ConnectionStatus.ONLINE, datetime(2026, 11, 1, tzinfo=UTC),
+                                            working_directory="<" * 3000)}
+    noted = dataclasses.replace(model_input(()), current_state=CurrentStateProjection(basis=basis, observations=seen))
     assert request_tokens(noted) >= sent_tokens(noted) >= 6 * 3000 // 3
 
 
@@ -169,7 +177,7 @@ def test_notes_are_part_of_the_context_key(tmp_path: Path) -> None:
     from himari.prompt.api import PromptInputs
 
     base = PromptInputs(instructions=("x",), tool_catalog=(), events=(), tool_executions=(), snapshot=None,
-                        state_basis=EMPTY_STATE, observations=(), request_options=RequestOptions("m"), trigger_refs=())
+                        state_basis=EMPTY_STATE, observations={}, request_options=RequestOptions("m"), trigger_refs=())
     keys = {context_key(base),
             context_key(dataclasses.replace(base, source_notes=(SourceNote("calliope", "system", "a"),))),
             context_key(dataclasses.replace(base, source_notes=(SourceNote("calliope", "data", "a"),))),

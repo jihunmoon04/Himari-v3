@@ -19,7 +19,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +52,6 @@ class AddTool:
             "required": ["a", "b"],
             "additionalProperties": False,
         },
-        workspace_requirement=WorkspaceRequirement.NONE,
         effect_profile=EffectProfile.READ,
     )
 

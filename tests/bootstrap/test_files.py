@@ -24,7 +24,7 @@ from himari.control.api import ControlError, ControlErrorCode, JobStatus
 from himari.data.api import (
     MAX_STAGED_UPLOADS, DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind, UserMessage,
 )
-from himari.environment.machine import WorkspaceBusy
+from himari.environment.machine import FolderBusy
 from himari.prompt.api import ATTACHMENT_NOTE, PROGRESS_NOTE, TOOL_IMAGES_NOTE
 from himari.provider.scripted import ScriptedAdapter
 
@@ -266,7 +266,7 @@ def test_sending_waits_for_the_workspace_only_so_long_and_then_frees_the_trash(
                 sending = asyncio.create_task(app.send(scope, "x", [record.file_id]))
                 await asyncio.sleep(0.05)
                 trashing = asyncio.create_task(app.trash(scope))
-                with pytest.raises(WorkspaceBusy):
+                with pytest.raises(FolderBusy):
                     await sending
                 await trashing  # not held up past the bound (review N4)
             assert (await app.data.list_conversations(ALICE, trashed=True))[0].conversation_id == scope.conversation_id
@@ -358,12 +358,12 @@ def test_a_crash_around_placing_never_places_a_file_twice(tmp_path: Path, when: 
         assert app.machine is not None
         real = app.machine.commit_copy
 
-        async def dying(conversation_id, cwd, temp, path):  # type: ignore[no-untyped-def]
+        async def dying(conversation_id, temp, path):  # type: ignore[no-untyped-def]
             if path.endswith("/b.txt"):
                 if when == "after the rename":
-                    await real(conversation_id, cwd, temp, path)
+                    await real(conversation_id, temp, path)
                 raise Crash
-            return await real(conversation_id, cwd, temp, path)
+            return await real(conversation_id, temp, path)
 
         app.machine.commit_copy = dying  # type: ignore[method-assign]
         with pytest.raises(Crash):

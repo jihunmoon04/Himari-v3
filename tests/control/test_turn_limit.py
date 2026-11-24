@@ -95,7 +95,7 @@ def test_few_runs_left_and_the_last_are_told_as_data_and_the_rule_is_in_the_syst
     turn.charge(None, step=True)
     state = turn.state()
     assert state is not None and (state.runs_left, state.last) == (1, True)
-    block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ())), (), state)
+    block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, ())), (), state)
     assert block is not None
     data = json.loads(block.split("\n", 2)[2].rsplit("\n", 1)[0])
     assert data == {"turn_limit": {"runs_left": 1, "last": True}}
@@ -125,7 +125,7 @@ def test_the_measured_estimate_counts_the_turn_state() -> None:
 
     def prompt_inputs(mark: UsageMark | None) -> PromptInputs:
         return PromptInputs(instructions=("x",), tool_catalog=(), events=events, tool_executions=(), snapshot=None,
-                            state_basis=PersistedStateBasis(1, 0, (), (), ()), observations=(),
+                            state_basis=PersistedStateBasis(1, 0, ()), observations={},
                             request_options=RequestOptions("m"), trigger_refs=(), usage_mark=mark)
 
     basis = Composer().compose(prompt_inputs(None)).prompt_basis

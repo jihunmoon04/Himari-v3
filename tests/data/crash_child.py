@@ -23,11 +23,12 @@ from himari.common import (
     ToolCall,
     ToolId,
     UnknownOutcomePolicy,
-    WorkspaceId,
 )
 from himari.data.api import (
-    ArtifactMutation,
     AssistantToolCalls,
+    MemoryCategory,
+    MemoryChange,
+    MemoryChangeKind,
     PromptBasis,
     RawReceived,
     RunPreparation,
@@ -36,7 +37,7 @@ from himari.data.api import (
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.provider.scripted import ScriptedAdapter
-from himari.tool.api import EffectProfile, ToolOutcome, WorkspaceRequirement
+from himari.tool.api import EffectProfile, ToolOutcome
 
 WRITES = ("INSERT", "UPDATE", "DELETE")
 
@@ -90,8 +91,9 @@ async def setup_op(store: SqliteStore, data: SqliteData, op: str) -> Any:
     if op == "commit":
         run_id = await new_run()
         await data.project_model_output(SCOPE, run_id, AssistantToolCalls(group))
+        new_id = await data.allocate_memory_id(SCOPE.principal_id)
         done = ToolCompletion(ToolExecutionStatus.SUCCEEDED, text_result("ok"), raw_result={"x": 1},
-                              artifact_mutations=(ArtifactMutation("note", "a"), ArtifactMutation("plan", "b")))
+                              memory_change=MemoryChange(MemoryChangeKind.SAVE, new_id, MemoryCategory.USER, "a"))
         return lambda: data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c0")), done)
     if op == "recover":
         for _ in range(2):
@@ -141,10 +143,10 @@ def tool_scenario(path: str) -> None:
         raise AssertionError("unreachable")
 
     write = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
-                          workspace=WorkspaceRequirement.DEFAULT, behavior=killed_mid_effect)
+                          behavior=killed_mid_effect)
     rt = build_runtime(ScriptedAdapter([calls(("fake/write", {"v": 1}))]), store=store,
                        environments=[FakeEnvironment(write)])
-    store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    store.activate_environment(SCOPE, FAKE)
     asyncio.run(rt.driver.drive(SCOPE, user("write")))
 
 

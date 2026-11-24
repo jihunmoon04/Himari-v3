@@ -277,7 +277,7 @@ def test_a_refused_call_fails_and_an_is_error_result_is_shown_to_the_model() -> 
     server = FakeMcpServer()
     server.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": "bad square"}], "isError": True}
     (handler,) = connected(server).handlers
-    ctx = ToolContext(scope=SCOPE, artifacts=None)  # type: ignore[arg-type]
+    ctx = ToolContext(scope=SCOPE)
 
     async def scenario() -> None:
         outcome = await handler.run(ToolInvocation(ToolId("calliope/echo"), "c", {"text": "x"}), ctx)  # type: ignore[arg-type]

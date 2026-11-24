@@ -8,9 +8,8 @@ from dataclasses import replace
 import pytest
 from testkit import SCOPE, data_for, forget_unknown_policy, new_store, text_result, user
 
-from himari.common import ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId, TrustedScope
+from himari.common import ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, CallId, CallRef, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
-    ArtifactMutation,
     AssistantFinal,
     AssistantToolCalls,
     DataError,
@@ -72,32 +71,6 @@ def test_a_message_never_answers_a_call_and_an_open_ask_user_call_is_just_pendin
         await data.append_event(SCOPE, user("a new message"))
         (record,) = await data.read_tool_executions(SCOPE, call.run_id)
         assert record.status is ToolExecutionStatus.PENDING
-
-    asyncio.run(scenario())
-
-
-def test_artifact_conflict_rolls_back_the_whole_commit() -> None:
-    async def scenario() -> None:
-        data = fresh()
-        first = await projected_group(data, "note", "note")
-        await data.commit_tool_outcome(
-            SCOPE, first, ToolCompletion(ToolExecutionStatus.SUCCEEDED, text_result("ok"),
-                                         artifact_mutations=(ArtifactMutation("note", "v1"),))
-        )
-        (note,) = await data.list_artifacts(SCOPE)
-        second = CallRef(first.run_id, CallId("c1"))
-        events_before = len(await data.read_events(SCOPE))
-        stale = ArtifactMutation("note", "v2", artifact_id=note.artifact_id, expected_revision=99)
-        with pytest.raises(DataError) as exc:
-            await data.commit_tool_outcome(
-                SCOPE, second, ToolCompletion(ToolExecutionStatus.SUCCEEDED, text_result("ok"),
-                                              artifact_mutations=(stale,))
-            )
-        assert exc.value.code is DataErrorCode.VERSION_CONFLICT
-        assert (await data.read_artifact(SCOPE, ArtifactId(note.artifact_id))).content == "v1"
-        records = await data.read_tool_executions(SCOPE, first.run_id)
-        assert records[1].status is ToolExecutionStatus.PENDING
-        assert len(await data.read_events(SCOPE)) == events_before
 
     asyncio.run(scenario())
 

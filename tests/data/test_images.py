@@ -24,7 +24,6 @@ from himari.common import (
     ToolCall,
     ToolId,
     TrustedScope,
-    WorkspaceId,
 )
 from himari.data.api import (
     AssistantToolCalls,
@@ -32,7 +31,6 @@ from himari.data.api import (
     DataErrorCode,
     FileOrigin,
     ImageStatus,
-    InitialActivation,
     PreparedView,
     PromptBasis,
     RawReceived,
@@ -76,7 +74,7 @@ def run(coro: Coroutine[Any, Any, None]) -> None:
 
 
 async def conversation(data: Data) -> TrustedScope:
-    cid = await data.create_conversation(ALICE, title="t", activations=(InitialActivation(FAKE, WorkspaceId("ws")),))
+    cid = await data.create_conversation(ALICE, title="t", environments=(FAKE,))
     return TrustedScope(ALICE, cid)
 
 

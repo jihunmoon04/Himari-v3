@@ -11,19 +11,18 @@ import pytest
 from testkit import FAKE, SCOPE, RecordingTool, SimulatedCrash, calls, final, restart, runtime, user
 
 from himari.bootstrap.proactive import CUT_REASON, settle_cut_wakes
-from himari.common import UnknownOutcomePolicy, WorkspaceId
+from himari.common import UnknownOutcomePolicy
 from himari.control.api import ControlError, ControlErrorCode, DriveState
 from himari.control.driver import Driver
 from himari.data.api import ToolExecutionStatus, WakeKind, WakeReason, WakeStatus
-from himari.tool.api import EffectProfile, WorkspaceRequirement
+from himari.tool.api import EffectProfile
 
 TRY = (WakeReason(WakeKind.TRY),)
 
 
 def tool(name: str, effect: EffectProfile = EffectProfile.SCOPED_WRITE,
          policy: UnknownOutcomePolicy | None = None) -> RecordingTool:
-    made = RecordingTool(f"fake/{name}", effect=effect, environment_kind=FAKE,
-                         workspace=WorkspaceRequirement.DEFAULT)
+    made = RecordingTool(f"fake/{name}", effect=effect, environment_kind=FAKE)
     if policy is not None:
         import dataclasses
 
@@ -45,7 +44,7 @@ def test_a_restart_closes_the_cut_group_without_running_what_never_started() -> 
     tools = [first, second, third]
     group = calls(("fake/first", {}), ("fake/second", {}), ("fake/third", {}))
     rt, _ = runtime([group], env_tools=tools)
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    rt.store.activate_environment(SCOPE, FAKE)
     wake = asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1"))
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.resume(SCOPE, max_runs=3))
@@ -74,7 +73,7 @@ def test_an_unknown_effect_that_needs_the_user_keeps_new_wakes_out() -> None:
     pay = tool("pay", EffectProfile.UNKNOWN, UnknownOutcomePolicy.REQUIRE_USER)
     pay.crash_next = True  # dies after its claim: the effect is unknown
     rt, _ = runtime([calls(("fake/pay", {}))], env_tools=[pay])
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    rt.store.activate_environment(SCOPE, FAKE)
     wake = asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1"))
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.resume(SCOPE, max_runs=3))
@@ -94,7 +93,7 @@ def test_a_group_the_users_turn_left_keeps_new_wakes_out() -> None:
     """Stopped between Runs (here at its Run limit), the user's work waits for the user, not for a wake."""
     look = tool("look", EffectProfile.READ)
     rt, _ = runtime([calls(("fake/look", {}))], env_tools=[look], max_runs_per_drive=1)
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    rt.store.activate_environment(SCOPE, FAKE)
     assert asyncio.run(rt.driver.drive(SCOPE, user("look"))).state is DriveState.RUN_LIMIT_REACHED
     with pytest.raises(ControlError) as refused:
         asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1"))
@@ -105,7 +104,7 @@ def test_a_group_an_ended_wake_left_does_not_keep_the_next_one_out() -> None:
     """A wake stopped at its Run cap with its last group unanswered; once ended, the next wake shows those results."""
     look = tool("look", EffectProfile.READ)
     rt, provider = runtime([calls(("fake/look", {}))] * 3 + [final("아까 보던 거 다 봤어")], env_tools=[look])
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    rt.store.activate_environment(SCOPE, FAKE)
     wake = asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1"))
     assert asyncio.run(rt.driver.resume(SCOPE, max_runs=3)).state is DriveState.RUN_LIMIT_REACHED
     with pytest.raises(ControlError):  # still opened: its job has not been ended
@@ -122,7 +121,7 @@ def test_a_wake_that_said_something_keeps_its_keys() -> None:
     first = tool("first")
     first.crash_next = True
     rt, _ = runtime([calls(("fake/first", {}))], env_tools=[first])
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    rt.store.activate_environment(SCOPE, FAKE)
     asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("loop:m1:x",)))
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.resume(SCOPE, max_runs=3))

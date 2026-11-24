@@ -38,7 +38,7 @@ ALL = SystemSpec(companion=True, memory=True, attachments=True, turn_guidance=Tr
 
 def inputs(spec: SystemSpec | None = ALL, **more: object) -> PromptInputs:
     base = PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=(), tool_executions=(), snapshot=None,
-                        state_basis=PersistedStateBasis(0, 0, (), (), ()), observations=(),
+                        state_basis=PersistedStateBasis(0, 0, ()), observations={},
                         request_options=RequestOptions("m"), trigger_refs=(), system=spec)
     return replace(base, **more)  # type: ignore[arg-type]
 
@@ -196,7 +196,7 @@ def test_the_state_key_is_kept_with_the_runs_basis() -> None:
     from himari.data import codec
     from himari.data.api import PromptBasis
 
-    basis = PromptBasis(3, 1, None, {}, "context", "state")
+    basis = PromptBasis(3, 1, None, "context", "state")
     assert codec.prompt_basis_from(codec.prompt_basis(basis)) == basis
     older = '{"event_sequence": 3, "state_revision": 1, "snapshot_revision": null, "artifact_revisions": {}}'
     assert codec.prompt_basis_from(older).state_key is None

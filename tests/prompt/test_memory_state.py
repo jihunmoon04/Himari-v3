@@ -23,7 +23,7 @@ from himari.prompt.api import (
 USER, PREFERENCE, PROJECT, REFERENCE = (MemoryCategory.USER, MemoryCategory.PREFERENCE, MemoryCategory.PROJECT,
                                          MemoryCategory.REFERENCE)
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
-BASIS = PersistedStateBasis(0, 0, (), (), ())
+BASIS = PersistedStateBasis(0, 0, ())
 
 
 def note(memory_id: int, category: MemoryCategory, text: str) -> Memory:

@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 from testkit import FAKE, SCOPE, RecordingTool, text_result
 
-from himari.common import CallId, RawRepresentation, RunId, ToolCall, ToolId, WorkspaceId
+from himari.common import CallId, RawRepresentation, RunId, ToolCall, ToolId
 from himari.data.api import (
     AssistantToolCalls,
     PromptBasis,
@@ -23,7 +23,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 from himari.tool.access import ConfiguredExternalAccess
 from himari.tool.dispatcher import Dispatcher
@@ -40,7 +39,6 @@ class StatusProbe:
             tool_id=ToolId(tool_id),
             description="probe",
             input_schema={"type": "object"},
-            workspace_requirement=WorkspaceRequirement.DEFAULT if kind else WorkspaceRequirement.NONE,
             effect_profile=effect,
             environment_kind=FAKE if kind else None,
             external_source=source,
@@ -60,7 +58,7 @@ def test_only_effectful_environment_and_external_tools_are_claimed_before_runnin
     async def scenario() -> None:
         store = InMemoryStore()
         store.create_conversation(SCOPE)
-        store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+        store.activate_environment(SCOPE, FAKE)
         data = InMemoryData(store)
         internal = StatusProbe(data, "write_note", kind=None)
         env = StatusProbe(data, "fake/write", kind="fake")
@@ -68,7 +66,7 @@ def test_only_effectful_environment_and_external_tools_are_claimed_before_runnin
         # an Environment's, so the same claim rule applies; READ is never claimed.
         external = StatusProbe(data, "remote/write", kind=None, source="remote")
         external_read = StatusProbe(data, "remote/read", kind=None, source="remote", effect=EffectProfile.READ)
-        dispatcher = Dispatcher(ToolRegistry([internal, env, external, external_read]), data, data, data,
+        dispatcher = Dispatcher(ToolRegistry([internal, env, external, external_read]), data, data,
                                 ConfiguredExternalAccess({"remote": True}, data))
 
         run_id = await data.prepare_run(
@@ -109,7 +107,7 @@ def test_a_read_only_group_runs_only_tools_that_read() -> None:
         write = StatusProbe(data, "write_note", kind=None)
         read = StatusProbe(data, "remote/read", kind=None, source="remote", effect=EffectProfile.READ)
         unknown = StatusProbe(data, "remote/run", kind=None, source="remote", effect=EffectProfile.UNKNOWN)
-        dispatcher = Dispatcher(ToolRegistry([write, read, unknown]), data, data, data,
+        dispatcher = Dispatcher(ToolRegistry([write, read, unknown]), data, data,
                                 ConfiguredExternalAccess({"remote": True}, data))
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m")
@@ -143,7 +141,7 @@ def test_a_tool_the_model_was_not_offered_does_not_run() -> None:
         store.create_conversation(SCOPE)
         data = InMemoryData(store)
         screen = StatusProbe(data, "look_at_screen", kind=None, effect=EffectProfile.READ, requires="screen_tool")
-        dispatcher = Dispatcher(ToolRegistry([screen]), data, data, data)
+        dispatcher = Dispatcher(ToolRegistry([screen]), data, data)
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m")
         )
@@ -184,11 +182,11 @@ def test_an_external_tool_runs_only_while_its_source_is_enabled_for_the_conversa
         probe = StatusProbe(data, "remote/read", kind=None, source="remote", effect=EffectProfile.READ)
         registry = ToolRegistry([probe])
 
-        unconfigured = Dispatcher(registry, data, data, data)  # no ExternalAccess: nothing is enabled
+        unconfigured = Dispatcher(registry, data, data)  # no ExternalAccess: nothing is enabled
         assert await _one_external_call(unconfigured, data, probe) is ToolExecutionStatus.DENIED
         assert probe.seen == []
 
-        dispatcher = Dispatcher(registry, data, data, data, ConfiguredExternalAccess({"remote": False}, data))
+        dispatcher = Dispatcher(registry, data, data, ConfiguredExternalAccess({"remote": False}, data))
         assert await _one_external_call(dispatcher, data, probe) is ToolExecutionStatus.DENIED  # off by default
         await data.set_external_setting(SCOPE, "remote", True)
         assert await _one_external_call(dispatcher, data, probe) is ToolExecutionStatus.SUCCEEDED
@@ -221,7 +219,7 @@ def dispatch_one(outcome: ToolOutcome, *, effect: EffectProfile = EffectProfile.
         data = InMemoryData(store)
         tool = RecordingTool("remote/view", external_source="remote", effect=effect,
                              behavior=lambda invocation, ctx: outcome)
-        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data))
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, ConfiguredExternalAccess({"remote": True}, data))
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
         await data.mark_dispatch(SCOPE, run_id)
@@ -275,7 +273,7 @@ def test_presented_files_recorded_when_the_blob_is_there() -> None:
             yield b"bytes"
         blob_holder["blob"] = await store.blobs.put(SCOPE.principal_id, chunks(), 100)
         tool = RecordingTool("remote/give", external_source="remote", behavior=behavior)
-        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data))
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, ConfiguredExternalAccess({"remote": True}, data))
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
         await data.mark_dispatch(SCOPE, run_id)
@@ -310,7 +308,7 @@ def test_presented_files_over_the_hours_limit_fail_the_call() -> None:
             yield b"b" * (PRESENT_LIMIT_BYTES + 1)
         holder["blob"] = await store.blobs.put(SCOPE.principal_id, chunks(), PRESENT_LIMIT_BYTES * 2)
         tool = RecordingTool("remote/give", external_source="remote", behavior=behavior)
-        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data))
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, ConfiguredExternalAccess({"remote": True}, data))
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
         await data.mark_dispatch(SCOPE, run_id)
@@ -348,7 +346,7 @@ def _dispatch_images(images: tuple[object, ...]) -> tuple[InMemoryData, ToolExec
         tool = RecordingTool("remote/chart", external_source="remote",
                              behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("chart"),
                                                                result_images=images))  # type: ignore[arg-type]
-        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data),
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, ConfiguredExternalAccess({"remote": True}, data),
                                 images=StoredResultImages(data.blobs, data, None, DEFAULT_FILE_MAX_BYTES))
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
@@ -411,7 +409,7 @@ def test_a_cancel_while_images_are_kept_still_commits_the_result() -> None:
         tool = RecordingTool("remote/read", external_source="remote", effect=EffectProfile.READ,
                              behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("shot"),
                                                                result_images=images))
-        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data),
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, ConfiguredExternalAccess({"remote": True}, data),
                                 images=Slow())
         run_id = await data.prepare_run(
             SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))

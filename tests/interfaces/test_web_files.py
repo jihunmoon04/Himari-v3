@@ -266,11 +266,11 @@ def test_a_huge_version_is_refused_not_a_crash(server: Server) -> None:
 ])
 def test_more_of_the_error_table(server: Server, monkeypatch: pytest.MonkeyPatch, raised: str,
                                  expected: tuple[int, str]) -> None:
-    from himari.bootstrap.application import WorkspaceBusy
+    from himari.bootstrap.application import FolderBusy
     cid = server.new()
     up = server.upload(cid, "a.txt", b"a").json()
     assert server.application is not None
-    errors = {"too_many": DataError(DataErrorCode.LIMIT_EXCEEDED, "x"), "busy": WorkspaceBusy("ws"),
+    errors = {"too_many": DataError(DataErrorCode.LIMIT_EXCEEDED, "x"), "busy": FolderBusy("ws"),
               "missing": DataError(DataErrorCode.BLOB_MISSING, "k")}
 
     async def refuse(*args: Any, **kwargs: Any) -> Any:

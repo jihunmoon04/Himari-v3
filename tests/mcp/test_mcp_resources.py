@@ -58,8 +58,7 @@ def tool(connection: McpConnection, name: str) -> ResourceTool:
 
 
 async def use(connection: McpConnection, name: str, conversation: str = "conv-a", **arguments: Any) -> ToolOutcome:
-    ctx = ToolContext(scope=TrustedScope(PrincipalId("alice"), ConversationId(conversation)),
-                      artifacts=None)  # type: ignore[arg-type]
+    ctx = ToolContext(scope=TrustedScope(PrincipalId("alice"), ConversationId(conversation)))
     return await tool(connection, name).run(ToolInvocation(ToolId(f"calliope/{name}"), "c", arguments), ctx)  # type: ignore[arg-type]
 
 

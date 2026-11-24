@@ -20,20 +20,17 @@ import unicodedata
 from datetime import UTC, date, time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import BinaryIO, Protocol
 
 from himari.common import (
     DeepFrozen,
-    ArtifactId,
-    BindingId,
     CallId,
     CallRef,
     ContentBlock,
     ConversationId,
-    EnvironmentInstanceId,
     EnvironmentKind,
     EventId,
     FileId,
@@ -48,7 +45,6 @@ from himari.common import (
     ToolId,
     TrustedScope,
     UnknownOutcomePolicy,
-    WorkspaceId,
 )
 
 # --- Errors (Data v0.2 §11) --------------------------------------------------
@@ -286,7 +282,6 @@ class PromptBasis(DeepFrozen):
     event_sequence: int
     state_revision: int
     snapshot_revision: int | None = None
-    artifact_revisions: Mapping[ArtifactId, int] = field(default_factory=dict)
     # Opaque digest of what the input was composed under besides history and
     # state (model, instructions, Tool catalog); set by Prompt (V3-P48).
     context_key: str | None = None
@@ -381,7 +376,6 @@ class ToolExecutionRecord(DeepFrozen):
     status: ToolExecutionStatus
     model_result: ModelToolResult | None = None  # what the model sees
     raw_result: JsonValue = None  # the Tool's own execution record; never sent to the model
-    workspace_binding_id: BindingId | None = None
     # Persisted at claim time. None on an uncertain record means the policy is
     # not known and must be treated as REQUIRE_USER (never silently relaxed).
     unknown_outcome: UnknownOutcomePolicy | None = None
@@ -397,34 +391,9 @@ class ProjectionResult(DeepFrozen):
     pending: tuple[ToolExecutionRecord, ...]  # empty for AssistantFinal
 
 
-# --- Artifacts (Data v0.2 §8) ----------------------------------------------
-
-
-@dataclass(frozen=True)
-class Artifact(DeepFrozen):
-    artifact_id: ArtifactId
-    kind: str  # e.g. "plan", "note"; Data does not interpret content
-    revision: int
-    content: JsonValue
-
-
-@dataclass(frozen=True)
-class ArtifactMutation(DeepFrozen):
-    """Requested Plan/Note change carried by a ToolOutcome (V3-042).
-
-    ``artifact_id=None`` creates a new Artifact; otherwise ``expected_revision``
-    is checked (CAS) inside the same transaction as the Tool result.
-    """
-
-    kind: str
-    content: JsonValue
-    artifact_id: ArtifactId | None = None
-    expected_revision: int | None = None
-
-
 # --- Files (V3-P66, docs/file-upload-download-v0.1.md) -------------------------
 # An uploaded or presented file keeps its bytes in the file store, outside
-# every Workspace: written once, addressed per principal, expired when the
+# every Conversation folder: written once, addressed per principal, expired when the
 # store is full or after the keep days (§8.5) — bytes only, the record stays.
 
 MAX_FILE_NAME_BYTES = 200  # UTF-8, after cleaning (§5.3)
@@ -440,7 +409,7 @@ PRESENT_LIMIT_BYTES = 256 * 1024 * 1024  # presented per Conversation per PRESEN
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024
 DEFAULT_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_KEEP_DAYS = 30
-TEMP_PREFIX = ".himari-"  # the Workspace write Tools' temporary names
+TEMP_PREFIX = ".himari-"  # the folder write Tools' temporary names
 
 
 class FileOrigin(Enum):
@@ -794,7 +763,6 @@ class ToolCompletion(DeepFrozen):
     status: ToolExecutionStatus  # SUCCEEDED | FAILED | DENIED | CANCELLED
     model_result: ModelToolResult
     raw_result: JsonValue = None  # persisted on the ToolExecutionRecord
-    artifact_mutations: tuple[ArtifactMutation, ...] = ()
     record_event: bool = True  # the Tool's conversation_record policy (FULL → True)
     # V3-P67 §4.2: the model result's attachments that are this call's staged
     # Tool images get attached in the same transaction (INVALID_ARGUMENT for
@@ -846,44 +814,15 @@ class PromptSnapshot(DeepFrozen):
 
 
 @dataclass(frozen=True)
-class BindingAuthority(DeepFrozen):
-    """Current, authorized Binding metadata. Not an OS permission proof;
-    the Environment re-validates before any effect."""
-
-    binding_id: BindingId
-    environment_instance_id: EnvironmentInstanceId
-    environment_kind: EnvironmentKind
-    workspace_id: WorkspaceId
-    revision: int
-    # This Conversation's working directory inside *this* Binding's Workspace
-    # (DATA-11). Per Binding, so several Environments with different
-    # Workspaces can be active at once (V3-008). Never a host path.
-    cwd_relative: str | None = None
-
-
-@dataclass(frozen=True)
-class ConversationWorkspace(DeepFrozen):
-    workspace_id: WorkspaceId
-    cwd_relative: str  # never an absolute host path
-
-
-@dataclass(frozen=True)
-class EnvironmentActivation(DeepFrozen):
-    environment_instance_id: EnvironmentInstanceId
-    environment_kind: EnvironmentKind  # P0: at most one active per kind (V3-P19)
-    default_binding_id: BindingId | None = None
-
-
-@dataclass(frozen=True)
 class PersistedStateBasis(DeepFrozen):
     """One coherent, permission-filtered read (DATA-06)."""
 
     conversation_sequence: int
     state_revision: int
-    environments: tuple[EnvironmentActivation, ...]
-    bindings: tuple[BindingAuthority, ...]
-    artifacts: tuple[Artifact, ...]
-    conversation_workspace: ConversationWorkspace | None = None
+    # The Environment kinds this Conversation has, ordered by kind; each is
+    # set when the Conversation is created (an old one's kind this server
+    # no longer has stays listed: whoever reads it leaves it out).
+    environments: tuple[EnvironmentKind, ...]
 
 
 # --- External Tool sources (V3-P53) -----------------------------------------
@@ -1949,15 +1888,6 @@ PREVIEW_CHARS = 120
 
 
 @dataclass(frozen=True)
-class InitialActivation(DeepFrozen):
-    """An Environment activated in the same T0 transaction that creates the
-    Conversation (its default Binding's cwd is the Conversation's own folder)."""
-
-    environment_kind: EnvironmentKind
-    workspace_id: WorkspaceId
-
-
-@dataclass(frozen=True)
 class ConversationSummary(DeepFrozen):
     """One row of a principal's Conversation list. ``preview`` is the start
     of the first user message (display only, never a model input)."""
@@ -1976,7 +1906,7 @@ class TrashedConversation(DeepFrozen):
     """V3-P65: what a permanent delete must clean up outside Data."""
 
     summary: ConversationSummary
-    workspace: ConversationWorkspace | None  # the Conversation's own folder (§5)
+    environments: tuple[EnvironmentKind, ...]  # whose places (its folder, §5) go with it
 
 
 # --- Sub-ports ---------------------------------------------------------------
@@ -2063,8 +1993,7 @@ class ConversationLog(Protocol):
         self, scope: TrustedScope, call: CallRef, completion: ToolCompletion
     ) -> ConversationEvent | None:
         """T7/T8 (DATA-08): terminal state + model result + raw result +
-        Artifact mutations (CAS) + configured ``tool_result`` Event in one
-        transaction.
+        configured ``tool_result`` Event in one transaction.
         Called by the Tool Dispatcher only. Returns the Event if recorded."""
         ...
 
@@ -2128,38 +2057,12 @@ class ConversationLog(Protocol):
         ...
 
 
-class ArtifactStore(Protocol):
-    """DATA-04: read side. Writes go through ``commit_tool_outcome``."""
+class EnvironmentState(Protocol):
+    """DATA-07: which Environments a Conversation has (set at T0)."""
 
-    async def read_artifact(self, scope: TrustedScope, artifact_id: ArtifactId) -> Artifact: ...
-
-    async def list_artifacts(
-        self, scope: TrustedScope, *, kind: str | None = None
-    ) -> Sequence[Artifact]: ...
-
-
-class WorkspaceState(Protocol):
-    """DATA-07/11: Registry, Binding, cwd mapping. (FILE-02 metadata: later.)"""
-
-    async def read_binding_authority(
-        self, scope: TrustedScope, binding_id: BindingId
-    ) -> BindingAuthority: ...
-
-    async def resolve_default_binding(
-        self, scope: TrustedScope, environment_kind: EnvironmentKind
-    ) -> BindingAuthority | None:
-        """``workspace_requirement = DEFAULT`` resolution."""
-        ...
-
-    async def resolve_conversation_workspace(
-        self, scope: TrustedScope
-    ) -> ConversationWorkspace: ...
-
-    async def read_activation(
-        self, scope: TrustedScope, environment_kind: EnvironmentKind
-    ) -> EnvironmentActivation | None:
-        """Current activation of a kind in this Conversation (P0: ≤1).
-        Every Environment Tool call is gated on this, binding or not."""
+    async def has_environment(self, scope: TrustedScope, environment_kind: EnvironmentKind) -> bool:
+        """Whether this Conversation has the kind. Every Environment Tool
+        call is gated on this; NOT_AUTHORIZED for another's Conversation."""
         ...
 
 
@@ -2219,11 +2122,11 @@ class ConversationCatalog(Protocol):
         principal: PrincipalId,
         *,
         title: str | None = None,
-        activations: Sequence[InitialActivation] = (),
+        environments: Sequence[EnvironmentKind] = (),
         model_setting: ModelSetting | None = None,
     ) -> ConversationId:
-        """T0: a new Conversation owned by ``principal`` with its initial
-        Environment activations, atomically. The id is generated by Data.
+        """T0: a new Conversation owned by ``principal`` with its Environment
+        kinds (each once), atomically. The id is generated by Data.
         A title longer than MAX_TITLE_CHARS raises INVALID_ARGUMENT; a blank
         title is stored as None."""
         ...
@@ -2301,13 +2204,9 @@ class StateQuery(Protocol):
 
 
 __all__ = [
-    "Artifact",
-    "ArtifactMutation",
-    "ArtifactStore",
     "AssistantFinal",
     "AssistantOutput",
     "AssistantToolCalls",
-    "BindingAuthority",
     "CompletedGroupRef",
     "ConversationCatalog",
     "ConversationEvent",
@@ -2315,16 +2214,14 @@ __all__ = [
     "ConversationModelSettings",
     "ConversationRetention",
     "ConversationSummary",
-    "ConversationWorkspace",
     "DataError",
     "DataErrorCode",
-    "EnvironmentActivation",
+    "EnvironmentState",
     "EventKind",
     "EventPayload",
     "EventRef",
     "ExternalSourceSetting",
     "ExternalSourceSettings",
-    "InitialActivation",
     "MAX_EFFORT_CHARS",
     "MAX_EXTERNAL_SETTINGS",
     "MAX_LIST_LIMIT",
@@ -2352,5 +2249,4 @@ __all__ = [
     "TrashedConversation",
     "TriggerRef",
     "UserMessage",
-    "WorkspaceState",
 ]

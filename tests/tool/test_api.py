@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from types import ModuleType
 
 from himari.common import (
-    ArtifactId,
     CallId,
     ConversationId,
     ModelToolResult,
@@ -14,7 +13,6 @@ from himari.common import (
     ToolId,
     TrustedScope,
 )
-from himari.data.api import Artifact
 from himari.tool import api
 from himari.tool.api import (
     EffectProfile,
@@ -24,7 +22,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    WorkspaceRequirement,
 )
 
 
@@ -37,18 +34,6 @@ def assert_handler_conforms(handler: object) -> None:
         assert d.tool_id.startswith(f"{d.environment_kind}/")
     else:
         assert "/" not in d.tool_id
-    if d.workspace_requirement is not WorkspaceRequirement.NONE:
-        assert d.environment_kind is not None, "workspace Tools are Environment-provided"
-
-
-class _NoArtifacts:
-    async def read_artifact(self, scope: TrustedScope, artifact_id: ArtifactId) -> Artifact:
-        raise KeyError(artifact_id)
-
-    async def list_artifacts(
-        self, scope: TrustedScope, *, kind: str | None = None
-    ) -> Sequence[Artifact]:
-        return ()
 
 
 class EchoTool:
@@ -56,7 +41,6 @@ class EchoTool:
         tool_id=ToolId("echo"),
         description="Echo the text argument.",
         input_schema={"type": "object", "properties": {"text": {"type": "string"}}},
-        workspace_requirement=WorkspaceRequirement.NONE,
         effect_profile=EffectProfile.READ,
     )
 
@@ -78,10 +62,10 @@ def test_example_handlers_conform() -> None:
 
 def test_handler_returns_outcome_without_ledger_access() -> None:
     scope = TrustedScope(PrincipalId("p1"), ConversationId("c1"))
-    ctx = ToolContext(scope=scope, artifacts=_NoArtifacts())
+    ctx = ToolContext(scope=scope)
     outcome = asyncio.run(
         EchoTool().run(ToolInvocation(ToolId("echo"), CallId("call_1"), {"text": "hi"}), ctx)
     )
     assert outcome.status is ToolStatus.SUCCEEDED
     assert outcome.model_result.blocks == (TextBlock("hi"),)
-    assert outcome.artifact_mutations == ()
+    assert outcome.raw_result is None

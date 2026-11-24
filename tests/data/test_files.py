@@ -23,7 +23,6 @@ from himari.common import (
     ToolCall,
     ToolId,
     TrustedScope,
-    WorkspaceId,
 )
 from himari.data.api import (
     BLOB_GRACE,
@@ -33,7 +32,6 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     FileOrigin,
-    InitialActivation,
     PresentedFile,
     PromptBasis,
     RawReceived,
@@ -57,7 +55,7 @@ async def chunks(*parts: bytes) -> AsyncIterator[bytes]:
 
 
 async def conversation(data: Data, owner: PrincipalId = ALICE) -> TrustedScope:
-    cid = await data.create_conversation(owner, title="t", activations=(InitialActivation(FAKE, WorkspaceId("ws")),))
+    cid = await data.create_conversation(owner, title="t", environments=(FAKE,))
     return TrustedScope(owner, cid)
 
 

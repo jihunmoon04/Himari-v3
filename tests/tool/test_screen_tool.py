@@ -43,7 +43,7 @@ class Source:
 
 
 def run(tool: ScreenTool, turn: TurnSource | None):  # type: ignore[no-untyped-def]
-    return asyncio.run(tool.run(CALL, ToolContext(scope=SCOPE, artifacts=None, turn=turn)))  # type: ignore[arg-type]
+    return asyncio.run(tool.run(CALL, ToolContext(scope=SCOPE, turn=turn)))
 
 
 def text(outcome) -> str:  # type: ignore[no-untyped-def]
@@ -97,7 +97,7 @@ def test_a_run_looks_once() -> None:
         tool = ScreenTool(source)
         out: list[str] = []
         for run_id in ("r1", "r1", "r2"):
-            ctx = ToolContext(scope=SCOPE, artifacts=None, turn=TurnSource("d1"),  # type: ignore[arg-type]
+            ctx = ToolContext(scope=SCOPE, turn=TurnSource("d1"),
                               run_id=RunId(run_id))
             out.append(text(await tool.run(CALL, ctx)))
         assert len(source.asked) == 2  # §3.1: the second call of r1 does not ask again

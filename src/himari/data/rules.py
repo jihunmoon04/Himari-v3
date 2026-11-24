@@ -31,7 +31,6 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     EventText,
-    InitialActivation,
     InstructionScope,
     Memory,
     MemoryCategory,
@@ -74,10 +73,9 @@ def check_page(limit: int, offset: int) -> None:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, f"limit must be 1..{MAX_LIST_LIMIT} and offset >= 0")
 
 
-def check_activations(activations: Sequence[InitialActivation]) -> None:
-    kinds = [a.environment_kind for a in activations]
+def check_environments(kinds: Sequence[str]) -> None:
     if len(set(kinds)) != len(kinds):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "one activation per Environment kind (P0)")
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "each Environment kind once")
 
 
 def check_external_setting(source: object, enabled: object, count_after: int) -> None:

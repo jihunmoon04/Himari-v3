@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from testkit import V17_UNDO, V20_UNDO, SCOPE, V15_UNDO, text_result, user
+from testkit import FAKE, V17_UNDO, V20_UNDO, V21_UNDO, SCOPE, V15_UNDO, text_result, user
 
 from himari.common import CallId, CallRef, ConversationId, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
@@ -22,7 +22,6 @@ from himari.data.api import (
     PassItem,
     PassKind,
     PassStart,
-    ArtifactMutation,
     AssistantToolCalls,
     ModelSetting,
     PresentedFile,
@@ -63,7 +62,7 @@ async def fill(data: SqliteData, scope: TrustedScope) -> None:
     await data.project_model_output(scope, run_id, AssistantToolCalls((ToolCall(CallId("c"), 0, ToolId("fake/v"), {}),)))
     given = await data.blobs.put(scope.principal_id, chunks(f"out {scope.conversation_id}".encode()), 1000)
     await data.commit_tool_outcome(scope, CallRef(run_id, CallId("c")), ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("v"), artifact_mutations=(ArtifactMutation("note", "n"),),
+        ToolExecutionStatus.SUCCEEDED, text_result("v"),
         presented_files=(PresentedFile(given, "o.txt", "text/plain", "/workspace/o.txt"),)))
     now = datetime.now(UTC)  # V3-P85: an applied memory pass: its cursor, episode, call and item
     pass_id = await data.begin_pass(scope, PassStart(PassKind.LIVE, 0, 3, 3, "p", "m"))
@@ -95,6 +94,8 @@ def test_a_purge_leaves_no_row_of_the_conversation_in_any_table(tmp_path: Path) 
     data = SqliteData(store)
     store.create_conversation(SCOPE)
     store.create_conversation(OTHER)
+    store.activate_environment(SCOPE, FAKE)
+    store.activate_environment(OTHER, FAKE)
 
     async def scenario() -> None:
         await fill(data, SCOPE)
@@ -107,8 +108,7 @@ def test_a_purge_leaves_no_row_of_the_conversation_in_any_table(tmp_path: Path) 
     conn = store.connection
     counts = rows_of(conn, SCOPE.conversation_id)
     assert len(counts) >= 10 and set(counts.values()) == {0}, counts
-    assert all(n > 0 for table, n in rows_of(conn, OTHER.conversation_id).items()
-               if table not in ("activations", "bindings")), "the other Conversation keeps its rows"
+    assert all(n > 0 for n in rows_of(conn, OTHER.conversation_id).values()), "the other Conversation keeps its rows"
     assert conn.execute("SELECT count(*) FROM compaction_runs").fetchone()[0] == 1  # only the other one's
     for table in ("memory_pass_calls", "memory_pass_items", "memories"):  # V3-P85: only the other one's
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1, table
@@ -133,7 +133,7 @@ def v6_database(path: Path) -> None:
     store.close()
     conn = sqlite3.connect(path, isolation_level=None)
     try:
-        for statement in (*V20_UNDO, *V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
+        for statement in (*V21_UNDO, *V20_UNDO, *V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
                           "DROP TABLE devices", "DROP INDEX bindings_by_workspace", "DROP TABLE workspaces",
                           "DROP TABLE event_text", "DROP TABLE memory_ids", "DROP INDEX memories_by_source",
                           "DROP TABLE memories",

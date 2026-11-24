@@ -17,11 +17,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from testkit import FAKE, SCOPE, V15_UNDO, FakeEnvironment, RecordingTool, final, text_result, user
+from testkit import FAKE, SCOPE, V15_UNDO, V21_UNDO, FakeEnvironment, RecordingTool, final, text_result, user
 
 from himari.bootstrap import build_runtime
 from himari.common import (
-    ArtifactId,
     ConversationId,
     EnvironmentKind,
     PrincipalId,
@@ -33,8 +32,8 @@ from himari.common import (
     TokenUsage,
     ToolCall,
     ToolId,
+    TrustedScope,
     UnknownOutcomePolicy,
-    WorkspaceId,
     thaw,
 )
 from himari.control.api import DriveState
@@ -42,12 +41,12 @@ from himari.data.api import (
     MemoryCursor,
     InstructionScope,
     MemoryCategory,
-    ArtifactMutation,
+    MemoryChange,
+    MemoryChangeKind,
     AssistantFinal,
     AssistantToolCalls,
     DataError,
     DataErrorCode,
-    InitialActivation,
     ModelSetting,
     PromptBasis,
     RawNoResponse,
@@ -68,7 +67,7 @@ from himari.data.sqlite import (
     StoreSecurityError,
 )
 from himari.provider.scripted import ScriptedAdapter
-from himari.tool.api import EffectProfile, WorkspaceRequirement
+from himari.tool.api import EffectProfile
 from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
 
 HERE = Path(__file__).resolve().parent
@@ -98,7 +97,7 @@ async def everything(data: SqliteData, store: SqliteStore) -> dict[str, Any]:
         "raw": store.raw_request_bodies(SCOPE),
         "responses": [await data.read_raw_response(SCOPE, r) for r in sorted(runs)],
         "executions": [await data.read_tool_executions(SCOPE, r) for r in sorted(runs)],
-        "artifacts": await data.list_artifacts(SCOPE),
+        "memories": await data.list_memories(SCOPE.principal_id),
         "snapshot": await data.get_latest_snapshot(SCOPE),
         "state": await data.read_current_state_basis(SCOPE),
     }
@@ -111,7 +110,7 @@ def test_everything_reads_back_identically_after_reopening(tmp_path: Path) -> No
     path = tmp_path / "h.db"
     store, data = open_store(path)
     store.create_conversation(SCOPE)
-    binding = store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"), cwd_relative="conversations/x")
+    store.activate_environment(SCOPE, FAKE)
 
     async def fill() -> dict[str, Any]:
         await data.append_event(SCOPE, user("héllo ✓"), idempotency_key="k1")
@@ -119,13 +118,14 @@ def test_everything_reads_back_identically_after_reopening(tmp_path: Path) -> No
         await data.mark_dispatch(SCOPE, run_id)
         await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"\x01resp\xff", "application/json",
                                                                  TokenUsage(10, 20, 5, None)))
-        group = (ToolCall(CallId("a"), 0, ToolId("note"), {"n": 1.5, "f": 2.0, "nested": [{"k": None}, True], "workspace_binding_id": binding.binding_id}),
+        group = (ToolCall(CallId("a"), 0, ToolId("note"), {"n": 1.5, "f": 2.0, "nested": [{"k": None}, True]}),
                  ToolCall(CallId("b"), 1, ToolId("fake/w"), {}))
         await data.project_model_output(SCOPE, run_id, AssistantToolCalls(group, commentary=(TextBlock("thinking"),)),
                                         continuation={"reasoning_details": [{"type": "enc", "data": "Zm9v", "n": 1.0}]})
         await data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("a")), ToolCompletion(
             ToolExecutionStatus.SUCCEEDED, text_result("noted"), raw_result={"bytes": 3, "list": [1, "2"]},
-            artifact_mutations=(ArtifactMutation("note", {"text": "v1", "score": 3.0}),)))
+            memory_change=MemoryChange(MemoryChangeKind.SAVE, await data.allocate_memory_id(SCOPE.principal_id),
+                                       MemoryCategory.USER, "Writes ✓ notes.")))
         await data.claim_tool_execution(SCOPE, CallRef(run_id, CallId("b")),
                                         unknown_outcome=UnknownOutcomePolicy.REPORT_TO_MODEL, record_event=False)
         failed = await data.prepare_run(SCOPE, preparation(b"second"))
@@ -133,7 +133,7 @@ def test_everything_reads_back_identically_after_reopening(tmp_path: Path) -> No
         await data.record_raw_outcome(SCOPE, failed, RawNoResponse("http_500", b"err body", "text/plain"))
         await data.replace_latest_snapshot(SCOPE, expected_revision=None, schema_version=3,
                                            body={"turns": [1, 2.25, "x"]}, covers_through_sequence=2,
-                                           basis=PromptBasis(2, 1, None, {ArtifactId("art_1"): 1}))
+                                           basis=PromptBasis(2, 1, None, "ctx", "state"))
         return await everything(data, store)
 
     before = asyncio.run(fill())
@@ -145,7 +145,7 @@ def test_everything_reads_back_identically_after_reopening(tmp_path: Path) -> No
     assert after["raw"][0] == b"\x00\xff\xfe raw \x80" and after["responses"][0].body == b"\x01resp\xff"
     arguments = after["executions"][0][0].arguments
     assert arguments["f"] == 2.0 and isinstance(arguments["f"], float)  # 2.0 stays a float, not 2
-    assert isinstance(after["artifacts"][0].content["score"], float)
+    assert [m.text for m in after["memories"]] == ["Writes ✓ notes."]  # written with its call
     payload = thaw(after["runs"][0].continuation.payload)
     assert payload == {"reasoning_details": [{"type": "enc", "data": "Zm9v", "n": 1.0}]}
     assert isinstance(payload["reasoning_details"][0]["n"], float)
@@ -274,6 +274,7 @@ _ADDED_IN = {
     18: ("ALTER TABLE wakes DROP COLUMN held_run_id",),
     19: (),  # V3-P107 §2: data only (told reminders become delivered)
     20: ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name", "DROP TABLE personas"),
+    21: V21_UNDO,
 }
 
 
@@ -288,13 +289,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 20
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 21
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -310,7 +311,7 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         found = asyncio.run(data.search_events(SCOPE.principal_id, ["FROM V"], current=ConversationId("conv_none"),
                                                current_through=None, per_conversation=3, limit=10))
         assert [h.text for h in found.hits] == [f"from v{version}"]  # v12: the Events already there were filled
-        assert store.connection.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 0  # the v13 table
+        assert not asyncio.run(data.has_environment(SCOPE, FAKE))  # v21: the Environments it has (none)
         assert asyncio.run(data.add_device(SCOPE.principal_id, "Desk", b"code", datetime.now(UTC) + timedelta(minutes=10))
                            ).device_id == "d1"  # the v14 tables
         if version < 15:  # v15: the Conversation reads from its last Event, which is also its backfill baseline
@@ -325,7 +326,7 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v20 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v21 database afterwards
 
 
 def test_a_v19_companion_persona_becomes_persona_1_chosen(tmp_path: Path) -> None:
@@ -386,7 +387,52 @@ def test_a_v18_told_reminder_is_delivered_after_the_upgrade(tmp_path: Path) -> N
         store.close()
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
+def test_a_v20_conversation_keeps_its_environments_and_loses_the_rest(tmp_path: Path) -> None:
+    """v21: each Conversation keeps the Environment kinds it had (one row per kind, even if a kind was
+    activated twice); Bindings, Workspaces, Artifacts and the columns naming them are gone."""
+    path = tmp_path / "h.db"
+    other = TrustedScope(SCOPE.principal_id, ConversationId("conv_2"))
+    store = SqliteStore(path)
+    for scope in (SCOPE, other):
+        store.create_conversation(scope)
+        asyncio.run(SqliteData(store).append_event(scope, user(f"in {scope.conversation_id}")))
+    store.close()
+    tamper(path, *V21_UNDO,
+           "INSERT INTO activations (conversation_id, environment_instance_id, environment_kind, default_binding_id)"
+           " VALUES ('conv_1', 'env_a', 'machine', 'bind_a'), ('conv_1', 'env_b', 'machine', NULL),"
+           " ('conv_2', 'env_c', 'inside', 'bind_c')",
+           "INSERT INTO bindings (conversation_id, binding_id, environment_instance_id, environment_kind, workspace_id,"
+           " revision, cwd_relative) VALUES ('conv_1', 'bind_a', 'env_a', 'machine', 'mws_x', 1, 'conversations/conv_1')",
+           "INSERT INTO workspaces (workspace_id, owner, environment_kind, location, label, created_at)"
+           " VALUES ('ws_r', 'alice', 'machine', '/srv/x', 'x', '2026-11-01T00:00:00+00:00')",
+           "INSERT INTO artifacts (conversation_id, artifact_id, kind, revision, content)"
+           " VALUES ('conv_1', 'art_1', 'note', 1, '\"n\"')",
+           "UPDATE conversations SET workspace_id='mws_x', workspace_cwd='conversations/conv_1'"
+           " WHERE conversation_id='conv_1'",
+           "PRAGMA user_version=20")
+    store = SqliteStore(path)
+    try:
+        data = SqliteData(store)
+        machine, inside = EnvironmentKind("machine"), EnvironmentKind("inside")
+        assert asyncio.run(data.read_current_state_basis(SCOPE)).environments == (machine,)
+        assert asyncio.run(data.read_current_state_basis(other)).environments == (inside,)
+        assert asyncio.run(data.has_environment(SCOPE, machine)) and not asyncio.run(data.has_environment(other, machine))
+        tables = {r[0] for r in store.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not tables & {"activations", "bindings", "workspaces", "artifacts"} and "environments" in tables
+        columns = {r[1] for r in store.connection.execute("PRAGMA table_info(conversations)")}
+        assert not columns & {"workspace_id", "workspace_cwd"}
+        assert "workspace_binding_id" not in {r[1] for r in store.connection.execute("PRAGMA table_info(tool_executions)")}
+        events = asyncio.run(data.read_events(SCOPE))
+        assert [e.payload.blocks for e in events] == [(TextBlock("in conv_1"),)]  # type: ignore[union-attr]
+        asyncio.run(data.trash_conversation(SCOPE))
+        assert asyncio.run(data.begin_purge(SCOPE)).environments == (machine,)
+        asyncio.run(data.purge_conversation(SCOPE))
+        assert store.connection.execute("SELECT count(*) FROM environments").fetchone()[0] == 1  # conv_2's
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -559,12 +605,10 @@ async def op_project(store: SqliteStore, data: SqliteData) -> Operation:
 async def op_commit(store: SqliteStore, data: SqliteData) -> Operation:
     run_id = await _received(data)
     await data.project_model_output(SCOPE, run_id, AssistantToolCalls(GROUP))
-    await data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c1")), ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("x"), artifact_mutations=(ArtifactMutation("note", "v1"),)))
-    (note,) = await data.list_artifacts(SCOPE)
+    note = await data.save_memory(SCOPE.principal_id, MemoryCategory.USER, "v1")
     done = ToolCompletion(ToolExecutionStatus.SUCCEEDED, text_result("ok"), raw_result=[1],
-                          artifact_mutations=(ArtifactMutation("plan", "p"),
-                                              ArtifactMutation("note", "v2", note.artifact_id, expected_revision=1)))
+                          memory_change=MemoryChange(MemoryChangeKind.SAVE, note.memory_id, MemoryCategory.USER, "v2",
+                                                     expected_revision=1))
     return lambda: data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c0")), done)
 
 
@@ -599,21 +643,22 @@ async def op_final(store: SqliteStore, data: SqliteData) -> Operation:
 
 
 async def op_activate(store: SqliteStore, data: SqliteData) -> Operation:
-    async def activate() -> object:
-        return store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    async def activate() -> None:
+        store.activate_environment(SCOPE, FAKE)
     return activate
 
 
 async def op_create(store: SqliteStore, data: SqliteData) -> Operation:
-    activations = (InitialActivation(FAKE, WorkspaceId("ws_a")), InitialActivation(EnvironmentKind("other"), WorkspaceId("ws_b")))
-    return lambda: data.create_conversation(PrincipalId("carol"), title="t", activations=activations)
+    environments = (FAKE, EnvironmentKind("other"))
+    return lambda: data.create_conversation(PrincipalId("carol"), title="t", environments=environments)
 
 
 async def op_purge(store: SqliteStore, data: SqliteData) -> Operation:
     run_id = await _received(data)
     await data.project_model_output(SCOPE, run_id, AssistantToolCalls(GROUP))
     await data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c2")), ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("v"), artifact_mutations=(ArtifactMutation("note", "n"),)))
+        ToolExecutionStatus.SUCCEEDED, text_result("v"), raw_result={"n": 1}))
+    store.activate_environment(SCOPE, FAKE)
     await data.set_external_setting(SCOPE, "fake", False)
     await data.set_model_setting(SCOPE, ModelSetting("m", None))
     await data.trash_conversation(SCOPE)
@@ -687,7 +732,7 @@ def test_killed_right_after_commit_keeps_the_commit(tmp_path: Path, op: str) -> 
         if op == "project":
             assert isinstance(events[-1].payload, AssistantToolCalls)
         elif op == "commit":
-            assert len(asyncio.run(data.list_artifacts(SCOPE))) == 2
+            assert [m.text for m in asyncio.run(data.list_memories(SCOPE.principal_id))] == ["a"]
         else:
             report = asyncio.run(data.recover_interrupted(SCOPE))  # already done: nothing left
             assert report.tools_unknown == () and report.runs_abandoned_not_sent == ()
@@ -719,8 +764,7 @@ def test_d17_process_killed_during_an_effect_never_reruns_it(tmp_path: Path) -> 
     assert killed.returncode == -9, killed.stderr
 
     store = SqliteStore(db)
-    write = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
-                          workspace=WorkspaceRequirement.DEFAULT)
+    write = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE)
     provider = ScriptedAdapter([final("I checked")])
     rt = build_runtime(provider, store=store, environments=[FakeEnvironment(write)])
     result = asyncio.run(rt.driver.drive(SCOPE, user("continue")))

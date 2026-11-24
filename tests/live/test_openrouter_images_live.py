@@ -20,7 +20,7 @@ from himari.common import AttachmentRef, CallId, EventId, FileId, ModelToolResul
 from himari.prompt.api import AttachmentInfo, ToolGroupTurn, UserTurn
 from himari.provider.api import NativeReceived, NormalizedFinal, ProviderCapabilities
 from himari.provider.openrouter import KNOWN_CAPABILITIES, OpenRouterAdapter
-from himari.tool.api import EffectProfile, ToolDefinition, WorkspaceRequirement
+from himari.tool.api import EffectProfile, ToolDefinition
 
 ROOT = Path(__file__).resolve().parents[2]
 KEY = os.environ.get("OPENROUTER_API_KEY") or read_env_file(str(ROOT / ".env")).get("OPENROUTER_API_KEY", "")
@@ -66,8 +66,7 @@ def test_an_image_in_a_user_message(model: str) -> None:
 
 @pytest.mark.parametrize("model", MODELS)
 def test_an_image_after_a_tool_group(model: str) -> None:
-    chart = ToolDefinition(ToolId("x/chart"), "Draws a chart.", {"type": "object", "properties": {}},
-                           WorkspaceRequirement.NONE, EffectProfile.READ, external_source="x")
+    chart = ToolDefinition(ToolId("x/chart"), "Draws a chart.", {"type": "object", "properties": {}}, EffectProfile.READ, external_source="x")
     turn = UserTurn(EventId("e"), (TextBlock("Draw the chart, then tell me its main colour in one word."),))
     group = ToolGroupTurn(RunId("r1"), (), (ToolCall(CallId("call_1"), 0, ToolId("x/chart"), {}),),
                           {CallId("call_1"): ModelToolResult((TextBlock("drawn"), AttachmentRef(FileId("g"), 1)))})

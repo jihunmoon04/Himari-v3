@@ -149,15 +149,14 @@ def test_an_unusable_folder_root_does_nothing(tmp_path: Path) -> None:
 def test_an_old_inside_conversation_is_told_of_no_files(tmp_path: Path) -> None:
     """V3-P101: Inside is gone; a Conversation made with it only talks, so the model is told of no file Tools,
     attachments or folder, while a machine Conversation on the same server still is."""
-    from himari.common import EnvironmentKind, WorkspaceId
-    from himari.data.api import InitialActivation
+    from himari.common import EnvironmentKind
 
     async def scenario() -> None:
         adapter = ScriptedAdapter([final("old"), final("new")])
         app = await open_app(tmp_path / "data", adapter)
         try:
             old = TrustedScope(OPERATOR, await app.data.create_conversation(
-                OPERATOR, activations=(InitialActivation(EnvironmentKind("inside"), WorkspaceId("ws_old")),)))
+                OPERATOR, environments=(EnvironmentKind("inside"),)))
             new = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
             for scope in (old, new):
                 await app.send(scope, "hi")
@@ -179,7 +178,7 @@ def test_a_purge_removes_the_folder_after_folders_are_turned_off(tmp_path: Path)
         try:
             scope = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
             assert app.machine is not None
-            folder = Path(await app.machine.folder(scope.conversation_id, f"conversations/{scope.conversation_id}"))
+            folder = Path(await app.machine.folder(scope.conversation_id))
             (folder / "notes.txt").write_text("mine")
         finally:
             await app.close()
