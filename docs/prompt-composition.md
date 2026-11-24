@@ -1,5 +1,7 @@
 # Prompt Composition
 
+> **2026-11-24 주의:** 이 문서의 Workspace·Binding·Environment 활성화·Artifact(Plan/Note) 부분은 [H-75](decisions.md)(스키마 v21) 전의 기록이다. 지금은 대화가 가진 Environment 종류만 남았다. 지금 구조는 [아키텍처](architecture.md)가 우선이다.
+
 > **V3-P93 1단계 구현:** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md) §4는 같은 모델·설정의 Web/Windows 전환에서 시스템/도구 정의를 고정하고 현재 능력은 Conversation 뒤 runtime state로 투영한다. 서버 전역 설정 변경과 실제 Provider 캐시 수치 검증은 구분한다.
 
 > **새 경계 검토 초안:** [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에서 Prompt의 provider-neutral input/coverage, Provider의 native request preparation과 exact raw 보존, Tool 그룹 배리어를 구체화합니다. 아직 확정된 API는 아닙니다. Contract

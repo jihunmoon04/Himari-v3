@@ -18,7 +18,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 지금 동작하는 기능
 
 - **대화와 실행:** Run = LLM 호출 1회, 한 턴은 `HIMARI_MAX_RUNS`(기본 12)에서 멈추고 Continue로 잇는다. 취소, 문맥 압축(자동·수동), 대화별 모델·추론 강도, OpenRouter 스트리밍, 원본 요청·응답 보존. 묻는 것은 답의 글로 한다. → [control-prompt-provider](control-prompt-provider-v0.1.md), [conversation-model](conversation-model-v0.1.md), [streaming](streaming-v0.1.md)
-- **Data:** SQLite(WAL) 하나, 스키마 v20, 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
+- **Data:** SQLite(WAL) 하나, 스키마 v21(운영은 v20, 아래 운영 참고), 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
 - **프롬프트:** 캐시 우선 순서, 반려 켬/끔 두 바탕 글, "지시는 시스템 글과 사용자 메시지뿐" 원칙, Current State(지금 시각·기기·활동·기억), 작업 진행 줄. → [prompt-composition](prompt-composition.md), [prompt-cleanup](prompt-cleanup-v0.1.md), [interface-capabilities](interface-capabilities-v0.1.md), [work-progress](work-progress-v0.1.md)
 - **파일:** 대화 폴더(`<데이터 폴더>/conversations/<id>`) 안에서만 읽고 쓰는 파일 Tool, 올리기·내려받기와 `present_file`, 이미지 입력, `read_document`(PDF·DOCX·XLSX·PPTX·HWPX, server sandbox). → [server-slim](server-slim-v0.1.md), [file-upload-download](file-upload-download-v0.1.md), [images](images-v0.1.md), [documents](documents-v0.1.md)
 - **MCP:** Streamable HTTP 서버, 허용 목록의 Tool, 대화별 켬/끔과 Settings의 기본값, 서버 안내문·리소스 Tool·`/` 프롬프트. → [mcp-context](mcp-context-v0.1.md), [mcp-defaults](mcp-defaults-v0.1.md)
@@ -31,8 +31,8 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 운영
 
 - 운영 서버: `rabbithole`. 서버는 loopback에 바인딩하고 TLS reverse proxy 뒤에 있다.
-- 마지막 배포: **V3-P109**(v3 #227, `176bed1`), 2026-11-24 19:24 KST. 그 뒤 `main`에는 문서 커밋만 있다.
-- DB 스키마: **v20**. 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
+- 마지막 배포: **V3-P109**(v3 #227, `176bed1`), 2026-11-24 19:24 KST. 그 뒤의 `main`은 배포하지 않았다.
+- DB 스키마: 운영은 **v20**. `main`의 v21(H-75, 옛 추상 정리)은 아직 배포하지 않았다. 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
 - 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기).
 - 운영 서버에 남긴 것: 옛 대화 폴더 `/home/coder/HIMARI/conversations`, 옛 릴리스와 DB `.bak` 파일. 되돌릴 일이 없으면 소유자가 지운다.
 
@@ -47,8 +47,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 알려진 부채
 
 - **Linux 전용 의존**([server-slim §7](server-slim-v0.1.md#7-남는-linux-의존과-다음-단계)): 파일 잠금(`fcntl`)과 소유자·권한 검사(`geteuid`, 0600/0700), `O_NOFOLLOW`·`O_DIRECTORY`, worker의 `resource.setrlimit`, 문서·이미지 worker의 Bubblewrap + Landlock sandbox.
-- **작업 에이전트 시대의 추상:** Workspace·Binding·Activation·Artifact(Plan/Note)가 코드에 남아 있다(`workspaces` 표는 스키마에 있지만 쓰지 않는다). 정리 중이다.
-- **옛 내용이 섞인 문서:** [contracts.md](contracts.md), [data-contract-v0.2.md](data-contract-v0.2.md), [control-prompt-provider-v0.1.md](control-prompt-provider-v0.1.md) 같은 기준 문서에 Inside·`run_command`·`ask_user`·Pause 이야기가 남아 있다. 어긋나면 [decisions.md](decisions.md)와 [architecture.md](architecture.md)가 우선이다. 빠진 기능의 설계는 [archive/](archive/README.md)에 옮겼다.
+- **옛 내용이 섞인 문서:** [contracts.md](contracts.md), [module-boundaries.md](module-boundaries.md), [prompt-composition.md](prompt-composition.md), [data-and-tools.md](data-and-tools.md), [data-contract-v0.2.md](data-contract-v0.2.md), [control-prompt-provider-v0.1.md](control-prompt-provider-v0.1.md) 같은 기준 문서에 Inside·`run_command`·`ask_user`·Pause와 Workspace·Binding·Artifact 이야기가 남아 있다(각 문서 머리에 주의를 달았다). 어긋나면 [decisions.md](decisions.md)와 [architecture.md](architecture.md)가 우선이다. 빠진 기능의 설계는 [archive/](archive/README.md)에 옮겼다.
 
 ## 다음 후보
 

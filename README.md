@@ -170,7 +170,7 @@ himari memory retry conv_1 mpass_3              # 실패한 기억 정리 하나
 | 모듈 | 계약 |
 | --- | --- |
 | `src/himari/common.py` | 공용 식별자·값 타입 (`TrustedScope`, `ToolCall`, `ModelToolResult` …) |
-| `src/himari/data/api.py` | `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`, `ExternalSourceSettings` |
+| `src/himari/data/api.py` | `ConversationLog`, `EnvironmentState`, `StateQuery`, `ConversationCatalog`, `ExternalSourceSettings` 등 |
 | `src/himari/tool/api.py` | `ToolHandler` SPI, `ToolOutcome`, `ToolCatalog`, `ExternalAccess`, `ToolDispatcher` |
 | `src/himari/environment/api.py` | `EnvironmentPlugin` SPI |
 | `src/himari/prompt/api.py` | `PromptComposer`(순수), `PromptContextLoader`, `ModelInput` |

@@ -1,5 +1,7 @@
 # Data, Tool Execution, and Artifacts
 
+> **2026-11-24 주의:** 이 문서의 Workspace·Binding·Environment 활성화·Artifact(Plan/Note) 부분은 [H-75](decisions.md)(스키마 v21) 전의 기록이다. 지금은 대화가 가진 Environment 종류만 남았다. 지금 구조는 [아키텍처](architecture.md)가 우선이다.
+
 > 2026-10-13. **확정된 방향과 세부 권고안을 구분**한다. 이는 구현된 스키마가 아니라 논리적 계약 설계다.
 >
 > 구체적인 구조·저장 순서·공개 Data Port 초안: [Data Contract v0.2 — 검수 후보](data-contract-v0.2.md) (근거: [v0.1](data-contract-v0.1.md)). 이 초안은 아직 확정된 사양이 아니다.
