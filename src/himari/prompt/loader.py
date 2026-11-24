@@ -127,6 +127,7 @@ class ContextLoader:
         bond: BondSnapshot | None = None,  # the turn's, read with the life (character-bond §5)
         mood: HimariMood | None = None,  # the turn's, while told (character-state §2)
         himari_now: HimariNow | None = None,  # the turn's (character-state §3)
+        weather: str | None = None,  # the turn's line (character-world §2)
     ) -> PromptInputs:
         snapshot = await self._log.get_latest_snapshot(scope)
         events: tuple[ConversationEvent, ...] = ()
@@ -190,6 +191,7 @@ class ContextLoader:
             bond=bond,
             mood=mood,
             himari_now=himari_now,
+            weather=weather,
         )
 
     async def _observe(self, scope: TrustedScope,

@@ -84,6 +84,9 @@ from himari.control.driver import MAX_RUNS, Driver
 from himari.control.runner import BackgroundRunner
 from himari.life.api import DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS, DEFAULT_WRITE_AT, LifeSettings
 from himari.life.worker import LifeWriter
+from himari.bootstrap.world import WEATHER_SECONDS, search_tool, topic_search
+from himari.world.topics import SearchTopics
+from himari.world.weather import OpenMeteoWeather
 from himari.memory.api import MemoryPassSettings, PassOutcome
 from himari.memory.worker import MemoryPasses
 from himari.data.api import (
@@ -683,6 +686,15 @@ def quiet_hours(settings: ProactiveSettings) -> tuple[time, time] | None:
     return settings.quiet_start, settings.quiet_end
 
 
+def world_weather(location: tuple[float, float] | None, *, life: bool, companion: bool) -> str:
+    """character-world §2: whether the weather is read, as told at startup."""
+    if location is None:
+        return "off (no HIMARI_LOCATION)"
+    if not (life and companion):
+        return "off (HIMARI's life is off)"
+    return f"on (Open-Meteo at {location[0]:.2f},{location[1]:.2f})"
+
+
 def life_settings(provider: ProviderAdapter, *, life: bool, companion: bool, model_id: str | None, write_at: time,
                   daily_tokens: int, time_zone: str) -> tuple[LifeSettings | None, str]:
     """character-life §3 (L4): the story writer's settings, or None, and the status told
@@ -742,6 +754,10 @@ class Application:
     life_enabled: bool = False
     life_writer: LifeWriter | None = field(default=None, repr=False)
     auto_life: str = "off"
+    # character-world v0.1: the weather (None: none is read) and the day's topics, as told at startup.
+    weather: OpenMeteoWeather | None = field(default=None, repr=False)
+    world_weather: str = "off"
+    world_topics: str = "off"
     time_zone: str = DEFAULT_TIME_ZONE  # HIMARI_TIME_ZONE: a date the user writes ends in it unless the page says (V3-P85)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
@@ -808,6 +824,9 @@ class Application:
         life: bool = True,  # character-life §3, §5: HIMARI_LIFE=0 turns HIMARI's life off (prompt and writer)
         life_write_at: time = DEFAULT_WRITE_AT,  # HIMARI_LIFE_WRITE_AT: the story writer's time (server's zone)
         life_daily_tokens: int = LIFE_DAILY_TOKENS,  # HIMARI_LIFE_DAILY_TOKENS: each principal's daily budget
+        location: tuple[float, float] | None = None,  # character-world §2: HIMARI_LOCATION; None: no weather
+        life_topics: bool = True,  # character-world §3: HIMARI_LIFE_TOPICS=0 turns the day's topics off
+        weather_transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake Open-Meteo
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
@@ -877,6 +896,7 @@ class Application:
         store = SqliteStore(root / DATABASE_NAME)  # first: a second server on this root fails here
         mcp: McpConnection | None = None
         toolkit: Toolkit | None = None
+        weather: OpenMeteoWeather | None = None
         try:
             store.blobs.configure(max_bytes=file_store_max_bytes, keep_days=file_keep_days)
             mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport)
@@ -897,6 +917,8 @@ class Application:
                      f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
             uploads_work = machine is not None
             views = await _image_views(root, sandbox)
+            if location is not None and life and companion:  # character-world §2 (W1): read by the job "weather"
+                weather = OpenMeteoWeather(*location, time_zone, transport=weather_transport)
             base = base_instructions(companion) if instructions is None else instructions  # V3-P108 §3.1
             zones = frozenset(available_timezones())
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
@@ -916,6 +938,7 @@ class Application:
                                     max_runs_per_drive=max_runs, turn_guidance=True, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory, life=life and companion,
                                     quiet_hours=quiet_hours(speaking_first),  # character-state §3: asleep
+                                    weather=weather,  # character-world §2
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
                                     presence=presence, screen=screens,
@@ -925,6 +948,8 @@ class Application:
                                                                     companion_enabled=companion))
         except BaseException:
             try:
+                if weather is not None:
+                    await weather.aclose()
                 if mcp is not None:
                     await mcp.aclose()
             finally:
@@ -976,14 +1001,26 @@ class Application:
         writing, application.auto_life = life_settings(
             provider, life=life, companion=companion, model_id=memory_model, write_at=life_write_at,
             daily_tokens=life_daily_tokens, time_zone=time_zone)
+        application.weather = weather
+        application.world_weather = world_weather(location, life=life, companion=companion)
+        topics: SearchTopics | None = None
+        found = search_tool(mcp) if writing is not None and life_topics else None
+        if found is not None:  # character-world §3 (W2): the writer's only, once a date
+            topics = SearchTopics(topic_search(found))
+        application.world_topics = ("off (HIMARI_LIFE_TOPICS=0)" if not life_topics
+                                    else "off (no story writer)" if writing is None
+                                    else "off (no MCP search Tool)" if found is None
+                                    else f"on ({found.definition.tool_id})")
         if writing is not None:  # character-life §3: a periodic job, never a Conversation's Run
-            application.life_writer = LifeWriter(runtime.data, provider, writing)
+            application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics)
             await application.life_writer.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
             application.ticker.add("purge", cleanup_seconds, application._purge_round)
         if application.life_writer is not None:
             application.ticker.add("life", LIFE_SECONDS, application.life_writer.run)
+        if weather is not None:
+            application.ticker.add("weather", WEATHER_SECONDS, weather.refresh)
         if companion:  # V3-P87 §5.2: the devices' last inputs, kept whether or not HIMARI speaks first
             application.inputs = Inputs(runtime.data)
             hub.on_input = application.inputs.seen
@@ -1243,6 +1280,13 @@ class Application:
                                               expected_revision=revision)
 
     # --- HIMARI's state (character-state v0.1 §2, §3) ------------------------------------------
+
+    def weather_today(self) -> str | None:
+        """character-world §2: today's weather line (the server's date) as a turn would be told it now."""
+        if self.weather is None:
+            return None
+        found = self.weather.weather_on(datetime.now(ZoneInfo(self.time_zone)).date())
+        return None if found is None else found.line()
 
     async def _chosen_id(self, principal: PrincipalId) -> int:
         chosen = await self.data.active_persona(principal)
@@ -1779,6 +1823,8 @@ class Application:
             try:
                 await self.mcp.aclose()
             finally:
+                if self.weather is not None:
+                    await self.weather.aclose()
                 if self.toolkit is not None:
                     self.toolkit.close()
                 self.store.close()

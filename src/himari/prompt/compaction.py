@@ -287,7 +287,7 @@ def current_state(inputs: PromptInputs) -> CurrentStateProjection:
                                   memories=inputs.memories, now=inputs.now, presence=inputs.presence,
                                   episodes=inputs.episodes, episode_count=inputs.episode_count,
                                   interface=inputs.interface, life=inputs.life, bond=inputs.bond,
-                                  mood=inputs.mood, himari_now=inputs.himari_now)
+                                  mood=inputs.mood, himari_now=inputs.himari_now, weather=inputs.weather)
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:

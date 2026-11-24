@@ -1738,6 +1738,9 @@ MAX_LIFE_CHARS = 500  # a fact or a plan, in code points after newlines are norm
 MAX_DIARY_CHARS = 1_500  # one day's diary
 MAX_LIFE_FACTS = 200  # a persona's live facts; past it the oldest not the user's retire (§2)
 NO_PERSONA = 0  # L2: the life HIMARI has while no persona is chosen
+MAX_ARC_TITLE_CHARS = 60  # character-world §4: an arc's title, one line
+MAX_ARC_CHARS = 200  # an arc's goal and its ending, one line each
+MAX_OPEN_ARCS = 2  # W3: a persona's open arcs; a start past it is left out
 
 
 class LifeKind(Enum):
@@ -1745,6 +1748,7 @@ class LifeKind(Enum):
     DIARY = "diary"  # one day's diary: one per persona and date
     PLAN = "plan"  # something ahead, on a date
     BOND = "bond"  # character-bond §2: settled between the user and HIMARI (BondStore, never list_life)
+    ARC = "arc"  # character-world §4: a thread of HIMARI's life over weeks (the story writer starts and ends it)
 
 
 class LifeOrigin(Enum):
@@ -1768,8 +1772,10 @@ class BondTag(Enum):
 @dataclass(frozen=True)
 class LifeEntry(DeepFrozen):
     """One entry of a persona's life (§2). ``day`` (YYYY-MM-DD, the user's date)
-    only for a diary or a plan; ``tag`` only for a bond entry and ``month_day``
-    (MM-DD) only for a ``date`` one (character-bond §2)."""
+    only for a diary, a plan or an arc (the day it started); ``tag`` only for a bond
+    entry and ``month_day`` (MM-DD) only for a ``date`` one (character-bond §2).
+    character-world §4: an arc's ``text`` is its goal, with its ``title`` and, once
+    closed, its ``end_day`` and ``ending``; a diary's ``arc_id`` is the arc its day moved."""
 
     entry_id: int  # per principal, never given out again
     persona_id: int  # NO_PERSONA: the life of no chosen persona
@@ -1788,6 +1794,15 @@ class LifeEntry(DeepFrozen):
     tag: BondTag | None = None
     month_day: str | None = None
     time_of_day: str | None = None  # character-state §3 (S3): a plan's start, HH:MM in the user's zone
+    title: str | None = None  # character-world §4: an arc's title
+    end_day: str | None = None  # an arc's last day (YYYY-MM-DD) once closed; None: open
+    ending: str | None = None  # a closed arc's one-line ending
+    arc_id: int | None = None  # a diary's: the arc its day started, carried on or closed
+
+    @property
+    def arc_open(self) -> bool:
+        """character-world §4: an arc not closed yet."""
+        return self.kind is LifeKind.ARC and self.end_day is None
 
 
 class LifeChangeOp(Enum):
@@ -1809,11 +1824,32 @@ class LifeChange(DeepFrozen):
     sequences: tuple[int, ...] = ()
 
 
+class ArcOp(Enum):
+    """character-world §4 (W3): the one move a day's write may make on an arc."""
+
+    START = "start"  # a new arc: its title and goal
+    ADVANCE = "advance"  # the day's diary carries an open arc on
+    CLOSE = "close"  # the day's diary ends an open arc: its one-line ending
+
+
+@dataclass(frozen=True)
+class ArcMove(DeepFrozen):
+    """One arc move of a story writer call, checked by the life module: START carries the
+    title and the goal; ADVANCE the arc (``entry_id``); CLOSE the arc and the ending."""
+
+    op: ArcOp
+    title: str | None = None
+    goal: str | None = None
+    entry_id: int | None = None
+    ending: str | None = None
+
+
 @dataclass(frozen=True)
 class LifePlan(DeepFrozen):
     """What one story writer call writes for its date (§3), checked by the life module.
     character-state §2, §3: the plans' start times by position (HH:MM; missing or None: no
-    time), and HIMARI's mood at the day's end with why, as of ``mood_at`` (None: when applied)."""
+    time), and HIMARI's mood at the day's end with why, as of ``mood_at`` (None: when applied).
+    character-world §4: the day's one arc move, if any."""
 
     diary: str
     plans: tuple[tuple[str, str], ...] = ()  # (YYYY-MM-DD, text)
@@ -1822,6 +1858,7 @@ class LifePlan(DeepFrozen):
     mood: str | None = None  # a name in MOODS other than "neutral"
     mood_reason: str | None = None
     mood_at: datetime | None = None
+    arc: ArcMove | None = None
 
 
 class LifeStore(Protocol):
@@ -1829,15 +1866,18 @@ class LifeStore(Protocol):
     never from model output: no Tool reaches this port. The user's changes are
     compare-and-set on the entry's ``revision``. Errors: NOT_FOUND (no live
     entry of this principal), VERSION_CONFLICT, TOO_LARGE (past
-    MAX_LIFE_CHARS, a diary MAX_DIARY_CHARS), INVALID_ARGUMENT (no text, a
-    control character other than newline and tab), LIMIT_EXCEEDED
-    (MAX_LIFE_FACTS live facts, all the user's)."""
+    MAX_LIFE_CHARS, a diary MAX_DIARY_CHARS, an arc's goal MAX_ARC_CHARS and its
+    title MAX_ARC_TITLE_CHARS), INVALID_ARGUMENT (no text, a control character
+    other than newline and tab — none at all in an arc's title — or a title for an
+    entry that is not an arc), LIMIT_EXCEEDED (MAX_LIFE_FACTS live facts, all the user's)."""
 
     async def list_life(self, principal: PrincipalId, persona_id: int, *,
                         since: str | None = None) -> tuple[LifeEntry, ...]:
         """The persona's live entries: every fact (the user's first, then newest
-        first), then the plans and diaries dated ``since`` or later (None: all),
-        newest date first. Never the bond (character-bond: BondStore.list_bond)."""
+        first), then its arcs — the open ones (newest first), then those started or
+        closed ``since`` or later (character-world §4) — then the plans and diaries
+        dated ``since`` or later (None: all), newest date first. Never the bond
+        (character-bond: BondStore.list_bond)."""
         ...
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
@@ -1846,8 +1886,9 @@ class LifeStore(Protocol):
         ...
 
     async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
-                        expected_revision: int) -> LifeEntry:
-        """The user's rewrite: it becomes the user's (revision + 1)."""
+                        expected_revision: int, title: str | None = None) -> LifeEntry:
+        """The user's rewrite: it becomes the user's (revision + 1). An arc's ``text`` is
+        its goal and ``title`` (None: kept) its title (character-world §4)."""
         ...
 
     async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
@@ -1938,8 +1979,11 @@ class LifeWriteLog(Protocol):
         §3) and the facts (one the same as a live fact is skipped; at
         MAX_LIFE_FACTS the oldest not the user's retires; all the user's:
         skipped), the mood (character-state §2: as MoodStore.set_mood, source
-        WRITER, at ``plan.mood_at`` or ``now``); the write APPLIED. The entries
-        written. INVALID_STATE_TRANSITION unless RECEIVED."""
+        WRITER, at ``plan.mood_at`` or ``now``), the arc move (character-world §4:
+        a start below MAX_OPEN_ARCS open arcs and not titled as an open one, or an
+        advance or close of an open arc of the persona — else it is left out alone;
+        the diary the writer wrote that day names the arc moved); the write APPLIED.
+        The entries written. INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
     async def fail_life_write(self, write_id: str, error: str) -> None:

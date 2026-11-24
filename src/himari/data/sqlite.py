@@ -108,6 +108,8 @@ from himari.data.api import (
     MAX_BOND_ENTRIES,
     MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    ArcMove,
+    ArcOp,
     BondChange,
     BondSnapshot,
     BondStage,
@@ -202,7 +204,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -774,11 +776,19 @@ CREATE TABLE himari_moods (
     PRIMARY KEY (owner, persona_id)
 ) STRICT;
 """
+# v25 (character-world v0.1 §4): an arc is a life entry of kind 'arc' (its goal the text, its start the day)
+# with its title and, once closed, its last day and ending; a diary names the arc its day moved.
+_V25_ADDITIONS = """
+ALTER TABLE life_entries ADD COLUMN title TEXT;
+ALTER TABLE life_entries ADD COLUMN end_day TEXT;
+ALTER TABLE life_entries ADD COLUMN ending TEXT;
+ALTER TABLE life_entries ADD COLUMN arc_id INTEGER;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
-              _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS)  # what each version from v3 added
+              _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS, _V25_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1246,7 +1256,7 @@ def _life_entry(row: sqlite3.Row) -> LifeEntry:
                      LifeOrigin(row["origin"]), row["revision"], datetime.fromisoformat(row["created_at"]),
                      datetime.fromisoformat(row["updated_at"]), source, tuple(json.loads(row["source_sequences"])),
                      row["source"], None if row["tag"] is None else BondTag(row["tag"]), row["month_day"],
-                     row["time_of_day"])
+                     row["time_of_day"], row["title"], row["end_day"], row["ending"], row["arc_id"])
 
 
 def _mood(persona_id: int, row: sqlite3.Row | None) -> HimariMood | None:
@@ -2517,7 +2527,8 @@ class SqliteData:
     # --- LifeStore, LifeWriteLog (character-life v0.1 §2, §3) -----------------------------
 
     _LIFE_COLUMNS = ("entry_id, persona_id, kind, day, text, origin, revision, created_at, updated_at,"
-                     " source_conversation, source_sequences, source, tag, month_day, time_of_day")
+                     " source_conversation, source_sequences, source, tag, month_day, time_of_day, title, end_day,"
+                     " ending, arc_id")
 
     def _live_entry(self, tx: _Tx, principal: PrincipalId, entry_id: object) -> LifeEntry:
         row = None if isinstance(entry_id, bool) or not isinstance(entry_id, int) else tx.one(
@@ -2541,20 +2552,24 @@ class SqliteData:
                    " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, entry.entry_id)
         tx.execute("INSERT INTO life_entries (owner, entry_id, persona_id, kind, day, text, origin, revision,"
                    " created_at, updated_at, retired_at, source_conversation, source_sequences, source, tag,"
-                   " month_day, time_of_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
+                   " month_day, time_of_day, title, end_day, ending, arc_id)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                    principal, entry.entry_id, entry.persona_id, entry.kind.value, entry.day, entry.text,
                    entry.origin.value, entry.revision, _timestamp(entry.created_at), _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
-                   None if entry.tag is None else entry.tag.value, entry.month_day, entry.time_of_day)
+                   None if entry.tag is None else entry.tag.value, entry.month_day, entry.time_of_day, entry.title,
+                   entry.end_day, entry.ending, entry.arc_id)
         return entry
 
     @staticmethod
     def _rewrite_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
         tx.execute("UPDATE life_entries SET text=?, origin=?, revision=?, updated_at=?, source_conversation=?,"
-                   " source_sequences=?, source=?, tag=?, month_day=? WHERE owner=? AND entry_id=?",
+                   " source_sequences=?, source=?, tag=?, month_day=?, title=?, end_day=?, ending=?, arc_id=?"
+                   " WHERE owner=? AND entry_id=?",
                    entry.text, entry.origin.value, entry.revision, _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
-                   None if entry.tag is None else entry.tag.value, entry.month_day, principal, entry.entry_id)
+                   None if entry.tag is None else entry.tag.value, entry.month_day, entry.title, entry.end_day,
+                   entry.ending, entry.arc_id, principal, entry.entry_id)
         return entry
 
     @staticmethod
@@ -2580,8 +2595,9 @@ class SqliteData:
         since = None if since is None else rules.check_life_day(since)
         with self._tx() as tx:
             rows = tx.all(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
-                          " AND retired_at IS NULL AND kind <> 'bond' AND (kind='fact' OR ? IS NULL OR day >= ?)",
-                          principal, persona_id, since, since)
+                          " AND retired_at IS NULL AND kind <> 'bond' AND (kind='fact' OR ? IS NULL OR day >= ?"
+                          " OR (kind='arc' AND (end_day IS NULL OR end_day >= ?)))",
+                          principal, persona_id, since, since, since)
             return rules.order_life(_life_entry(r) for r in rows)
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
@@ -2596,14 +2612,16 @@ class SqliteData:
             return added
 
     async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
-                        expected_revision: int) -> LifeEntry:
+                        expected_revision: int, title: str | None = None) -> LifeEntry:
         with self._tx() as tx:
             entry = self._live_entry(tx, principal, entry_id)
             text = rules.check_life_text(entry.kind, text)
+            titled = rules.edited_title(entry, title)
             if expected_revision != entry.revision:
                 raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
             return self._rewrite_life(tx, principal, dataclasses.replace(
-                entry, text=text, origin=LifeOrigin.USER, revision=entry.revision + 1, updated_at=datetime.now(UTC)))
+                entry, text=text, title=titled, origin=LifeOrigin.USER, revision=entry.revision + 1,
+                updated_at=datetime.now(UTC)))
 
     async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
         with self._tx() as tx:
@@ -2720,6 +2738,7 @@ class SqliteData:
         plans = rules.check_life_plans(plan)
         facts = [rules.check_life_text(LifeKind.FACT, text) for text in plan.facts]
         mood = rules.writer_mood(plan, now)
+        arc = rules.check_arc_move(plan.arc)
         with self._tx() as tx:
             row = self._life_write_row(tx, write_id)
             if row["status"] != "received":
@@ -2729,13 +2748,18 @@ class SqliteData:
             found = tx.one(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
                            " AND kind='diary' AND day=? AND retired_at IS NULL", principal, persona_id, day)
             before = None if found is None else _life_entry(found)
+            arc_id, moved = (None, None) if arc is None else self._move_arc(tx, principal, persona_id, day, arc,
+                                                                            write_id, now)
+            if moved is not None:
+                written.append(moved)
             if before is None:
                 written.append(self._new_life(tx, principal, LifeEntry(
-                    0, persona_id, LifeKind.DIARY, day, diary, LifeOrigin.WRITER, 1, now, now, source=write_id)))
+                    0, persona_id, LifeKind.DIARY, day, diary, LifeOrigin.WRITER, 1, now, now, source=write_id,
+                    arc_id=arc_id)))
             elif before.origin is not LifeOrigin.USER:  # §2: one diary a day; the user's stays
                 written.append(self._rewrite_life(tx, principal, dataclasses.replace(
                     before, text=diary, origin=LifeOrigin.WRITER, revision=before.revision + 1, updated_at=now,
-                    source=write_id)))
+                    source=write_id, arc_id=arc_id)))
             for plan_day, text, at in plans:
                 written.append(self._new_life(tx, principal, LifeEntry(
                     0, persona_id, LifeKind.PLAN, plan_day, text, LifeOrigin.WRITER, 1, now, now, source=write_id,
@@ -2751,6 +2775,31 @@ class SqliteData:
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return tuple(written)
+
+    def _move_arc(self, tx: _Tx, principal: PrincipalId, persona_id: int, day: str, move: ArcMove, write_id: str,
+                  now: datetime) -> tuple[int | None, LifeEntry | None]:
+        """character-world §4: the arc a write's move names for the day's diary and the arc it
+        wrote (a start or a close; an advance writes none), or (None, None) when the move is left
+        out — a start past MAX_OPEN_ARCS or titled as an open arc, or a move of what is not an
+        open arc of the persona."""
+        arcs = [_life_entry(r) for r in tx.all(
+            f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND kind='arc'"
+            " AND retired_at IS NULL AND end_day IS NULL", principal, persona_id)]
+        if move.op is ArcOp.START:
+            if not rules.arc_starts(move, arcs):
+                return None, None
+            assert move.goal is not None
+            started = self._new_life(tx, principal, LifeEntry(
+                0, persona_id, LifeKind.ARC, day, move.goal, LifeOrigin.WRITER, 1, now, now, source=write_id,
+                title=move.title))
+            return started.entry_id, started
+        target = rules.arc_moved(move, arcs)
+        if target is None:
+            return None, None
+        if move.op is ArcOp.ADVANCE:
+            return target.entry_id, None
+        return target.entry_id, self._rewrite_life(tx, principal, dataclasses.replace(
+            target, revision=target.revision + 1, updated_at=now, end_day=day, ending=move.ending))
 
     async def fail_life_write(self, write_id: str, error: str) -> None:
         with self._tx() as tx:

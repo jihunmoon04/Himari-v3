@@ -135,6 +135,8 @@ from himari.data.api import (
     MAX_PERSONA_NAME_CHARS,
     MAX_PERSONAS,
     MAX_LIST_LIMIT,
+    MAX_ARC_CHARS,
+    MAX_ARC_TITLE_CHARS,
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
@@ -146,6 +148,7 @@ from himari.data.api import (
     BondStanding,
     BondTag,
     LifeEntry,
+    LifeKind,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -465,8 +468,9 @@ class LifeFactBody(_Body):  # character-life §6: the limits are Data's
 
 
 class LifeEditBody(_Body):
-    text: str
+    text: str  # an arc's goal (character-world §4)
     revision: int = Field(ge=1)  # the revision the entry was edited from
+    title: str | None = None  # an arc's title; null or left out: kept
 
 
 type BondTagName = Literal["name", "promise", "joke", "first", "date"]  # BondTag's values
@@ -1015,9 +1019,15 @@ PERSONA_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 
 def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
     """character-life §6: one entry of HIMARI's life."""
-    return {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "time": entry.time_of_day,
+    view = {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "time": entry.time_of_day,
             "text": entry.text, "origin": entry.origin.value, "revision": entry.revision,
             "created_at": _time(entry.created_at), "updated_at": _time(entry.updated_at)}
+    if entry.kind is LifeKind.ARC:  # character-world §4: its title, open or closed, and how it ended
+        view |= {"title": entry.title, "status": "open" if entry.arc_open else "closed", "end_day": entry.end_day,
+                 "ending": entry.ending}
+    elif entry.arc_id is not None:  # a diary: the arc its day moved
+        view["arc_id"] = entry.arc_id
+    return view
 
 
 def mood_view(mood: HimariMood | None) -> dict[str, Any] | None:
@@ -1077,8 +1087,10 @@ LIFE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "It was changed elsewhere since it was opened."),
     DataErrorCode.LIMIT_EXCEEDED: (409, "life_full", f"At most {MAX_LIFE_FACTS} facts, all yours; delete one first."),
     DataErrorCode.TOO_LARGE: (422, "too_large", f"A fact or a plan is at most {MAX_LIFE_CHARS:,} characters, a diary "
-                                                f"{MAX_DIARY_CHARS:,}."),
-    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters."),
+                                                f"{MAX_DIARY_CHARS:,}, an arc's goal {MAX_ARC_CHARS:,} and its title "
+                                                f"{MAX_ARC_TITLE_CHARS:,}."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters; only "
+                                                          "an arc has a title, on one line."),
 }
 
 
@@ -1763,8 +1775,12 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "enabled": application.life_enabled,
                 "writer": {"running": application.life_writer is not None, "told": application.auto_life},
                 "mood": mood_view(mood), "now": now_view(now),
+                # character-world §2, §3: what the writer and a turn know of the real world, as told at startup
+                "world": {"weather": application.world_weather, "today": application.weather_today(),
+                          "topics": application.world_topics},
                 "entries": [life_entry_view(e) for e in entries],
-                "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS}}
+                "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
+                           "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS}}
 
     @app.post("/api/life", status_code=201)
     async def add_life_fact(body: LifeFactBody, request: Request,
@@ -1782,7 +1798,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         """It becomes the user's: automatic writes leave it alone."""
         try:
             return life_entry_view(await himari(request).data.edit_life(who, entry_id, body.text,
-                                                                        expected_revision=body.revision))
+                                                                        expected_revision=body.revision,
+                                                                        title=body.title))
         except DataError as error:
             raise life_refused(error) from None
 

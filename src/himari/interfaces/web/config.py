@@ -48,6 +48,13 @@ after ``HIMARI_LIFE_WRITE_AT`` (HH:MM in ``HIMARI_TIME_ZONE``, default
 a day. The bond (character-bond v0.1: its entries, stage and anniversary
 wakes) is on and off with it.
 
+The world (character-world v0.1): ``HIMARI_LOCATION`` (``latitude,longitude``,
+e.g. ``37.57,126.98``) is where the user is: today's weather there is read from
+Open-Meteo (no key) a few times a day for the story writer and the turns' state;
+unset, there is no weather. The day's topics come from a configured MCP server's
+search Tool, once a day for the story writer only; ``HIMARI_LIFE_TOPICS=0``
+turns them off. Both are used only with HIMARI's life on.
+
 Conversation search (V3-P72 §9): ``HIMARI_CONVERSATION_SEARCH=0`` turns
 conversation_search and conversation_read off; on by default.
 
@@ -80,6 +87,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from himari.bootstrap.proactive import ProactiveSettings, parse_quiet
+from himari.world.api import parse_location
 
 HOST_VAR = "HIMARI_WEB_HOST"
 PORT_VAR = "HIMARI_WEB_PORT"
@@ -106,6 +114,8 @@ MEMORY_TOKENS_VAR = "HIMARI_MEMORY_DAILY_TOKENS"  # V3-P85: each principal's dai
 LIFE_VAR = "HIMARI_LIFE"  # character-life v0.1: 0 turns HIMARI's life off
 LIFE_WRITE_AT_VAR = "HIMARI_LIFE_WRITE_AT"  # the story writer's time, HH:MM
 LIFE_TOKENS_VAR = "HIMARI_LIFE_DAILY_TOKENS"  # the story writer's daily budget per principal
+LOCATION_VAR = "HIMARI_LOCATION"  # character-world v0.1: latitude,longitude for the weather; unset: none
+LIFE_TOPICS_VAR = "HIMARI_LIFE_TOPICS"  # character-world v0.1: 0 turns the day's topics off
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
 COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
@@ -174,6 +184,8 @@ class WebConfig:
     life: bool = True  # character-life v0.1
     life_write_at: time = time(22, 0)
     life_daily_tokens: int = 200_000
+    location: tuple[float, float] | None = None  # character-world v0.1: HIMARI_LOCATION
+    life_topics: bool = True
     conversation_search: bool = True
     streaming: bool = True
     companion: bool = True  # V3-P83
@@ -265,6 +277,8 @@ class WebConfig:
             life=_flag(source.get(LIFE_VAR), LIFE_VAR, default=True),
             life_write_at=_clock_time(source.get(LIFE_WRITE_AT_VAR), LIFE_WRITE_AT_VAR, time(22, 0)),
             life_daily_tokens=_required(source.get(LIFE_TOKENS_VAR), LIFE_TOKENS_VAR, 200_000, 10_000, 10**9),
+            location=_location(source.get(LOCATION_VAR)),
+            life_topics=_flag(source.get(LIFE_TOPICS_VAR), LIFE_TOPICS_VAR, default=True),
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
@@ -374,6 +388,16 @@ def _clock_time(value: str | None, name: str, default: time) -> time:
             and 0 <= int(minutes) <= 59):
         raise WebConfigError(f"{name} must be HH:MM, e.g. 22:00")
     return time(int(hours), int(minutes))
+
+
+def _location(value: str | None) -> tuple[float, float] | None:
+    """``latitude,longitude``; unset or empty: no location."""
+    if value is None or not value.strip():
+        return None
+    try:
+        return parse_location(value)
+    except ValueError:
+        raise WebConfigError(f"{LOCATION_VAR} must be latitude,longitude in degrees, e.g. 37.57,126.98") from None
 
 
 def _time_zone(value: str | None) -> str:

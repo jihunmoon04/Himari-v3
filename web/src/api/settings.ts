@@ -44,7 +44,7 @@ export const deletePersona = (id: number, revision: number) =>
 export const choosePersona = (personaId: number | null, revision: number) =>
   put<PersonaChoice>("/api/personas/choice", { persona_id: personaId, revision });
 
-export type LifeKind = "fact" | "plan" | "diary";
+export type LifeKind = "fact" | "plan" | "diary" | "arc"; // arc: a thread over weeks (character-world §4)
 export type LifeOrigin = "writer" | "conversation" | "user"; // the story writer, a conversation, the user
 
 export interface LifeEntry {
@@ -52,11 +52,18 @@ export interface LifeEntry {
   kind: LifeKind;
   day: string | null; // YYYY-MM-DD for a plan or a diary, null for a fact
   time?: string | null; // HH:MM when a plan starts (character-state §3), null otherwise
-  text: string;
+  text: string; // an arc's goal
   origin: LifeOrigin;
   revision: number;
   created_at: string;
   updated_at: string;
+  // character-world §4: an arc's title, whether it is open, and its last day and ending once closed (``day`` is
+  // the day it started); a diary's arc_id is the arc its day moved.
+  title?: string | null;
+  status?: "open" | "closed";
+  end_day?: string | null;
+  ending?: string | null;
+  arc_id?: number;
 }
 
 /** HIMARI's mood while it is told (character-state §2): a reply's last mood or the story writer's, with why. */
@@ -70,8 +77,10 @@ export interface Life {
   writer: { running: boolean; told: string };
   mood?: HimariMood | null; // null: none now (or the life is off)
   now?: HimariNow | null; // null: nothing now (or the life is off)
-  entries: LifeEntry[]; // facts first, then plans and diaries, newest day first (the last 30 days and later)
-  limits: { facts: number; chars: number; diary_chars: number };
+  // character-world §2, §3: whether the weather and the day's topics are used (as told at startup), today's weather
+  world?: { weather: string; today: string | null; topics: string };
+  entries: LifeEntry[]; // facts, arcs, then plans and diaries, newest day first (the last 30 days and later)
+  limits: { facts: number; chars: number; diary_chars: number; arc_chars?: number; arc_title_chars?: number };
 }
 
 export const readLife = () => get<Life>("/api/life");
@@ -79,7 +88,9 @@ export const readLife = () => get<Life>("/api/life");
  * one was chosen since. */
 export const addLifeFact = (text: string, personaId: number | null) =>
   post<LifeEntry>("/api/life", { text, persona_id: personaId });
-export const editLife = (id: number, text: string, revision: number) => put<LifeEntry>(`/api/life/${id}`, { text, revision });
+/** ``title``: an arc's new title (character-world §4); left out, it is kept. */
+export const editLife = (id: number, text: string, revision: number, title?: string) =>
+  put<LifeEntry>(`/api/life/${id}`, title === undefined ? { text, revision } : { text, revision, title });
 export const deleteLife = (id: number, revision: number) => del<void>(`/api/life/${id}?revision=${revision}`);
 
 // The bond (character-bond §1): what is settled between the user and the persona in use, how close the two are, and

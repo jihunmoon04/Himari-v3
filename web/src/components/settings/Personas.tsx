@@ -15,7 +15,8 @@ const field = "block w-full rounded-lg border border-line bg-bg p-2 text-sm outl
 const why = (failure: unknown, fallback: string) => (failure instanceof ApiError ? failure.message : fallback);
 const NEXT_TURN = "Used from each conversation's next turn.";
 
-// §6.3, §14: what a first persona opens with; only a guide, sent to HIMARI as the user leaves it.
+// §6.3, §14: what a first persona opens with; only a guide, sent to HIMARI as the user leaves it. A line that starts
+// with [familiar] or [close] is told only once the bond reaches that stage (character-world §5); here it shows as written.
 export const STARTER = [
   "이름:",
   "나와의 관계: (예: 오래 알고 지낸 친구)",
@@ -30,6 +31,7 @@ export const STARTER = [
   "습관:",
   "좋아하는 것 / 싫어하는 것:",
   "하지 않는 것: (예: 지나친 칭찬, 이모지)",
+  "숨긴 이야기: 줄 앞에 [familiar] 또는 [close]를 붙이면 그만큼 가까워진 뒤에 드러납니다", // character-world §5
 ].join("\n");
 
 const nameKey = (name: string) => name.trim().normalize("NFC").toLowerCase();

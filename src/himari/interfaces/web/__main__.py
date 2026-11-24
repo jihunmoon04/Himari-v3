@@ -9,6 +9,7 @@ Configuration comes from the environment (see ``config.py``):
 ``HIMARI_FILE_MAX_BYTES``, ``HIMARI_FILE_STORE_MAX_BYTES``, ``HIMARI_FILE_KEEP_DAYS`` (files, V3-P66),
 ``HIMARI_MEMORY`` (0 turns memory off, V3-P71),
 ``HIMARI_LIFE``, ``HIMARI_LIFE_WRITE_AT``, ``HIMARI_LIFE_DAILY_TOKENS`` (HIMARI's life, character-life v0.1),
+``HIMARI_LOCATION``, ``HIMARI_LIFE_TOPICS`` (the weather and the day's topics, character-world v0.1),
 ``HIMARI_CONVERSATION_SEARCH`` (0 turns conversation search off, V3-P72),
 and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
 real environment variables win; the token variables named in
@@ -79,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
                                              memory_daily_tokens=config.memory_daily_tokens,
                                              life=config.life, life_write_at=config.life_write_at,
                                              life_daily_tokens=config.life_daily_tokens,
+                                             location=config.location, life_topics=config.life_topics,
                                              conversation_search=config.conversation_search,
                                              streaming=config.streaming, companion=config.companion,
                                              companion_default_model=config.companion_default_model,
@@ -100,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"HIMARI web: automatic memory {application.auto_memory}", file=sys.stderr, flush=True)  # V3-P85 §12
         print(f"HIMARI web: HIMARI's life {'on' if application.life_enabled else 'off'}, story writer "
               f"{application.auto_life}", file=sys.stderr, flush=True)  # character-life v0.1
+        print(f"HIMARI web: weather {application.world_weather}, the day's topics {application.world_topics}",
+              file=sys.stderr, flush=True)  # character-world v0.1
         print(f"HIMARI web: reaching out {application.proactive.describe()}", file=sys.stderr, flush=True)  # V3-P87
         if not application.conversation_search_enabled:  # V3-P72 §9
             print("HIMARI web: conversation search is off (HIMARI_CONVERSATION_SEARCH=0)", file=sys.stderr, flush=True)

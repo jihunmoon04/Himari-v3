@@ -114,6 +114,7 @@ from himari.data.api import (
     InstructionsStore,
     NO_PERSONA,
     BondSnapshot,
+    BondStage,
     BondStore,
     HimariMood,
     LifeEntry,
@@ -161,6 +162,7 @@ from himari.prompt.api import (
     PromptInputs,
     RequestOptions,
     doing_now,
+    persona_for_stage,
 )
 from himari.provider.api import (
     NativeInvocationOutcome,
@@ -178,6 +180,7 @@ from himari.provider.api import (
     RawCapture,
 )
 from himari.tool.api import SCREEN_TOOL_ID, GroupDispatchResult, GroupState, ToolDispatcher, TurnSource, TurnWake
+from himari.world.api import WeatherSource
 
 
 _logger = logging.getLogger(__name__)  # ``log`` is the Driver's ConversationLog
@@ -231,6 +234,7 @@ class _UserContext(NamedTuple):
     bond: BondSnapshot | None = None  # character-bond §5: that persona's bond with the user; None: not told
     mood: HimariMood | None = None  # character-state §2: that persona's mood while told; None: not told or none
     himari_now: HimariNow | None = None  # character-state §3: what HIMARI is doing; None: not told or nothing
+    weather: str | None = None  # character-world §2: today's weather where the user is; None: not told
 
 
 class Driver:
@@ -252,6 +256,9 @@ class Driver:
         bond: BondStore | None = None,  # character-bond §5: the bond, told with the life; None: not told
         moods: MoodStore | None = None,  # character-state §2: the mood, told and set with the life; None: neither
         quiet_hours: tuple[time, time] | None = None,  # character-state §3 (S2): HIMARI sleeps in them; None: never
+        # character-world §5 (W4): the stored bond stage the persona's hidden lines wait for; None: they stay hidden
+        bond_stages: BondStore | None = None,
+        weather: WeatherSource | None = None,  # character-world §2: told with the life; None: no weather
         max_runs_per_drive: int = MAX_RUNS,
         planner: CompactionPlanner | None = None,
         turn_guidance: bool = False,  # V3-P62 §8: the model is told when few Runs are left
@@ -280,6 +287,8 @@ class Driver:
         self._bond = bond
         self._moods = moods
         self._quiet_hours = quiet_hours
+        self._bond_stages = bond_stages
+        self._weather = weather
         self._turn_personas: dict[ConversationId, int] = {}  # the persona read when the turn started (§2)
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
@@ -553,12 +562,17 @@ class Driver:
             chosen = await self._personas.active_persona(scope.principal_id)
             persona = "" if chosen is None else chosen.text
             persona_id = NO_PERSONA if chosen is None else chosen.persona_id
+            if persona:  # character-world §5 (W4): hidden lines wait for the stage as stored (moved: next turn)
+                stage = (BondStage.NEW if self._bond_stages is None
+                         else (await self._bond_stages.bond_stage(scope.principal_id, persona_id)).stage)
+                persona = persona_for_stage(persona, stage)
         now = self._clock()
         local = None if self._zone is None else now.astimezone(self._zone)
         life = None
         bond = None
         mood = None
         doing = None
+        weather = None
         if self._life is not None and self._companion:  # character-life §5: the chosen persona's (L2: none's is 0)
             since = ((local or now).date() - LIFE_READ_DAYS).isoformat()
             life = await self._life.list_life(scope.principal_id, persona_id, since=since)
@@ -568,14 +582,18 @@ class Driver:
                 mood = live_mood(await self._moods.read_mood(scope.principal_id, persona_id), now)
             # character-state §3: a timed plan under way, else asleep in the quiet hours (the server's clock)
             doing = doing_now(life, local or now, self._quiet_hours)
+            if self._weather is not None:  # character-world §2: as last read, from memory (the server's date)
+                found = self._weather.weather_on((local or now).date())
+                weather = None if found is None else found.line()
         if self._memories is None:
             return _UserContext(text, None, local, persona=persona, life=life, bond=bond, mood=mood,
-                                himari_now=doing), persona_id
+                                himari_now=doing, weather=weather), persona_id
         notes = await self._memories.list_memories(scope.principal_id)
         episodes = await self._memories.recent_episodes(scope.principal_id, since=now - RECENT_DAYS,
                                                         besides=scope.conversation_id, limit=RECENT_EPISODES)
         count = await self._memories.count_episodes(scope.principal_id)
-        return _UserContext(text, notes, local, episodes, count, persona, life, bond, mood, doing), persona_id
+        return _UserContext(text, notes, local, episodes, count, persona, life, bond, mood, doing,
+                            weather), persona_id
 
     async def _interface_at_acceptance(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
         snapshot = (await self._interfaces.read(scope, origin) if self._interfaces is not None

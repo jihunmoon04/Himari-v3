@@ -34,6 +34,8 @@ describe("the personas screen", () => {
     shown();
     fireEvent.click(await screen.findByRole("button", { name: "New persona" }));
     expect((screen.getByLabelText("Persona text") as HTMLTextAreaElement).value).toBe(STARTER);
+    expect(STARTER.split("\n").at(-1)).toBe(
+      "숨긴 이야기: 줄 앞에 [familiar] 또는 [close]를 붙이면 그만큼 가까워진 뒤에 드러납니다"); // character-world §5
   });
 
   it("marks the persona in use and offers the others and no persona", async () => {

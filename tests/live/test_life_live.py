@@ -3,7 +3,8 @@ call and one memory pass with ``self``, on the memory passes' model (``HIMARI_LI
 operator configuration names), to see that the JSON round-trips with a real model: the writer's answer passes every
 check, and the pass keeps what HIMARI said of itself. With ``HIMARI_LIVE_LIFE_OUT`` set to a file, both answers and
 their usage are appended as JSON lines. Machine checks are only "is it the shape asked for" (character-architecture
-§10); whether the writing is good is the owner's to judge."""
+§10); whether the writing is good is the owner's to judge. The writer's input also holds a sample weather line, five
+sample topic titles and one open arc (character-world v0.1), never the production search."""
 
 from __future__ import annotations
 
@@ -73,7 +74,14 @@ LIFE = (entry(1, LifeKind.FACT, "고양이를 무서워한다.", origin=LifeOrig
         entry(2, LifeKind.FACT, "화면 속 방 창가에 작은 선인장을 키운다."),
         entry(3, LifeKind.DIARY, "오늘은 하루 종일 비가 왔다. 창가에 앉아 오래된 신스팝을 들었다. 선인장에 물을 줬다.",
               "2026-11-24"),
-        replace(entry(4, LifeKind.PLAN, "중고 레코드 가게 목록을 정리한다.", "2026-11-25"), time_of_day="10:00"))
+        replace(entry(4, LifeKind.PLAN, "중고 레코드 가게 목록을 정리한다.", "2026-11-25"), time_of_day="10:00"),
+        # character-world §4: one open arc, moved once since it started
+        replace(entry(5, LifeKind.ARC, "한 달 안에 신스팝 커버곡 하나를 완성한다.", "2026-11-18"), title="커버곡 연습"),
+        replace(entry(6, LifeKind.DIARY, "커버곡 연습을 시작했다. 첫 소절부터 막혔다.", "2026-11-18"), arc_id=5))
+# character-world §2, §3: sample inputs (never the production search)
+WEATHER = "light rain, 3 to 9°C, rain 2.1 mm"
+TOPICS = ("수도권 첫눈 예보, 주말 기온 뚝", "연말 공연 예매 시작", "국회 예산안 처리 두고 공방", "새 스마트폰 출시 첫날 매진",
+          "프로야구 시상식 열려")
 
 
 def adapter() -> OpenRouterAdapter:
@@ -112,13 +120,19 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
                      datetime(2026, 11, 25, 11, 40, tzinfo=UTC),
                      "사용자가 회사 발표 자료를 마무리했고, HIMARI가 마지막 장의 문장을 다듬자고 했다.", (1,), (2,),
                      MemoryOrigin.EXTRACTOR, None, 1, NOW, NOW)
-    data = writer.request_data(PERSONA, LIFE, [RecentEpisode(talked, "발표")], day=day, now=NOW, zone=SEOUL)
+    data = writer.request_data(PERSONA, LIFE, [RecentEpisode(talked, "발표")], day=day, now=NOW, zone=SEOUL,
+                               weather=WEATHER, topics=TOPICS)
+    assert data["arcs"] == [{"id": 5, "title": "커버곡 연습", "goal": "한 달 안에 신스팝 커버곡 하나를 완성한다.",
+                             "started": "2026-11-18", "moved_on": ["2026-11-18"]}]
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
                              max_output_tokens=writer.WRITER_MAX_OUTPUT_TOKENS)
     text, usage = call(writer.model_input(data, options))
     plan = writer.parse_answer(text, day)  # every §3 check: shape, lengths, counts, plan dates
     record("writer", text, usage, plans=len(plan.plans), facts=len(plan.facts), diary_chars=len(plan.diary),
-           times=list(plan.times), mood=plan.mood, mood_reason=plan.mood_reason)
+           times=list(plan.times), mood=plan.mood, mood_reason=plan.mood_reason,
+           arc=None if plan.arc is None else {"move": plan.arc.op.value, "id": plan.arc.entry_id,
+                                              "title": plan.arc.title, "goal": plan.arc.goal,
+                                              "ending": plan.arc.ending})
     assert plan.diary
     # character-state §2, §3: the optional mood and plan times, when given, are in the shape asked for — kept, not
     # dropped by the checks (an out-of-shape one would be left out silently)
@@ -133,6 +147,9 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
     for asked, kept in zip(raw.get("plans") or [], times):
         if isinstance(asked, dict) and asked.get("time") is not None:
             assert kept is not None, asked
+    # character-world §4: an arc move, when given, is in the shape asked for (an out-of-shape one is left out)
+    if raw.get("arc") is not None:
+        assert plan.arc is not None, raw["arc"]
 
 
 def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:
