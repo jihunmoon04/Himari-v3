@@ -15,7 +15,18 @@ pytest.importorskip("fastapi")
 from webkit import SEND, Server  # noqa: E402
 
 from himari.common import PrincipalId  # noqa: E402
-from himari.data.api import MAX_DIARY_CHARS, MAX_LIFE_CHARS, MAX_LIFE_FACTS, LifePlan, LifeWriteStart, RawReceived  # noqa: E402
+from himari.data.api import (  # noqa: E402
+    MAX_ARC_CHARS,
+    MAX_ARC_TITLE_CHARS,
+    MAX_DIARY_CHARS,
+    MAX_LIFE_CHARS,
+    MAX_LIFE_FACTS,
+    ArcMove,
+    ArcOp,
+    LifePlan,
+    LifeWriteStart,
+    RawReceived,
+)
 from himari.interfaces.web import app as web  # noqa: E402
 
 ME = PrincipalId("operator")
@@ -40,7 +51,10 @@ def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Se
     assert now in (None, {"asleep": True, "doing": None, "since": None})
     assert empty == {"persona": None, "enabled": True,
                      "writer": {"running": False, "told": "off (no HIMARI_MEMORY_MODEL)"}, "mood": None, "entries": [],
-                     "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS}}
+                     "world": {"weather": "off (no HIMARI_LOCATION)", "today": None,
+                               "topics": "off (no story writer)"},
+                     "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
+                                "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS}}
     added = server.post("/api/life", {"text": " 비 오는 날을 좋아한다. ", "persona_id": None})
     assert added.status_code == 201
     fact = added.json()
@@ -89,6 +103,36 @@ def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Se
     # no persona again: its life is still there
     server.client.put("/api/personas/choice", json={"persona_id": None, "revision": 1}, headers=SEND)
     assert [e["text"] for e in server.client.get("/api/life").json()["entries"]] == ["비 오는 날을 좋아한다."]
+
+
+def test_an_arc_is_seen_with_its_title_and_status_and_its_title_and_goal_are_edited(server: Server) -> None:
+    """character-world §4: an arc's title, status, start, end and ending; a diary names the arc it moved."""
+    async def written() -> None:
+        assert server.application is not None
+        data = server.application.data
+        for day, move in (("2099-01-01", ArcMove(ArcOp.START, title="그림 연습", goal="풍경화 한 장")),
+                          ("2099-01-03", ArcMove(ArcOp.CLOSE, entry_id=1, ending="완성했다."))):
+            write_id = await data.begin_life_write(ME, LifeWriteStart(0, day, "p", "m", b"{}", "j", 1))
+            await data.mark_life_write_dispatched(write_id)
+            await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+            await data.apply_life_write(write_id, LifePlan(f"{day}의 일기.", arc=move), now=datetime.now(UTC))
+
+    server.client.portal.call(written)  # type: ignore[union-attr]
+    arc, last, first = server.client.get("/api/life").json()["entries"]
+    assert (arc["kind"], arc["title"], arc["text"], arc["status"], arc["day"], arc["end_day"], arc["ending"]) == (
+        "arc", "그림 연습", "풍경화 한 장", "closed", "2099-01-01", "2099-01-03", "완성했다.")
+    assert (last["kind"], last["arc_id"], first["arc_id"]) == ("diary", arc["id"], arc["id"])
+    edited = server.client.put(f"/api/life/{arc['id']}", json={"text": "인물화 한 장", "title": "수채화 연습",
+                                                               "revision": arc["revision"]}, headers=SEND)
+    assert edited.status_code == 200
+    assert (edited.json()["title"], edited.json()["text"], edited.json()["origin"]) == ("수채화 연습", "인물화 한 장",
+                                                                                         "user")
+    titled = server.client.put(f"/api/life/{first['id']}", json={"text": "일기", "title": "제목",
+                                                                  "revision": first["revision"]}, headers=SEND)
+    assert (titled.status_code, error_code(titled)) == (422, "invalid_life")  # only an arc has a title
+    long = server.client.put(f"/api/life/{arc['id']}", json={"text": "g", "title": "x" * (MAX_ARC_TITLE_CHARS + 1),
+                                                             "revision": edited.json()["revision"]}, headers=SEND)
+    assert (long.status_code, error_code(long)) == (422, "too_large")
 
 
 def test_life_needs_a_signed_in_user_and_an_allowed_origin(server: Server) -> None:

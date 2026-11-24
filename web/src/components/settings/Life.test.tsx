@@ -151,6 +151,33 @@ describe("an entry", () => {
     expect((screen.getByLabelText("Entry text") as HTMLTextAreaElement).value).toBe("맑았다.");
   });
 
+  it("shows an arc with its title, status and ending, and edits its title and goal (character-world §4)", async () => {
+    state.data = {
+      ...aLife(),
+      world: { weather: "on (Open-Meteo at 37.57,126.98)", today: "light rain, 3 to 9°C", topics: "on (exa/web_search_exa)" },
+      entries: [
+        { ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "writer"), title: "그림 연습", status: "open", end_day: null },
+        { ...entry(10, "arc", "2026-11-01", "매일 십 분", "writer", 2), title: "우쿨렐레", status: "closed",
+          end_day: "2026-11-20", ending: "한 곡을 끝까지 쳤다." },
+      ],
+      limits: { ...aLife().limits, arc_chars: 200, arc_title_chars: 60 },
+    };
+    await shown();
+    expect(screen.getByLabelText("World").textContent).toBe(
+      "Weather: light rain, 3 to 9°C · The day's topics: on (exa/web_search_exa)");
+    expect(part("Arcs").getByText("그림 연습")).toBeTruthy();
+    expect(part("Arcs").getByText("since 2026-11-10 · open · written by the story writer")).toBeTruthy();
+    expect(part("Arcs").getByText("2026-11-01 – 2026-11-20 · closed · written by the story writer")).toBeTruthy();
+    expect(part("Arcs").getByText("Ending: 한 곡을 끝까지 쳤다.")).toBeTruthy();
+    fireEvent.click(part("Arcs").getAllByRole("button", { name: "Edit" })[0] as HTMLElement);
+    const title = screen.getByLabelText("Arc title") as HTMLInputElement;
+    const goal = screen.getByLabelText("Arc goal") as HTMLTextAreaElement;
+    expect([title.value, title.maxLength, goal.value, goal.maxLength]).toEqual(["그림 연습", 60, "풍경화 한 장", 200]);
+    fireEvent.change(title, { target: { value: " 수채화 연습 " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editLife).toHaveBeenCalledWith(11, "풍경화 한 장", 1, "수채화 연습"));
+  });
+
   it("is deleted only when confirmed", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     await shown();

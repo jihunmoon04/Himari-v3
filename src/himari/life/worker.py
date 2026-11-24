@@ -9,6 +9,11 @@ answer is out of shape is recorded and thrown away; the next round tries again,
 ATTEMPTS_PER_DAY times a date. Every call's request is stored before it is
 sent, and the tokens it may use are reserved against the principal's own daily
 budget first (L4: apart from the memory passes').
+
+character-world v0.1: the input also holds the weather where the user is for the
+date written (as last read, from memory) and the day's topic titles (read once a
+date, only when a call is about to be made), and the persona is told as a turn
+tells it — its hidden lines only from the bond stage they wait for (W4).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from zoneinfo import ZoneInfo
 from himari.common import PrincipalId
 from himari.data.api import (
     NO_PERSONA,
+    BondStanding,
     DataError,
     DataErrorCode,
     LifeKind,
@@ -49,7 +55,7 @@ from himari.life.writer import (
     reservation,
     target_day,
 )
-from himari.prompt.api import RequestOptions
+from himari.prompt.api import RequestOptions, persona_for_stage
 from himari.provider.api import (
     NativeNoResponse,
     NativePreparedRequest,
@@ -58,6 +64,7 @@ from himari.provider.api import (
     ProviderAdapter,
     ProviderError,
 )
+from himari.world.api import TopicSource, WeatherSource
 
 log = logging.getLogger(__name__)
 
@@ -70,15 +77,20 @@ class LifeWriterData(LifeStore, LifeWriteLog, Protocol):  # what the writer read
     async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
                             end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]: ...
 
+    async def bond_stage(self, principal: PrincipalId, persona_id: int) -> BondStanding: ...
+
 
 class LifeWriter:
     """The ``life`` job (§3) and one principal's write."""
 
     def __init__(self, data: LifeWriterData, provider: ProviderAdapter, settings: LifeSettings, *,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None, weather: WeatherSource | None = None,
+                 topics: TopicSource | None = None) -> None:
         self._data = data
         self._provider = provider
         self.settings = settings
+        self._weather = weather  # character-world §2: None: no weather in the input
+        self._topics = topics  # §3: None: no topics (none configured, or HIMARI_LIFE_TOPICS=0)
         self._clock = clock or (lambda: datetime.now(UTC))
         self._zone = ZoneInfo(settings.time_zone)
         self._principals: dict[PrincipalId, asyncio.Lock] = {}
@@ -128,10 +140,15 @@ class LifeWriter:
             return WriteOutcome.GAVE_UP
         start, end = day_bounds(day, self._zone)
         episodes = await self._data.find_episodes(principal, (), start=start, end=end)
+        persona = "" if chosen is None else chosen.text
+        if persona:  # character-world §5 (W4): as a turn tells it, at the stage as stored
+            persona = persona_for_stage(persona, (await self._data.bond_stage(principal, persona_id)).stage)
+        found = None if self._weather is None else self._weather.weather_on(day)
+        topics = () if self._topics is None else await self._topics.topics(day)  # §3: once a date
         options = RequestOptions(self.settings.model_id, self.settings.reasoning_effort,
                                  provider_key=self._provider.provider_key, max_output_tokens=WRITER_MAX_OUTPUT_TOKENS)
-        asked = model_input(request_data("" if chosen is None else chosen.text, entries, episodes, day=day, now=now,
-                                         zone=self._zone), options)
+        asked = model_input(request_data(persona, entries, episodes, day=day, now=now, zone=self._zone,
+                                         weather=None if found is None else found.line(), topics=topics), options)
         request = self._provider.prepare_native_request(asked)
         reserve = reservation(request.body)
         if await self._data.life_usage(principal, self.budget_start(now)) + reserve > self.settings.daily_tokens:

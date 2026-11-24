@@ -16,7 +16,8 @@ Rules:
    ``sandbox`` and ``data`` (V3-P67); presence uses ``common`` and ``data``
    (V3-P83); memory passes use ``common``, ``data``, ``prompt`` and
    ``provider`` (V3-P85), never Control; so does the story writer (``life``,
-   character-life v0.1).
+   character-life v0.1), with the real world's ports (``world``, character-world
+   v0.1), which use ``common`` only.
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -33,6 +34,7 @@ LAYERS = {
     "common": 0,
     "sandbox": 1,  # the isolation mechanism: imports common only (rule 6), used by consumers via its api
     "data": 1,
+    "world": 1,  # the weather and the day's topics (character-world v0.1): common only, read through its api
     "presence": 2,  # devices and the current device (V3-P83 §2.2): Data's types and nothing else
     "tool": 2,
     "imaging": 2,  # model copies of images (V3-P67): the sandbox and Data's file types, nothing else
@@ -57,7 +59,8 @@ ONLY_FROM = {
     "presence": frozenset({"common", "data"}),
     "proactive": frozenset({"common", "data", "presence"}),
     "memory": frozenset({"common", "data", "prompt", "provider"}),
-    "life": frozenset({"common", "data", "prompt", "provider"}),
+    "life": frozenset({"common", "data", "prompt", "provider", "world"}),
+    "world": frozenset({"common"}),
 }
 
 

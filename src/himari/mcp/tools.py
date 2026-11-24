@@ -87,6 +87,16 @@ class McpTool:
             external_source=source,
         )
 
+    @property
+    def name(self) -> str:
+        """The server's own name for the Tool (its id is HIMARI's)."""
+        return self._name
+
+    @property
+    def client(self) -> McpClient:
+        """The connection its calls go through (character-world §3: the day's topics use it too)."""
+        return self._client
+
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
         """A definite answer, or ``McpRefused`` turned into FAILED (the Tool
         did not run). Anything uncertain raises, so a claimed call is never

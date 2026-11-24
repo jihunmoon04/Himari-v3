@@ -33,6 +33,7 @@ from himari.tool.conversation_search import conversation_search_tools
 from himari.tool.memory import memory_tools
 from himari.tool.screen import ScreenTool
 from himari.tool.registry import ToolRegistry
+from himari.world.api import WeatherSource
 
 # V3-P89 §3.1, V3-P108 §3.1: the base without the companion (Application picks by the switch); an operator's
 # own replaces only this.
@@ -79,6 +80,7 @@ def build_runtime(
     memory: bool = False,  # V3-P71: the memory Tools, the memory section and the notes in the state
     life: bool = False,  # character-life §5: HIMARI's life in the state and its rule (with the companion)
     quiet_hours: tuple[time, time] | None = None,  # character-state §3 (S2): HIMARI is asleep in them; None: never
+    weather: WeatherSource | None = None,  # character-world §2: told with the life; None: no weather
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
     time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
@@ -145,6 +147,8 @@ def build_runtime(
         bond=data if spec is not None and spec.life else None,  # character-bond §5: told with the life
         moods=data if spec is not None and spec.life else None,  # character-state §2: so is the mood
         quiet_hours=quiet_hours,
+        bond_stages=data,  # character-world §5 (W4): the persona's hidden lines wait for the stage
+        weather=weather if spec is not None and spec.life else None,
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_guidance=turn_guidance,

@@ -147,6 +147,20 @@ def test_the_run_limit_is_configured() -> None:
             WebConfig.from_env({**base, "HIMARI_MAX_RUNS": bad})
 
 
+def test_the_world_is_configured() -> None:
+    # character-world v0.1: HIMARI_LOCATION (latitude,longitude; unset: no weather), HIMARI_LIFE_TOPICS (on by default)
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert (WebConfig.from_env(base).location, WebConfig.from_env(base).life_topics) == (None, True)
+    assert WebConfig.from_env({**base, "HIMARI_LOCATION": " "}).location is None
+    assert WebConfig.from_env({**base, "HIMARI_LOCATION": "37.57, 126.98"}).location == (37.57, 126.98)
+    assert WebConfig.from_env({**base, "HIMARI_LIFE_TOPICS": "0"}).life_topics is False
+    for bad in ("seoul", "37.57", "100,0"):
+        with pytest.raises(WebConfigError, match="HIMARI_LOCATION"):
+            WebConfig.from_env({**base, "HIMARI_LOCATION": bad})
+    with pytest.raises(WebConfigError, match="HIMARI_LIFE_TOPICS"):
+        WebConfig.from_env({**base, "HIMARI_LIFE_TOPICS": "sometimes"})
+
+
 @pytest.mark.parametrize("settings, message", [
     # PR #12 re-review B2: the server speaks plain HTTP, so it never listens beyond loopback,
     # whatever origin is declared (an Origin header proves nothing about the connection).

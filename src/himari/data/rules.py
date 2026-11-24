@@ -11,6 +11,11 @@ from collections.abc import Iterable, Sequence
 
 from himari.common import ContentBlock, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
+    MAX_ARC_CHARS,
+    MAX_ARC_TITLE_CHARS,
+    MAX_OPEN_ARCS,
+    ArcMove,
+    ArcOp,
     BOND_CLOSE_DAYS,
     BOND_FAMILIAR_DAYS,
     MAX_BOND_CHARS,
@@ -531,7 +536,8 @@ def check_life_text(kind: LifeKind, text: object) -> str:
     text = text.strip()
     if not text:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
-    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS}.get(kind, MAX_LIFE_CHARS)
+    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS,
+             LifeKind.ARC: MAX_ARC_CHARS}.get(kind, MAX_LIFE_CHARS)
     if len(text) > limit:
         raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
     return text
@@ -556,13 +562,17 @@ def check_life_persona(persona_id: object) -> int:
 
 
 def order_life(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
-    """Facts first (the user's, then newest), then the dated entries, newest date first."""
+    """Facts first (the user's, then newest), then the arcs (character-world §4: the open
+    ones, newest start first, then the closed ones, newest end first), then the dated
+    entries, newest date first."""
     listed = list(entries)
     facts = sorted((e for e in listed if e.kind is LifeKind.FACT),
                    key=lambda e: (e.origin is not LifeOrigin.USER, -e.updated_at.timestamp(), -e.entry_id))
-    dated_ = sorted((e for e in listed if e.kind is not LifeKind.FACT),
+    arcs = sorted((e for e in listed if e.kind is LifeKind.ARC),
+                  key=lambda e: (e.end_day is None, e.end_day or e.day or "", e.entry_id), reverse=True)
+    dated_ = sorted((e for e in listed if e.kind not in (LifeKind.FACT, LifeKind.ARC)),
                     key=lambda e: (e.day or "", e.kind is LifeKind.DIARY, e.entry_id), reverse=True)
-    return (*facts, *dated_)
+    return (*facts, *arcs, *dated_)
 
 
 def same_fact(text: str, facts: Iterable[LifeEntry]) -> bool:
@@ -787,6 +797,61 @@ def check_life_plans(plan: LifePlan) -> list[tuple[str, str, str | None]]:
     return [(check_life_day(day), check_life_text(LifeKind.PLAN, text),
              check_time_of_day(plan.times[i] if i < len(plan.times) else None))
             for i, (day, text) in enumerate(plan.plans)]
+
+
+# --- World: HIMARI's arcs (character-world v0.1 §4) -------------------------------------------
+
+
+def check_arc_title(title: object) -> str:
+    """An arc's title: one line of text, trimmed, at most MAX_ARC_TITLE_CHARS."""
+    if not isinstance(title, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an arc's title is text")
+    if any(unicodedata.category(c) in ("Cc", "Cs") for c in title):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an arc's title is one line, with no control characters")
+    title = title.strip()
+    if not title:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an arc needs a title")
+    if len(title) > MAX_ARC_TITLE_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"an arc's title is at most {MAX_ARC_TITLE_CHARS} characters")
+    return title
+
+
+def edited_title(entry: LifeEntry, title: object) -> str | None:
+    """The title after the user's edit: an arc's given one, checked, else the entry's own.
+    INVALID_ARGUMENT for a title given to an entry that is not an arc."""
+    if title is None:
+        return entry.title
+    if entry.kind is not LifeKind.ARC:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only an arc has a title")
+    return check_arc_title(title)
+
+
+def check_arc_move(move: object) -> ArcMove | None:
+    """A writer's arc move as stored: START with its title and goal, ADVANCE with its arc,
+    CLOSE with its arc and ending (the ending as an arc's goal is checked)."""
+    if move is None:
+        return None
+    if not isinstance(move, ArcMove) or not isinstance(move.op, ArcOp):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not an arc move")
+    if move.op is ArcOp.START:
+        return ArcMove(ArcOp.START, title=check_arc_title(move.title), goal=check_life_text(LifeKind.ARC, move.goal))
+    if isinstance(move.entry_id, bool) or not isinstance(move.entry_id, int):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an arc move names its arc")
+    if move.op is ArcOp.ADVANCE:
+        return ArcMove(ArcOp.ADVANCE, entry_id=move.entry_id)
+    return ArcMove(ArcOp.CLOSE, entry_id=move.entry_id, ending=check_life_text(LifeKind.ARC, move.ending))
+
+
+def arc_moved(move: ArcMove, arcs: Sequence[LifeEntry]) -> LifeEntry | None:
+    """§4 (W3): the open arc among the persona's live ``arcs`` an ADVANCE or CLOSE moves,
+    or None when it names no open arc of the persona (the move is left out)."""
+    return next((a for a in arcs if a.entry_id == move.entry_id and a.arc_open), None)
+
+
+def arc_starts(move: ArcMove, arcs: Sequence[LifeEntry]) -> bool:
+    """§4 (W3): a START fits — fewer than MAX_OPEN_ARCS open arcs, none titled the same (folded)."""
+    open_ = [a for a in arcs if a.arc_open]
+    return len(open_) < MAX_OPEN_ARCS and all(fold(a.title or "") != fold(move.title or "") for a in open_)
 
 
 def writer_mood(plan: LifePlan, now: datetime) -> HimariMood | None:

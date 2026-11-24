@@ -61,6 +61,8 @@ from himari.data.api import (
     MAX_BOND_ENTRIES,
     MAX_PERSONAS,
     PAIRING_FAILURE_LIMIT,
+    ArcMove,
+    ArcOp,
     BondChange,
     BondSnapshot,
     BondStage,
@@ -1272,7 +1274,8 @@ class InMemoryData:
         return rules.order_life(
             e for (owner, _), (e, retired) in self._store.life.items()
             if owner == principal and retired is None and e.persona_id == persona_id and e.kind is not LifeKind.BOND
-            and (e.kind is LifeKind.FACT or since is None or (e.day or "") >= since))
+            and (e.kind is LifeKind.FACT or since is None or (e.day or "") >= since
+                 or (e.kind is LifeKind.ARC and (e.end_day is None or e.end_day >= since))))
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         persona_id = rules.check_life_persona(persona_id)
@@ -1285,12 +1288,13 @@ class InMemoryData:
         return added
 
     async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
-                        expected_revision: int) -> LifeEntry:
+                        expected_revision: int, title: str | None = None) -> LifeEntry:
         entry = self._live_entry(principal, entry_id)
         text = rules.check_life_text(entry.kind, text)
+        titled = rules.edited_title(entry, title)
         if expected_revision != entry.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
-        return self._put_life(principal, replace(entry, text=text, origin=LifeOrigin.USER,
+        return self._put_life(principal, replace(entry, text=text, title=titled, origin=LifeOrigin.USER,
                                                  revision=entry.revision + 1, updated_at=datetime.now(UTC)))
 
     async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
@@ -1388,6 +1392,7 @@ class InMemoryData:
         plans = rules.check_life_plans(plan)
         facts = [rules.check_life_text(LifeKind.FACT, text) for text in plan.facts]
         mood = rules.writer_mood(plan, now)
+        arc = rules.check_arc_move(plan.arc)
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
@@ -1396,13 +1401,18 @@ class InMemoryData:
         before = next((e for (owner, _), (e, retired) in self._store.life.items()
                        if owner == principal and retired is None and e.persona_id == persona_id
                        and e.kind is LifeKind.DIARY and e.day == day), None)
+        arc_id, moved = (None, None) if arc is None else self._move_arc(principal, persona_id, day, arc, write_id,
+                                                                        now)
+        if moved is not None:
+            written.append(moved)
         if before is None:
             written.append(self._new_life(principal, LifeEntry(0, persona_id, LifeKind.DIARY, day, diary,
-                                                               LifeOrigin.WRITER, 1, now, now, source=write_id)))
+                                                               LifeOrigin.WRITER, 1, now, now, source=write_id,
+                                                               arc_id=arc_id)))
         elif before.origin is not LifeOrigin.USER:  # §2: one diary a day; the user's stays
             written.append(self._put_life(principal, replace(before, text=diary, origin=LifeOrigin.WRITER,
                                                              revision=before.revision + 1, updated_at=now,
-                                                             source=write_id)))
+                                                             source=write_id, arc_id=arc_id)))
         for plan_day, text, at in plans:
             written.append(self._new_life(principal, LifeEntry(0, persona_id, LifeKind.PLAN, plan_day, text,
                                                                LifeOrigin.WRITER, 1, now, now, source=write_id,
@@ -1416,6 +1426,27 @@ class InMemoryData:
             self._keep_mood(principal, replace(mood, persona_id=persona_id))
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return tuple(written)
+
+    def _move_arc(self, principal: PrincipalId, persona_id: int, day: str, move: ArcMove, write_id: str,
+                  now: datetime) -> tuple[int | None, LifeEntry | None]:
+        """character-world §4: as SqliteData._move_arc."""
+        arcs = [e for (owner, _), (e, retired) in self._store.life.items()
+                if owner == principal and retired is None and e.persona_id == persona_id and e.arc_open]
+        if move.op is ArcOp.START:
+            if not rules.arc_starts(move, arcs):
+                return None, None
+            assert move.goal is not None
+            started = self._new_life(principal, LifeEntry(0, persona_id, LifeKind.ARC, day, move.goal,
+                                                          LifeOrigin.WRITER, 1, now, now, source=write_id,
+                                                          title=move.title))
+            return started.entry_id, started
+        target = rules.arc_moved(move, arcs)
+        if target is None:
+            return None, None
+        if move.op is ArcOp.ADVANCE:
+            return target.entry_id, None
+        return target.entry_id, self._put_life(principal, replace(target, revision=target.revision + 1,
+                                                                  updated_at=now, end_day=day, ending=move.ending))
 
     @staticmethod
     def _end_write(row: _LifeWrite, status: LifeWriteStatus, error: str) -> None:

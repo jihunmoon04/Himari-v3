@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
@@ -48,6 +49,7 @@ from himari.common import (
 from himari.data.api import (
     MAX_IMAGE_BYTES_PER_REQUEST,
     MAX_IMAGES_PER_REQUEST,
+    BOND_STAGES,
     BondSnapshot,
     BondStage,
     ConversationEvent,
@@ -237,6 +239,9 @@ class CurrentStateProjection(DeepFrozen):
     # read with the life; None: not told, or none now (no himari_mood / himari_now entry).
     mood: HimariMood | None = None
     himari_now: HimariNow | None = None
+    # character-world §2: today's weather where the user is, one line, read with the life; None: not
+    # told (no location, none read, or the life is off) — no world entry.
+    weather: str | None = None
 
 
 @dataclass(frozen=True)
@@ -372,6 +377,7 @@ class PromptInputs(DeepFrozen):
     bond: BondSnapshot | None = None  # character-bond §5: the turn's; None: not told
     mood: HimariMood | None = None  # character-state §2: the turn's, while told; None: not told or none
     himari_now: HimariNow | None = None  # character-state §3: the turn's; None: not told or nothing now
+    weather: str | None = None  # character-world §2: the turn's line; None: not told
 
 
 @dataclass(frozen=True)
@@ -524,6 +530,7 @@ class PromptContextLoader(Protocol):
         bond: BondSnapshot | None = None,  # the turn's (character-bond §5); None: not told
         mood: HimariMood | None = None,  # the turn's, while told (character-state §2); None: not told or none
         himari_now: HimariNow | None = None,  # the turn's (character-state §3); None: not told or nothing now
+        weather: str | None = None,  # the turn's (character-world §2); None: not told
     ) -> PromptInputs: ...
 
 
@@ -688,6 +695,7 @@ LIFE_FACTS_CHARS = 1_500  # the facts the state carries: the user's first, then 
 LIFE_DAYS = 3  # the newest diaries
 LIFE_DAYS_CHARS = 1_500
 LIFE_PLANS_CHARS = 800  # the plans from today on, the soonest first
+LIFE_ARCS_CHARS = 500  # character-world §4: the open arcs' titles and goals, the newest first
 LIFE_READ_DAYS = timedelta(days=14)  # how far back a turn reads diaries and plans
 
 
@@ -695,7 +703,8 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     """§5: the facts in the store's order (the user's, then the newest) while
     their text fits in LIFE_FACTS_CHARS; the newest LIFE_DAYS diaries within
     LIFE_DAYS_CHARS (newest first); the plans dated today (``now``'s date) or
-    later, soonest first, within LIFE_PLANS_CHARS. None when none is shown."""
+    later, soonest first, within LIFE_PLANS_CHARS; the open arcs' titles and
+    goals within LIFE_ARCS_CHARS (character-world §4). None when none is shown."""
     today = None if now is None else now.date().isoformat()
     facts: list[str] = []
     room = LIFE_FACTS_CHARS
@@ -725,14 +734,55 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         plans.append({"date": entry.day, **({"time": entry.time_of_day} if entry.time_of_day else {}),
                       "text": entry.text})
         room -= len(entry.text)
-    if not facts and not days and not plans:
+    arcs: list[dict[str, object]] = []
+    room = LIFE_ARCS_CHARS
+    for entry in entries:
+        if not entry.arc_open:
+            continue
+        size = len(entry.title or "") + len(entry.text)
+        if size > room:
+            break
+        arcs.append({"title": entry.title, "goal": entry.text})
+        room -= size
+    if not facts and not days and not plans and not arcs:
         return None
     data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
     if days:
         data["days"] = days
     if plans:
         data["plans"] = plans
+    if arcs:
+        data["arcs"] = arcs
     return data
+
+
+# character-world §2 (W1): the weather where the user is in the runtime state, with the companion and life on;
+# it is the user's side of the real world, whatever world the persona lives in.
+WORLD_ABOUT = ("The real world on the user's side: today's weather where the user is. Your own world, as this "
+               "persona, may be another.")
+
+
+def world_data(weather: str) -> dict[str, object]:
+    """§2: the weather line, labelled as the user's side."""
+    return {"about": WORLD_ABOUT, "weather": weather}
+
+
+# character-world §5 (W4): a persona line that starts with [familiar] or [close] (after indentation or a list
+# mark) is the owner's hidden backstory: left out until the bond with that persona reaches the stage.
+HIDDEN_LINE = re.compile(r"^([ \t]*(?:[-*•][ \t]*)?)\[(familiar|close)\][ \t]?", re.IGNORECASE)
+
+
+def persona_for_stage(text: str, stage: BondStage) -> str:
+    """W4: the persona as a model is told it at ``stage``: each marked line is left out until the
+    bond reaches its stage, then told without its mark. Text with no marked line is returned as is."""
+    lines: list[str] = []
+    for line in text.split("\n"):
+        found = HIDDEN_LINE.match(line)
+        if found is None:
+            lines.append(line)
+        elif BOND_STAGES.index(stage) >= BOND_STAGES.index(BondStage(found.group(2).lower())):
+            lines.append(found.group(1) + line[found.end():])
+    return "\n".join(lines)
 
 
 # character-bond §5: the bond with the user in the runtime state, with the companion and life on; what the model
@@ -955,7 +1005,8 @@ FREE_SCREEN_RULE = (
 # own life freely, with no daily limit (one is added later if it turns out to be too much).
 LIFE_RULE = (
     "- Your life: runtime_state.himari_life is your own life apart from the user, as this persona: facts settled "
-    "about you, your last few days and your plans. After the persona, keep to it and never contradict it; what "
+    "about you, your last few days, your plans and what runs through your weeks (arcs). After the persona, keep to "
+    "it and never contradict it; what "
     "you add about yourself as you talk must fit it. Answer from it when asked about yourself, and bring up your "
     "own day, plans and likes freely whenever it fits: in a greeting, when you speak first, or as you talk. "
     "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
@@ -1323,6 +1374,8 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
         data["himari_mood"] = himari_mood_data(state.mood, state.now)
     if state.himari_now is not None:
         data["himari_now"] = himari_now_data(state.himari_now)
+    if state.weather is not None:
+        data["world"] = world_data(state.weather)
     data.update(turn_state_data(turn) or {})
     if state.now is not None:
         data["now"] = time_text(state.now)

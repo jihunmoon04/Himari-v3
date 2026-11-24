@@ -1,5 +1,6 @@
 // HIMARI's life (character-life §6): for the persona in use (or the default), the facts it has settled about itself,
-// its plans and its diary. The owner adds facts, edits any entry from the revision opened (a save over a change made
+// its arcs (character-world §4: threads over weeks the story writer starts and ends), its plans and its diary. The
+// owner adds facts, edits any entry from the revision opened (an arc's title and goal; a save over a change made
 // elsewhere is refused with 409 and says so) and deletes them (they retire: no undo). The app never shows them.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
@@ -23,19 +24,26 @@ const ORIGINS: Record<LifeOrigin, string> = {
   conversation: "from a conversation",
   user: "yours",
 };
-const NAMES: Record<LifeKind, string> = { fact: "fact", plan: "plan", diary: "diary entry" };
+const NAMES: Record<LifeKind, string> = { fact: "fact", plan: "plan", diary: "diary entry", arc: "arc" };
+const ARC_CHARS = 200; // as the server's, when it does not say
+const ARC_TITLE_CHARS = 60;
 
 function Editor({ entry, revision, limits, onDone }: {
   entry: LifeEntry; revision: number; limits: Life["limits"]; onDone: () => void;
 }) {
   const client = useQueryClient();
   const [text, setText] = useState(entry.text);
+  const arc = entry.kind === "arc";
+  const [title, setTitle] = useState(entry.title ?? "");
   const [saving, setSaving] = useState(false);
-  const max = entry.kind === "diary" ? limits.diary_chars : limits.chars;
+  const max = entry.kind === "diary" ? limits.diary_chars : arc ? limits.arc_chars ?? ARC_CHARS : limits.chars;
+  const changed = text !== entry.text || (arc && title !== (entry.title ?? ""));
   const save = async () => {
     setSaving(true);
     try {
-      await editLife(entry.id, text.trim(), revision); // from the revision it was opened with, whatever is read later
+      // from the revision it was opened with, whatever is read later
+      if (arc) await editLife(entry.id, text.trim(), revision, title.trim());
+      else await editLife(entry.id, text.trim(), revision);
       toast(`Saved. ${NEXT_TURN}`);
       onDone();
     } catch (failure) {
@@ -51,13 +59,19 @@ function Editor({ entry, revision, limits, onDone }: {
   return (
     <form className="space-y-2" aria-label="Life entry editor"
       onSubmit={(event) => { event.preventDefault(); void save(); }}>
-      <textarea aria-label="Entry text" value={text} rows={entry.kind === "diary" ? 6 : 2} maxLength={max} autoFocus
-        readOnly={saving} onChange={(event) => setText(event.target.value)} className={cn(field, "resize-y")} />
+      {arc && (
+        <input aria-label="Arc title" value={title} maxLength={limits.arc_title_chars ?? ARC_TITLE_CHARS} autoFocus
+          readOnly={saving} onChange={(event) => setTitle(event.target.value)} className={field} />
+      )}
+      <textarea aria-label={arc ? "Arc goal" : "Entry text"} value={text} rows={entry.kind === "diary" ? 6 : 2}
+        maxLength={max} autoFocus={!arc} readOnly={saving} onChange={(event) => setText(event.target.value)}
+        className={cn(field, "resize-y")} />
       <div className="flex items-center gap-3 text-xs text-faint">
         <span>{text.length.toLocaleString()} / {max.toLocaleString()}</span>
         <div className="ml-auto flex gap-2">
           <Button variant="ghost" disabled={saving} onClick={onDone}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={saving || !text.trim() || text === entry.text}>Save</Button>
+          <Button type="submit" variant="primary"
+            disabled={saving || !text.trim() || (arc && !title.trim()) || !changed}>Save</Button>
         </div>
       </div>
     </form>
@@ -70,9 +84,14 @@ function Row({ entry, locked, onEdit, onDelete }: {
   return (
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
+        {entry.kind === "arc" && <p className="font-medium text-ink">{entry.title}</p>}
         <p className="whitespace-pre-wrap break-words">{entry.text}</p>
+        {entry.kind === "arc" && entry.ending && <p className="mt-1 text-muted">Ending: {entry.ending}</p>}
         <p className="mt-1 text-xs text-faint">
-          {entry.day ? `${entry.day}${entry.time ? ` ${entry.time}` : ""} · ` : ""}{ORIGINS[entry.origin]}
+          {entry.kind === "arc"
+            ? `${entry.status === "closed" ? `${entry.day} – ${entry.end_day} · closed` : `since ${entry.day} · open`} · `
+            : entry.day ? `${entry.day}${entry.time ? ` ${entry.time}` : ""} · ` : ""}
+          {ORIGINS[entry.origin]}
         </p>
       </div>
       <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>Edit</Button>
@@ -137,7 +156,7 @@ export function LifeSettings() {
   const [busy, setBusy] = useState(false);
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read HIMARI's life.</p>;
-  const { persona, enabled, writer, entries, limits, mood, now } = query.data;
+  const { persona, enabled, writer, entries, limits, mood, now, world } = query.data;
   const remove = async (entry: LifeEntry) => {
     const what = NAMES[entry.kind];
     if (!window.confirm(`Delete this ${what}? HIMARI will not know it any more; there is no undo.`)) return;
@@ -174,8 +193,8 @@ export function LifeSettings() {
       <h2 className="text-base font-semibold">Life</h2>
       <p className="text-sm text-muted">
         <span className="font-medium text-ink">{persona ? `${persona.name}'s life` : "Default (no persona)"}</span>.
-        HIMARI lives it apart from you: the facts it has settled about itself, its plans and its diary. Each persona
-        has its own; this is the one in use. The app never shows it. {NEXT_TURN}
+        HIMARI lives it apart from you: the facts it has settled about itself, the arcs it follows over weeks, its
+        plans and its diary. Each persona has its own; this is the one in use. The app never shows it. {NEXT_TURN}
       </p>
       {!enabled && (
         <p className="text-sm text-wait">
@@ -183,6 +202,11 @@ export function LifeSettings() {
         </p>
       )}
       <p className="text-xs text-faint">Story writer: {writer.told}</p>
+      {world && (
+        <p className="text-xs text-faint" aria-label="World">
+          Weather: {world.today ?? world.weather} · The day's topics: {world.topics}
+        </p>
+      )}
       {(mood || now) && (
         <p className="text-sm text-muted" aria-label="Now">
           {mood && <>Mood: <span className="text-ink">{mood.mood}</span>{mood.reason ? ` (${mood.reason})` : ""}
@@ -195,6 +219,8 @@ export function LifeSettings() {
         top={<AddFact personaId={persona?.id ?? null} full={full} max={limits.chars} />}>
         {facts}
       </Group>
+      <Group title="Arcs" note="the story writer starts, carries on and ends them; at most 2 open"
+        empty="No arcs yet.">{rows("arc")}</Group>
       <Group title="Plans" empty="No plans.">{rows("plan")}</Group>
       <Group title="Diary" empty="No diary yet.">{rows("diary")}</Group>
     </section>
