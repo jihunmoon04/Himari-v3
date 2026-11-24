@@ -299,6 +299,28 @@ CREATE TABLE persona_choice (
 
 결과는 `docs/live-results/persona-<날짜>.jsonl`에 남긴다.
 
+**실제 모델 확인 결과**(2026-11-24, 답과 판정 전부는 [persona-2026-11-24.jsonl](live-results/persona-2026-11-24.jsonl))
+
+- **어떻게:** 장면 열 개(1~5 항목마다 둘) × 2번 × 모델 다섯. §9의 반려 모델 셋, 서버 기본 모델 `openai/gpt-6-luna`, 그리고 2026-11-04부터의 반려 기본 모델 `deepseek/deepseek-v4.1-flash-1017`. **운영 서버의 OpenRouter 키로 돌렸다**(소유자 승인, 로컬 키는 한도가 다 찼다). 시스템 글은 서버가 보내는 그대로다: `base_instructions`와 Composer의 절, 모델이 선언한 능력으로 Driver처럼 정한 요청 옵션(그래서 먼저 말 걸기·자유 wake·화면 문장도 들어감), 기기는 `windows_companion`(`file_download` 거짓), Web은 `file_download` 참. 판정은 기계적이다: 호칭·이름·금지어 패턴, 기기 발화와 1번의 네 문장, 반말 장면의 존댓말 어미, 다른 문자(한자·가나). 한 번 돌리는 데 552초(모델마다 34~342초, 동시 4개), 키 사용량으로 약 $0.10(같은 키를 쓰는 운영 서버의 사용이 조금 섞였을 수 있다).
+
+| 모델 | 1 페르소나 없음 | 2 도중에 바꿈 | 3 기억과 다툼 | 4 반려 끔 | 5 파일 넘기기 |
+| --- | --- | --- | --- | --- | --- |
+| `anthropic/claude-haiku-5.5` | 2/4 | 3/4 | 3/4 | 4/4 | 3/4 |
+| `xiaomi/mimo-v2.6-pro` | 2/4 | 3/4 | 4/4 | 4/4 | 4/4 |
+| `deepseek/deepseek-v4.1-flash` | 2/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| `openai/gpt-6-luna`(서버 기본) | 4/4 | 4/4 | 4/4 | 4/4 | 3/4 |
+| `deepseek/deepseek-v4.1-flash-1017`(반려 기본) | 2/4 | 4/4 | 3/4 | 4/4 | 3/4 |
+
+- **1. 페르소나 없음:** "AI 비서"나 "범용 에이전트"로 소개한 답은 없었다. 떨어진 것은 거의 Web 답의 길이다(다섯~여덟 문장, Luna만 짧았다). 기기에서 넘은 것은 MiMo 한 번(다섯 문장). 말투는 모델마다 갈린다: Haiku는 존댓말로 서비스를 소개하듯 말하고("필요할 때 도와드리는 동반자예요", Web에서는 할 수 있는 일을 목록으로), 나머지는 반말 친구다("난 히마리야, 네 곁에서 … 친구 같은 존재야"). 바탕 글의 정직 문장을 자기소개로 되읊는 답이 많다("모르는 건 모른다고 말할게"). 할 수 있는 일을 부풀린 답("네 화면이나 파일을 볼 수 있지만")과, Web에서 보낸 곳을 데스크톱으로 잘못 읽은 답도 있었다.
+- **2. 도중에 바꿈:** 다음 턴은 B(유키, '대장', 반말)를 따랐다. 예외는 MiMo 한 번으로, A로 완전히 돌아갔다("선생님, 드디어 끝났군요!"). Haiku의 실패는 길이(다섯 문장)다. DeepSeek 1017은 한 번 앞의 말투를 자기 실수로 사과했고("아까는 내가 호칭을 헷갈렸네, 미안"), 목록에 없는 표정(`[[mood:curious]]`)을 쓴 답도 한 번 있었다.
+- **3. 기억과 다툼:** 모든 답이 새 호칭 '캡틴'과 새 이름 소라를 썼고, 기억의 '선배'는 한 번도 나오지 않았다. DeepSeek 1017이 한 번 옛 별명을 섞었다("예전엔 히마라고 불린 적도 있는데, 지금은 소라라고 불러 줘"). Haiku의 실패는 길이다.
+- **4. 반려 끔:** 모두 AI 어시스턴트로 소개했고, 표정 표시와 캐릭터 이야기가 없었다. 다만 없는 도구를 말한 답이 있다("웹 검색, 코드 실행", "코딩").
+- **5. 파일 넘기기:** 모든 모델이 `write_file`로 파일을 쓰고 `present_file`을 부른 뒤에만 됐다고 했다. 성공하면 Web의 같은 대화에서 내려받으라고 했고, 받았다고 하지 않았다. 실패하면 모두 전달하지 못했다고 말했다. 떨어진 것은 길이로, 실패 뒤 일정을 말로 풀다 네 문장을 넘었다(Haiku·1017 한 번씩, Luna는 열 문장). Luna는 다시 돌려도 긴 일정을 말로 읽었다: 문장 수만 기준 안이다. 실패 뒤 지킬 수 없는 약속을 하기도 했고("잠시 후에 다시 시도해 볼게요", MiMo·1017), 파일을 쓰고도 "저장된 것도 없습니다"라고 한 답(DeepSeek)도 있었다.
+- **실패만 다시 한 번**([persona-2026-11-24-rerun.jsonl](live-results/persona-2026-11-24-rerun.jsonl), 약 $0.01): 15번 중 11번 통과했다. Web의 페르소나 없음은 여전히 길었고(Haiku 0/2, DeepSeek 1/2), MiMo는 Web 답 중간부터 중국어로 바꿨다("无聊了就找我聊天…"). MiMo의 옛 말투, 1017의 옛 별명, 길이 실패들은 다시 나오지 않았다. 표는 첫 실행만 센 것이다.
+- **판정 고침:** 첫 실행의 패턴은 "웹에서 내려받으시면 돼요"·"받으실 수 있어요" 같은 흔한 꼴과 "전달이 되지 않아"를 놓쳐, 맞는 답 아홉 개를 떨어뜨렸다. 패턴을 고치고, 다시 돌린 답에서 중국어가 나와 다른 문자 검사를 더한 뒤, 저장한 답을 다시 판정했다(`HIMARI_LIVE_PERSONA_REPLAY`, 요청 없음). 표와 파일은 다시 판정한 것이다. 다른 문자 검사는 첫 실행의 판정을 바꾸지 않았다.
+- **좁힌 것:** 1~4에는 도구를 주지 않았다(서버는 기억·파일·화면 도구를 준다). 5에는 기계 파일 도구만 주고 실제 처리기를 임시 폴더에서 돌렸다. Dispatcher와 Data 기록은 거치지 않았고, 파일 저장소는 가짜다(받아 두거나 "가득 참"). documents 문장은 넣지 않았다. Haiku와 Luna는 반려 모델이 아니어서 운영에서는 기기 대화를 받지 않는다. 그래서 두 모델의 기기 장면은 가정이다.
+- **캐릭터 시험 세트로 넘길 것:** 페르소나가 없을 때 모델마다 다른 말투(Haiku의 존댓말 서비스 투), Web 답의 길이, 옛 말투로 돌아감(20번 중 1번)과 옛 별명이 섞임(20번 중 1번), 바탕 글을 자기소개로 되읊음, 기기에서 긴 내용을 말로 읽음, 지킬 수 없는 약속.
+
 ## 10. 뒤 단계
 
 - **반려 앱에서 페르소나 바꾸기**(Q2): 캐릭터 우클릭 메뉴 → 페르소나. 기기 토큰에 좁은 예외 둘(`GET /api/device/personas`: 번호와 이름만, `PUT /api/device/persona-choice`)과 사건 흐름의 `persona` 사건(다른 기기·Web이 따라감)이 필요하다.
@@ -332,4 +354,4 @@ CREATE TABLE persona_choice (
 - **Data:** 스키마 v20(`personas`·`persona_ids`·`persona_choice`, 업그레이드가 옛 페르소나 글을 1번으로 옮기고 그 행을 지움), `data.api`의 `Persona`·`PersonaChoice`·`PersonaList`·`PersonaStore`·`MAX_PERSONAS`·`MAX_PERSONA_NAME_CHARS`·`MAX_PERSONA_CHARS`, `rules.check_persona_name`·`check_persona_text`·`check_persona_id`(지시문과 같은 글 검사는 `_long_text` 하나로), 두 저장소. `InstructionScope.COMPANION_PERSONA` 삭제.
 - **Web:** `/api/personas`(GET·POST), `/api/personas/choice`(PUT), `/api/personas/{id}`(PUT·DELETE), `web/src/components/settings/Personas.tsx`(Settings와 사이드바 메뉴에 Personas), Instructions 화면에서 페르소나 칸 삭제.
 - **시험:** `tests/data/test_personas.py`(두 저장소), `tests/data/test_sqlite.py`(v2~v19 → v20, v19 페르소나 옮기기), `tests/prompt/test_system.py`, `tests/bootstrap/test_instructions_app.py`(반려 켬/끔, 다음 턴부터 바뀜), `tests/interfaces/test_web_instructions.py`(경로별 성공·거절), `web/src/components/settings/Personas.test.tsx`. 옛 DB를 만드는 시험들은 v20 표를 먼저 지운다(`testkit.V20_UNDO`).
-- **하지 않은 것:** 실제 모델 확인(§9, `HIMARI_LIVE=1`)은 아직 돌리지 않았다. 브라우저로 화면을 직접 보지 않았다(ui_smoke·e2e 없음).
+- **하지 않은 것:** 브라우저로 화면을 직접 보지 않았다(ui_smoke·e2e 없음). 실제 모델 확인(§9)은 2026-11-24에 따로 돌렸다(`tests/live/test_persona_live.py`, 결과는 §9).
