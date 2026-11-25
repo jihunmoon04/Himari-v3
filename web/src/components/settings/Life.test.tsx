@@ -216,6 +216,23 @@ describe("an entry", () => {
         30, "냉각부 설계.\n증발열은 포신 뒤로.", 1, "냉각부", "냉각부 끝!"));
     });
 
+  it("marks a piece begun at its work time's start as a draft (character-mind §4.4)", async () => {
+    state.data = {
+      ...aLife(),
+      entries: [
+        { ...entry(11, "arc", "2026-11-10", "설정집 한 권", "writer"), title: "블랙홀 전자포", status: "open",
+          end_day: null },
+        { ...entry(31, "work", "2026-11-26", "첫 스케치.", "writer"), time: "20:00", title: "냉각부 스케치",
+          summary: "세 겹 방열판", arc_id: 11, plan_id: 21, draft: true },
+      ],
+    };
+    await shown();
+    const project = within(part("Work").getByLabelText("Project 블랙홀 전자포"));
+    expect(project.getByText("draft")).toBeTruthy();
+    expect(project.getByText("Show the draft")).toBeTruthy();
+    expect(project.getByText("세 겹 방열판")).toBeTruthy();
+  });
+
   it("says which model HIMARI's self runs use and why (character-mind §8)", async () => {
     state.data = { ...aLife(), mind: { model: "memory-model", reason: "the memory model (no companion conversation)" } };
     await shown();

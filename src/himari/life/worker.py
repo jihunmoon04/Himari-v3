@@ -49,6 +49,7 @@ from himari.data.api import (
     HimariMood,
     InstructionScope,
     Instructions,
+    LifeEntry,
     LifeJob,
     LifeKind,
     LifeStore,
@@ -173,7 +174,8 @@ class LifeWriter:
         if self._ready_at is None or now < self._ready_at:
             return
         jobs: tuple[tuple[str, Callable[[PrincipalId], Awaitable[WriteOutcome]]], ...] = (
-            ("world", self.world), ("work", self.work), ("review", self.write), ("settle", self.settle))
+            ("world", self.world), ("work_start", self.work_start), ("work_end", self.work), ("review", self.write),
+            ("settle", self.settle))
         for principal in await self._data.life_principals(now - ACTIVE_DAYS):
             for name, job in jobs:
                 try:
@@ -212,8 +214,12 @@ class LifeWriter:
         """§5.3: the facts the latest reviewed date's diary settles."""
         return await self._locked(principal, self._settle)
 
+    async def work_start(self, principal: PrincipalId) -> WriteOutcome:
+        """§4.4: the start step of the chosen persona's work plan that just started, if any."""
+        return await self._locked(principal, self._work_start)
+
     async def work(self, principal: PrincipalId) -> WriteOutcome:
-        """character-work §4: the piece of the chosen persona's due work plan, if any."""
+        """character-work §4, character-mind §4.4: the end step (the piece) of the chosen persona's due work plan."""
         return await self._locked(principal, self._work)
 
     async def mind_model(self, principal: PrincipalId) -> MindModel:
@@ -432,56 +438,74 @@ class LifeWriter:
         log.info("settle %s kept %d fact(s) of %s", write_id, len(added), day)
         return WriteOutcome.WRITTEN
 
+    async def _work_start(self, principal: PrincipalId) -> WriteOutcome:
+        """§4.4: within WORK_START_WINDOW of a work plan's start, HIMARI begins: a self run leaving a draft."""
+        return await self._work_step(principal, LifeJob.WORK_START)
+
     async def _work(self, principal: PrincipalId) -> WriteOutcome:
+        """§4.4: once the work time ended, HIMARI finishes the piece: a self run from the draft, if any."""
+        return await self._work_step(principal, LifeJob.WORK_END)
+
+    async def _work_step(self, principal: PrincipalId, job: LifeJob) -> WriteOutcome:
         now = self._clock()
-        today = now.astimezone(self._zone).date()
+        local = now.astimezone(self._zone)
         chosen = await self._persona(principal)
         persona_id = chosen.persona_id
-        entries = await self._data.list_life(principal, persona_id, since=(today - timedelta(days=1)).isoformat(),
-                                             now=now)
-        plan = work.due_plan(entries, now, self._zone)
+        entries = await self._data.list_life(principal, persona_id,
+                                             since=(local.date() - timedelta(days=1)).isoformat(), now=now)
+        start = job is LifeJob.WORK_START
+        plan = (work.due_start if start else work.due_plan)(entries, now, self._zone)
         if plan is None:
             return WriteOutcome.NOTHING
-        if await self._data.work_attempts(principal, plan.entry_id, job=LifeJob.WORK_END) >= ATTEMPTS_PER_DAY:
+        if await self._data.work_attempts(principal, plan.entry_id, job=job) >= ATTEMPTS_PER_DAY:
             return WriteOutcome.GAVE_UP
         project = next(e for e in entries if e.entry_id == plan.arc_id)
-        mood = live_mood(await self._data.read_mood(principal, persona_id), now)
-        options = RequestOptions(self.settings.model_id, self.settings.reasoning_effort,
-                                 provider_key=self._provider.provider_key,
-                                 max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
-        asked = work.model_input(work.request_data(chosen.text, entries, plan, project, now=now, zone=self._zone,
-                                                   mood=mood, makes=chosen.makes,  # §7: the events so far
-                                                   events=world.passed_events(entries, now.astimezone(self._zone))),
-                                 options)
-        prepared = await self._prepared(principal, asked, work.WORK_MAX_OUTPUT_TOKENS, now)
+        draft = None if start else work.draft_of(entries, plan)
+        remarks: tuple[str, ...] = ()
+        if not start and self._link is not None:  # §4.4: what the user said while HIMARI worked
+            began = draft.created_at if draft is not None else work.plan_start(plan, self._zone)
+            if began is not None:
+                remarks = tuple(await self._link.remarks(principal, began, now))
+        data = work.step_data(entries, plan, project, now=now, zone=self._zone, makes=chosen.makes,
+                              events=world.passed_events(entries, local), draft=draft, remarks=remarks)
+        tokens = work.START_MAX_OUTPUT_TOKENS if start else work.WORK_MAX_OUTPUT_TOKENS
+        mind = await self._mind(principal)
+        options = RequestOptions(mind.model_id, mind.reasoning_effort, provider_key=self._provider.provider_key,
+                                 max_output_tokens=tokens)
+        asked = self._composer.self_input(await self._self_inputs(principal, chosen, options, now),
+                                          work.WORK_START_TASK if start else work.WORK_END_TASK, data)
+        prepared = await self._prepared(principal, asked, tokens, now)
         if prepared is None:
             return WriteOutcome.DEFERRED
         request, reserve = prepared
         assert plan.day is not None  # a work plan has its date (work_plans)
         write_id = await self._data.begin_life_write(principal, LifeWriteStart(
-            persona_id, plan.day, self._provider.provider_key, self.settings.model_id, request.body,
-            request.content_type, reserve, plan_id=plan.entry_id, job=LifeJob.WORK_END, model_reason=MEMORY_MODEL))
+            persona_id, plan.day, self._provider.provider_key, mind.model_id, request.body, request.content_type,
+            reserve, plan_id=plan.entry_id, job=job, model_reason=mind.reason))
         try:
-            return await self._make(write_id, request)
+            return await self._worked(write_id, request, job)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await self._data.fail_life_write(write_id, type(error).__name__)
             raise
 
-    async def _make(self, write_id: str, request: NativePreparedRequest) -> WriteOutcome:
-        text = await self._answer(write_id, request, "worker")
-        if text is None:
+    async def _worked(self, write_id: str, request: NativePreparedRequest, job: LifeJob) -> WriteOutcome:
+        who = job.value
+        body = await self._thought_and_json(write_id, request, who)
+        if body is None:
             return WriteOutcome.FAILED
         try:
-            piece = work.parse_piece(text)
+            made: tuple[LifeEntry, ...]
+            if job is LifeJob.WORK_START:
+                made = (await self._data.apply_work_start(write_id, work.parse_start(body), now=self._clock()),)
+            else:
+                made = await self._data.apply_work_write(write_id, work.parse_piece(body), now=self._clock())
         except AnswerError as error:
-            return await self._malformed(write_id, "worker", error)
-        try:
-            made = await self._data.apply_work_write(write_id, piece, now=self._clock())
+            return await self._malformed(write_id, who, error)
         except DataError as error:
-            return await self._refused(write_id, "worker", error)
-        log.info("worker call %s made piece %d", write_id, made[0].entry_id)
+            return await self._refused(write_id, who, error)
+        log.info("%s call %s wrote piece %d", who, write_id, made[0].entry_id)
         return WriteOutcome.WRITTEN
 
     async def _malformed(self, write_id: str, who: str, error: AnswerError) -> WriteOutcome:

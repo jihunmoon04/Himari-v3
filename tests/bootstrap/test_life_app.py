@@ -5,7 +5,7 @@ model."""
 from __future__ import annotations
 
 import asyncio
-from datetime import time
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
@@ -123,6 +123,27 @@ def test_a_self_run_uses_the_latest_companion_conversations_model_else_the_memor
             await app.data.append_event(scope, UserMessage((TextBlock("안녕"),)))
             assert await app.mind_model(ME) == MindModel("companion-model", None, "the latest conversation's model")
             assert (await app.life_writer.mind_model(ME)).model_id == "companion-model"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_remarks_are_the_users_words_in_the_latest_companion_conversation_meanwhile(tmp_path: Path) -> None:
+    """character-mind §4.4: what the user said while HIMARI worked, as text, oldest first."""
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "data", _Models(), model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)),
+                                     memory_model="memory-model", sandbox=False, cleanup_seconds=None)
+        try:
+            assert await app.remarks(ME, datetime.now(UTC) - timedelta(hours=1), datetime.now(UTC)) == ()
+            scope = TrustedScope(ME, await app.create_conversation(ME, initial_model="companion-model"))
+            before = datetime.now(UTC)
+            for said in ("방열판 세 겹은 과하지 않아?", "두 겹이 좋겠어"):
+                await app.data.append_event(scope, UserMessage((TextBlock(said),)))
+            assert await app.remarks(ME, before, datetime.now(UTC)) == ("방열판 세 겹은 과하지 않아?", "두 겹이 좋겠어")
+            assert await app.remarks(ME, datetime.now(UTC) + timedelta(seconds=1),
+                                     datetime.now(UTC) + timedelta(hours=1)) == ()
         finally:
             await app.close()
 

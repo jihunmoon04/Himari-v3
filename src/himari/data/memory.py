@@ -77,6 +77,7 @@ from himari.data.api import (
     LifeJob,
     MAX_EVENTS_PER_DAY,
     WorldEvent,
+    WorkDraft,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -1571,10 +1572,33 @@ class InMemoryData:
                                           and e.plan_id == plan.entry_id]
         project = rules.work_project(plan, persona_id, self._open_arcs(principal, persona_id), pieces)
         assert plan is not None
-        made = self._new_life(principal, rules.work_entry(plan, project, piece, write_id, now))
+        draft = next((p for p in pieces if p.draft), None)  # character-mind §4.4: the start step's
+        made = (self._new_life(principal, rules.work_entry(plan, project, piece, write_id, now)) if draft is None
+                else self._put_life(principal, rules.finished(draft, piece, write_id, now)))
         moved = self._put_life(principal, rules.worked_on(project, plan, piece, now))
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return made, moved
+
+    async def apply_work_start(self, write_id: str, draft: WorkDraft, *, now: datetime) -> LifeEntry:
+        draft = rules.check_work_draft(draft)
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.WORK_START:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a work's start")
+        principal, persona_id, plan_id = row.owner, row.record.persona_id, row.record.plan_id
+        found = None if plan_id is None else self._store.life.get((principal, plan_id))
+        plan = None if found is None or found[1] is not None else found[0]
+        pieces = [] if plan is None else [e for (owner, _), (e, retired) in self._store.life.items()
+                                          if owner == principal and retired is None and e.kind is LifeKind.WORK
+                                          and e.plan_id == plan.entry_id]
+        if pieces:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan has a piece already")
+        project = rules.work_project(plan, persona_id, self._open_arcs(principal, persona_id), pieces)
+        assert plan is not None
+        made = self._new_life(principal, rules.draft_entry(plan, project, draft, write_id, now))
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return made
 
     @staticmethod
     def _end_write(row: _LifeWrite, status: LifeWriteStatus, error: str) -> None:

@@ -24,6 +24,7 @@ from himari.data.api import (
     MAX_THOUGHTS,
     MAX_EVENT_CHARS,
     WorldEvent,
+    WorkDraft,
     THOUGHT_DAYS,
     INTENT_DAYS,
     NEW_ARC,
@@ -1070,9 +1071,32 @@ def work_project(plan: LifeEntry | None, persona_id: int, arcs: Sequence[LifeEnt
     project = next((a for a in arcs if a.entry_id == plan.arc_id and a.arc_open), None)
     if project is None:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan's project is not open")
-    if pieces:
+    if any(not p.draft for p in pieces):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan has a piece already")
     return project
+
+
+def check_work_draft(draft: object) -> WorkDraft:
+    """character-mind §4.4: a start step's draft as stored — its title as an arc's, its concept as a
+    piece's summary (one line) and its text as a WORK entry's."""
+    if not isinstance(draft, WorkDraft):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a work draft")
+    return WorkDraft(check_arc_title(draft.title), check_work_summary(draft.concept),
+                     check_life_text(LifeKind.WORK, draft.text))
+
+
+def draft_entry(plan: LifeEntry, project: LifeEntry, draft: WorkDraft, write_id: str, now: datetime) -> LifeEntry:
+    """§4.4: the draft as a WORK entry of the plan (its id given as it is inserted)."""
+    return LifeEntry(0, plan.persona_id, LifeKind.WORK, plan.day, draft.text, LifeOrigin.WRITER, 1, now, now,
+                     source=write_id, time_of_day=plan.time_of_day, title=draft.title, arc_id=project.entry_id,
+                     summary=draft.concept, plan_id=plan.entry_id, draft=True)
+
+
+def finished(draft: LifeEntry, piece: WorkPiece, write_id: str, now: datetime) -> LifeEntry:
+    """§4.4: the plan's draft filled by its end step: the piece, its title and summary, made ``now``."""
+    return dataclasses.replace(draft, text=piece.text, title=piece.title, summary=piece.summary, draft=False,
+                               origin=LifeOrigin.WRITER, revision=draft.revision + 1, created_at=now, updated_at=now,
+                               source=write_id)
 
 
 def work_entry(plan: LifeEntry, project: LifeEntry, piece: WorkPiece, write_id: str, now: datetime) -> LifeEntry:

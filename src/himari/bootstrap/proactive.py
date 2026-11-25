@@ -378,7 +378,7 @@ class ProactiveScheduler:
             if self._work:  # character-work §7.1: the pieces made lately
                 since = (now.astimezone(ZoneInfo(self._zone)).date() - timedelta(days=1)).isoformat()
                 work = tuple(e for e in await self._data.list_life(principal, persona_id, since=since)
-                             if e.kind is LifeKind.WORK and timedelta(0) <= now - e.created_at < WORK_FRESH)
+                             if e.kind is LifeKind.WORK and not e.draft and timedelta(0) <= now - e.created_at < WORK_FRESH)
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),

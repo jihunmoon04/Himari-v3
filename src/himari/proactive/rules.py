@@ -300,7 +300,7 @@ def work_candidates(s: Situation) -> list[Candidate]:
     if s.device_id is None:
         return []
     return [Candidate(WakeReason(WakeKind.WORK_DONE, entry_id=e.entry_id), f"work:{e.entry_id}", e.created_at)
-            for e in s.work if e.kind is LifeKind.WORK and timedelta(0) <= s.now - e.created_at < WORK_FRESH]
+            for e in s.work if e.kind is LifeKind.WORK and not e.draft and timedelta(0) <= s.now - e.created_at < WORK_FRESH]
 
 
 def anniversary_candidates(s: Situation) -> list[Candidate]:

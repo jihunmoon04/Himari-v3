@@ -12,7 +12,7 @@ checked for them, H-60); every other call uses the memory model. All share one d
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from enum import Enum
 from typing import Protocol
 
@@ -60,4 +60,9 @@ class MindLink(Protocol):
     async def mind_model(self, principal: PrincipalId) -> MindModel:
         """The model of the principal's latest conversation (where a wake goes) when it is checked for
         free wakes, with its effort; else ``model_id`` None with why."""
+        ...
+
+    async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
+        """§4.4: the user's messages (their text) in that latest conversation from ``since`` to ``until``,
+        oldest first: what they said while HIMARI worked."""
         ...

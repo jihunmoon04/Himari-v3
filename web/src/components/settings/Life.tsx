@@ -119,12 +119,19 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
   return (
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
-        {(entry.kind === "arc" || piece) && <p className="font-medium text-ink">{entry.title}</p>}
+        {(entry.kind === "arc" || piece) && (
+          <p className="font-medium text-ink">
+            {entry.title}
+            {piece && entry.draft && <span className="ml-2 text-xs font-normal text-wait">draft</span>}
+          </p>
+        )}
         {piece ? (
           <>
             <p className="break-words">{entry.summary}</p>
             <details className="mt-1">
-              <summary className="cursor-pointer text-xs text-muted">Show the piece</summary>
+              <summary className="cursor-pointer text-xs text-muted">
+                {entry.draft ? "Show the draft" : "Show the piece"}
+              </summary>
               <p className="mt-1 whitespace-pre-wrap break-words">{entry.text}</p>
             </details>
           </>

@@ -79,6 +79,7 @@ export interface LifeEntry {
   so_far?: string | null;
   summary?: string | null;
   plan_id?: number | null;
+  draft?: boolean; // character-mind §4.4: a piece begun at its work time's start, not finished yet (summary: concept)
   // character-mind §5.2: a kept thought's subject and when it stops being told (it is only deleted, never edited)
   about?: ThoughtAbout | null;
   expires_at?: string | null;

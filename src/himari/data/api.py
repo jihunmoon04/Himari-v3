@@ -1935,6 +1935,16 @@ NEW_ARC = 0  # character-work §4: a plan's project is the arc the same write st
 
 
 @dataclass(frozen=True)
+class WorkDraft(DeepFrozen):
+    """character-mind §4.4: what a work plan's start step began, checked by the life module: the piece's
+    title, its concept in one line (kept as the piece's summary until it is finished) and the draft."""
+
+    title: str
+    concept: str
+    text: str
+
+
+@dataclass(frozen=True)
 class WorldEvent(DeepFrozen):
     """character-mind §7: one thing the world made happen to HIMARI, checked by the life module."""
 
@@ -2157,8 +2167,17 @@ class LifeWriteLog(Protocol):
         """character-work §4, one transaction: the worker call's piece (a WORK entry with its plan's
         day and time, its project and plan), the project's "so far" rewritten and, with ``done``, the
         project closed on the plan's day with that ending; the write APPLIED. The piece first, then
-        the project. INVALID_ARGUMENT when the call is not a worker's, its plan is no live work plan
-        of an open arc, or the plan has a piece already; INVALID_STATE_TRANSITION unless RECEIVED."""
+        the project. character-mind §4.4: the write is a WORK_END's, and when the plan's start step left
+        a draft, the piece fills that entry (no longer a draft, made ``now``). INVALID_ARGUMENT when the
+        call is not a work end's, its plan is no live work plan of an open arc, or the plan has a finished
+        piece already; INVALID_STATE_TRANSITION unless RECEIVED."""
+        ...
+
+    async def apply_work_start(self, write_id: str, draft: WorkDraft, *, now: datetime) -> LifeEntry:
+        """character-mind §4.4, one transaction: a WORK_START write's draft as the plan's WORK entry, a
+        draft (its title, the concept as its summary, the draft as its text, its plan's day and time); the
+        write APPLIED. INVALID_ARGUMENT when the write is not a work start's, its plan is no live work plan
+        of an open arc, or the plan has a piece (a draft too) already; INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
     async def fail_life_write(self, write_id: str, error: str) -> None:

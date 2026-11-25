@@ -142,11 +142,7 @@ def test_the_days_review_writes_a_day_that_passes_its_checks() -> None:
     assert data["work"] and data["quiet_hours"] == "23:00-08:00"
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
                              max_output_tokens=review.REVIEW_MAX_OUTPUT_TOKENS)
-    inputs = PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=(), tool_executions=(), snapshot=None,
-                          state_basis=PersistedStateBasis(0, 0, ()), observations={}, request_options=options,
-                          trigger_refs=(), system=SystemSpec(companion=True, life=True), companion_persona=PERSONA,
-                          now=NOW.astimezone(SEOUL), time_zone="Asia/Seoul", life=LIFE)
-    text, usage = call(Composer().self_input(inputs, review.REVIEW_TASK, data))
+    text, usage = call(self_run(options, LIFE, review.REVIEW_TASK, data))
     thought, body = review.self_answer(text)  # character-mind §4.1: the thought, then the JSON
     plan = review.parse_answer(body, day, QUIET)  # every §3 check: shape, lengths, counts, plan dates
     record("review", text, usage, thought=thought, plans=len(plan.plans), diary_chars=len(plan.diary),
@@ -188,20 +184,41 @@ def test_the_facts_settled_from_a_diary_pass_their_checks() -> None:
     record("settle", text, usage, facts=list(facts))
 
 
-def test_the_worker_makes_a_piece_that_passes_its_checks() -> None:
-    """character-work §4: one worker call for the work plan of the open project, after its hour."""
+def self_run(options: RequestOptions, life: tuple[LifeEntry, ...], task: str, data: Any) -> Any:
+    """character-mind §4.1: a self run's request — the persona and rules of a turn, the life as its state."""
+    inputs = PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=(), tool_executions=(), snapshot=None,
+                          state_basis=PersistedStateBasis(0, 0, ()), observations={}, request_options=options,
+                          trigger_refs=(), system=SystemSpec(companion=True, life=True), companion_persona=PERSONA,
+                          now=NOW.astimezone(SEOUL), time_zone="Asia/Seoul", life=life)
+    return Composer().self_input(inputs, task, data)
+
+
+def test_the_work_steps_make_a_draft_then_a_piece_that_pass_their_checks() -> None:
+    """character-work §4, character-mind §4.4: the start step's draft, then the end step's piece from it."""
     plan = replace(LIFE[6], text="오늘 밤엔 후렴 가사 붙여 봐야지.", entry_id=9)
     life = (*LIFE[:6], plan, LIFE[7])
-    at = datetime(2026, 11, 25, 12, 10, tzinfo=UTC)  # 21:10 in Seoul: the 20:00 work time is over
-    data = work.request_data(PERSONA, life, plan, LIFE[4], now=at, zone=SEOUL)
+    begin = datetime(2026, 11, 25, 11, 5, tzinfo=UTC)  # 20:05 in Seoul
+    data = work.step_data(life, plan, LIFE[4], now=begin, zone=SEOUL)
     told = data["project"]
     assert data["recent_pieces"] and isinstance(told, dict) and told.get("so_far")
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
-                             max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
-    text, usage = call(work.model_input(data, options))
-    piece = work.parse_piece(text)  # every §4 check, the whole answer
-    record("worker", text, usage, piece_chars=len(piece.text), title=piece.title, summary=piece.summary,
-           so_far=piece.so_far, done=piece.done)
+                             max_output_tokens=work.START_MAX_OUTPUT_TOKENS)
+    text, usage = call(self_run(options, life, work.WORK_START_TASK, data))
+    thought, body = review.self_answer(text)
+    draft = work.parse_start(body)  # every §4.4 check
+    record("work_start", text, usage, thought=thought, title=draft.title, concept=draft.concept,
+           draft_chars=len(draft.text))
+    began = replace(LIFE[7], entry_id=10, text=draft.text, title=draft.title, summary=draft.concept, plan_id=9,
+                    draft=True)
+    at = datetime(2026, 11, 25, 12, 10, tzinfo=UTC)  # 21:10 in Seoul: the 20:00 work time is over
+    data = work.step_data((*life, began), plan, LIFE[4], now=at, zone=SEOUL, draft=began,
+                          remarks=("후렴은 좀 더 짧게 가면 어때?",))
+    options = replace(options, max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
+    text, usage = call(self_run(options, life, work.WORK_END_TASK, data))
+    thought, body = review.self_answer(text)
+    piece = work.parse_piece(body)  # every §4 check, the whole answer
+    record("work_end", text, usage, thought=thought, piece_chars=len(piece.text), title=piece.title,
+           summary=piece.summary, so_far=piece.so_far, done=piece.done)
 
 
 def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:

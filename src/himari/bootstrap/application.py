@@ -1062,6 +1062,20 @@ class Application:
             return MindModel(None, reason=f"the memory model ({choice.model_id} is not checked for free wakes)")
         return MindModel(choice.model_id, choice.effort, "the latest conversation's model")
 
+    async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
+        """character-mind §4.4 (MindLink): the user's messages, as text, in the latest companion conversation
+        between ``since`` and ``until`` — what they said while HIMARI was at its own work."""
+        recent = await self.recent_companion_conversation(principal)
+        if recent is None:
+            return ()
+        said: list[str] = []
+        for event in await self.data.read_events(TrustedScope(principal, recent.conversation_id)):
+            if isinstance(event.payload, UserMessage) and since <= event.created_at <= until:
+                text = "\n".join(b.text for b in event.payload.blocks if isinstance(b, TextBlock)).strip()
+                if text:
+                    said.append(text)
+        return tuple(said)
+
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
         latest compaction. Authorizes like any read (NOT_AUTHORIZED)."""

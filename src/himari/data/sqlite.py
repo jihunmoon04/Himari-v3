@@ -125,6 +125,7 @@ from himari.data.api import (
     LifeJob,
     MAX_EVENTS_PER_DAY,
     WorldEvent,
+    WorkDraft,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -2612,12 +2613,12 @@ class SqliteData:
     def _rewrite_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
         tx.execute("UPDATE life_entries SET text=?, origin=?, revision=?, updated_at=?, source_conversation=?,"
                    " source_sequences=?, source=?, tag=?, month_day=?, title=?, end_day=?, ending=?, arc_id=?,"
-                   " summary=?, so_far=?, time_of_day=?, draft=? WHERE owner=? AND entry_id=?",
+                   " summary=?, so_far=?, time_of_day=?, draft=?, created_at=? WHERE owner=? AND entry_id=?",
                    entry.text, entry.origin.value, entry.revision, _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
                    None if entry.tag is None else entry.tag.value, entry.month_day, entry.title, entry.end_day,
                    entry.ending, entry.arc_id, entry.summary, entry.so_far, entry.time_of_day, int(entry.draft),
-                   principal, entry.entry_id)
+                   _timestamp(entry.created_at), principal, entry.entry_id)
         return entry
 
     @staticmethod
@@ -2975,11 +2976,37 @@ class SqliteData:
                 " AND retired_at IS NULL", principal, plan.entry_id)]
             project = rules.work_project(plan, persona_id, arcs, pieces)
             assert plan is not None
-            made = self._new_life(tx, principal, rules.work_entry(plan, project, piece, write_id, now))
+            draft = next((p for p in pieces if p.draft), None)  # character-mind §4.4: the start step's
+            made = (self._new_life(tx, principal, rules.work_entry(plan, project, piece, write_id, now))
+                    if draft is None else self._rewrite_life(tx, principal, rules.finished(draft, piece, write_id, now)))
             moved = self._rewrite_life(tx, principal, rules.worked_on(project, plan, piece, now))
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return made, moved
+
+    async def apply_work_start(self, write_id: str, draft: WorkDraft, *, now: datetime) -> LifeEntry:
+        draft = rules.check_work_draft(draft)
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] != "received":
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            if row["job"] != LifeJob.WORK_START.value:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a work's start")
+            principal, persona_id = PrincipalId(row["owner"]), int(row["persona_id"])
+            plan = _life_entry(found) if (found := tx.one(
+                f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND entry_id=? AND retired_at IS NULL",
+                principal, row["plan_id"])) is not None else None
+            pieces = [] if plan is None else [_life_entry(r) for r in tx.all(
+                f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND kind='work' AND plan_id=?"
+                " AND retired_at IS NULL", principal, plan.entry_id)]
+            if pieces:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan has a piece already")
+            project = rules.work_project(plan, persona_id, self._open_arcs(tx, principal, persona_id), pieces)
+            assert plan is not None
+            made = self._new_life(tx, principal, rules.draft_entry(plan, project, draft, write_id, now))
+            tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
+                       write_id)
+            return made
 
     async def fail_life_write(self, write_id: str, error: str) -> None:
         with self._tx() as tx:

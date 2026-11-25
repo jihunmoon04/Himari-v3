@@ -1040,7 +1040,8 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
         view |= {"title": entry.title, "status": "open" if entry.arc_open else "closed", "end_day": entry.end_day,
                  "ending": entry.ending, "so_far": entry.so_far}  # character-work §3: where the project stands
     elif entry.kind is LifeKind.WORK:  # character-work §4: a piece, its project and its plan
-        view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id}
+        view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id,
+                 "draft": entry.draft}  # character-mind §4.4: begun at the start step, not finished yet
     elif entry.kind is LifeKind.THOUGHT:  # character-mind §5.2: what it is about and when it stops being told
         view |= {"about": None if entry.about is None else entry.about.value,
                  "expires_at": None if entry.expires_at is None else _time(entry.expires_at)}

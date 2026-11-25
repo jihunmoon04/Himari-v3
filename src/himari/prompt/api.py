@@ -258,6 +258,11 @@ class HimariNow(DeepFrozen):
     asleep: bool = False
     doing: str | None = None  # the plan's text
     since: str | None = None  # HH:MM: when it started
+    # character-mind §4.4: the draft the work plan's start step left (its title, concept and first DRAFT_SHOWN
+    # characters); None: not a work plan, or none begun
+    draft_title: str | None = None
+    concept: str | None = None
+    draft: str | None = None
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -765,7 +770,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         arcs.append({"title": entry.title, "goal": entry.text, **({"so_far": entry.so_far} if entry.so_far else {})})
         room -= size
     titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
-    pieces = sorted((e for e in entries if e.kind is LifeKind.WORK
+    pieces = sorted((e for e in entries if e.kind is LifeKind.WORK and not e.draft  # a draft is himari_now's
                      and (now is None or timedelta(0) <= now - e.created_at < timedelta(hours=WORK_HOURS))),
                     key=lambda e: (e.created_at, e.entry_id), reverse=True)[:WORK_SHOWN]
     work: list[dict[str, object]] = []
@@ -943,6 +948,7 @@ def himari_mood_data(mood: HimariMood, now: datetime | None = None) -> dict[str,
 # character-state §3: what HIMARI is doing now in the runtime state; LIFE_RULE says what to make of it.
 NOW_ABOUT = "What you are doing right now in your own life."
 NOW_MINUTES = 90  # S3: a timed plan is what HIMARI is doing this long after it starts
+DRAFT_SHOWN = 400  # character-mind §4.4: the start of the draft under way a turn is told
 
 
 def in_quiet(moment: time, start: time, end: time) -> bool:
@@ -969,7 +975,13 @@ def doing_now(entries: Sequence[LifeEntry], now: datetime, quiet: tuple[time, ti
             started.append((at, entry.entry_id, entry))
     if started:
         entry = max(started, key=lambda found: (found[0], found[1]))[2]
-        return HimariNow(doing=entry.text, since=entry.time_of_day)
+        # character-mind §4.4: the draft its start step left, while the work is under way
+        draft = next((e for e in entries if e.kind is LifeKind.WORK and e.draft and e.plan_id == entry.entry_id), None)
+        if draft is None:
+            return HimariNow(doing=entry.text, since=entry.time_of_day)
+        shown = draft.text if len(draft.text) <= DRAFT_SHOWN else draft.text[:DRAFT_SHOWN] + "…"
+        return HimariNow(doing=entry.text, since=entry.time_of_day, draft_title=draft.title, concept=draft.summary,
+                         draft=shown)
     if quiet is not None and in_quiet(now.time(), *quiet):
         return HimariNow(asleep=True)
     return None
@@ -982,6 +994,8 @@ def himari_now_data(now: HimariNow) -> dict[str, object]:
         data["doing"] = now.doing
         if now.since is not None:
             data["since"] = now.since
+        if now.draft is not None:  # character-mind §4.4: the piece under way
+            data["draft"] = {"title": now.draft_title, "concept": now.concept, "text": now.draft}
     elif now.asleep:
         data["asleep"] = True
     return data
@@ -1080,6 +1094,11 @@ THINK_RULE = (
 TALKING_RULE = (
     "- Talking: reply the way a friend talks — a few sentences by default. Go longer, with lists or code, only "
     "when the user asks for detail or the task needs it. Introducing yourself and small talk stay short."
+)
+# character-mind §4.4: added to TALKING_RULE when HIMARI's life is told.
+WORK_TALK_NOTE = (
+    "When runtime_state.himari_now shows you at your own work and they talk to you, put it down and answer them; "
+    "you may mention what you were working on, naturally."
 )
 # V3-P108 §3.4: how a file is handed over lives in INTERFACE_RULE only.
 SPEAKING_RULE = (

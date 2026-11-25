@@ -29,6 +29,11 @@ from himari.prompt.api import (
     PromptInputs,
     RequestOptions,
     SystemSpec,
+    DRAFT_SHOWN,
+    TALKING_RULE,
+    WORK_TALK_NOTE,
+    doing_now,
+    himari_now_data,
     himari_life_data,
     himari_mind_data,
     recent_thoughts,
@@ -141,3 +146,22 @@ def test_himari_life_tells_todays_events_whose_time_has_passed() -> None:
     assert shown is not None and shown["events"] == [{"time": "09:30", "text": "아침에 택배가 왔다."}]
     assert himari_life_data(life[1:], NOW) is None  # nothing has happened yet today
     assert "himari_life.events" in LIFE_RULE
+
+
+def test_himari_now_carries_the_draft_under_way_and_the_talking_rule_says_to_put_it_down() -> None:
+    """§4.4: during the work time, the plan's draft (title, concept, the start of its text); never as made work."""
+    plan = replace(LifeEntry(2, 1, LifeKind.PLAN, "2026-11-25", "냉각부 도면 그려야지.", LifeOrigin.WRITER, 1, NOW, NOW),
+                   time_of_day="09:30", arc_id=1)
+    draft = LifeEntry(3, 1, LifeKind.WORK, "2026-11-25", "가" * 500, LifeOrigin.WRITER, 1, NOW, NOW,
+                      time_of_day="09:30", title="냉각부 스케치", summary="세 겹 방열판", arc_id=1, plan_id=2,
+                      draft=True)
+    doing = doing_now((plan, draft), NOW)  # 10:00: half an hour into it
+    assert doing is not None and (doing.doing, doing.draft_title, doing.concept) == (
+        "냉각부 도면 그려야지.", "냉각부 스케치", "세 겹 방열판")
+    assert himari_now_data(doing)["draft"] == {"title": "냉각부 스케치", "concept": "세 겹 방열판",
+                                               "text": "가" * DRAFT_SHOWN + "…"}
+    assert "draft" not in himari_now_data(doing_now((plan,), NOW))  # type: ignore[arg-type]
+    assert himari_life_data((draft,), NOW) is None  # a draft is not work made
+    told = "\n".join(Composer().compose(inputs(SystemSpec(companion=True, life=True), events=())).stable_prefix)
+    assert f"{TALKING_RULE} {WORK_TALK_NOTE}" in told
+    assert WORK_TALK_NOTE not in "\n".join(Composer().compose(inputs(SystemSpec(companion=True), events=())).stable_prefix)

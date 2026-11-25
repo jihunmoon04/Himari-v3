@@ -38,6 +38,7 @@ from himari.prompt.api import (
     SCREEN_NOTE,
     SPEAKING_RULE,
     TALKING_RULE,
+    WORK_TALK_NOTE,
     ACTIVITY_RULE,
     TIME_NOTE,
     TOOL_IMAGES_NOTE,
@@ -144,7 +145,8 @@ def companion_section(screen_points: bool, proactive: bool = False, free: bool =
                   *((ANNIVERSARY_RULE, WORK_RULE) if life else ())) if free else ()
     speaking = (SPEAKING_RULE, PROACTIVE_RULE, *free_lines) if proactive else (SPEAKING_RULE,)
     lived = (LIFE_RULE, BOND_RULE, MOOD_RULE) if life else ()
-    return "\n".join((COMPANION_HEAD, PERSONA_RULE, THINK_RULE, *lived, TALKING_RULE,
+    talking = TALKING_RULE + (" " + WORK_TALK_NOTE if life else "")  # character-mind §4.4
+    return "\n".join((COMPANION_HEAD, PERSONA_RULE, THINK_RULE, *lived, talking,
                       *speaking, EXPRESSION_RULE, ACTIVITY_RULE, screens))
 
 

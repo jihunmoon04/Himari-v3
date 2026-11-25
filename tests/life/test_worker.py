@@ -68,6 +68,9 @@ class Link:
     async def mind_model(self, principal: PrincipalId) -> MindModel:
         return self.chosen
 
+    async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
+        return ()
+
 
 def setup(*script: object, settings: LifeSettings = SETTINGS, clock: object = None,
           weather: WeatherSource | None = None, topics: TopicSource | None = None,
