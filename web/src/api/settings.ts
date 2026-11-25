@@ -51,8 +51,9 @@ export const choosePersona = (personaId: number | null, revision: number) =>
   put<PersonaChoice>("/api/personas/choice", { persona_id: personaId, revision });
 
 // arc: a thread over weeks, a project (character-world §4); work: a piece of a project (character-work §4);
-// thought: what HIMARI thought and left unsaid, kept a few days (character-mind §5.2)
-export type LifeKind = "fact" | "plan" | "diary" | "arc" | "work" | "thought";
+// thought: what HIMARI thought and left unsaid, kept a few days (character-mind §5.2); event: what happened to it on a
+// day, decided by the world (character-mind §7: its day and time)
+export type LifeKind = "fact" | "plan" | "diary" | "arc" | "work" | "thought" | "event";
 export type ThoughtAbout = "user" | "self" | "work" | "intent";
 export type LifeOrigin = "writer" | "conversation" | "user"; // the story writer, a conversation, the user
 
@@ -95,7 +96,8 @@ export interface Life {
   mood?: HimariMood | null; // null: none now (or the life is off)
   now?: HimariNow | null; // null: nothing now (or the life is off)
   // character-world §2, §3: whether the weather and the day's topics are used (as told at startup), today's weather
-  world?: { weather: string; today: string | null; topics: string };
+  // character-mind §8: when the world next decides HIMARI's day (null: no life runs)
+  world?: { weather: string; today: string | null; topics: string; next?: string | null };
   // facts, arcs, then plans, work pieces and diaries, newest day first (the last 30 days on), then the kept thoughts
   entries: LifeEntry[];
   // character-work §8: whether the worker runs (with the story writer) and the next work plan
@@ -103,7 +105,7 @@ export interface Life {
   // character-mind §8: the model HIMARI's self runs (the day's review) use now, and why; null: no life runs
   mind?: { model: string; reason: string } | null;
   limits: { facts: number; chars: number; diary_chars: number; arc_chars?: number; arc_title_chars?: number;
-    work_chars?: number; summary_chars?: number };
+    work_chars?: number; summary_chars?: number; event_chars?: number };
 }
 
 export const readLife = () => get<Life>("/api/life");

@@ -779,7 +779,13 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         if index == 0:
             item["text"] = entry.text if len(entry.text) <= WORK_TEXT_CHARS else entry.text[:WORK_TEXT_CHARS] + "…"
         work.append(item)
-    if not facts and not days and not plans and not arcs and not work:
+    # character-mind §7: what happened to HIMARI today whose time has passed (``now``'s date and clock)
+    events = [] if now is None else [
+        {"time": e.time_of_day, "text": e.text}
+        for e in sorted((e for e in entries if e.kind is LifeKind.EVENT and e.day == today
+                         and (e.time_of_day or "00:00") <= now.strftime("%H:%M")),
+                        key=lambda e: (e.time_of_day or "", e.entry_id))]
+    if not facts and not days and not plans and not arcs and not work and not events:
         return None
     data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
     if days:
@@ -790,6 +796,8 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         data["arcs"] = arcs
     if work:
         data["work"] = work
+    if events:
+        data["events"] = events
     return data
 
 
@@ -1119,7 +1127,8 @@ LIFE_RULE = (
     "own day, plans and likes freely when it fits: in a greeting, when you speak first, or when it connects to "
     "what they said. Not in every reply, though: when they are talking about their own matters, stay with those. "
     "himari_life.work is what you made lately in your projects: you may share it or show it off, but do not read "
-    "it out at length unless they ask. "
+    "it out at length unless they ask. himari_life.events is what happened to you today so far, whether you wanted "
+    "it or not. "
     "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
     "what you are doing right now: when it says you are asleep and the user talks to you, you may answer briefly, "
     "as if just woken; say what you are doing when they ask. runtime_state.himari_mind is what you thought "

@@ -142,6 +142,7 @@ from himari.data.api import (
     MAX_ARC_TITLE_CHARS,
     MAX_WORK_CHARS,
     MAX_WORK_SUMMARY_CHARS,
+    MAX_EVENT_CHARS,
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
@@ -1112,7 +1113,7 @@ LIFE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.TOO_LARGE: (422, "too_large", f"A fact or a plan is at most {MAX_LIFE_CHARS:,} characters, a diary "
                                                 f"{MAX_DIARY_CHARS:,}, an arc's goal {MAX_ARC_CHARS:,}, a title "
                                                 f"{MAX_ARC_TITLE_CHARS:,}, a work piece {MAX_WORK_CHARS:,} and its "
-                                                f"summary {MAX_WORK_SUMMARY_CHARS:,}."),
+                                                f"summary {MAX_WORK_SUMMARY_CHARS:,}, an event {MAX_EVENT_CHARS:,}."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters; only "
                                                           "an arc or a work piece has a title, and only a piece a "
                                                           "summary, each on one line; a kept thought is only "
@@ -1812,11 +1813,15 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "mood": mood_view(mood), "now": now_view(now),
                 # character-world §2, §3: what the writer and a turn know of the real world, as told at startup
                 "world": {"weather": application.world_weather, "today": application.weather_today(),
-                          "topics": application.world_topics},
+                          "topics": application.world_topics,
+                          # character-mind §8: when the world next decides what happens to HIMARI
+                          "next": None if application.life_writer is None
+                          else _time(application.life_writer.next_world(datetime.now(UTC)))},
                 "entries": [life_entry_view(e) for e in entries],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                            "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
-                           "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS}}
+                           "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS,
+                           "event_chars": MAX_EVENT_CHARS}}
 
     @app.post("/api/life", status_code=201)
     async def add_life_fact(body: LifeFactBody, request: Request,

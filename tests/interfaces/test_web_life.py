@@ -19,6 +19,7 @@ from himari.data.api import (  # noqa: E402
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
     MAX_DIARY_CHARS,
+    MAX_EVENT_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
     MAX_WORK_CHARS,
@@ -28,7 +29,9 @@ from himari.data.api import (  # noqa: E402
     ArcOp,
     LifePlan,
     LifeWriteStart,
+    LifeJob,
     RawReceived,
+    WorldEvent,
     ThoughtAbout,
     ThoughtChange,
     ThoughtOp,
@@ -59,12 +62,13 @@ def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Se
     assert empty == {"persona": None, "enabled": True,
                      "writer": {"running": False, "told": "off (no HIMARI_MEMORY_MODEL)"}, "mood": None, "entries": [],
                      "world": {"weather": "off (no HIMARI_LOCATION)", "today": None,
-                               "topics": "off (no story writer)"},
+                               "topics": "off (no story writer)", "next": None},  # character-mind §8: no world
                      "work": {"running": False, "next": None},  # character-work §8
                      "mind": None,  # character-mind §8: no life runs here
                      "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                                 "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
-                                "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS}}
+                                "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS,
+                                "event_chars": MAX_EVENT_CHARS}}
     added = server.post("/api/life", {"text": " 비 오는 날을 좋아한다. ", "persona_id": None})
     assert added.status_code == 201
     fact = added.json()
@@ -218,3 +222,27 @@ def test_life_needs_a_signed_in_user_and_an_allowed_origin(server: Server) -> No
     assert server.client.post("/api/life", json={"text": "x", "persona_id": None}).status_code == 403  # no origin
     server.client.delete("/api/session", headers=SEND)
     assert server.client.get("/api/life").status_code == 401
+
+
+def test_an_event_is_seen_with_its_day_and_time_and_is_edited_and_deleted(server: Server) -> None:
+    """character-mind §8: what the world made happen to HIMARI, in the Events group."""
+    async def happened() -> None:
+        assert server.application is not None
+        data = server.application.data
+        write_id = await data.begin_life_write(ME, LifeWriteStart(0, "2099-01-01", "p", "m", b"{}", "j", 1,
+                                                                  job=LifeJob.WORLD))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+        await data.add_events(write_id, [WorldEvent("15:00", "택배가 늦게 왔다.")], now=datetime.now(UTC))
+
+    server.client.portal.call(happened)  # type: ignore[union-attr]
+    (event,) = server.client.get("/api/life").json()["entries"]
+    assert (event["kind"], event["day"], event["time"], event["text"], event["origin"]) == (
+        "event", "2099-01-01", "15:00", "택배가 늦게 왔다.", "writer")
+    edited = server.client.put(f"/api/life/{event['id']}", json={"text": "택배가 일찍 왔다.", "revision": 1},
+                               headers=SEND)
+    assert (edited.status_code, edited.json()["text"], edited.json()["origin"]) == (200, "택배가 일찍 왔다.", "user")
+    long = server.client.put(f"/api/life/{event['id']}", json={"text": "x" * (MAX_EVENT_CHARS + 1), "revision": 2},
+                             headers=SEND)
+    assert (long.status_code, error_code(long)) == (422, "too_large")
+    assert server.client.delete(f"/api/life/{event['id']}", params={"revision": 2}, headers=SEND).status_code == 204

@@ -444,7 +444,7 @@ def test_a_part_reads_the_thoughts_apart_from_what_was_said() -> None:
                                        {"seq": 4, "thought": "스트레칭 얘기는 다음에."}]
     assert data["kept_thoughts"] == [{"id": "t7", "about": "user", "text": "요즘 지쳐 보인다.",
                                       "kept": "2026-10-31T21:00+09:00"}]
-    assert "잔소리" not in json.dumps([m["text"] for m in data["messages"]], ensure_ascii=False)  # type: ignore[union-attr]
+    assert "잔소리" not in json.dumps([m["text"] for m in data["messages"]], ensure_ascii=False)  # type: ignore[index, union-attr, call-overload]
     without = request_data(THOUGHTFUL, [], None, now=NOW, zone=SEOUL, kind=PassKind.LIVE, facts=[])
     assert "himari_thoughts" not in without and "kept_thoughts" not in without  # life off: never asked
 

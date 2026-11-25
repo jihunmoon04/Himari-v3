@@ -1766,6 +1766,8 @@ MAX_THOUGHT_CHARS = 200  # character-mind §5.2: a kept thought, a line or two i
 MAX_THOUGHTS = 30  # §5.2: a persona's live kept thoughts; past it the oldest retires
 THOUGHT_DAYS = timedelta(days=3)  # §5.2: a kept thought lasts this long from when it was kept
 INTENT_DAYS = timedelta(days=2)  # an ``intent`` one (what HIMARI wants to say or do) this long
+MAX_EVENT_CHARS = 200  # character-mind §7: what happened to HIMARI, one sentence
+MAX_EVENTS_PER_DAY = 2  # §7: a persona's live events of one date
 
 
 class LifeKind(Enum):
@@ -1776,6 +1778,7 @@ class LifeKind(Enum):
     ARC = "arc"  # character-world §4: a thread of HIMARI's life over weeks (the story writer starts and ends it)
     WORK = "work"  # character-work §4: a piece of an arc's (a project's) work, made by the worker at a work plan
     THOUGHT = "thought"  # character-mind §5.2: what HIMARI thought and left unsaid, kept a few days by a memory pass
+    EVENT = "event"  # §7: what happened to HIMARI on a date (its ``day``, ``time_of_day``), decided by the world
 
 
 class ThoughtAbout(Enum):
@@ -1929,6 +1932,14 @@ class LifePlan(DeepFrozen):
 
 
 NEW_ARC = 0  # character-work §4: a plan's project is the arc the same write starts
+
+
+@dataclass(frozen=True)
+class WorldEvent(DeepFrozen):
+    """character-mind §7: one thing the world made happen to HIMARI, checked by the life module."""
+
+    time_of_day: str  # HH:MM, outside the quiet hours
+    text: str  # one sentence, at most MAX_EVENT_CHARS
 
 
 @dataclass(frozen=True)
@@ -2124,6 +2135,14 @@ class LifeWriteLog(Protocol):
         the write is a REVIEW's (else INVALID_ARGUMENT), and the persona's kept thoughts expired by
         ``now`` retire with it (the review has read them).
         The entries written. INVALID_STATE_TRANSITION unless RECEIVED."""
+        ...
+
+    async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
+        """character-mind §7, one transaction: a WORLD write's events as entries of kind EVENT on its date
+        (origin WRITER, its source the write), each one line of at most MAX_EVENT_CHARS with its time;
+        past MAX_EVENTS_PER_DAY live events of the persona that date the rest is left out; the write
+        APPLIED. The events kept. INVALID_ARGUMENT when the write is not a WORLD's or an event out of shape;
+        INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
     async def apply_settle_write(self, write_id: str, facts: Sequence[str], *,

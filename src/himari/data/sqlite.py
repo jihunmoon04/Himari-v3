@@ -123,6 +123,8 @@ from himari.data.api import (
     ThoughtChange,
     ThoughtOp,
     LifeJob,
+    MAX_EVENTS_PER_DAY,
+    WorldEvent,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -2886,6 +2888,24 @@ class SqliteData:
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return tuple(written)
+
+    async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
+        checked = [rules.check_world_event(event) for event in events]
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] != "received":
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            if row["job"] != LifeJob.WORLD.value:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not the world's")
+            principal, persona_id, day = PrincipalId(row["owner"]), int(row["persona_id"]), str(row["day"])
+            found = tx.one("SELECT COUNT(*) AS n FROM life_entries WHERE owner=? AND persona_id=? AND kind='event'"
+                           " AND day=? AND retired_at IS NULL", principal, persona_id, day)
+            room = MAX_EVENTS_PER_DAY - (0 if found is None else int(found["n"]))
+            kept = tuple(self._new_life(tx, principal, rules.world_entry(persona_id, day, event, write_id, now))
+                         for event in checked[:max(0, room)])
+            tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
+                       write_id)
+            return kept
 
     async def apply_settle_write(self, write_id: str, facts: Sequence[str], *,
                                  now: datetime) -> tuple[LifeEntry, ...]:

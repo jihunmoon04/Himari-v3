@@ -22,6 +22,8 @@ from himari.data.api import (
     MAX_WORK_SUMMARY_CHARS,
     MAX_THOUGHT_CHARS,
     MAX_THOUGHTS,
+    MAX_EVENT_CHARS,
+    WorldEvent,
     THOUGHT_DAYS,
     INTENT_DAYS,
     NEW_ARC,
@@ -624,7 +626,8 @@ def check_life_text(kind: LifeKind, text: object) -> str:
     if not text:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
     limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS, LifeKind.ARC: MAX_ARC_CHARS,
-             LifeKind.WORK: MAX_WORK_CHARS, LifeKind.THOUGHT: MAX_THOUGHT_CHARS}.get(kind, MAX_LIFE_CHARS)
+             LifeKind.WORK: MAX_WORK_CHARS, LifeKind.THOUGHT: MAX_THOUGHT_CHARS,
+             LifeKind.EVENT: MAX_EVENT_CHARS}.get(kind, MAX_LIFE_CHARS)
     if len(text) > limit:
         raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
     return text
@@ -686,6 +689,22 @@ def check_thought_note(thought: object) -> str:
 def expired_thoughts(entries: Iterable[LifeEntry], now: datetime) -> list[LifeEntry]:
     """§5.2: the kept thoughts among ``entries`` expired by ``now`` (they retire once the review read them)."""
     return [e for e in entries if e.kind is LifeKind.THOUGHT and not live_thought(e, now)]
+
+
+def check_world_event(event: object) -> WorldEvent:
+    """character-mind §7: a world's event as stored — its time HH:MM and one line of at most MAX_EVENT_CHARS."""
+    if not isinstance(event, WorldEvent):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not an event")
+    at = check_time_of_day(event.time_of_day)
+    if at is None or not isinstance(event.text, str) or any(c in event.text for c in "\r\n"):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an event has its time and one line")
+    return WorldEvent(at, check_life_text(LifeKind.EVENT, event.text))
+
+
+def world_entry(persona_id: int, day: str, event: WorldEvent, write_id: str, now: datetime) -> LifeEntry:
+    """§7: an event as an EVENT entry of the write's date (its id given as it is inserted)."""
+    return LifeEntry(0, persona_id, LifeKind.EVENT, day, event.text, LifeOrigin.WRITER, 1, now, now, source=write_id,
+                     time_of_day=event.time_of_day)
 
 
 def check_editable(entry: LifeEntry) -> None:

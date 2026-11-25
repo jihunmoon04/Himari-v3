@@ -6,7 +6,9 @@
 // title, summary, the full text when opened), which are edited and deleted like any entry; the status line says
 // whether the worker runs and the next work plan, and a work plan names its project.
 // character-mind §8: the Thoughts group lists the kept thoughts (what HIMARI thought and left unsaid: the text, what it
-// is about, when it was kept and when it stops being told); they are only deleted, never edited.
+// is about, when it was kept and when it stops being told); they are only deleted, never edited. The Events group lists
+// what the world made happen to HIMARI (date and time, text), edited and deleted like any entry; a line says when the
+// world next runs.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { ApiError } from "@/api/client";
@@ -31,6 +33,7 @@ const ORIGINS: Record<LifeOrigin, string> = {
 };
 const NAMES: Record<LifeKind, string> = {
   fact: "fact", plan: "plan", diary: "diary entry", arc: "arc", work: "work piece", thought: "kept thought",
+  event: "event",
 };
 const ABOUT: Record<string, string> = {
   user: "about you", self: "about itself", work: "about its work", intent: "something it wants to say or do",
@@ -41,6 +44,7 @@ const ARC_CHARS = 200; // as the server's, when it does not say
 const ARC_TITLE_CHARS = 60;
 const WORK_CHARS = 3000;
 const SUMMARY_CHARS = 200;
+const EVENT_CHARS = 200;
 const when = (entry: LifeEntry) => `${entry.day ?? ""}${entry.time ? ` ${entry.time}` : ""}`;
 
 function Editor({ entry, revision, limits, onDone }: {
@@ -55,7 +59,8 @@ function Editor({ entry, revision, limits, onDone }: {
   const [summary, setSummary] = useState(entry.summary ?? "");
   const [saving, setSaving] = useState(false);
   const max = entry.kind === "diary" ? limits.diary_chars : arc ? limits.arc_chars ?? ARC_CHARS
-    : piece ? limits.work_chars ?? WORK_CHARS : limits.chars;
+    : piece ? limits.work_chars ?? WORK_CHARS : entry.kind === "event" ? limits.event_chars ?? EVENT_CHARS
+    : limits.chars;
   const changed = text !== entry.text || (titled && title !== (entry.title ?? ""))
     || (piece && summary !== (entry.summary ?? ""));
   const save = async () => {
@@ -283,6 +288,7 @@ export function LifeSettings() {
       {world && (
         <p className="text-xs text-faint" aria-label="World">
           Weather: {world.today ?? world.weather} · The day's topics: {world.topics}
+          {world.next ? ` · World: next ${clock(world.next)}` : ""}
         </p>
       )}
       {(mood || now) && (
@@ -295,7 +301,9 @@ export function LifeSettings() {
       )}
       <Group title="Work" note="what HIMARI makes for its projects, a piece at each work plan"
         empty="No projects yet.">{projectBlocks}</Group>
-      <Group title="Arcs" note="the story writer starts, carries on and ends them; at most 2 open"
+      <Group title="Events" note="what the world made happen to HIMARI, at most 2 a day"
+        empty="Nothing happened lately.">{rows("event")}</Group>
+      <Group title="Arcs" note="HIMARI starts, carries on and ends them in its day's review; at most 2 open"
         empty="No arcs yet.">{rows("arc")}</Group>
       <Group title="Plans" empty="No plans.">{rows("plan")}</Group>
       <Group title="Facts" note={`${facts.length} of ${limits.facts}`} empty="No facts yet."

@@ -75,6 +75,8 @@ from himari.data.api import (
     ThoughtChange,
     ThoughtOp,
     LifeJob,
+    MAX_EVENTS_PER_DAY,
+    WorldEvent,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -1496,6 +1498,22 @@ class InMemoryData:
             self._keep_mood(principal, replace(mood, persona_id=persona_id))
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return tuple(written)
+
+    async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
+        checked = [rules.check_world_event(event) for event in events]
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.WORLD:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not the world's")
+        principal, persona_id, day = row.owner, row.record.persona_id, row.record.day
+        room = MAX_EVENTS_PER_DAY - sum(1 for (owner, _), (e, retired) in self._store.life.items()
+                                        if owner == principal and retired is None and e.persona_id == persona_id
+                                        and e.kind is LifeKind.EVENT and e.day == day)
+        kept = tuple(self._new_life(principal, rules.world_entry(persona_id, day, event, write_id, now))
+                     for event in checked[:max(0, room)])
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return kept
 
     async def apply_settle_write(self, write_id: str, facts: Sequence[str], *,
                                  now: datetime) -> tuple[LifeEntry, ...]:

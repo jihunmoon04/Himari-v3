@@ -29,6 +29,7 @@ from himari.prompt.api import (
     PromptInputs,
     RequestOptions,
     SystemSpec,
+    himari_life_data,
     himari_mind_data,
     recent_thoughts,
     state_data,
@@ -83,8 +84,8 @@ def test_himari_mind_holds_the_recent_thoughts_and_the_newest_kept_ones_within_t
     assert himari_mind_data((), life[2:], NOW) is None  # no thought among the life
     long = ("a" * 600, "b" * 600)
     shown = himari_mind_data(long, (), NOW)
-    assert shown is not None and shown["recent"] == ["a" * 600, "b" * 199 + "…"]  # type: ignore[index]
-    assert sum(len(t) for t in shown["recent"]) == MIND_RECENT_CHARS  # type: ignore[union-attr]
+    assert shown is not None and shown["recent"] == ["a" * 600, "b" * 199 + "…"]
+    assert sum(len(t) for t in shown["recent"]) == MIND_RECENT_CHARS
     many = tuple(kept(10 + i, f"{i}" * 150, i) for i in range(8))
     shown = himari_mind_data((), many, NOW)
     assert shown is not None and len(shown["kept"]) == min(MIND_KEPT, MIND_KEPT_CHARS // 150)  # type: ignore[arg-type]
@@ -127,3 +128,16 @@ def test_a_self_run_has_a_turns_system_text_and_state_with_no_history_or_tools_a
     assert (task.text, data.text) == ("[The day's review] …", '{"day": "2026-11-25"}')  # type: ignore[union-attr]
     mind = state_data(asked.current_state)["himari_mind"]
     assert mind == {"about": MIND_ABOUT, "kept": [{"text": "피곤해 보였다.", "about": "user", "hours_ago": 1}]}
+
+
+def test_himari_life_tells_todays_events_whose_time_has_passed() -> None:
+    """§6, §7: the events of today (now's date) up to now's clock, earliest first."""
+    def event(entry_id: int, day: str, at: str, text: str) -> LifeEntry:
+        return LifeEntry(entry_id, 1, LifeKind.EVENT, day, text, LifeOrigin.WRITER, 1, NOW, NOW, time_of_day=at)
+
+    life = (event(1, "2026-11-25", "09:30", "아침에 택배가 왔다."), event(2, "2026-11-25", "15:00", "아직 안 온 일."),
+            event(3, "2026-11-24", "09:00", "어제 일."))
+    shown = himari_life_data(life, NOW)  # 10:00 in Seoul
+    assert shown is not None and shown["events"] == [{"time": "09:30", "text": "아침에 택배가 왔다."}]
+    assert himari_life_data(life[1:], NOW) is None  # nothing has happened yet today
+    assert "himari_life.events" in LIFE_RULE

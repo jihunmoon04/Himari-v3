@@ -16,6 +16,10 @@ shown. It writes the latest date whose write time has come (L3), unless its diar
 at the next round, an earlier one never. §5.3: once a date's review applied, the memory model settles the facts its
 diary newly holds (``settle``).
 
+character-mind §7: before them all, once a day after the quiet hours end (and before the review time), the world
+decides on the memory model what happens to HIMARI that day (0 to 2 events): the review is told them all, the work
+those whose time has come, and a turn those whose time has passed (the runtime state's himari_life.events).
+
 character-world v0.1: the review is told the weather where the user is for the date (as last read, from memory) and
 the day's topic titles (read once a date, only when a call is about to be made), and the persona as a turn tells it
 — its hidden lines only from the bond stage they wait for (W4).
@@ -59,7 +63,7 @@ from himari.data.api import (
     RecentEpisode,
     live_mood,
 )
-from himari.life import review, settle, work
+from himari.life import review, settle, work, world
 from himari.life.api import ACTIVE_DAYS, ATTEMPTS_PER_DAY, LifeSettings, MindLink, MindModel, WriteOutcome
 from himari.life.review import AnswerError, answer_text, day_bounds, reservation, self_answer, target_day
 from himari.prompt.api import (
@@ -169,7 +173,7 @@ class LifeWriter:
         if self._ready_at is None or now < self._ready_at:
             return
         jobs: tuple[tuple[str, Callable[[PrincipalId], Awaitable[WriteOutcome]]], ...] = (
-            ("work", self.work), ("review", self.write), ("settle", self.settle))
+            ("world", self.world), ("work", self.work), ("review", self.write), ("settle", self.settle))
         for principal in await self._data.life_principals(now - ACTIVE_DAYS):
             for name, job in jobs:
                 try:
@@ -193,6 +197,16 @@ class LifeWriter:
     async def write(self, principal: PrincipalId) -> WriteOutcome:
         """character-mind §4.3: the day's review of the latest date whose write time has come."""
         return await self._locked(principal, self._review)
+
+    async def world(self, principal: PrincipalId) -> WriteOutcome:
+        """§7: what happens to HIMARI today, once a day after the quiet hours."""
+        return await self._locked(principal, self._world)
+
+    def next_world(self, now: datetime) -> datetime:
+        """§8: when the world is next decided (today's start if still ahead, else tomorrow's)."""
+        local = now.astimezone(self._zone)
+        start = world.world_start(local.date(), self._zone, self._quiet)
+        return start if local < start else world.world_start(local.date() + timedelta(days=1), self._zone, self._quiet)
 
     async def settle(self, principal: PrincipalId) -> WriteOutcome:
         """§5.3: the facts the latest reviewed date's diary settles."""
@@ -281,7 +295,8 @@ class LifeWriter:
         topics = () if self._topics is None else await self._topics.topics(day)  # character-world §3: once a date
         data = review.request_data(entries, episodes, day=day, now=now, zone=self._zone,
                                    weather=None if found is None else found.line(), topics=topics, quiet=self._quiet,
-                                   makes=chosen.makes)
+                                   makes=chosen.makes,  # §7: all of the day's events
+                                   events=[e for e in entries if e.kind is LifeKind.EVENT and e.day == written])
         mind = await self._mind(principal)
         options = RequestOptions(mind.model_id, mind.reasoning_effort, provider_key=self._provider.provider_key,
                                  max_output_tokens=review.REVIEW_MAX_OUTPUT_TOKENS)
@@ -318,6 +333,56 @@ class LifeWriter:
         except DataError as error:
             return await self._refused(write_id, "review", error)
         log.info("review %s wrote %d entries for %s", write_id, len(entries), day)
+        return WriteOutcome.WRITTEN
+
+    async def _world(self, principal: PrincipalId) -> WriteOutcome:
+        """§7: today's events on the memory model, once a date, after the quiet hours and before the review."""
+        now = self._clock()
+        day = world.due_day(now, self._zone, self._quiet, self.settings.write_at)
+        if day is None:
+            return WriteOutcome.NOTHING
+        written = day.isoformat()
+        chosen = await self._persona(principal)
+        persona_id = chosen.persona_id
+        if await self._data.life_done(principal, persona_id, written, LifeJob.WORLD):
+            return WriteOutcome.NOTHING
+        if await self._data.life_attempts(principal, persona_id, written, job=LifeJob.WORLD) >= ATTEMPTS_PER_DAY:
+            return WriteOutcome.GAVE_UP
+        entries = await self._data.list_life(principal, persona_id,
+                                             since=(day - timedelta(days=world.WORLD_DAYS)).isoformat(), now=now)
+        found = None if self._weather is None else self._weather.weather_on(day)
+        topics = () if self._topics is None else await self._topics.topics(day)
+        options = RequestOptions(self.settings.model_id, self.settings.reasoning_effort,
+                                 provider_key=self._provider.provider_key,
+                                 max_output_tokens=world.WORLD_MAX_OUTPUT_TOKENS)
+        asked = review.model_input(world.WORLD_INSTRUCTIONS, world.request_data(
+            chosen.text, entries, day=day, makes=chosen.makes, weather=None if found is None else found.line(),
+            topics=topics, quiet=self._quiet), options, "life-world-input")
+        prepared = await self._prepared(principal, asked, world.WORLD_MAX_OUTPUT_TOKENS, now)
+        if prepared is None:
+            return WriteOutcome.DEFERRED
+        request, reserve = prepared
+        write_id = await self._data.begin_life_write(principal, LifeWriteStart(
+            persona_id, written, self._provider.provider_key, self.settings.model_id, request.body,
+            request.content_type, reserve, job=LifeJob.WORLD, model_reason=MEMORY_MODEL))
+        try:
+            text = await self._answer(write_id, request, "world")
+            if text is None:
+                return WriteOutcome.FAILED
+            try:
+                events = world.parse_events(text, self._quiet)
+            except AnswerError as error:
+                return await self._malformed(write_id, "world", error)
+            try:
+                kept = await self._data.add_events(write_id, events, now=self._clock())
+            except DataError as error:
+                return await self._refused(write_id, "world", error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._data.fail_life_write(write_id, type(error).__name__)
+            raise
+        log.info("world %s made %d event(s) for %s", write_id, len(kept), written)
         return WriteOutcome.WRITTEN
 
     async def _settle(self, principal: PrincipalId) -> WriteOutcome:
@@ -385,7 +450,9 @@ class LifeWriter:
                                  provider_key=self._provider.provider_key,
                                  max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
         asked = work.model_input(work.request_data(chosen.text, entries, plan, project, now=now, zone=self._zone,
-                                                   mood=mood, makes=chosen.makes), options)
+                                                   mood=mood, makes=chosen.makes,  # §7: the events so far
+                                                   events=world.passed_events(entries, now.astimezone(self._zone))),
+                                 options)
         prepared = await self._prepared(principal, asked, work.WORK_MAX_OUTPUT_TOKENS, now)
         if prepared is None:
             return WriteOutcome.DEFERRED

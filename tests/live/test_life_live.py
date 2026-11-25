@@ -40,7 +40,7 @@ from himari.data.api import (
     RecentEpisode,
     UserMessage,
 )
-from himari.life import review, settle, work
+from himari.life import review, settle, work, world
 from himari.memory import passes
 from himari.prompt.api import PromptInputs, RequestOptions, SystemSpec
 from himari.prompt.composer import Composer
@@ -228,3 +228,13 @@ def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:
     record("memory_pass", text, usage, self=[(c.op.value, c.text) for c in changes], notes=len(items))
     # new things HIMARI said of itself (a ukulele, a friend Miko); never the user's own facts
     assert any(c.op is LifeChangeOp.ADD and any(w in (c.text or "") for w in ("우쿨렐레", "미코")) for c in changes)
+
+
+def test_the_world_decides_events_that_pass_their_checks() -> None:
+    """character-mind §7: one world call for the day; 0 to 2 events, each a time outside the quiet hours."""
+    data = world.request_data(PERSONA, LIFE, day=date(2026, 11, 25), weather=WEATHER, topics=TOPICS, quiet=QUIET)
+    options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
+                             max_output_tokens=world.WORLD_MAX_OUTPUT_TOKENS)
+    text, usage = call(review.model_input(world.WORLD_INSTRUCTIONS, data, options, "life-world-input"))
+    events = world.parse_events(text, QUIET)  # every §7 check
+    record("world", text, usage, events=[(e.time_of_day, e.text) for e in events])

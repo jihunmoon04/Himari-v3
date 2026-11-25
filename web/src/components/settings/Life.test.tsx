@@ -248,6 +248,23 @@ describe("an entry", () => {
       confirm.mockRestore();
     });
 
+  it("lists what the world made happen under Events, edited like any entry, and when it next runs", async () => {
+    state.data = {
+      ...aLife(),
+      entries: [{ ...entry(14, "event", "2026-11-25", "택배가 늦게 왔다.", "writer"), time: "15:00" }],
+      world: { weather: "on", today: null, topics: "off", next: "2026-11-25T23:00:00+00:00" },
+    };
+    await shown();
+    expect(part("Events").getByText("택배가 늦게 왔다.")).toBeTruthy();
+    expect(part("Events").getByText("2026-11-25 15:00 · written by the story writer")).toBeTruthy();
+    expect(screen.getByLabelText("World").textContent).toContain("World: next");
+    fireEvent.click(part("Events").getByRole("button", { name: "Edit" }));
+    const text = await screen.findByLabelText("Entry text");
+    fireEvent.change(text, { target: { value: "택배가 일찍 왔다." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editLife).toHaveBeenCalledWith(14, "택배가 일찍 왔다.", 1));
+  });
+
   it("is deleted only when confirmed", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     await shown();

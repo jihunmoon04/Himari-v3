@@ -21,6 +21,7 @@ from himari.data.api import (
     LifeWriteStart,
     LifeWriteStatus,
     RawReceived,
+    WorldEvent,
 )
 
 ALICE = PrincipalId("alice")
@@ -97,5 +98,34 @@ def test_a_settle_write_keeps_the_new_facts_once_and_only_a_settle_write_may() -
         assert record.status is LifeWriteStatus.APPLIED
         assert [e.text for e in await data.list_life(ALICE, 1) if e.kind is LifeKind.FACT] == [
             known.text, "친구 유나가 있다."]
+
+    asyncio.run(scenario())
+
+
+def test_a_world_write_keeps_at_most_two_events_a_date_which_the_user_edits_and_deletes() -> None:
+    """character-mind §7: events of the write's date with their times; the user edits the text and deletes."""
+    async def scenario() -> None:
+        store = new_store()
+        data = data_for(store)
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.add_events(await received(data, LifeJob.REVIEW), [WorldEvent("15:00", "x")], now=NOW)
+        first = await received(data, LifeJob.WORLD)
+        for bad in (WorldEvent("3pm", "x"), WorldEvent("15:00", "두 줄\n글"), WorldEvent("15:00", "x" * 201)):
+            with pytest.raises(DataError):
+                await data.add_events(first, [bad], now=NOW)
+        made = await data.add_events(first, [WorldEvent("15:00", "택배가 늦게 왔다.")], now=NOW)
+        assert [(e.kind, e.day, e.time_of_day, e.text, e.source) for e in made] == [
+            (LifeKind.EVENT, "2026-11-25", "15:00", "택배가 늦게 왔다.", first)]
+        more = await data.add_events(await received(data, LifeJob.WORLD),
+                                     [WorldEvent("18:00", "유나가 왔다."), WorldEvent("20:00", "셋째.")], now=NOW)
+        assert [e.text for e in more] == ["유나가 왔다."]  # two a date at most
+        data = data_for(restart(store))
+        listed = [e for e in await data.list_life(ALICE, 1, since="2026-11-25") if e.kind is LifeKind.EVENT]
+        assert [e.time_of_day for e in listed] == ["18:00", "15:00"]
+        assert await data.list_life(ALICE, 1, since="2026-11-26") == ()
+        edited = await data.edit_life(ALICE, listed[0].entry_id, "유나가 앨범을 들고 왔다.", expected_revision=1)
+        assert (edited.text, edited.origin, edited.time_of_day) == ("유나가 앨범을 들고 왔다.", LifeOrigin.USER, "18:00")
+        await data.retire_life(ALICE, edited.entry_id, expected_revision=2)
+        assert [e.text for e in await data.list_life(ALICE, 1) if e.kind is LifeKind.EVENT] == ["택배가 늦게 왔다."]
 
     asyncio.run(scenario())
