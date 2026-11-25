@@ -315,4 +315,5 @@
 
 ## 15. 구현에서 정한 것
 
-(구현하며 채운다.)
+1. **생각은 답 원문에 그대로 둔다(§14.2의 `thought` 칸을 만들지 않음).** 답은 원래 표시(`[[mood:…]]` 등)까지 원문 그대로 저장되고 읽는 곳에서 걸러 낸다(H-14). 생각도 같은 방식이다: `common.thought_end`·`split_thought`·`thought_of`·`drop_thought`, `scan_marks`가 맨 앞 생각을 건너뛴다. 그래서 앱·Web·검색·기억 정리(모두 `split_marks`/`scan_marks`를 거침)는 저절로 생각을 보지 않고, 프롬프트의 대화 기록은 `Composer`가 `drop_thought`로 뺀다. Web 대화 API의 사건마다 `thought`(없으면 `null`)를 더했다. 기억 정리가 생각을 읽을 때는 `thought_of(blocks)`로 꺼낸다.
+2. **생각만 있고 보이는 답이 빈 경우 다시 하지 않는다(v0.1).** 드물고, 자유 wake에서는 pass가 된다. 대화 턴이면 빈 답이 남는다(알려진 한계).
