@@ -94,7 +94,7 @@
 지금 이야기 작가가 하던 일 가운데 **HIMARI가 쓰는 것**이 여기로 온다.
 
 - **언제:** 지금 작가와 같다(`HIMARI_LIFE_WRITE_AT`, 기본 22:00, 놓치면 다음 주기).
-- **입력(자료):** 날짜·요일·계절·지금, 오늘 일어난 일(§7), 오늘 남긴 생각, 오늘의 일화(근거로만, 로드맵 §5의 1), 오늘 만든 조각(제목·요약), 열린 프로젝트(제목·목표·지금까지), 앞으로의 일정, 날씨, 오늘의 화제 제목, 조용한 시간. 정사·최근 일기·관계·기분은 Current State에 이미 있다.
+- **입력(자료):** 날짜·요일·계절·지금, 오늘 일어난 일(§7), 오늘 남긴 생각, 오늘의 일화(근거로만, 로드맵 §5의 1), 오늘 만든 조각(제목·요약), 열린 프로젝트(제목·목표·지금까지), 앞으로의 일정, 날씨, 오늘의 화제 제목, 조용한 시간, 페르소나의 `makes` 칸(`persona_makes`, 7단계, 관계 단계로 거른 것. 프로젝트는 여기서 고른다). 정사·최근 일기·관계·기분은 Current State에 이미 있다.
 - **답:** 생각(1,200자까지) 뒤에 JSON 하나.
   - `diary`: 지금과 같다(3~6문장, 1인칭, HIMARI의 하루와 그날 만든 것 중심, 사용자는 일화에 있는 것만 한두 문장).
   - `plans`: 지금과 같다(0~3, 시각, 프로젝트 `arc`).
@@ -168,14 +168,14 @@
   - 위가 다 비면 넣지 않는다.
 - **`himari_life.events`(새것):** 오늘 일어난 일(§7) 가운데 시각이 지난 것.
 - **`himari_now`:** 작업 시간이면 진행 중인 원고(§4.4).
-- **떠오름:** 생각의 "떠오른 것"이 Current State에서 꺼낼 것을 고른다. 그리고 `memory_search`가 **지금 페르소나의 정사와 일기도 찾는다**(지금은 사용자 메모와 일화만). 상한 밖으로 밀린 정사와 지난 일기에 닿는 길이다.
+- **떠오름:** 생각의 "떠오른 것"이 Current State에서 꺼낼 것을 고른다. 그리고 `memory_search`의 `kind`에 `life`를 더해 **지금 페르소나의 정사·일기·일어난 일도 찾는다**(지금은 `notes`·`episodes`·`all`, `all`에도 넣음). 상한 밖으로 밀린 정사와 지난 일기에 닿는 길이다. 관계 단계로 거르지 않은 것은 없다(삶 항목에는 숨긴 줄이 없음).
 
 ## 7. 세계
 
 지금 작가의 **작가 시점** 몫이 여기로 온다. 세계는 HIMARI에게 일어나는 일만 정하고, 그 일을 어떻게 겪었는지는 HIMARI가 쓴다.
 
 - **언제:** 하루 한 번, 조용한 시간이 끝난 뒤 첫 주기(기본 08시). 놓쳤으면 그날 첫 대화·wake 전에.
-- **입력:** 페르소나(정체성과 세계 부분, 관계 단계로 거른 것), 정사, 열린 프로젝트, 앞으로의 일정, 최근 7일의 일어난 일, 날씨, 오늘의 화제 제목, 날짜·요일·계절, 조용한 시간. 사용자 대화는 넣지 않는다.
+- **입력:** 페르소나 글(관계 단계로 거른 것)과 `persona_makes`, 정사, 열린 프로젝트, 앞으로의 일정, 최근 7일의 일어난 일, 날씨, 오늘의 화제 제목, 날짜·요일·계절, 조용한 시간. 사용자 대화는 넣지 않는다.
 - **답(JSON):** `events` 0~2개. 각각 시각(조용한 시간 밖), 한 문장(`MAX_EVENT_CHARS` 200, 일어난 일만, HIMARI의 감정은 쓰지 않음). 예: "오후에 작업실 창문 틈으로 비가 새서 도면 한 장이 젖었다", "저녁에 친구 유나가 새로 나온 앨범을 들고 찾아왔다".
 - **규칙:** 사용자는 나오지 않는다(로드맵 §5의 1). 정체성·정사·현실(날짜·계절·날씨)과 어긋나지 않는다(§5의 2, 3). 일정과 프로젝트를 뒤집지 않되 방해할 수는 있다(비가 와서 전시를 못 감). 정치·범죄·사고·재난 화제는 쓰지 않는다(지금 작가 규칙). 매일 사건이 있을 필요는 없다. 대부분의 날은 0~1개.
 - **저장:** 삶 항목의 새 종류 `event`(날짜, 시각, 글). Web에서 보고 고치고 지운다.
@@ -185,7 +185,7 @@
 ## 8. Web
 
 - **대화 화면:** HIMARI의 답마다 접힌 "생각"(주인만). wake의 pass도 생각이 있으면 보인다.
-- **Settings → Life(8단계 뒤에는 HIMARI):** **Thoughts**(살아 있는 남긴 생각: 글, 종류, 언제, 만료, 지우기)와 **Events**(일어난 일: 날짜·시각, 글, 고치기·지우기). Work의 조각에 초안 표시.
+- **Settings → HIMARI**(8단계, 대화 밖): 묶음 순서 Work, **Events**, Arcs, Plans, Facts, Diary, **Thoughts**. Events는 일어난 일(날짜·시각, 글, 고치기·지우기), Thoughts는 살아 있는 남긴 생각(글, 종류, 언제, 만료, 지우기). 남긴 생각은 대화에서 나오지만 HIMARI의 속이므로 You and HIMARI가 아니라 여기에 둔다. Work의 조각에 초안 표시.
 - **상태 줄:** "Mind: <모델>"(혼자 하는 호출이 쓰는 모델, 기억 작업 모델로 넘어갔으면 그 까닭), 세계의 다음 때.
 - 앱에는 생각도 사건도 보이지 않는다(로드맵 D4).
 
@@ -200,7 +200,7 @@
 | 대화 기록의 답 | 보이는 글과 생각을 나눠 저장, 프롬프트에는 보이는 글만 |
 | 삶 항목 종류 | `thought`, `event` 더함. 조각에 초안 상태 |
 
-스키마가 바뀐다(v27): 삶 항목의 `thought`·`event`와 그 칸(`about`, 만료, 초안), 답 이벤트의 생각 칸. 지금처럼 업그레이드 전에 백업을 만든다.
+스키마가 바뀐다(v28, 7단계가 v27): 삶 항목의 `thought`·`event`와 그 칸(`about`, 만료, 초안), `life_writes`의 작업 종류. 답 이벤트의 생각 칸은 이벤트 JSON의 선택 칸이라 표는 바뀌지 않는다. 지금처럼 업그레이드 전에 백업을 만든다.
 
 ## 10. 비용
 
@@ -239,3 +239,80 @@
 | M8 | 생각 원문은 답 기록에 따로 두고 프롬프트에는 방금 생각 2개만. 남긴 생각은 무의식이 말하지 않은 것만 0~2개 추린 삶 항목 `thought`(3일, `intent` 2일, 30개) |
 | M9 | 생각은 정사·메모의 근거가 아니다. 말하면 그 말이 근거가 된다. 남긴 생각을 말하면 물러난다 |
 | M10 | Current State에 `himari_mind`(방금 생각, 남긴 생각, "사용자는 모름"), `himari_life.events`. `memory_search`가 정사·일기도 찾는다 |
+
+## 14. 구현 계약 (구현 전에 정한 것, 2026-11-26)
+
+코드를 읽고 설계를 자리에 맞췄다. 구현이 이것과 다르게 가야 하면 §15에 적고 바꾼다.
+
+### 14.1 층
+
+- 새 코드는 지금 층 규칙(`scripts/check_imports.py`) 안에 들어간다. `life`는 `common`, `data`, `prompt`, `provider`, `world`를 쓸 수 있으므로 **혼자 하는 호출이 `prompt`의 시스템 글과 Current State 만들기를 그대로 부를 수 있다.** Control은 쓰지 않는다(Run이 아니므로).
+- `memory`도 지금처럼 `common`, `data`, `prompt`, `provider`만.
+
+### 14.2 Data
+
+| 자리 | 바꿈 |
+| --- | --- |
+| `AssistantFinal` | `thought: str \| None = None`(생각 원문). 코덱의 선택 칸이라 옛 기록은 `None` |
+| `AssistantToolCalls` | `thought: str \| None = None`(첫 Run이 Tool을 부르면 그 commentary 앞의 생각) |
+| `LifeKind` | `THOUGHT`, `EVENT` |
+| `LifeEntry` | `about`(`thought`만: `user`·`self`·`work`·`intent`), `expires_at`(`thought`만), `draft`(`work`만, 참이면 초안). `event`는 `day`·`time_of_day`·`text`를 쓴다 |
+| 한도 | `MAX_THOUGHT_CHARS` 200, `MAX_THOUGHTS` 30(페르소나마다 살아 있는 것), `MAX_EVENT_CHARS` 200, `MAX_EVENTS_PER_DAY` 2 |
+| `LifeStore` | `apply_thought_changes`(기억 정리의 `thoughts`·`said`, `apply_life_changes`와 같은 결과 글), `add_events`(세계 작가), `list_life`가 만료 안 된 `thought`와 `since` 이후의 `event`를 준다. 사용자는 `thought`를 지우기만, `event`는 고치고 지운다 |
+| `LifeWriteLog` | 기록마다 작업 종류 `job`: `world`, `review`, `settle`, `work_start`, `work_end`. 지금 기록은 업그레이드 때 `plan_id`가 있으면 `work_end`, 없으면 `review`. 시도 횟수는 종류와 날짜(작업은 일정)마다 센다 |
+| 작업 조각 | `work_start`가 `draft` 조각을 만들고 `work_end`가 같은 항목을 채워 `draft`를 끈다. 시작이 없었으면 `work_end`가 지금처럼 새로 만든다 |
+| 대화 영구 삭제 | 그 대화에서 나온 `thought`도 지운다(메모와 같음) |
+
+### 14.3 생각 걸러 내기
+
+- `common`의 표시 걸러 내기(`scan_marks`)에 생각을 더한다. **답의 맨 앞**(공백 뒤)에서 `[[think]]`로 시작할 때만 생각이다. 중간의 `[[think]]`는 글이다.
+- 자라는 글(`complete=False`)에서는 닫힐 때까지 아무것도 확정하지 않는다. 닫히지 않은 채 `THINK_CHARS`를 넘으면 그 자리까지를 생각으로 끊는다(§3.2).
+- 걸러 낸 생각은 Driver가 기록할 때 `thought` 칸으로 간다. 표정·이동 표시의 `at`은 생각을 뺀 보이는 글로 센다.
+- 자유 wake의 pass 판정(`driver.py`의 `[[pass]]`)은 생각을 뺀 글로 한다.
+
+### 14.4 Prompt
+
+- 시스템 글: 반려 절에 `THINK_RULE`(§3.1)을 `PERSONA_RULE` 다음에 둔다. 반려가 꺼진 대화(비서)에는 넣지 않는다. `LIFE_RULE`에 `himari_mind` 한 구절, `FREE_RULE`에 `intent` 한 구절, `TALKING_RULE`에 작업 중 한 구절.
+- 대화 기록을 그릴 때 `thought`는 넣지 않는다(지금처럼 `blocks`만).
+- Current State: `himari_mind`(§6), `himari_life.events`, `himari_now`의 `draft`(제목, 구상 한 줄, 초안 앞 400자).
+- 혼자 하는 호출용 함수: `self_input(inputs, task, data)`. 대화 턴과 같은 `PromptInputs`(대화 기록·Tool 없음)로 시스템 글과 Current State를 만들고, 사용자 턴 자리에 그 계기의 지시문(`REVIEW_TASK`, `WORK_START_TASK`, `WORK_END_TASK`)과 자료(JSON)를 둔다.
+
+### 14.5 Life
+
+| 파일 | 하는 일 |
+| --- | --- |
+| `life/world.py`(새것, 순수) | 세계 작가 지시문, 입력, 답 검사 |
+| `life/review.py`(새것, 순수) | 하루 돌아보기의 자료와 답 검사. 지금 `writer.py`의 일기·일정·줄거리·기분 검사를 옮겨 온다 |
+| `life/settle.py`(새것, 순수) | 일기에서 정사 추리기(기억 작업 모델) |
+| `life/work.py` | 시작·끝 두 단계의 자료와 답 검사, `due_start`·`due_end` |
+| `life/worker.py` | 한 주기에 사람마다 순서대로: 세계(아침) → 작업 시작 → 작업 끝 → 하루 돌아보기(밤) → 정사 추리기. 지금처럼 한 사람 잠금, 한 주기에 한 호출씩이 아니라 종류마다 하나까지 |
+| `life/writer.py` | 지우거나 `review.py`로 합친다(옛 이름이 다른 곳에서 쓰이지 않으면 지운다) |
+
+- **혼자 하는 호출의 모델**은 `bootstrap`이 넘겨 준다: 그 사람의 가장 최근 대화(wake가 가는 대화, `bootstrap/proactive.py`의 `recent`와 같은 것)의 모델과 그 모델의 `free_wake` 능력. 아니면 기억 작업 모델. 고른 모델과 까닭을 `life_writes`에 남긴다.
+- 답 모양: 생각 뒤 JSON 하나. JSON 앞뒤의 글은 버린다. 생각은 그 기록에 따로 남긴다.
+
+### 14.6 Memory
+
+- 기억 정리 입력의 HIMARI 답은 지금처럼 `blocks`(보이는 글)만이다. 따라서 `self`는 저절로 보이는 말만 근거가 된다.
+- 입력에 그 구간의 생각(`thought`, 답마다 순번과 함께)과 지금 페르소나의 살아 있는 남긴 생각을 더한다.
+- 답 JSON에 `thoughts`(0~2: `text`, `about`, 근거 순번)와 `said`(그 구간에서 말한 남긴 생각의 번호)를 더한다. `life`가 꺼져 있으면 둘 다 묻지 않는다.
+
+### 14.7 Tool
+
+- `memory_search`의 `kind`에 `life`. 지금 페르소나는 Tool 문맥에 없으므로 턴이 시작될 때 고른 페르소나 번호를 Tool 문맥에 넣는다(Dispatcher가 주는 값, 모델 출력이 아님).
+
+### 14.8 구현 순서
+
+한 브랜치에서 아래 순서로 만들고 단계마다 전체 시험을 돌린다. 앞 단계만으로도 돌아가게 둔다.
+
+1. **생각:** Data의 `thought` 칸, `scan_marks`, Driver 기록, `THINK_RULE`, Web 대화의 접힌 생각. 여기까지면 대화와 wake가 생각을 먼저 한다.
+2. **남긴 생각:** `LifeKind.THOUGHT`(스키마 v28 시작), 기억 정리의 `thoughts`·`said`, `himari_mind`, 대화 삭제 연쇄, Web Thoughts.
+3. **혼자 하는 호출과 하루 돌아보기:** `self_input`, 모델 고르기, `review.py`, `settle.py`, `life_writes.job`. 작가의 HIMARI 몫을 옮긴다.
+4. **세계:** `LifeKind.EVENT`, `world.py`, `himari_life.events`, Web Events.
+5. **작업 두 단계:** `draft`, `work_start`, `himari_now`의 초안, `remarks`, `TALKING_RULE` 구절.
+6. **떠오름 길:** `memory_search`의 `life`, `FREE_RULE`의 `intent` 구절.
+7. 실제 모델 확인(§12), 문서(이 문서 §15, 결정 기록, 로드맵, status).
+
+## 15. 구현에서 정한 것
+
+(구현하며 채운다.)
