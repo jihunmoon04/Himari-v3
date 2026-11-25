@@ -2004,6 +2004,19 @@ class LifeStore(Protocol):
         ...
 
 
+class LifeJob(Enum):
+    """character-mind §14.2: what a life write is for."""
+
+    REVIEW = "review"  # §4.3: the day's review, a self run (before it: the story writer's call)
+    SETTLE = "settle"  # §5.3: the facts the day's diary settles (the memory model)
+    WORLD = "world"  # §7: what happens to HIMARI today (the memory model)
+    WORK_START = "work_start"  # §4.4: a work plan's start: the concept and a draft (a self run)
+    WORK_END = "work_end"  # §4.4: its end, the piece (character-work §4: the worker's call)
+
+
+WORK_JOBS = frozenset({LifeJob.WORK_START, LifeJob.WORK_END})  # the jobs of a work plan (``plan_id``)
+
+
 @dataclass(frozen=True)
 class LifeWriteStart(DeepFrozen):
     persona_id: int
@@ -2014,6 +2027,10 @@ class LifeWriteStart(DeepFrozen):
     content_type: str
     reserved_tokens: int
     plan_id: int | None = None  # character-work §4: a worker call's work plan; None: a story writer call
+    # character-mind §14.2: the job (None: WORK_END with a plan, else REVIEW; a work job needs its plan,
+    # no other has one) and why its model was chosen (§4.1)
+    job: LifeJob | None = None
+    model_reason: str | None = None
 
 
 class LifeWriteStatus(Enum):
@@ -2043,6 +2060,9 @@ class LifeWrite(DeepFrozen):
     created_at: datetime
     finished_at: datetime | None
     plan_id: int | None = None  # character-work §4: a worker call's work plan
+    job: LifeJob = LifeJob.REVIEW  # character-mind §14.2
+    model_reason: str | None = None  # §4.1: why its model was chosen
+    thought: str | None = None  # §4.1: a self run's thought, kept with it (never shown, never told again)
 
 
 class LifeWriteLog(Protocol):
@@ -2053,12 +2073,22 @@ class LifeWriteLog(Protocol):
         """The principals who sent a message since then (in a Conversation not in the trash)."""
         ...
 
-    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
-        """The story writer's writes made for this persona and date, whatever came of them."""
+    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
+                            job: LifeJob = LifeJob.REVIEW) -> int:
+        """The writes of ``job`` made for this persona and date, whatever came of them (character-mind §14.2)."""
         ...
 
-    async def work_attempts(self, principal: PrincipalId, plan_id: int) -> int:
-        """character-work §4: the worker's calls made for this work plan, whatever came of them."""
+    async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
+        """character-work §4: the calls of ``job`` made for this work plan, whatever came of them."""
+        ...
+
+    async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
+        """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED."""
+        ...
+
+    async def note_life_thought(self, write_id: str, thought: str) -> None:
+        """§4.1: the thought a self run's answer began with, kept with its write (its raw response
+        holds it too). NOT_FOUND for no such write."""
         ...
 
     async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
@@ -2090,8 +2120,18 @@ class LifeWriteLog(Protocol):
         advance or close of an open arc of the persona — else it is left out alone;
         the diary the writer wrote that day names the arc moved); the write APPLIED.
         character-work §4: a plan's project is kept only when it names an open arc of the persona
-        (or NEW_ARC with a start made), else the plan stays without one.
+        (or NEW_ARC with a start made), else the plan stays without one. character-mind §4.3, §5.2:
+        the write is a REVIEW's (else INVALID_ARGUMENT), and the persona's kept thoughts expired by
+        ``now`` retire with it (the review has read them).
         The entries written. INVALID_STATE_TRANSITION unless RECEIVED."""
+        ...
+
+    async def apply_settle_write(self, write_id: str, facts: Sequence[str], *,
+                                 now: datetime) -> tuple[LifeEntry, ...]:
+        """character-mind §5.3, one transaction: the facts a SETTLE write found in the date's diary
+        (origin WRITER, its source the write; one the same as a live fact is skipped; at MAX_LIFE_FACTS
+        the oldest not the user's retires; all the user's: skipped); the write APPLIED. The facts kept.
+        INVALID_ARGUMENT when the write is not a SETTLE's; INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
     async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:

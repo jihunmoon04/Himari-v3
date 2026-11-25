@@ -61,6 +61,7 @@ def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Se
                      "world": {"weather": "off (no HIMARI_LOCATION)", "today": None,
                                "topics": "off (no story writer)"},
                      "work": {"running": False, "next": None},  # character-work §8
+                     "mind": None,  # character-mind §8: no life runs here
                      "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                                 "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
                                 "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS}}

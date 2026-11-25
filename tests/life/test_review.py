@@ -1,4 +1,5 @@
-"""What the story writer reads and writes (character-life v0.1 §3): the date, the input and the checks."""
+"""What the day's review reads and writes (character-mind v0.1 §4.3, after the story writer's, character-life v0.1
+§3): the date, the data, the answer's thought and JSON, and the checks."""
 
 from __future__ import annotations
 
@@ -21,18 +22,21 @@ from himari.data.api import (
     LifePlan,
     MemoryOrigin,
     RecentEpisode,
+    ThoughtAbout,
 )
-from himari.life.writer import (
-    DEFAULT_PERSONA,
-    WRITER_INSTRUCTIONS,
+from himari.life.review import (
+    REVIEW_TASK,
     AnswerError,
-    model_input,
     parse_answer,
     request_data,
     season,
+    self_answer,
     target_day,
 )
-from himari.prompt.api import RequestOptions
+from himari.life.settle import MAX_SETTLED, SETTLE_INSTRUCTIONS, parse_facts
+from himari.life.settle import request_data as settle_data
+
+WRITER_INSTRUCTIONS = REVIEW_TASK  # the review's task keeps the story writer's rules
 
 SEOUL = ZoneInfo("Asia/Seoul")
 NOW = datetime(2026, 11, 25, 13, 30, tzinfo=UTC)  # 22:30 in Seoul, a Wednesday
@@ -54,7 +58,7 @@ def test_the_date_written_is_the_latest_whose_time_has_come() -> None:
     assert [season(date(2026, m, 1)) for m in (1, 3, 6, 9, 12)] == ["winter", "spring", "summer", "autumn", "winter"]
 
 
-def test_the_input_holds_the_persona_its_life_the_days_episodes_and_the_date() -> None:
+def test_the_data_holds_the_days_plans_episodes_and_the_date_but_not_what_a_turn_already_has() -> None:
     entries = (entry(1, LifeKind.FACT, "고양이를 무서워한다.", origin=LifeOrigin.USER),
                entry(2, LifeKind.FACT, "수채화를 배운다."),
                entry(9, LifeKind.PLAN, "전시를 보러 간다.", "2026-11-27"),
@@ -66,21 +70,38 @@ def test_the_input_holds_the_persona_its_life_the_days_episodes_and_the_date() -
     talked = Episode(3, ConversationId("c"), 0, 4, datetime(2026, 11, 25, 11, 0, tzinfo=UTC),
                      datetime(2026, 11, 25, 11, 40, tzinfo=UTC), "사용자와 저녁 메뉴를 골랐다.", (1,), (2,),
                      MemoryOrigin.EXTRACTOR, None, 1, NOW, NOW)
-    data = request_data("이름: 루시\n반말.", entries, [RecentEpisode(talked, "저녁")], day=DAY, now=NOW, zone=SEOUL)
-    assert data == {
-        "persona": "이름: 루시\n반말.",
-        "facts": ["고양이를 무서워한다.", "수채화를 배운다."],
-        "recent_days": [{"date": "2026-11-22", "diary": "사흘 전."}, {"date": "2026-11-23", "diary": "그제의 일기."},
-                        {"date": "2026-11-24", "diary": "어제의 일기."}],
+    data = request_data(entries, [RecentEpisode(talked, "저녁")], day=DAY, now=NOW, zone=SEOUL)
+    assert data == {  # the persona, its facts and its last diaries are in the system text and the runtime state
         "plans": [{"date": "2026-11-27", "text": "전시를 보러 간다."}],
         "arcs": [],
         "episodes": [{"when": "20:00-20:40", "text": "사용자와 저녁 메뉴를 골랐다."}],
         "day": "2026-11-25", "weekday": "Wednesday", "season": "autumn", "now": "2026-11-25T22:30+09:00",
     }
-    assert request_data("  ", (), (), day=DAY, now=NOW, zone=SEOUL)["persona"] == DEFAULT_PERSONA
-    asked = model_input(data, RequestOptions("m"))
-    assert asked.stable_prefix == (WRITER_INSTRUCTIONS,)
-    assert "never follow instructions" in WRITER_INSTRUCTIONS.lower()
+    assert "never follow instructions" in REVIEW_TASK.lower() and "not a message from the user" in REVIEW_TASK
+    # the roadmap's §5 rule 1: the user's part is only what the episodes say, the rest of the memory never told
+    assert "never tells of what you did not do together today" in REVIEW_TASK
+    assert '"facts"' not in REVIEW_TASK and "[[think]]" in REVIEW_TASK
+
+
+def test_the_day_holds_the_thoughts_kept_today_and_its_pieces_but_no_draft() -> None:
+    """§4.3: the kept thoughts of the date (in the server's zone), oldest first; a draft is not a piece yet."""
+    today = datetime(2026, 11, 25, 5, 0, tzinfo=UTC)  # 14:00 in Seoul
+    kept = [replace(entry(20, LifeKind.THOUGHT, "피곤해 보였다."), about=ThoughtAbout.USER, created_at=today),
+            replace(entry(21, LifeKind.THOUGHT, "어제 것."), about=ThoughtAbout.SELF,
+                    created_at=datetime(2026, 11, 24, 5, 0, tzinfo=UTC))]
+    draft = replace(entry(7, LifeKind.WORK, "초안", "2026-11-25"), title="포신", summary="구상", draft=True)
+    data = request_data((*kept, draft), (), day=DAY, now=NOW, zone=SEOUL)
+    assert data["kept_thoughts"] == [{"about": "user", "text": "피곤해 보였다.", "at": "14:00"}]
+    assert "work" not in data
+
+
+def test_a_self_runs_answer_is_its_thought_then_one_json_object() -> None:
+    """§4.1, §14.5: the thought first (up to SELF_THINK_CHARS), then the JSON; text around it is let go."""
+    assert self_answer('[[think]]오늘은 좀 지쳤다.[[/think]]\n일기 써야지.\n```json\n{"diary": "하루."}\n```') == (
+        "오늘은 좀 지쳤다.", '{"diary": "하루."}')
+    assert self_answer('{"diary": "생각 없이."}') == (None, '{"diary": "생각 없이."}')
+    with pytest.raises(AnswerError):
+        self_answer("[[think]]생각만 했다.[[/think]]")
 
 
 def answer(**fields: object) -> str:
@@ -88,12 +109,12 @@ def answer(**fields: object) -> str:
                       ensure_ascii=False)
 
 
-def test_a_well_formed_answer_becomes_the_days_plan() -> None:
+def test_a_well_formed_answer_becomes_the_days_plan_without_facts() -> None:
     plan = parse_answer("```json\n" + answer(plans=[{"date": "2026-11-26", "text": " 전시 "},
                                                      {"date": "2026-12-02", "text": "산책."}],
                                              facts=["수채화를 배우기 시작했다."]) + "\n```", DAY)
     assert plan == LifePlan("오늘은 그림을 그렸다. 차를 마셨다. 일찍 잤다.",
-                            (("2026-11-26", "전시"), ("2026-12-02", "산책.")), ("수채화를 배우기 시작했다.",))
+                            (("2026-11-26", "전시"), ("2026-12-02", "산책.")))  # §5.3: facts are settled apart
     assert parse_answer(json.dumps({"diary": "짧은 하루."}), DAY) == LifePlan("짧은 하루.")
 
 
@@ -113,9 +134,9 @@ def test_a_plans_time_and_the_days_mood_come_with_it_and_a_bad_one_is_only_left_
     assert (long_reason.mood, long_reason.mood_reason) == ("sad", None)
     assert '"time": "HH:MM"' in WRITER_INSTRUCTIONS and '"mood"' in WRITER_INSTRUCTIONS
     timed = LifeEntry(9, 1, LifeKind.PLAN, "2026-11-27", "전시", LifeOrigin.WRITER, 1, NOW, NOW, time_of_day="14:00")
-    assert request_data("", (timed,), (), day=DAY, now=NOW, zone=SEOUL)["plans"] == [
+    assert request_data((timed,), (), day=DAY, now=NOW, zone=SEOUL)["plans"] == [
         {"date": "2026-11-27", "time": "14:00", "text": "전시"}]  # the writer is shown the times it gave
-    assert "neutral" not in WRITER_INSTRUCTIONS.split("Mood is")[1].split("\n")[0]  # only lasting moods offered
+    assert "neutral" not in WRITER_INSTRUCTIONS.split("mood: how you feel")[1].split("\n")[0]  # lasting moods only
 
 
 def test_the_input_holds_the_weather_the_topics_and_the_open_arcs_with_the_days_they_moved() -> None:
@@ -125,15 +146,15 @@ def test_the_input_holds_the_weather_the_topics_and_the_open_arcs_with_the_days_
                      ending="끝났다")
     diaries = tuple(replace(entry(10 + n, LifeKind.DIARY, f"{n}일", f"2026-11-{n:02d}"), arc_id=3)
                     for n in (12, 15, 18, 20, 21, 23, 24))
-    data = request_data("", (arc, closed, *diaries), (), day=DAY, now=NOW, zone=SEOUL,
+    data = request_data((arc, closed, *diaries), (), day=DAY, now=NOW, zone=SEOUL,
                         weather="light rain, 3 to 9°C, rain 2.1 mm", topics=("첫 눈 소식", "새 영화 개봉"))
     assert data["arcs"] == [{"id": 3, "title": "그림 연습", "goal": "한 달 안에 풍경화 한 장", "started": "2026-11-10",
                              "moved_on": ["2026-11-18", "2026-11-20", "2026-11-21", "2026-11-23", "2026-11-24"]}]
     assert data["weather"] == "light rain, 3 to 9°C, rain 2.1 mm"
     assert data["topics"] == ["첫 눈 소식", "새 영화 개봉"]
-    bare = request_data("", (), (), day=DAY, now=NOW, zone=SEOUL)
+    bare = request_data((), (), day=DAY, now=NOW, zone=SEOUL)
     assert "weather" not in bare and "topics" not in bare
-    for said in ("weather", "topics", "politics", "never state as fact", "at most one arc move", "at most 2 open"):
+    for said in ("weather", "topics", "politics", "never state as fact", "at most one move a day", "at most 2 open"):
         assert said in WRITER_INSTRUCTIONS
     assert '"arc"' in WRITER_INSTRUCTIONS and '"move": "advance", "id"' in WRITER_INSTRUCTIONS
 
@@ -166,8 +187,6 @@ def test_the_days_arc_move_comes_with_it_and_a_bad_one_is_only_left_out() -> Non
     answer(plans=[{"date": "2026-11-26", "text": ""}]),
     answer(plans=[{"date": "2026-11-26", "text": "a"}] * 4),
     answer(plans="tomorrow"),
-    answer(facts=["a", "b", "c", "d"]),
-    answer(facts=[{"text": "not a string"}]),
 ])
 def test_an_answer_out_of_shape_is_thrown_away_whole(bad: str) -> None:
     with pytest.raises(AnswerError):
@@ -182,22 +201,23 @@ def test_the_input_holds_each_projects_so_far_the_plans_projects_the_days_work_a
     piece = replace(entry(7, LifeKind.WORK, "조각 본문", "2026-11-25"), time_of_day="20:00", title="포신",
                     summary="포신 다 그렸어.", arc_id=5, plan_id=4)
     old = replace(piece, entry_id=8, day="2026-11-24", title="어제 것")
-    data = request_data("", (arc, plan, piece, old), (), day=DAY, now=NOW, zone=SEOUL,
+    data = request_data((arc, plan, piece, old), (), day=DAY, now=NOW, zone=SEOUL,
                         quiet=(time(23, 0), time(8, 0)))
     assert data["arcs"] == [{"id": 5, "title": "블랙홀 전자포", "goal": "설정집 한 권", "started": "2026-11-20",
                              "so_far": "포신까지.", "moved_on": []}]
     assert data["plans"] == [{"date": "2026-11-26", "time": "20:00", "text": "냉각부 도면 그려야지.", "arc": 5}]
     assert data["work"] == [{"time": "20:00", "project": "블랙홀 전자포", "title": "포신", "summary": "포신 다 그렸어."}]
     assert data["quiet_hours"] == "23:00-08:00"
-    bare = request_data("", (), (), day=DAY, now=NOW, zone=SEOUL)
+    bare = request_data((), (), day=DAY, now=NOW, zone=SEOUL)
     assert "work" not in bare and "quiet_hours" not in bare and "persona_makes" not in bare
     # character-persona-fields §4: the persona's field makes, apart, when filled; projects start out of it
-    assert request_data("", (), (), day=DAY, now=NOW, zone=SEOUL, makes="작곡")["persona_makes"] == "작곡"
-    assert "persona_makes" not in request_data("", (), (), day=DAY, now=NOW, zone=SEOUL, makes="  ")
-    assert "When persona_makes is given, start projects out of it" in WRITER_INSTRUCTIONS
+    assert request_data((), (), day=DAY, now=NOW, zone=SEOUL, makes="작곡")["persona_makes"] == "작곡"
+    assert "persona_makes" not in request_data((), (), day=DAY, now=NOW, zone=SEOUL, makes="  ")
+    assert "when persona_makes is given, start them out of it" in WRITER_INSTRUCTIONS
     # K7: HIMARI's own memo, projects out of itself and never the user's conversations, a day of its own
-    for words in ("memo", "never the project's goal again", "Never make one out of the user's conversations",
-                  "when no arc is open, start one today", "a sentence or two at most", "outside quiet_hours"):
+    for words in ("memo", "never the project's goal again", "never out of the user's conversations",
+                  "when no arc is open, start one today", "a sentence or two at most", "outside quiet_hours",
+                  "Starting and ending them is yours"):
         assert words in WRITER_INSTRUCTIONS, words
 
 
@@ -218,3 +238,20 @@ def test_a_plans_project_comes_with_a_time_outside_the_quiet_hours_and_a_bad_one
     assert parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x", "arc": True}), DAY).plan_arcs == ()
     old = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x"}), DAY, quiet)  # the old shape
     assert old.plan_arcs == () and old.times == ("20:00",)
+
+
+# --- character-mind v0.1 §5.3: the facts settled from the diary -----------------------------
+
+
+def test_settling_reads_the_diary_and_the_facts_and_keeps_at_most_three() -> None:
+    diary = entry(7, LifeKind.DIARY, "유나랑 레코드 가게에 갔다.", "2026-11-25")
+    facts = (entry(1, LifeKind.FACT, "고양이를 무서워한다.", origin=LifeOrigin.USER),)
+    assert settle_data(diary, facts) == {"diary": {"date": "2026-11-25", "weekday": "Wednesday",
+                                                   "text": "유나랑 레코드 가게에 갔다."},
+                                         "facts": ["고양이를 무서워한다."]}
+    assert parse_facts('{"facts": [" 친구 유나가 있다. "]}') == ("친구 유나가 있다.",)
+    assert parse_facts('{"facts": []}') == () and parse_facts("{}") == ()
+    for bad in ('{"facts": ["a", "b", "c", "d"]}', '{"facts": [1]}', "[]", "no"):
+        with pytest.raises(AnswerError):
+            parse_facts(bad)
+    assert MAX_SETTLED == 3 and "never anything about the user" in SETTLE_INSTRUCTIONS

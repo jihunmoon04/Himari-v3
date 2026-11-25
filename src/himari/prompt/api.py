@@ -474,6 +474,15 @@ class PromptComposer(Protocol):
     def compose(self, inputs: PromptInputs) -> ModelInput: ...
 
 
+class SelfComposer(Protocol):
+    """character-mind §4.1, §14.4: a self run — HIMARI alone, not a conversation's Run. Pure."""
+
+    def self_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
+        """The system text and the runtime state a turn composed from ``inputs`` has (its history and
+        Tools left out), with one user turn: the task's fixed text, then ``data`` as escaped JSON."""
+        ...
+
+
 class CompactionPlanner(Protocol):
     """PROMPT-04, pure: no I/O, no model calls."""
 

@@ -32,7 +32,8 @@ from himari.data.memory import InMemoryData, InMemoryStore
 from himari.life import work
 from himari.life.api import ATTEMPTS_PER_DAY, LifeSettings, WriteOutcome
 from himari.life.worker import LifeWriter
-from himari.life.writer import AnswerError
+from himari.life.review import AnswerError
+from himari.prompt.composer import Composer
 from himari.provider.api import NormalizedFinal
 from himari.provider.scripted import Measured, ScriptedAdapter
 
@@ -135,7 +136,7 @@ def setup(*script: object, settings: LifeSettings = SETTINGS,
     data = InMemoryData(InMemoryStore())
     provider = ScriptedAdapter(memory_passes=True)
     provider.extend(script)  # type: ignore[arg-type]
-    return data, provider, LifeWriter(data, provider, settings, clock=lambda: now)
+    return data, provider, LifeWriter(data, provider, settings, clock=lambda: now, composer=Composer())
 
 
 def final(text: str) -> NormalizedFinal:

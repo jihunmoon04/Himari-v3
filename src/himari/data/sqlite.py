@@ -122,6 +122,7 @@ from himari.data.api import (
     ThoughtAbout,
     ThoughtChange,
     ThoughtOp,
+    LifeJob,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -1312,7 +1313,8 @@ def _life_write(row: sqlite3.Row) -> LifeWrite:
     return LifeWrite(row["write_id"], row["persona_id"], row["day"], LifeWriteStatus(row["status"]),
                      row["provider_key"], row["model_id"], row["reserved_tokens"], row["charged_tokens"],
                      None if usage is None else usage[0], None if usage is None else usage[1], row["error"],
-                     datetime.fromisoformat(row["created_at"]), _moment(row["finished_at"]), row["plan_id"])
+                     datetime.fromisoformat(row["created_at"]), _moment(row["finished_at"]), row["plan_id"],
+                     LifeJob(row["job"]), row["model_reason"], row["thought"])
 
 
 def _memory(row: sqlite3.Row) -> Memory:
@@ -2746,18 +2748,31 @@ class SqliteData:
                           _timestamp(active_since))
             return tuple(PrincipalId(r["owner"]) for r in rows)
 
-    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
+    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
+                            job: LifeJob = LifeJob.REVIEW) -> int:
         with self._tx() as tx:
-            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=?"
-                         " AND plan_id IS NULL", principal, persona_id, day)
+            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?",
+                         principal, persona_id, day, LifeJob(job).value)
             assert row is not None
             return int(row["n"])
 
-    async def work_attempts(self, principal: PrincipalId, plan_id: int) -> int:
+    async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
         with self._tx() as tx:
-            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND plan_id=?", principal, plan_id)
+            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND plan_id=? AND job=?", principal,
+                         plan_id, LifeJob(job).value)
             assert row is not None
             return int(row["n"])
+
+    async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
+        with self._tx() as tx:
+            return tx.one("SELECT 1 FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?"
+                          " AND status='applied' LIMIT 1", principal, persona_id, day, LifeJob(job).value) is not None
+
+    async def note_life_thought(self, write_id: str, thought: str) -> None:
+        thought = rules.check_thought_note(thought)
+        with self._tx() as tx:
+            self._life_write_row(tx, write_id)
+            tx.execute("UPDATE life_writes SET thought=? WHERE write_id=?", thought, write_id)
 
     async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
         with self._tx() as tx:
@@ -2779,15 +2794,17 @@ class SqliteData:
                 or not rules.check_plan_ref(start.plan_id)):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life write")
         persona_id, day = rules.check_life_persona(start.persona_id), rules.check_life_day(start.day)
+        job = rules.write_job(start)
         try:
             with self._tx() as tx:
                 write_id = tx.new_id("lwrite")
                 tx.execute("INSERT INTO life_writes (write_id, owner, persona_id, day, status, provider_key, model_id,"
                            " reserved_tokens, charged_tokens, usage, raw_request_body, raw_request_content_type,"
-                           " error, created_at, finished_at, plan_id) VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, NULL,"
-                           " ?, ?, NULL, ?, NULL, ?)", write_id, principal, persona_id, day, start.provider_key,
-                           start.model_id, start.reserved_tokens, start.reserved_tokens, start.body,
-                           start.content_type, _timestamp(datetime.now(UTC)), start.plan_id)
+                           " error, created_at, finished_at, plan_id, job, model_reason, thought) VALUES (?, ?, ?, ?,"
+                           " 'prepared', ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL)", write_id, principal,
+                           persona_id, day, start.provider_key, start.model_id, start.reserved_tokens,
+                           start.reserved_tokens, start.body, start.content_type, _timestamp(datetime.now(UTC)),
+                           start.plan_id, job.value, start.model_reason)
                 return write_id
         except sqlite3.Error as error:
             raise DataError(DataErrorCode.RAW_PERSISTENCE_UNAVAILABLE, type(error).__name__) from error
@@ -2828,10 +2845,15 @@ class SqliteData:
             row = self._life_write_row(tx, write_id)
             if row["status"] != "received":
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
-            if row["plan_id"] is not None:
-                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is a worker's call")
+            if row["job"] != LifeJob.REVIEW.value:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a review")
             principal, persona_id, day = PrincipalId(row["owner"]), int(row["persona_id"]), str(row["day"])
             written: list[LifeEntry] = []
+            # character-mind §5.2: the kept thoughts the review read that have expired retire now
+            for old in rules.expired_thoughts(map(_life_entry, tx.all(
+                    f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND kind='thought'"
+                    " AND retired_at IS NULL", principal, persona_id)), now):
+                self._retire_life(tx, principal, old, now)
             found = tx.one(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
                            " AND kind='diary' AND day=? AND retired_at IS NULL", principal, persona_id, day)
             before = None if found is None else _life_entry(found)
@@ -2864,6 +2886,27 @@ class SqliteData:
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return tuple(written)
+
+    async def apply_settle_write(self, write_id: str, facts: Sequence[str], *,
+                                 now: datetime) -> tuple[LifeEntry, ...]:
+        texts = [rules.check_life_text(LifeKind.FACT, text) for text in facts]
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] != "received":
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            if row["job"] != LifeJob.SETTLE.value:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} does not settle facts")
+            principal, persona_id = PrincipalId(row["owner"]), int(row["persona_id"])
+            kept: list[LifeEntry] = []
+            for text in texts:
+                added = self._add_fact(tx, principal, LifeEntry(
+                    0, persona_id, LifeKind.FACT, None, text, LifeOrigin.WRITER, 1, now, now, source=write_id),
+                    dedupe=True)
+                if isinstance(added, LifeEntry):
+                    kept.append(added)
+            tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
+                       write_id)
+            return tuple(kept)
 
     def _move_arc(self, tx: _Tx, principal: PrincipalId, persona_id: int, day: str, move: ArcMove, write_id: str,
                   now: datetime) -> tuple[int | None, LifeEntry | None]:
@@ -2899,6 +2942,8 @@ class SqliteData:
             row = self._life_write_row(tx, write_id)
             if row["status"] != "received":
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            if row["job"] != LifeJob.WORK_END.value:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a work's end")
             principal, persona_id = PrincipalId(row["owner"]), int(row["persona_id"])
             plan_row = None if row["plan_id"] is None else tx.one(
                 f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND entry_id=? AND retired_at IS NULL",

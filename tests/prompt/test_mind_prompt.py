@@ -113,3 +113,17 @@ def test_life_rule_says_the_user_does_not_know_the_thoughts_and_the_principle_na
     assert "as if for the first time" in LIFE_RULE
     assert "himari_mind" in principle_section(False, life=True)
     assert "himari_mind" not in principle_section(False)
+
+
+def test_a_self_run_has_a_turns_system_text_and_state_with_no_history_or_tools_and_its_task_as_the_turn() -> None:
+    """§4.1, §14.4: the same system text and runtime state as a turn from the same inputs; the task then the data."""
+    told = inputs(SystemSpec(companion=True, life=True), life=(kept(7, "피곤해 보였다.", 1),),
+                  companion_persona="이름: 루시")
+    asked = Composer().self_input(told, "[The day's review] …", {"day": "2026-11-25"})
+    turn = Composer().compose(replace(told, events=EVENTS[:3]))
+    assert asked.stable_prefix == turn.stable_prefix and "이름: 루시" in "\n".join(asked.stable_prefix)
+    assert asked.tool_catalog == () and len(asked.conversation) == 1
+    task, data = asked.conversation[0].blocks  # type: ignore[union-attr]
+    assert (task.text, data.text) == ("[The day's review] …", '{"day": "2026-11-25"}')  # type: ignore[union-attr]
+    mind = state_data(asked.current_state)["himari_mind"]
+    assert mind == {"about": MIND_ABOUT, "kept": [{"text": "피곤해 보였다.", "about": "user", "hours_ago": 1}]}

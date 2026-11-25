@@ -31,7 +31,7 @@ from himari.data.api import (
     PromptBasis,
     WorkPiece,
 )
-from himari.life.writer import DEFAULT_PERSONA, WEEKDAYS, WRITER_FACT_CHARS, AnswerError
+from himari.life.review import DEFAULT_PERSONA, WEEKDAYS, WRITER_FACT_CHARS, AnswerError
 from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions, UserTurn, json_data
 
 WORK_MINUTES = 60  # §4: a work plan is work time this long from its start

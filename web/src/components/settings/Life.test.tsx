@@ -53,7 +53,8 @@ describe("the life screen", () => {
   it("says whose life it is and groups the entries by kind, with their dates and where they came from", async () => {
     await shown();
     expect(await screen.findByText("Friend's life")).toBeTruthy();
-    expect(screen.getByText(/Story writer: on \(deepseek/)).toBeTruthy();
+    expect(screen.getByText(/Life runs: on \(deepseek/)).toBeTruthy();
+    expect(screen.queryByLabelText("Mind")).toBeNull();
     expect(screen.queryByText(/not used now/)).toBeNull();
     expect(part("Facts").getByText("고양이를 무서워한다.")).toBeTruthy();
     expect(part("Facts").getByText("from a conversation")).toBeTruthy();
@@ -214,6 +215,13 @@ describe("an entry", () => {
       await waitFor(() => expect(editLife).toHaveBeenCalledWith(
         30, "냉각부 설계.\n증발열은 포신 뒤로.", 1, "냉각부", "냉각부 끝!"));
     });
+
+  it("says which model HIMARI's self runs use and why (character-mind §8)", async () => {
+    state.data = { ...aLife(), mind: { model: "memory-model", reason: "the memory model (no companion conversation)" } };
+    await shown();
+    expect(screen.getByLabelText("Mind").textContent)
+      .toBe("Mind: memory-model (the memory model (no companion conversation))");
+  });
 
   it("says when the worker is off", async () => {
     state.data = { ...aLife(), work: { running: false, next: null } };

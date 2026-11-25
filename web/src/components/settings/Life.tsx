@@ -200,7 +200,7 @@ export function LifeSettings() {
   const [busy, setBusy] = useState(false);
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read HIMARI's life.</p>;
-  const { persona, enabled, writer, entries, limits, mood, now, world, work } = query.data;
+  const { persona, enabled, writer, entries, limits, mood, now, world, work, mind } = query.data;
   // character-work §8: the projects by id, for a work plan's project and the Work group
   const titles = new Map(entries.filter((entry) => entry.kind === "arc").map((entry) => [entry.id, entry.title]));
   const projectOf = (entry: LifeEntry) =>
@@ -277,7 +277,8 @@ export function LifeSettings() {
           HIMARI's life is not used now (the companion or life is off on this server); it is kept as it is.
         </p>
       )}
-      <p className="text-xs text-faint">Story writer: {writer.told}</p>
+      <p className="text-xs text-faint">Life runs: {writer.told}</p>
+      {mind && <p className="text-xs text-faint" aria-label="Mind">Mind: {mind.model} ({mind.reason})</p>}
       {workLine && <p className="text-xs text-faint" aria-label="Work status">{workLine}</p>}
       {world && (
         <p className="text-xs text-faint" aria-label="World">

@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
-from himari.common import CallId, CallRef, ModelToolResult, RunId, TextBlock, drop_thought
+from himari.common import CallId, CallRef, EventId, JsonValue, ModelToolResult, RunId, TextBlock, drop_thought
 from himari.data.api import (
     AssistantFinal,
     AssistantToolCalls,
@@ -39,6 +39,7 @@ from himari.prompt.api import (
     SourceNote,
     ToolGroupTurn,
     UserTurn,
+    json_data,
     time_line,
     wake_text,
 )
@@ -103,6 +104,22 @@ class Composer:
             ),
             source_notes=fit_notes(inputs.source_notes),
             attachments=inputs.attachments,
+        )
+
+    def self_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
+        """character-mind §4.1, §14.4: a self run's request — the same system text and runtime state as a
+        turn from ``inputs`` (no history, no Tools: a cache may still hold the system text), the task's
+        text and its data as the one user turn."""
+        quiet = replace(inputs, events=(), tool_executions=(), tool_catalog=(), snapshot=None)
+        return ModelInput(
+            stable_prefix=stable_prefix(quiet),
+            tool_catalog=(),
+            conversation=(UserTurn(EventId("self-run"), (TextBlock(task), TextBlock(json_data(data)))),),
+            current_state=current_state(quiet),
+            request_options=quiet.request_options,
+            trigger_refs=(),
+            prompt_basis=PromptBasis(0, quiet.state_basis.state_revision, state_key=state_key(quiet)),
+            source_notes=fit_notes(quiet.source_notes),
         )
 
     @staticmethod

@@ -26,6 +26,9 @@ from himari.data.api import (
     INTENT_DAYS,
     NEW_ARC,
     ThoughtAbout,
+    LifeJob,
+    LifeWriteStart,
+    WORK_JOBS,
     ThoughtChange,
     ThoughtOp,
     WorkPiece,
@@ -659,6 +662,30 @@ def order_life(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
     thoughts = sorted((e for e in listed if e.kind is LifeKind.THOUGHT),
                       key=lambda e: (e.created_at, e.entry_id), reverse=True)
     return (*facts, *arcs, *dated_, *thoughts)
+
+
+def write_job(start: LifeWriteStart) -> LifeJob:
+    """character-mind §14.2: a life write's job as stored — the one given, else WORK_END with a plan and
+    REVIEW without; a work job names its plan and no other job has one, and why its model was chosen is
+    text (INVALID_ARGUMENT otherwise)."""
+    job = start.job if start.job is not None else LifeJob.WORK_END if start.plan_id is not None else LifeJob.REVIEW
+    if not isinstance(job, LifeJob) or (job in WORK_JOBS) != (start.plan_id is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a work job names its plan, and no other job has one")
+    if start.model_reason is not None and not isinstance(start.model_reason, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a model's reason is text")
+    return job
+
+
+def check_thought_note(thought: object) -> str:
+    """§4.1: a self run's thought as kept with its write: text, trimmed."""
+    if not isinstance(thought, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a thought is text")
+    return thought.strip()
+
+
+def expired_thoughts(entries: Iterable[LifeEntry], now: datetime) -> list[LifeEntry]:
+    """§5.2: the kept thoughts among ``entries`` expired by ``now`` (they retire once the review read them)."""
+    return [e for e in entries if e.kind is LifeKind.THOUGHT and not live_thought(e, now)]
 
 
 def check_editable(entry: LifeEntry) -> None:

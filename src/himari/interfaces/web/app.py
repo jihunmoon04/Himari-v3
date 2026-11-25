@@ -89,6 +89,7 @@ from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
+from himari.life.api import MindModel
 from himari.prompt.api import HimariNow
 from himari.presence.api import (
     MAX_IDLE_SECONDS,
@@ -1047,6 +1048,11 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
     return view
 
 
+def mind_view(mind: MindModel) -> dict[str, Any]:
+    """character-mind §8: a self run's model and why it was chosen."""
+    return {"model": mind.model_id, "reason": mind.reason}
+
+
 def mood_view(mood: HimariMood | None) -> dict[str, Any] | None:
     """character-state §2: HIMARI's mood while it is told."""
     return None if mood is None else {"mood": mood.mood, "set_at": _time(mood.set_at), "source": mood.source.value,
@@ -1800,6 +1806,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "work": {"running": application.life_writer is not None,
                          "next": None if (planned := application.next_work(entries)) is None
                          else life_entry_view(planned)},
+                # character-mind §8: the model HIMARI's self runs use now, and why
+                "mind": None if application.life_writer is None
+                else mind_view(await application.life_writer.mind_model(who)),
                 "mood": mood_view(mood), "now": now_view(now),
                 # character-world §2, §3: what the writer and a turn know of the real world, as told at startup
                 "world": {"weather": application.world_weather, "today": application.weather_today(),

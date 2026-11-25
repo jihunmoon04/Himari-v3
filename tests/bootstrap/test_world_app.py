@@ -145,7 +145,8 @@ def test_the_story_writer_is_told_the_days_topics_from_the_search_tool(tmp_path:
             assert app.world_topics == ("on (exa/web_search_exa)" if topics else "off (HIMARI_LIFE_TOPICS=0)")
             assert app.life_writer is not None
             assert await app.life_writer.write(ME) is WriteOutcome.WRITTEN
-            told = json.loads(adapter.prepared_inputs[-1].conversation[0].blocks[0].text)  # type: ignore[union-attr]
+            # character-mind §4.3: the review's data follows its task in the one user turn
+            told = json.loads(adapter.prepared_inputs[-1].conversation[0].blocks[-1].text)  # type: ignore[union-attr]
             if not topics:
                 assert "topics" not in told and fake.calls == []
                 return

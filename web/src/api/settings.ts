@@ -100,6 +100,8 @@ export interface Life {
   entries: LifeEntry[];
   // character-work §8: whether the worker runs (with the story writer) and the next work plan
   work?: { running: boolean; next: LifeEntry | null };
+  // character-mind §8: the model HIMARI's self runs (the day's review) use now, and why; null: no life runs
+  mind?: { model: string; reason: string } | null;
   limits: { facts: number; chars: number; diary_chars: number; arc_chars?: number; arc_title_chars?: number;
     work_chars?: number; summary_chars?: number };
 }

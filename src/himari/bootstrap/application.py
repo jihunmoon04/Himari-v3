@@ -82,7 +82,7 @@ from himari.control.api import (
 )
 from himari.control.driver import MAX_RUNS, Driver
 from himari.control.runner import BackgroundRunner
-from himari.life.api import DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS, DEFAULT_WRITE_AT, LifeSettings
+from himari.life.api import DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS, DEFAULT_WRITE_AT, LifeSettings, MindModel
 from himari.life.work import next_plan
 from himari.life.worker import LifeWriter
 from himari.bootstrap.world import WEATHER_SECONDS, search_tool, topic_search
@@ -183,6 +183,7 @@ from himari.prompt.api import (
     SystemSpec,
     doing_now,
 )
+from himari.prompt.composer import Composer
 from himari.prompt.system import base_instructions
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
@@ -925,14 +926,15 @@ class Application:
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
             screens = ScreenRequests(hub) if companion else None  # V3-P91: the screen Tool's requests
+            system = SystemSpec(companion=companion, attachments=uploads_work,
+                                proactive=companion and speaking_first.enabled,
+                                documents=_documents_notes(reader, toolkit)
+                                if machine is not None else ())  # read_document is the machine's (V3-P101)
             runtime = build_runtime(provider, store=store, environments=[machine] if machine else [],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=base,  # V3-P89: the base; the sections are the Prompt module's
-                                    system=SystemSpec(companion=companion, attachments=uploads_work,
-                                                      proactive=companion and speaking_first.enabled,
-                                                      documents=_documents_notes(reader, toolkit)
-                                                      if machine is not None else ()),  # read_document is the machine's (V3-P101)
+                                    system=system,
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
@@ -1014,8 +1016,13 @@ class Application:
                                     else f"on ({found.definition.tool_id})")
         if writing is not None:  # character-life §3: a periodic job, never a Conversation's Run
             # character-work §4: the worker runs with it; no work plan in HIMARI's sleeping hours
+            # character-mind §4.1: a self run has a turn's system text (as build_runtime fills it in) and
+            # chooses its model through the application (the conversation a wake would go to)
             application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics,
-                                                 quiet=quiet_hours(speaking_first))
+                                                 quiet=quiet_hours(speaking_first), composer=Composer(),
+                                                 instructions=base, link=application,
+                                                 system=replace(system, memory=memory, turn_guidance=True,
+                                                                life=True))
             await application.life_writer.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
@@ -1041,6 +1048,19 @@ class Application:
                 ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)
         application.ticker.start()
         return application
+
+    async def mind_model(self, principal: PrincipalId) -> MindModel:
+        """character-mind §4.1 (MindLink): a self run's model — the one the principal's latest companion
+        conversation (where a wake goes) would use next, when it is checked for free wakes; else the memory
+        model, with why."""
+        recent = await self.recent_companion_conversation(principal)
+        if recent is None:
+            return MindModel(None, reason="the memory model (no companion conversation)")
+        scope = TrustedScope(principal, recent.conversation_id)
+        choice = await self.model_choice(scope)
+        if not await self.runtime.driver.free_wake_ok(scope):
+            return MindModel(None, reason=f"the memory model ({choice.model_id} is not checked for free wakes)")
+        return MindModel(choice.model_id, choice.effort, "the latest conversation's model")
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
