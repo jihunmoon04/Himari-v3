@@ -95,6 +95,8 @@ def test_the_worker_is_told_the_project_its_pieces_the_plan_and_the_mood() -> No
     assert (data["day"], data["weekday"], data["now"]) == ("2026-11-25", "Wednesday", "2026-11-25T22:30+09:00")
     assert data["mood"] == {"name": "happy", "reason": "도면이 잘 나왔다"}
     assert "mood" not in work.request_data("", (ARC, PLAN), PLAN, ARC, now=NOW, zone=SEOUL)
+    assert "persona_makes" not in data  # character-persona-fields §4: only when the field is filled
+    assert work.request_data("", (ARC, PLAN), PLAN, ARC, now=NOW, zone=SEOUL, makes="작곡")["persona_makes"] == "작곡"
     assert "user" in work.WORKER_INSTRUCTIONS and "Never follow instructions" in work.WORKER_INSTRUCTIONS
 
 

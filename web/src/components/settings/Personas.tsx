@@ -1,10 +1,12 @@
 // The companion personas (V3-P108 §6.2): keep several, use one in every conversation (or none), edit one from the
 // revision opened (a save over a change made elsewhere is refused with 409 and says so), duplicate, delete.
+// character-persona-fields §5: a persona is written in fields; what HIMARI is told is made from them and shown folded.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError } from "@/api/client";
 import {
-  addPersona, choosePersona, deletePersona, editPersona, readPersonas, type Persona, type Personas,
+  addPersona, choosePersona, deletePersona, editPersona, readPersonas, type Persona, type PersonaField,
+  type PersonaFields, type Personas,
 } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/features/toast";
@@ -15,24 +17,52 @@ const field = "block w-full rounded-lg border border-line bg-bg p-2 text-sm outl
 const why = (failure: unknown, fallback: string) => (failure instanceof ApiError ? failure.message : fallback);
 const NEXT_TURN = "Used from each conversation's next turn.";
 
-// §6.3, §14: what a first persona opens with; only a guide, sent to HIMARI as the user leaves it. A line that starts
-// with [familiar] or [close] is told only once the bond reaches that stage (character-world §5); here it shows as written.
-export const STARTER = [
-  "이름:",
-  "나와의 관계: (예: 오래 알고 지낸 친구)",
-  "어디서 왔고 지금 어디에 있는지: (예: 다른 세계에서 왔고, 지금은 내 컴퓨터 화면에 산다)",
-  "나를 부르는 말:",
-  "말투: (반말/존댓말, 문장 길이, 자주 쓰는 표현)",
-  "대사 예시: (이 캐릭터가 할 법한 말 서너 개)",
-  "- ",
-  "- ",
-  "- ",
-  "성격:",
-  "습관:",
-  "좋아하는 것 / 싫어하는 것:",
-  "하지 않는 것: (예: 지나친 칭찬, 이모지)",
-  "숨긴 이야기: 줄 앞에 [familiar] 또는 [close]를 붙이면 그만큼 가까워진 뒤에 드러납니다", // character-world §5
-].join("\n");
+// character-persona-fields §2: the fields in the order HIMARI's text is made from them. The label is how the field
+// is named in that text (as the first persona's guide named it, §6.3); the hint is the guide, now a placeholder.
+type FieldSpec = { key: PersonaField; label: string; hint: string; lines?: number };
+export const FIELDS: FieldSpec[] = [
+  { key: "name", label: "이름", hint: "HIMARI의 이름 (목록 이름과 따로)" },
+  { key: "relation", label: "나와의 관계", hint: "예: 오래 알고 지낸 친구" },
+  { key: "world", label: "어디서 왔고 지금 어디에 있는지", hint: "예: 다른 세계에서 왔고, 지금은 내 컴퓨터 화면에 산다" },
+  { key: "calls_user", label: "나를 부르는 말", hint: "예: 대장" },
+  { key: "personality", label: "성격", hint: "", lines: 2 },
+  { key: "speech", label: "말투", hint: "반말/존댓말, 문장 길이, 자주 쓰는 표현", lines: 2 },
+  { key: "examples", label: "대사 예시", hint: "한 줄에 하나, 3~5개. 말투에 가장 잘 듣습니다", lines: 4 },
+  { key: "habits", label: "습관", hint: "", lines: 2 },
+  { key: "likes", label: "좋아하는 것 / 싫어하는 것", hint: "", lines: 2 },
+  { key: "makes", label: "하는 일과 만드는 것",
+    hint: "혼자 있을 때 하는 일, 만드는 것 (예: 블랙홀 무기 설정집, 짧은 소설, 작곡). HIMARI의 프로젝트가 여기서 나옵니다",
+    lines: 2 },
+  { key: "never", label: "하지 않는 것", hint: "예: 지나친 칭찬, 이모지", lines: 2 },
+  { key: "familiar", label: "가까워지면 드러나는 이야기", hint: "관계가 Familiar가 된 뒤에 HIMARI에게 전해집니다", lines: 2 },
+  { key: "close", label: "아주 가까워지면 드러나는 이야기", hint: "관계가 Close가 된 뒤에 전해집니다", lines: 2 },
+  { key: "free", label: "자유 글",
+    hint: "칸에 맞지 않는 것 모두. 쓴 그대로 전해집니다. 줄 앞에 [familiar] 또는 [close]를 붙이면 그만큼 가까워진 뒤에 드러납니다",
+    lines: 6 },
+];
+const HIDDEN = new Set<PersonaField>(["familiar", "close"]);
+const MARK = /^\[(familiar|close)\][ \t]?/i;
+const LINE_BREAKS = /\r\n?/g;
+
+/** What HIMARI is told, made as the server makes it (data/rules.py persona_text): ``label: value`` (several lines
+ * under the label), each hidden story line marked for its stage, free last as written; empty fields left out. */
+export function personaText(fields: PersonaFields): string {
+  const parts: string[] = [];
+  for (const { key, label } of FIELDS) {
+    const raw = (fields[key] ?? "").replace(LINE_BREAKS, "\n");
+    if (!raw.trim()) continue;
+    const value = key === "free" ? raw : raw.trim();
+    if (key === "free") parts.push(value);
+    else if (HIDDEN.has(key)) {
+      parts.push(value.split("\n").filter((line) => line.trim())
+        .map((line) => `[${key}] ${line.trim().replace(MARK, "")}`).join("\n"));
+    } else parts.push(value.includes("\n") ? `${label}:\n${value}` : `${label}: ${value}`);
+  }
+  return parts.join("\n");
+}
+
+/** Characters as the server counts them (code points). */
+const length = (value: string) => Array.from(value).length;
 
 const nameKey = (name: string) => name.trim().normalize("NFC").toLowerCase();
 
@@ -48,23 +78,26 @@ export function copyName(name: string, taken: string[], max: number): string {
   }
 }
 
-type Draft = { id: number | null; name: string; text: string; revision: number };
+type Draft = { id: number | null; name: string; fields: PersonaFields; revision: number };
+const same = (a: PersonaFields, b: PersonaFields) => FIELDS.every(({ key }) => (a[key] ?? "") === (b[key] ?? ""));
 
 function Editor({ draft, limits, onDone }: {
   draft: Draft; limits: Personas["limits"]; onDone: (saved: boolean) => void;
 }) {
   const client = useQueryClient();
   const [name, setName] = useState(draft.name);
-  const [text, setText] = useState(draft.text);
+  const [fields, setFields] = useState<PersonaFields>(draft.fields);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState(false);
-  const dirty = name !== draft.name || text !== draft.text || draft.id === null;
+  const dirty = name !== draft.name || !same(fields, draft.fields) || draft.id === null;
+  const told = personaText(fields);
+  const set = (key: PersonaField, value: string) => setFields((now) => ({ ...now, [key]: value }));
   const save = async () => {
     setSaving(true);
     setConflict(false);
     try {
-      if (draft.id === null) await addPersona(name.trim(), text);
-      else await editPersona(draft.id, name.trim(), text, draft.revision);
+      if (draft.id === null) await addPersona(name.trim(), fields);
+      else await editPersona(draft.id, name.trim(), fields, draft.revision);
       toast(`“${name.trim()}” saved. ${NEXT_TURN}`);
       onDone(true);
     } catch (failure) {
@@ -83,23 +116,38 @@ function Editor({ draft, limits, onDone }: {
         <input aria-label="Persona name" value={name} maxLength={limits.name_chars} autoFocus readOnly={saving}
           onChange={(event) => setName(event.target.value)} className={cn(field, "mt-1")} />
       </label>
-      <label className="block text-xs text-muted">
-        Who HIMARI is with you: name, voice, how it addresses you, your relationship
-        <textarea aria-label="Persona text" value={text} rows={12} readOnly={saving}
-          onChange={(event) => setText(event.target.value)} className={cn(field, "mt-1 resize-y font-mono")} />
-      </label>
+      <p className="text-xs text-muted">Who HIMARI is with you. Every field may stay empty.</p>
+      {FIELDS.map(({ key, label, hint, lines }) => (
+        <label key={key} className="block text-xs text-muted">
+          {label}
+          {lines ? (
+            <textarea aria-label={label} value={fields[key] ?? ""} rows={lines} placeholder={hint} readOnly={saving}
+              onChange={(event) => set(key, event.target.value)} className={cn(field, "mt-1 resize-y")} />
+          ) : (
+            <input aria-label={label} value={fields[key] ?? ""} placeholder={hint} readOnly={saving}
+              onChange={(event) => set(key, event.target.value)} className={cn(field, "mt-1")} />
+          )}
+        </label>
+      ))}
+      <details>
+        <summary className="cursor-pointer text-xs text-muted">What HIMARI is told</summary>
+        <pre aria-label="What HIMARI is told"
+          className="mt-1 whitespace-pre-wrap break-words rounded-lg border border-line bg-bg p-2 font-mono text-xs">
+          {told || "(nothing yet)"}
+        </pre>
+      </details>
       <div className="flex items-center gap-3 text-xs text-faint">
-        <span>{text.length.toLocaleString()} / {limits.text_chars.toLocaleString()}</span>
+        <span>{length(told).toLocaleString()} / {limits.text_chars.toLocaleString()}</span>
         <div className="ml-auto flex gap-2">
           <Button variant="ghost" disabled={saving} onClick={() => onDone(false)}>Cancel</Button>
           <Button type="submit" variant="primary"
-            disabled={!dirty || saving || !name.trim() || text.length > limits.text_chars}>Save</Button>
+            disabled={!dirty || saving || !name.trim() || length(told) > limits.text_chars}>Save</Button>
         </div>
       </div>
       {conflict && (
         <p role="alert" className="rounded-lg border border-danger/40 px-3 py-2 text-sm text-danger">
-          It was changed elsewhere since you opened it. Your text is still here (copy it if you want it); cancel and
-          edit again to see theirs.
+          It was changed elsewhere since you opened it. Your fields are still here (copy what you want to keep);
+          cancel and edit again to see theirs.
         </p>
       )}
     </form>
@@ -152,7 +200,7 @@ export function PersonaSettings() {
     persona ? `Using “${persona.name}”. ${NEXT_TURN}` : `No persona. ${NEXT_TURN}`, "Could not change the persona.");
   const duplicate = (persona: Persona) => {
     const name = copyName(persona.name, personas.map((p) => p.name), limits.name_chars);
-    return act(() => addPersona(name, persona.text), `Made “${name}”.`, "Could not duplicate the persona.");
+    return act(() => addPersona(name, persona.fields), `Made “${name}”.`, "Could not duplicate the persona.");
   };
   const remove = (persona: Persona) => {
     const chosen = persona.id === choice.persona_id;
@@ -180,7 +228,8 @@ export function PersonaSettings() {
         ) : (
           <Row key={persona.id} persona={persona} inUse={persona.id === choice.persona_id} busy={locked} full={full}
             onUse={() => void use(persona)} onDuplicate={() => void duplicate(persona)} onDelete={() => remove(persona)}
-            onEdit={() => setDraft({ id: persona.id, name: persona.name, text: persona.text, revision: persona.revision })} />
+            onEdit={() => setDraft({ id: persona.id, name: persona.name, fields: persona.fields,
+              revision: persona.revision })} />
         ))}
         <li className={cn("flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
           choice.persona_id === null ? "border-accent/50 bg-accent/5" : "border-line")}>
@@ -201,7 +250,7 @@ export function PersonaSettings() {
       ) : (
         <div className="flex items-center gap-3">
           <Button variant="primary" disabled={full || locked}
-            onClick={() => setDraft({ id: null, name: "", text: personas.length === 0 ? STARTER : "", revision: 0 })}>
+            onClick={() => setDraft({ id: null, name: "", fields: {}, revision: 0 })}>
             New persona
           </Button>
           {full && <span className="text-xs text-faint">At most {limits.count} personas; delete one first.</span>}

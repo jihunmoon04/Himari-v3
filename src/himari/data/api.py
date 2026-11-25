@@ -29,6 +29,7 @@ from typing import BinaryIO, Protocol
 from himari.common import (
     MOODS,
     DeepFrozen,
+    FrozenMap,
     CallId,
     CallRef,
     ContentBlock,
@@ -911,12 +912,19 @@ class InstructionsStore(Protocol):
 MAX_PERSONAS = 20  # a principal's personas (Q6)
 MAX_PERSONA_NAME_CHARS = 40  # code points, after trimming
 MAX_PERSONA_CHARS = MAX_INSTRUCTIONS_CHARS  # a persona's text, counted as instructions are
+# character-persona-fields §2: a persona's fields, in the order its text is made from them. ``name`` (HIMARI's own
+# name, as the old starter's first line) is added to the design's 13; ``familiar`` and ``close`` are the hidden
+# stories (their lines are told from that bond stage on); ``free`` is everything else, told last and as written.
+PERSONA_FIELDS = ("name", "relation", "world", "calls_user", "personality", "speech", "examples", "habits", "likes",
+                  "makes", "never", "familiar", "close", "free")
+PERSONA_HIDDEN_FIELDS = ("familiar", "close")
 
 
 @dataclass(frozen=True)
 class Persona(DeepFrozen):
     """One of the user's companion personas. ``name`` is the user's label in
-    the list and never reaches the model; ``text`` is who HIMARI is."""
+    the list and never reaches the model; ``text`` is who HIMARI is, made from
+    ``fields`` when it is saved (character-persona-fields §3)."""
 
     persona_id: int  # per principal, never given out again
     name: str
@@ -924,6 +932,7 @@ class Persona(DeepFrozen):
     revision: int
     created_at: datetime
     updated_at: datetime
+    fields: Mapping[str, str] = FrozenMap()  # PERSONA_FIELDS' filled ones, in that order
 
 
 @dataclass(frozen=True)
@@ -950,17 +959,22 @@ class PersonaStore(Protocol):
     and unique per principal, compared trimmed, NFC and case-folded
     (DUPLICATE_IDENTITY); a text is checked as instructions are (newlines become
     ``\n``, only whitespace is no text, TOO_LARGE past MAX_PERSONA_CHARS,
-    INVALID_ARGUMENT for a control character other than newline and tab)."""
+    INVALID_ARGUMENT for a control character other than newline and tab).
+
+    character-persona-fields §3: a persona is saved from its ``fields`` (each
+    checked so, an unknown key INVALID_ARGUMENT) and its text is made from them;
+    the text alone (``fields`` None) is saved as the field ``free``."""
 
     async def list_personas(self, principal: PrincipalId) -> PersonaList:
         ...
 
-    async def create_persona(self, principal: PrincipalId, name: str, text: str) -> Persona:
+    async def create_persona(self, principal: PrincipalId, name: str, text: str,
+                             fields: Mapping[str, str] | None = None) -> Persona:
         """A new persona at revision 1. LIMIT_EXCEEDED past MAX_PERSONAS."""
         ...
 
     async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
-                             expected_revision: int) -> Persona:
+                             expected_revision: int, fields: Mapping[str, str] | None = None) -> Persona:
         """Replaces its name and text (revision + 1). NOT_FOUND, VERSION_CONFLICT."""
         ...
 

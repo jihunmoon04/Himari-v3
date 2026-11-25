@@ -16,11 +16,17 @@ export const saveInstructions = (text: string, revision: number) => put<Instruct
 export interface Persona {
   id: number;
   name: string; // the user's label in the list, never told to HIMARI
-  text: string;
+  text: string; // what HIMARI is told: made from the fields when saved (character-persona-fields §3)
+  fields: PersonaFields;
   revision: number;
   created_at: string;
   updated_at: string;
 }
+
+// character-persona-fields §2: the filled fields; a persona from before the fields is all "free"
+export type PersonaFields = Partial<Record<PersonaField, string>>;
+export type PersonaField = "name" | "relation" | "world" | "calls_user" | "personality" | "speech" | "examples" |
+  "habits" | "likes" | "makes" | "never" | "familiar" | "close" | "free";
 
 export interface PersonaChoice {
   persona_id: number | null; // null: no persona
@@ -36,9 +42,9 @@ export interface Personas {
 }
 
 export const readPersonas = () => get<Personas>("/api/personas");
-export const addPersona = (name: string, text: string) => post<Persona>("/api/personas", { name, text });
-export const editPersona = (id: number, name: string, text: string, revision: number) =>
-  put<Persona>(`/api/personas/${id}`, { name, text, revision });
+export const addPersona = (name: string, fields: PersonaFields) => post<Persona>("/api/personas", { name, fields });
+export const editPersona = (id: number, name: string, fields: PersonaFields, revision: number) =>
+  put<Persona>(`/api/personas/${id}`, { name, fields, revision });
 export const deletePersona = (id: number, revision: number) =>
   del<PersonaChoice>(`/api/personas/${id}?revision=${revision}`);
 export const choosePersona = (personaId: number | null, revision: number) =>

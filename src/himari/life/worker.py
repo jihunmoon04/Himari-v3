@@ -152,14 +152,15 @@ class LifeWriter:
         async with lock:
             return await self._work(principal)
 
-    async def _persona(self, principal: PrincipalId) -> tuple[int, str]:
-        """The chosen persona's id and text as a turn tells it (W4: at the stage as stored)."""
+    async def _persona(self, principal: PrincipalId) -> tuple[int, str, str]:
+        """The chosen persona's id and text as a turn tells it (W4: at the stage as stored), and its field
+        ``makes`` (character-persona-fields §4: what HIMARI does and makes; "" when not filled)."""
         chosen = await self._data.active_persona(principal)
         persona_id = NO_PERSONA if chosen is None else chosen.persona_id
         persona = "" if chosen is None else chosen.text
         if persona:
             persona = persona_for_stage(persona, (await self._data.bond_stage(principal, persona_id)).stage)
-        return persona_id, persona
+        return persona_id, persona, "" if chosen is None else chosen.fields.get("makes", "")
 
     async def _work(self, principal: PrincipalId) -> WriteOutcome:
         now = self._clock()
@@ -173,13 +174,13 @@ class LifeWriter:
         if await self._data.work_attempts(principal, plan.entry_id) >= ATTEMPTS_PER_DAY:
             return WriteOutcome.GAVE_UP
         project = next(e for e in entries if e.entry_id == plan.arc_id)
-        persona_id, persona = await self._persona(principal)
+        persona_id, persona, makes = await self._persona(principal)
         mood = live_mood(await self._data.read_mood(principal, persona_id), now)
         options = RequestOptions(self.settings.model_id, self.settings.reasoning_effort,
                                  provider_key=self._provider.provider_key,
                                  max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
         asked = work.model_input(work.request_data(persona, entries, plan, project, now=now, zone=self._zone,
-                                                   mood=mood), options)
+                                                   mood=mood, makes=makes), options)
         request = self._provider.prepare_native_request(asked)
         reserve = reservation(request.body, work.WORK_MAX_OUTPUT_TOKENS)
         if await self._data.life_usage(principal, self.budget_start(now)) + reserve > self.settings.daily_tokens:
@@ -254,14 +255,14 @@ class LifeWriter:
             return WriteOutcome.GAVE_UP
         start, end = day_bounds(day, self._zone)
         episodes = await self._data.find_episodes(principal, (), start=start, end=end)
-        persona_id, persona = await self._persona(principal)  # character-world §5 (W4): as a turn tells it
+        persona_id, persona, makes = await self._persona(principal)  # character-world §5 (W4): as a turn tells it
         found = None if self._weather is None else self._weather.weather_on(day)
         topics = () if self._topics is None else await self._topics.topics(day)  # §3: once a date
         options = RequestOptions(self.settings.model_id, self.settings.reasoning_effort,
                                  provider_key=self._provider.provider_key, max_output_tokens=WRITER_MAX_OUTPUT_TOKENS)
         asked = model_input(request_data(persona, entries, episodes, day=day, now=now, zone=self._zone,
                                          weather=None if found is None else found.line(), topics=topics,
-                                         quiet=self._quiet), options)
+                                         quiet=self._quiet, makes=makes), options)
         request = self._provider.prepare_native_request(asked)
         reserve = reservation(request.body)
         if await self._data.life_usage(principal, self.budget_start(now)) + reserve > self.settings.daily_tokens:

@@ -1178,28 +1178,30 @@ class InMemoryData:
     async def list_personas(self, principal: PrincipalId) -> PersonaList:
         return PersonaList(tuple(p for p, _ in self._personas_of(principal)), self._choice(principal))
 
-    async def create_persona(self, principal: PrincipalId, name: str, text: str) -> Persona:
+    async def create_persona(self, principal: PrincipalId, name: str, text: str,
+                             fields: Mapping[str, str] | None = None) -> Persona:
         name, key = rules.check_persona_name(name)
-        text = rules.check_persona_text(text)
+        kept, text = rules.check_persona_fields(text, fields)
         if len(self._personas_of(principal)) >= MAX_PERSONAS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_PERSONAS} personas")
         self._check_name_free(principal, key, None)
         persona_id = self._store.persona_ids.get(principal, 0) + 1
         self._store.persona_ids[principal] = persona_id
         now = datetime.now(UTC)
-        persona = Persona(persona_id, name, text, 1, now, now)
+        persona = Persona(persona_id, name, text, 1, now, now, kept)
         self._store.personas[(principal, persona_id)] = (persona, key)
         return persona
 
     async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
-                             expected_revision: int) -> Persona:
+                             expected_revision: int, fields: Mapping[str, str] | None = None) -> Persona:
         name, key = rules.check_persona_name(name)
-        text = rules.check_persona_text(text)
+        kept, text = rules.check_persona_fields(text, fields)
         current = self._persona(principal, persona_id)
         if expected_revision != current.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
         self._check_name_free(principal, key, current.persona_id)
-        persona = replace(current, name=name, text=text, revision=current.revision + 1, updated_at=datetime.now(UTC))
+        persona = replace(current, name=name, text=text, fields=kept, revision=current.revision + 1,
+                          updated_at=datetime.now(UTC))
         self._store.personas[(principal, current.persona_id)] = (persona, key)
         return persona
 

@@ -190,7 +190,11 @@ def test_the_input_holds_each_projects_so_far_the_plans_projects_the_days_work_a
     assert data["work"] == [{"time": "20:00", "project": "블랙홀 전자포", "title": "포신", "summary": "포신 다 그렸어."}]
     assert data["quiet_hours"] == "23:00-08:00"
     bare = request_data("", (), (), day=DAY, now=NOW, zone=SEOUL)
-    assert "work" not in bare and "quiet_hours" not in bare
+    assert "work" not in bare and "quiet_hours" not in bare and "persona_makes" not in bare
+    # character-persona-fields §4: the persona's field makes, apart, when filled; projects start out of it
+    assert request_data("", (), (), day=DAY, now=NOW, zone=SEOUL, makes="작곡")["persona_makes"] == "작곡"
+    assert "persona_makes" not in request_data("", (), (), day=DAY, now=NOW, zone=SEOUL, makes="  ")
+    assert "When persona_makes is given, start projects out of it" in WRITER_INSTRUCTIONS
     # K7: HIMARI's own memo, projects out of itself and never the user's conversations, a day of its own
     for words in ("memo", "never the project's goal again", "Never make one out of the user's conversations",
                   "when no arc is open, start one today", "a sentence or two at most", "outside quiet_hours"):

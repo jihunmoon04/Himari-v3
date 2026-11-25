@@ -20,6 +20,7 @@ from himari.data.api import (  # noqa: E402
     MAX_INSTRUCTIONS_CHARS,
     MAX_PERSONA_CHARS,
     MAX_PERSONA_NAME_CHARS,
+    PERSONA_FIELDS,
     MAX_PERSONAS,
 )
 from himari.interfaces.web import app as web  # noqa: E402
@@ -152,7 +153,8 @@ def test_personas_are_made_edited_chosen_and_deleted(server: Server) -> None:
     empty = server.client.get("/api/personas").json()
     assert empty == {"personas": [], "choice": {"persona_id": None, "revision": 0, "updated_at": None},
                      "companion": True, "limits": {"count": MAX_PERSONAS, "name_chars": MAX_PERSONA_NAME_CHARS,
-                                                   "text_chars": MAX_PERSONA_CHARS}}
+                                                   "text_chars": MAX_PERSONA_CHARS},
+                     "fields": list(PERSONA_FIELDS)}
     made = server.client.post("/api/personas", json={"name": "Teacher", "text": "Call me 선생님."}, headers=WRITE)
     assert made.status_code == 201
     teacher = made.json()
@@ -196,6 +198,24 @@ def test_personas_are_made_edited_chosen_and_deleted(server: Server) -> None:
     huge_choice = server.client.put("/api/personas/choice", json={"persona_id": 10**20, "revision": 2},
                                     headers=WRITE)
     assert (huge_choice.status_code, error_code(huge_choice)) == (404, "not_found")
+
+
+def test_a_persona_is_written_in_fields_and_read_with_them(server: Server) -> None:
+    """character-persona-fields §3: fields in, the text made from them out; text alone is the field free."""
+    server.sign_in()
+    made = server.client.post("/api/personas", json={"name": "Lucy", "fields": {
+        "name": "루시", "makes": "블랙홀 무기 설정집", "close": "세계를 구하러 왔다."}}, headers=WRITE)
+    assert made.status_code == 201
+    assert made.json()["fields"] == {"name": "루시", "makes": "블랙홀 무기 설정집", "close": "세계를 구하러 왔다."}
+    assert made.json()["text"] == "이름: 루시\n하는 일과 만드는 것: 블랙홀 무기 설정집\n[close] 세계를 구하러 왔다."
+    texted = server.client.put("/api/personas/1", json={"name": "Lucy", "text": "반말로.", "revision": 1}, headers=WRITE)
+    assert texted.json()["fields"] == {"free": "반말로."} and texted.json()["text"] == "반말로."
+    listed = server.client.get("/api/personas").json()
+    assert listed["personas"][0]["fields"] == {"free": "반말로."}
+    unknown = server.client.post("/api/personas", json={"name": "X", "fields": {"age": "17"}}, headers=WRITE)
+    assert (unknown.status_code, error_code(unknown)) == (422, "invalid_persona")
+    not_text = server.client.post("/api/personas", json={"name": "Y", "fields": {"name": 3}}, headers=WRITE)
+    assert not_text.status_code == 400  # a body out of shape, as for any other
 
 
 def test_personas_need_a_signed_in_user_and_an_allowed_origin(server: Server) -> None:
