@@ -79,6 +79,9 @@ def test_the_state_tells_the_stage_in_words_the_days_the_entries_and_todays_days
     many = tuple(entry(i, BondTag.JOKE, "x" * 300) for i in range(1, 10))
     shown = himari_bond_data(replace(BOND, entries=many, today=()))
     assert len(shown["entries"]) == BOND_ENTRY_CHARS // 300 and "today" not in shown  # type: ignore[arg-type]
+    skipped = (entry(1, BondTag.JOKE, "x" * (BOND_ENTRY_CHARS + 1)), entry(2, BondTag.JOKE, "감자 사건"))
+    shown = himari_bond_data(replace(BOND, entries=skipped, today=()))
+    assert shown["entries"] == [{"tag": "joke", "text": "감자 사건"}]  # one too long does not hide the rest
 
 
 def inputs(spec: SystemSpec, **more: object) -> PromptInputs:

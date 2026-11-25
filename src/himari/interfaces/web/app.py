@@ -134,6 +134,7 @@ from himari.data.api import (
     MAX_PERSONA_CHARS,
     MAX_PERSONA_NAME_CHARS,
     MAX_PERSONAS,
+    PERSONA_FIELDS,
     MAX_LIST_LIMIT,
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
@@ -452,7 +453,8 @@ class InstructionsBody(_Body):
 
 class PersonaBody(_Body):  # V3-P108 §6.1: the limits are Data's
     name: str
-    text: str
+    text: str = ""  # an older client's whole text: saved as the field "free" (character-persona-fields §3)
+    fields: dict[str, str] | None = None  # character-persona-fields §2: given, the text is made from them
 
 
 class PersonaEditBody(PersonaBody):
@@ -1002,8 +1004,9 @@ PAIRING_MESSAGES = {
 
 def persona_view(persona: Persona) -> dict[str, Any]:
     """V3-P108 §6.1: one of the user's personas."""
-    return {"id": persona.persona_id, "name": persona.name, "text": persona.text, "revision": persona.revision,
-            "created_at": _time(persona.created_at), "updated_at": _time(persona.updated_at)}
+    return {"id": persona.persona_id, "name": persona.name, "text": persona.text, "fields": dict(persona.fields),
+            "revision": persona.revision, "created_at": _time(persona.created_at),
+            "updated_at": _time(persona.updated_at)}
 
 
 def choice_view(choice: PersonaChoice) -> dict[str, Any]:
@@ -1018,7 +1021,8 @@ PERSONA_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.LIMIT_EXCEEDED: (409, "persona_limit", f"At most {MAX_PERSONAS} personas; delete one first."),
     DataErrorCode.TOO_LARGE: (422, "too_large", f"A persona is at most {MAX_PERSONA_CHARS:,} characters."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_persona", f"A persona needs a name of 1–{MAX_PERSONA_NAME_CHARS} "
-                                                             "characters, and no control characters."),
+                                                             "characters, only the known fields, and no control "
+                                                             "characters."),
 }
 
 
@@ -1719,13 +1723,14 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         return {"personas": [persona_view(p) for p in listed.personas], "choice": choice_view(listed.choice),
                 "companion": application.companion_enabled,
                 "limits": {"count": MAX_PERSONAS, "name_chars": MAX_PERSONA_NAME_CHARS,
-                           "text_chars": MAX_PERSONA_CHARS}}
+                           "text_chars": MAX_PERSONA_CHARS},
+                "fields": list(PERSONA_FIELDS)}  # character-persona-fields §2: in the order the text is made
 
     @app.post("/api/personas", status_code=201)
     async def add_persona(body: PersonaBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application = himari(request)
         try:
-            made = await application.data.create_persona(who, body.name, body.text)
+            made = await application.data.create_persona(who, body.name, body.text, body.fields)
         except DataError as error:
             raise persona_refused(error) from None
         await personas_changed(application, who)  # character-state §4: the apps' menus follow
@@ -1748,7 +1753,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application = himari(request)
         try:
-            edited = await application.data.update_persona(who, persona_id, body.name, body.text, body.revision)
+            edited = await application.data.update_persona(who, persona_id, body.name, body.text, body.revision,
+                                                           body.fields)
         except DataError as error:
             raise persona_refused(error) from None
         await personas_changed(application, who)  # a new name for the menus

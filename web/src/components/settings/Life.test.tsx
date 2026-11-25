@@ -41,7 +41,7 @@ vi.mock("@/features/toast", () => ({ toast: vi.fn() }));
 async function shown() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><LifeSettings /></QueryClientProvider>);
-  await screen.findByRole("region", { name: "Life" }); // read
+  await screen.findByRole("region", { name: "HIMARI" }); // read
 }
 
 const part = (name: string) => within(screen.getByRole("region", { name }));

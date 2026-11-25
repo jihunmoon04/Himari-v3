@@ -14,6 +14,7 @@ from himari.prompt.api import (
     LIFE_ABOUT,
     LIFE_DAYS_CHARS,
     LIFE_FACTS_CHARS,
+    LIFE_PLANS_CHARS,
     LIFE_RULE,
     MOOD_RULE,
     PERSONA_RULE,
@@ -67,6 +68,15 @@ def test_the_state_carries_the_facts_the_last_three_days_and_the_plans_from_toda
     assert shown is not None and len(shown["days"]) == LIFE_DAYS_CHARS // 1_000  # type: ignore[arg-type]
 
 
+def test_one_entry_too_long_for_the_room_left_is_skipped_not_the_end_of_the_list() -> None:
+    facts = (entry(1, LifeKind.FACT, "x" * 1_000), entry(2, LifeKind.FACT, "y" * 900), entry(3, LifeKind.FACT, "짧다."))
+    shown = himari_life_data(facts, NOW)
+    assert shown is not None and shown["facts"] == ["x" * 1_000, "짧다."]
+    plans = (entry(4, LifeKind.PLAN, "p" * (LIFE_PLANS_CHARS + 1), "2026-11-25"), entry(5, LifeKind.PLAN, "장 보기.", "2026-11-26"))
+    shown = himari_life_data(plans, NOW)
+    assert shown is not None and shown["plans"] == [{"date": "2026-11-26", "text": "장 보기."}]
+
+
 def inputs(spec: SystemSpec, **more: object) -> PromptInputs:
     base = PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=(), tool_executions=(), snapshot=None,
                         state_basis=PersistedStateBasis(0, 0, ()), observations={},
@@ -92,6 +102,8 @@ def test_the_companion_section_has_the_life_rule_after_the_persona_and_it_is_fre
     assert "your own life and work (himari_life)" in life
     # owner 2026-11-25: she brings up her own life freely; no daily limit
     assert "freely" in LIFE_RULE and "once a day" not in LIFE_RULE + FREE_LIFE_NOTE
+    # 2026-11-25: freely, but not in every reply; the user's own matters keep the floor
+    assert "Not in every reply" in LIFE_RULE and "stay with those" in LIFE_RULE
     assert "never make up things you did together" in LIFE_RULE
     without = "\n\n".join(system_text(inputs(SystemSpec(companion=True, proactive=True))))
     assert LIFE_RULE not in without and FREE_LIFE_NOTE not in without and "himari_life" not in without

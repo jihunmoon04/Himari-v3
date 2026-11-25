@@ -181,3 +181,47 @@ def test_an_id_that_is_not_an_int_is_not_found() -> None:
             await data.update_persona(ALICE, 999, "", "x", 1)
 
     asyncio.run(scenario())
+
+
+def test_a_persona_is_saved_from_its_fields_and_its_text_is_made_from_them() -> None:
+    """character-persona-fields §3: filled fields only, in their order; ``label: value`` lines (several lines under
+    the label), each hidden story line marked for its stage, free last as written; the same fields, the same text."""
+    async def scenario() -> None:
+        store = new_store()
+        data = data_for(store)
+        fields = {"free": "자유 글.", "speech": " 반말 ", "name": "루시", "examples": "- 왔어?\r\n- 밥은?",
+                  "familiar": "사실 해커였다.\n\n[close] 이미 표시된 줄", "close": "  세계를 구하러 왔다.", "habits": "  "}
+        made = await data.create_persona(ALICE, "Lucy", "ignored when fields are given", fields)
+        assert dict(made.fields) == {"name": "루시", "speech": "반말", "examples": "- 왔어?\n- 밥은?",
+                                     "familiar": "사실 해커였다.\n\n[close] 이미 표시된 줄",
+                                     "close": "세계를 구하러 왔다.", "free": "자유 글."}
+        assert list(made.fields) == ["name", "speech", "examples", "familiar", "close", "free"]
+        assert made.text == ("이름: 루시\n말투: 반말\n대사 예시:\n- 왔어?\n- 밥은?\n"
+                             "[familiar] 사실 해커였다.\n[familiar] 이미 표시된 줄\n[close] 세계를 구하러 왔다.\n자유 글.")
+        again = await data.update_persona(ALICE, 1, "Lucy", "", 1, dict(made.fields))
+        assert again.text == made.text and again.fields == made.fields
+        only_free = await data.update_persona(ALICE, 1, "Lucy", "", 2, {"free": "  as written \n"})
+        assert only_free.text == "  as written \n"  # free alone is the text itself (P3)
+        marked = await data.update_persona(ALICE, 1, "Lucy", "", 3, {"makes": "[close] 몰래 쓰는 일기", "speech": "- [familiar] 반말"})
+        assert marked.text == "말투:\n- [familiar] 반말\n하는 일과 만드는 것:\n[close] 몰래 쓰는 일기"  # marks at the line's start
+        texted = await data.update_persona(ALICE, 1, "Lucy", "옛 클라이언트의 글.", 4)
+        assert dict(texted.fields) == {"free": "옛 클라이언트의 글."}  # text alone: the field free
+        data = data_for(restart(store))
+        assert (await data.list_personas(ALICE)).personas == (texted,)
+
+    asyncio.run(scenario())
+
+
+def test_a_persona_with_an_unknown_field_or_too_long_a_made_text_is_refused() -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.create_persona(ALICE, "Lucy", "", {"age": "17"})
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.create_persona(ALICE, "Lucy", "", {"name": "a\x00b"})
+        with refused(DataErrorCode.TOO_LARGE):  # each fits, the text made from them does not
+            await data.create_persona(ALICE, "Lucy", "", {"world": "x" * (MAX_PERSONA_CHARS // 2),
+                                                          "free": "y" * (MAX_PERSONA_CHARS // 2)})
+        assert (await data.list_personas(ALICE)).personas == ()
+
+    asyncio.run(scenario())

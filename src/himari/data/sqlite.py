@@ -205,7 +205,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -793,12 +793,18 @@ ALTER TABLE life_entries ADD COLUMN plan_id INTEGER;
 ALTER TABLE life_entries ADD COLUMN so_far TEXT;
 ALTER TABLE life_writes ADD COLUMN plan_id INTEGER;
 """
+# v27 (character-persona-fields §3): a persona keeps its fields (a JSON object); its text is made from them when it
+# is saved. A persona from before is all one field, "free", so the text the model is told stays the same.
+_V27_ADDITIONS = """
+ALTER TABLE personas ADD COLUMN fields TEXT NOT NULL DEFAULT '{}';
+UPDATE personas SET fields=json_object('free', text) WHERE text <> '';
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
               _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS, _V25_ADDITIONS,
-              _V26_ADDITIONS)  # what each version from v3 added
+              _V26_ADDITIONS, _V27_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1253,7 +1259,8 @@ def _instructions(row: sqlite3.Row | None) -> Instructions:
 
 def _persona(row: sqlite3.Row) -> Persona:
     return Persona(row["persona_id"], row["name"], row["text"], row["revision"],
-                   datetime.fromisoformat(row["created_at"]), datetime.fromisoformat(row["updated_at"]))
+                   datetime.fromisoformat(row["created_at"]), datetime.fromisoformat(row["updated_at"]),
+                   rules.persona_fields_from_json(row["fields"]))
 
 
 def _moment(value: str | None) -> datetime | None:
@@ -2435,7 +2442,7 @@ class SqliteData:
 
     # --- PersonaStore (V3-P108 §5.2) ------------------------------------------------
 
-    _PERSONA_COLUMNS = "persona_id, name, text, revision, created_at, updated_at"
+    _PERSONA_COLUMNS = "persona_id, name, text, revision, created_at, updated_at, fields"
 
     def _read_persona(self, tx: _Tx, principal: PrincipalId, persona_id: object) -> Persona:
         row = tx.one(f"SELECT {self._PERSONA_COLUMNS} FROM personas WHERE owner=? AND persona_id=?",
@@ -2470,9 +2477,10 @@ class SqliteData:
             rows = tx.all(f"SELECT {self._PERSONA_COLUMNS} FROM personas WHERE owner=? ORDER BY persona_id", principal)
             return PersonaList(tuple(_persona(row) for row in rows), self._persona_choice(tx, principal))
 
-    async def create_persona(self, principal: PrincipalId, name: str, text: str) -> Persona:
+    async def create_persona(self, principal: PrincipalId, name: str, text: str,
+                             fields: Mapping[str, str] | None = None) -> Persona:
         name, key = rules.check_persona_name(name)
-        text = rules.check_persona_text(text)
+        kept, text = rules.check_persona_fields(text, fields)
         with self._tx() as tx:
             count = tx.one("SELECT COUNT(*) AS n FROM personas WHERE owner=?", principal)
             assert count is not None
@@ -2484,25 +2492,28 @@ class SqliteData:
             tx.execute("INSERT INTO persona_ids (owner, last_id) VALUES (?, ?)"
                        " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, persona_id)
             now = datetime.now(UTC)
-            tx.execute("INSERT INTO personas (owner, persona_id, name, name_key, text, revision, created_at, updated_at)"
-                       " VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-                       principal, persona_id, name, key, text, _timestamp(now), _timestamp(now))
-            return Persona(persona_id, name, text, 1, now, now)
+            tx.execute("INSERT INTO personas (owner, persona_id, name, name_key, text, fields, revision, created_at,"
+                       " updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                       principal, persona_id, name, key, text, rules.persona_fields_json(kept), _timestamp(now),
+                       _timestamp(now))
+            return Persona(persona_id, name, text, 1, now, now, kept)
 
     async def update_persona(self, principal: PrincipalId, persona_id: int, name: str, text: str,
-                             expected_revision: int) -> Persona:
+                             expected_revision: int, fields: Mapping[str, str] | None = None) -> Persona:
         name, key = rules.check_persona_name(name)
-        text = rules.check_persona_text(text)
+        kept, text = rules.check_persona_fields(text, fields)
         with self._tx() as tx:
             current = self._read_persona(tx, principal, persona_id)
             if expected_revision != current.revision:
                 raise DataError(DataErrorCode.VERSION_CONFLICT, f"the persona is at revision {current.revision}")
             self._check_name_free(tx, principal, key, current.persona_id)
             now = datetime.now(UTC)
-            tx.execute("UPDATE personas SET name=?, name_key=?, text=?, revision=?, updated_at=?"
+            tx.execute("UPDATE personas SET name=?, name_key=?, text=?, fields=?, revision=?, updated_at=?"
                        " WHERE owner=? AND persona_id=?",
-                       name, key, text, current.revision + 1, _timestamp(now), principal, current.persona_id)
-            return dataclasses.replace(current, name=name, text=text, revision=current.revision + 1, updated_at=now)
+                       name, key, text, rules.persona_fields_json(kept), current.revision + 1, _timestamp(now),
+                       principal, current.persona_id)
+            return dataclasses.replace(current, name=name, text=text, fields=kept, revision=current.revision + 1,
+                                       updated_at=now)
 
     async def delete_persona(self, principal: PrincipalId, persona_id: int, expected_revision: int) -> PersonaChoice:
         with self._tx() as tx:

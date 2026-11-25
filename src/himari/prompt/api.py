@@ -703,22 +703,21 @@ LIFE_READ_DAYS = timedelta(days=14)  # how far back a turn reads diaries and pla
 
 
 def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) -> dict[str, object] | None:
-    """§5: the facts in the store's order (the user's, then the newest) while
-    their text fits in LIFE_FACTS_CHARS; the newest LIFE_DAYS diaries within
+    """§5: the facts in the store's order (the user's, then the newest) that
+    fit in LIFE_FACTS_CHARS; of the newest LIFE_DAYS diaries those that fit in
     LIFE_DAYS_CHARS (newest first); the plans dated today (``now``'s date) or
-    later, soonest first, within LIFE_PLANS_CHARS; the open arcs' titles and
-    goals within LIFE_ARCS_CHARS (character-world §4) with their so far, and the work
+    later, soonest first, that fit in LIFE_PLANS_CHARS; the open arcs' titles and
+    goals with their so far that fit in LIFE_ARCS_CHARS (character-world §4), and the work
     pieces made in the last WORK_HOURS (at most WORK_SHOWN, the newest first: title,
-    summary and project; the newest also its text's first WORK_TEXT_CHARS, character-work
-    §6). None when none is shown."""
+    summary and project; the newest also its text's first WORK_TEXT_CHARS, and its summary
+    only when the text is cut, character-work §6). One too long for the room left is
+    skipped, not the end of the list. None when none is shown."""
     today = None if now is None else now.date().isoformat()
     facts: list[str] = []
     room = LIFE_FACTS_CHARS
     for entry in entries:
-        if entry.kind is not LifeKind.FACT:
-            continue
-        if len(entry.text) > room:
-            break
+        if entry.kind is not LifeKind.FACT or len(entry.text) > room:
+            continue  # one too long for what is left does not hide the shorter ones after it
         facts.append(entry.text)
         room -= len(entry.text)
     days: list[dict[str, object]] = []
@@ -727,7 +726,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
                      key=lambda e: e.day or "", reverse=True)
     for entry in diaries[:LIFE_DAYS]:
         if len(entry.text) > room:
-            break
+            continue
         days.append({"date": entry.day, "diary": entry.text})
         room -= len(entry.text)
     plans: list[dict[str, object]] = []
@@ -736,7 +735,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
                    key=lambda e: (e.day or "", e.entry_id))
     for entry in ahead:
         if len(entry.text) > room:
-            break
+            continue
         plans.append({"date": entry.day, **({"time": entry.time_of_day} if entry.time_of_day else {}),
                       "text": entry.text})
         room -= len(entry.text)
@@ -747,7 +746,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
             continue
         size = len(entry.title or "") + len(entry.text) + len(entry.so_far or "")
         if size > room:
-            break
+            continue
         arcs.append({"title": entry.title, "goal": entry.text, **({"so_far": entry.so_far} if entry.so_far else {})})
         room -= size
     titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
@@ -756,7 +755,8 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
                     key=lambda e: (e.created_at, e.entry_id), reverse=True)[:WORK_SHOWN]
     work: list[dict[str, object]] = []
     for index, entry in enumerate(pieces):
-        item: dict[str, object] = {"title": entry.title, "summary": entry.summary}
+        whole = index == 0 and len(entry.text) <= WORK_TEXT_CHARS
+        item: dict[str, object] = {"title": entry.title, **({} if whole else {"summary": entry.summary})}
         if entry.arc_id in titles:
             item["project"] = titles[entry.arc_id]
         if entry.day:
@@ -821,13 +821,13 @@ BOND_ENTRY_CHARS = 1_000  # the entries the state carries: names and promises fi
 
 def himari_bond_data(bond: BondSnapshot) -> dict[str, object]:
     """§5: the stage in words, the days together since the first conversation,
-    the entries in list_bond's order (names, promises, the rest) while their
-    text fits in BOND_ENTRY_CHARS, and today's anniversaries by name."""
+    the entries in list_bond's order (names, promises, the rest) that fit in
+    BOND_ENTRY_CHARS (one too long is skipped), and today's anniversaries by name."""
     entries: list[dict[str, object]] = []
     room = BOND_ENTRY_CHARS
     for entry in bond.entries:
         if len(entry.text) > room:
-            break
+            continue
         item: dict[str, object] = {"tag": None if entry.tag is None else entry.tag.value, "text": entry.text}
         if entry.month_day:
             item["date"] = entry.month_day
@@ -1033,7 +1033,8 @@ LIFE_RULE = (
     "about you, your last few days, your plans and what runs through your weeks (arcs). After the persona, keep to "
     "it and never contradict it; what "
     "you add about yourself as you talk must fit it. Answer from it when asked about yourself, and bring up your "
-    "own day, plans and likes freely whenever it fits: in a greeting, when you speak first, or as you talk. "
+    "own day, plans and likes freely when it fits: in a greeting, when you speak first, or when it connects to "
+    "what they said. Not in every reply, though: when they are talking about their own matters, stay with those. "
     "himari_life.work is what you made lately in your projects: you may share it or show it off, but do not read "
     "it out at length unless they ask. "
     "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "

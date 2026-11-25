@@ -337,7 +337,7 @@ test("settings: instructions kept, notes added, edited and deleted, the Tool ser
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Instructions" })).toHaveValue("Answer briefly.");
 
-  await page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: "Memory" }).click();
+  await page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: "You and HIMARI" }).click();
   const fresh = page.getByRole("form", { name: "New note" });
   await fresh.getByLabel("Note").fill("The user drinks coffee.");
   await fresh.getByRole("button", { name: "Add note" }).click();

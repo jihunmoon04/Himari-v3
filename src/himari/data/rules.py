@@ -6,11 +6,14 @@ import dataclasses
 from datetime import date, datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
+import re
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
-from himari.common import ContentBlock, TextBlock, split_marks, tool_id_problem
+from himari.common import ContentBlock, FrozenMap, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
+    PERSONA_FIELDS,
+    PERSONA_HIDDEN_FIELDS,
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
     MAX_OPEN_ARCS,
@@ -169,6 +172,75 @@ def check_instructions(scope: object, text: object) -> str:
 def check_persona_text(text: object) -> str:
     """V3-P108 §4.1: a persona's text, checked as instructions are."""
     return _long_text(text, "a persona's text", MAX_PERSONA_CHARS)
+
+
+# character-persona-fields §3: how a field is named in the text the model is told (as the old starter named it).
+PERSONA_LABELS = {
+    "name": "이름", "relation": "나와의 관계", "world": "어디서 왔고 지금 어디에 있는지", "calls_user": "나를 부르는 말",
+    "personality": "성격", "speech": "말투", "examples": "대사 예시", "habits": "습관",
+    "likes": "좋아하는 것 / 싫어하는 것", "makes": "하는 일과 만드는 것", "never": "하지 않는 것",
+}
+_HIDDEN_MARK = re.compile(r"^\[(familiar|close)\][ \t]?", re.IGNORECASE)
+# A value that starts as a hidden line does (prompt/api.py HIDDEN_LINE): put after "label: " its mark would be told
+# from the first stage on, so it goes under its label instead (review).
+_MARKED_START = re.compile(r"(?:[-*•][ \t]*)?\[(familiar|close)\]", re.IGNORECASE)
+
+
+def persona_text(fields: Mapping[str, str]) -> str:
+    """§3: the text the model is told, made from checked fields in PERSONA_FIELDS' order: ``label: value`` (a
+    value of several lines under its label), each line of a hidden story marked ``[familiar]`` or ``[close]``
+    (so persona_for_stage hides it until that stage), and ``free`` last as written. The same fields always
+    make the same text; only ``free`` makes the text ``free`` itself."""
+    parts: list[str] = []
+    for key in PERSONA_FIELDS:
+        value = fields.get(key, "")
+        if not value:
+            continue
+        if key == "free":
+            parts.append(value)
+        elif key in PERSONA_HIDDEN_FIELDS:
+            parts.append("\n".join(f"[{key}] " + _HIDDEN_MARK.sub("", line.strip())
+                                   for line in value.split("\n") if line.strip()))
+        elif "\n" in value or _MARKED_START.match(value):  # a marked line keeps its mark at the line's start
+            parts.append(f"{PERSONA_LABELS[key]}:\n{value}")
+        else:
+            parts.append(f"{PERSONA_LABELS[key]}: {value}")
+    return "\n".join(parts)
+
+
+def check_persona_fields(text: object, fields: object) -> tuple[FrozenMap[str, str], str]:
+    """§3: the fields as stored (filled ones only, in PERSONA_FIELDS' order) and the text made from them, or
+    why not. ``fields`` None saves ``text`` as the field ``free`` (an older client, and the upgrade)."""
+    if fields is None:
+        free = check_persona_text(text)
+        return FrozenMap({"free": free} if free else {}), free
+    if not isinstance(fields, Mapping) or not all(isinstance(k, str) for k in fields):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a persona's fields must be an object of texts")
+    unknown = sorted(set(fields) - set(PERSONA_FIELDS))
+    if unknown:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"a persona has no field {unknown[0]!r}")
+    kept: dict[str, str] = {}
+    for key in PERSONA_FIELDS:
+        value = _long_text(fields.get(key, ""), f"a persona's {key}", MAX_PERSONA_CHARS)
+        if key != "free":
+            value = value.strip()  # free is told as written (§3: an upgraded persona's text stays the same)
+        if value:
+            kept[key] = value
+    made = persona_text(kept)
+    if len(made) > MAX_PERSONA_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"a persona's text may be at most {MAX_PERSONA_CHARS} characters")
+    return FrozenMap(kept), made
+
+
+def persona_fields_json(fields: Mapping[str, str]) -> str:
+    """How a store keeps the fields: a JSON object in PERSONA_FIELDS' order."""
+    return json.dumps({k: fields[k] for k in PERSONA_FIELDS if k in fields}, ensure_ascii=False)
+
+
+def persona_fields_from_json(raw: str | None) -> FrozenMap[str, str]:
+    """The stored fields back (a row from before v27's column filled: none)."""
+    loaded = json.loads(raw) if raw else {}
+    return FrozenMap({k: loaded[k] for k in PERSONA_FIELDS if isinstance(loaded.get(k), str) and loaded[k]})
 
 
 def check_persona_name(name: object) -> tuple[str, str]:

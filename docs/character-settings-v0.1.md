@@ -42,3 +42,12 @@
 | S1 | 설정을 HIMARI(대화 밖)와 You and HIMARI(대화에서)로 나눈다 |
 | S2 | 메모는 없애지 않고 You and HIMARI의 "What HIMARI remembers about you"로 옮긴다 |
 | S3 | Timeline은 Moments together에 합친다 |
+
+## 5. 구현에서 정한 것 (2026-11-26, H-83, 배포 전)
+
+- **Web만 바꿨다.** 서버와 API는 그대로다(일화 고치기·지우기는 이미 있던 `/api/episodes`로 충분했다).
+- 설정 순서: Instructions, Personas, **HIMARI**(`/settings/himari`), **You and HIMARI**(`/settings/together`), Devices, Tool servers. 옛 `/settings/life`·`/settings/memory`는 새 자리로 바꿔 보낸다. 사이드바 메뉴도 같다.
+- **HIMARI**: 지금의 Life 화면에서 Bond를 뺐다. 묶음 순서는 Work, Arcs, Plans, Facts, Diary.
+- **You and HIMARI**: 함께한 날·오늘의 기념일·Stage, Settled between you, **What HIMARI remembers about you**(메모와 Suggestions, "Every persona shares them"), **Moments together**.
+- **Moments together**는 일화를 `/api/episodes`로 한 쪽(30개)씩 읽어 관계 항목과 시간순(최신 먼저, 일화는 API가 쪽을 나누는 대로 끝난 때)으로 섞는다. 더 읽을 쪽이 있으면 관계 항목은 읽은 일화 가운데 가장 오래된 것까지만 보인다("Show more"로 이어짐). 일화는 여기서 고치고 지우며, 관계 항목은 위 Settled between you에서 고친다. `/api/bond`의 `memories`는 Web이 더는 쓰지 않는다.
+- 관계를 읽지 못해도 메모와 Moments together는 보이고, 관계를 다시 읽어도 그 둘은 다시 그려지지 않는다(쓰던 글이 남음).

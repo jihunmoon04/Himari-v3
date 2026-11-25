@@ -1,11 +1,12 @@
-// Settings (V3-P102 W6c): one page, a section per kind, chosen on the left (above on a phone).
-import { NavLink, useParams } from "react-router";
+// Settings (V3-P102 W6c): one page, a section per kind, chosen on the left (above on a phone). character-settings §2:
+// what HIMARI remembers is split by where it came from — HIMARI (its own life, apart from the user) and You and HIMARI
+// (from talking with the user: the bond, the notes about the user, the moments together).
+import { Navigate, NavLink, useParams } from "react-router";
 import { PageHeader } from "@/components/Shell";
 import { BondSettings } from "@/components/settings/Bond";
 import { DevicesSettings } from "@/components/settings/Devices";
 import { InstructionsSettings } from "@/components/settings/Instructions";
 import { LifeSettings } from "@/components/settings/Life";
-import { MemorySettings } from "@/components/settings/Memory";
 import { PersonaSettings } from "@/components/settings/Personas";
 import { ToolServerSettings } from "@/components/settings/ToolServers";
 import { cn } from "@/lib/cn";
@@ -13,15 +14,19 @@ import { cn } from "@/lib/cn";
 const SECTIONS = [
   { id: "instructions", label: "Instructions", body: <InstructionsSettings /> },
   { id: "personas", label: "Personas", body: <PersonaSettings /> },
-  // character-bond §1: the bond with the persona in use, under its life
-  { id: "life", label: "Life", body: <div className="space-y-10"><LifeSettings /><BondSettings /></div> },
-  { id: "memory", label: "Memory", body: <MemorySettings /> },
+  { id: "himari", label: "HIMARI", body: <LifeSettings /> },
+  { id: "together", label: "You and HIMARI", body: <BondSettings /> },
   { id: "devices", label: "Devices", body: <DevicesSettings /> },
   { id: "tools", label: "Tool servers", body: <ToolServerSettings /> },
 ] as const;
 
+// character-settings §2: where the sections before it went
+const MOVED: Record<string, string> = { life: "himari", memory: "together" };
+
 export function Settings() {
   const section = useParams().section ?? "instructions";
+  const moved = Object.hasOwn(MOVED, section) ? MOVED[section] : undefined; // not /settings/constructor (review)
+  if (moved) return <Navigate to={`/settings/${moved}`} replace />;
   const shown = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
   return (
     <>

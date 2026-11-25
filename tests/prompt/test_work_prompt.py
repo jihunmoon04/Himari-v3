@@ -43,10 +43,11 @@ def test_the_state_carries_the_projects_so_far_and_the_newest_two_pieces_of_two_
     assert life is not None
     assert life["arcs"] == [{"title": "블랙홀 전자포", "goal": "설정집 한 권", "so_far": "포신과 냉각부까지."}]
     assert life["work"] == [
-        {"title": "조각 6", "summary": "요약 6", "project": "블랙홀 전자포", "date": "2026-11-25", "text": "본문"},
+        {"title": "조각 6", "project": "블랙홀 전자포", "date": "2026-11-25", "text": "본문"},  # whole: no summary
         {"title": "조각 5", "summary": "요약 5", "project": "블랙홀 전자포", "date": "2026-11-25"}]
     first = himari_life_data((ARC, piece(5, 2, long)), NOW)
     assert first is not None and first["work"][0]["text"] == "가" * WORK_TEXT_CHARS + "…"  # type: ignore[index]
+    assert first["work"][0]["summary"] == "요약 5"  # type: ignore[index]  # cut: the summary tells the rest
     assert himari_life_data((piece(3, 49),), NOW) is None  # older than two days: nothing to show
     assert "himari_life.work" in LIFE_RULE and "do not read it out at length unless they ask" in LIFE_RULE
 

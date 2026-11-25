@@ -73,7 +73,8 @@ WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 
 WRITER_INSTRUCTIONS = (
     "You write the private life of HIMARI, a companion character, one day at a time. The user message is JSON data "
-    "from the system: who HIMARI is (persona), the facts already settled about HIMARI (facts), its last diaries "
+    "from the system: who HIMARI is (persona; persona_makes, when given, is the part of it about what HIMARI does "
+    "and makes), the facts already settled about HIMARI (facts), its last diaries "
     "(recent_days), its plans ahead (plans), its projects under way (arcs), the pieces of work it made that day "
     "(work), what HIMARI did with the user that day (episodes, from real conversations), the date (day, weekday, "
     "season, now), HIMARI's sleeping hours (quiet_hours) and, when known, the weather where the user lives that "
@@ -102,7 +103,8 @@ WRITER_INSTRUCTIONS = (
     "without an opinion, or leave them out; never state as fact any detail a title does not give.\n"
     "Arcs are HIMARI's projects: things it makes itself over weeks, out of who it is (the persona's identity, "
     "world, likes and what it does) — a setting book, a serial story, a series of paintings, a game's play log, "
-    "song notes, a recipe notebook; fanciful is fine. Never make one out of the user's conversations. Each has a "
+    "song notes, a recipe notebook; fanciful is fine. When persona_makes is given, start projects out of it. "
+    "Never make one out of the user's conversations. Each has a "
     "short, natural title (a few words, at most "
     f"{MAX_ARC_TITLE_CHARS} characters) and a plain one-line goal; so_far is where it stands, written as the work "
     "is done (never by you). Make at most one arc move a day: when no arc is open, start one today; else start "
@@ -137,13 +139,15 @@ def season(day: date) -> str:
 
 def request_data(persona: str, entries: Sequence[LifeEntry], episodes: Sequence[RecentEpisode], *, day: date,
                  now: datetime, zone: tzinfo, weather: str | None = None,
-                 topics: Sequence[str] = (), quiet: tuple[time, time] | None = None) -> dict[str, JsonValue]:
+                 topics: Sequence[str] = (), quiet: tuple[time, time] | None = None,
+                 makes: str = "") -> dict[str, JsonValue]:
     """§3: the writer's input, as JSON data. ``entries``: the persona's life as
     listed (facts first); ``episodes``: those that ended on ``day``, oldest first.
     character-world §2–§4: the open arcs (each with the latest days a diary moved
     it), and, when given, the weather line and the topic titles. character-work §5:
     each open arc's so far, the plans' projects, the day's work pieces (title and
-    summary) and the quiet hours."""
+    summary) and the quiet hours. character-persona-fields §4: the persona's field
+    ``makes`` as persona_makes, when filled."""
     written = day.isoformat()
     facts: list[JsonValue] = []
     room = WRITER_FACT_CHARS
@@ -175,6 +179,7 @@ def request_data(persona: str, entries: Sequence[LifeEntry], episodes: Sequence[
         world["topics"] = list(topics)
     return {
         "persona": persona.strip() or DEFAULT_PERSONA,
+        **({"persona_makes": makes} if makes.strip() else {}),
         "facts": facts,
         "recent_days": [{"date": e.day, "diary": e.text} for e in reversed(diaries)],
         "plans": [{"date": e.day, **({"time": e.time_of_day} if e.time_of_day else {}), "text": e.text,

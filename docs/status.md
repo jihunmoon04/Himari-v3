@@ -18,7 +18,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 지금 동작하는 기능
 
 - **대화와 실행:** Run = LLM 호출 1회, 한 턴은 `HIMARI_MAX_RUNS`(기본 12)에서 멈추고 Continue로 잇는다. 취소, 문맥 압축(자동·수동), 대화별 모델·추론 강도, OpenRouter 스트리밍, 원본 요청·응답 보존. 묻는 것은 답의 글로 한다. → [control-prompt-provider](control-prompt-provider-v0.1.md), [conversation-model](conversation-model-v0.1.md), [streaming](streaming-v0.1.md)
-- **Data:** SQLite(WAL) 하나, 스키마 v26, 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
+- **Data:** SQLite(WAL) 하나, 스키마 v26(이 브랜치는 v27), 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
 - **프롬프트:** 캐시 우선 순서, 반려 켬/끔 두 바탕 글, "지시는 시스템 글과 사용자 메시지뿐" 원칙, Current State(지금 시각·기기·활동·기억), 작업 진행 줄. → [prompt-composition](prompt-composition.md), [prompt-cleanup](prompt-cleanup-v0.1.md), [interface-capabilities](interface-capabilities-v0.1.md), [work-progress](work-progress-v0.1.md)
 - **파일:** 대화 폴더(`<데이터 폴더>/conversations/<id>`) 안에서만 읽고 쓰는 파일 Tool, 올리기·내려받기와 `present_file`, 이미지 입력, `read_document`(PDF·DOCX·XLSX·PPTX·HWPX, server sandbox). → [server-slim](server-slim-v0.1.md), [file-upload-download](file-upload-download-v0.1.md), [images](images-v0.1.md), [documents](documents-v0.1.md)
 - **MCP:** Streamable HTTP 서버, 허용 목록의 Tool, 대화별 켬/끔과 Settings의 기본값, 서버 안내문·리소스 Tool·`/` 프롬프트. → [mcp-context](mcp-context-v0.1.md), [mcp-defaults](mcp-defaults-v0.1.md)
@@ -31,6 +31,9 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 - **상태(2026-11-25 배포, H-79. 앱의 페르소나 메뉴는 앱을 다시 빌드해야 들어간다):** 페르소나별로 이어지는 기분(답의 마지막 비중립 표정 또는 작가의 그날 끝 기분과 까닭, 6시간 뒤 흐려짐), 하루 리듬(자는 시간 = 먼저 말 걸기의 조용한 시간, 작가가 일정에 시각을 붙이고 90분 안의 일정이 지금 하는 일), runtime state `himari_mood`·`himari_now`와 `MOOD_RULE`, 앱 연결 때 시작 표정(`mood` 사건), 캐릭터 우클릭 메뉴의 "페르소나"(기기 토큰 예외 둘, `persona` 사건으로 다른 기기·Web이 따라감). 기분·지금 하는 일은 삶과 함께 켜지고 꺼진다. → [character-state](character-state-v0.1.md)
 - **세계(2026-11-25 배포, H-80):** 사용자 쪽 날씨(`HIMARI_LOCATION`, Open-Meteo, 3시간마다 메모리로. 운영에는 아직 설정하지 않아 꺼져 있다)를 작가 입력과 runtime state `world`에, 그날 화제 제목 5개(MCP 검색 Tool, 하루 한 번, 작가에게만, `HIMARI_LIFE_TOPICS=0`으로 끔), 몇 주짜리 줄거리(삶 항목 `arc`, 열린 것 2개까지, 작가의 `arc` 움직임 하루 하나, `himari_life.arcs`, Life 화면의 Arcs), 숨긴 뒷이야기(페르소나 줄머리 `[familiar]`·`[close]`는 관계 단계가 되면 다음 턴부터). → [character-world](character-world-v0.1.md)
 - **작업(2026-11-25 배포, H-81):** 줄거리가 곧 프로젝트("지금까지" 600자), 작가가 작업 일정에 프로젝트를 붙이고(`plans[].arc`), 작업 시간이 끝나면 작업자(작가와 같은 주기 작업·모델·예산)가 프로젝트의 조각(삶 항목 `work`: 제목·글·한 줄 요약)을 남김, 작가 말투·재료 고침(HIMARI의 메모, 사용자 대화로 프로젝트를 만들지 않음, 일기는 HIMARI의 하루 중심), `himari_life.work`, 새 계기 `work_done`, 자유 wake는 "컴퓨터 앞 + 마지막으로 말한 때에서 30분", 답 없는 wake 하나는 2시간, Settings → Life의 Work 묶음. 스키마 v26. → [character-work](character-work-v0.1.md)
+- **페르소나 항목(2026-11-26 구현, 배포 전, H-82):** 페르소나를 14칸(이름·관계·세계·부르는 말·성격·말투·대사 예시·습관·좋아하는 것·하는 일과 만드는 것·하지 않는 것·숨긴 이야기 둘·자유 글)으로 쓰고, 모델이 보는 글은 저장할 때 칸에서 만든다. 지금 페르소나는 `free` 하나로 옮겨 글이 그대로다. 작가·작업자에 `persona_makes`. 스키마 v27. → [character-persona-fields](character-persona-fields-v0.1.md)
+- **설정 나누기(2026-11-26 구현, 배포 전, H-83):** Web 설정의 Life·Memory를 HIMARI와 You and HIMARI로 나누고, 메모는 "What HIMARI remembers about you", Timeline은 Moments together로 합쳤다. Web만. → [character-settings](character-settings-v0.1.md)
+- **대화 프롬프트 고침(2026-11-26, 배포 전):** `LIFE_RULE`은 자유롭게 꺼내되 "매 답마다는 아니고, 사용자가 자기 이야기를 할 땐 그 이야기에 머문다", 상한에 안 맞는 긴 정사·일기·일정·줄거리·관계 항목 하나가 뒤의 것을 막지 않음, 글 전체가 보이는 최신 조각은 요약을 빼고 보낸다.
 - **Web·CLI:** React Web(대화, 설정, 휴지통, `/` 프롬프트, 초안 보존), CLI는 `himari proactive`·`himari memory`만. → [web-console](web-console-v0.1.md) §4·§7(hub 부분 제외)
 
 ## 운영
@@ -71,11 +74,11 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 4. **상태와 몸:** 이어지는 기분, 하루 리듬, 앱에서 페르소나 바꾸기. **2026-11-25 배포(앱은 다시 빌드해야 함), 써 보기가 남음**([character-state](character-state-v0.1.md)). 이벤트 그림·애니메이션, 페르소나별 그림은 그림이 생기면 한다.
 5. **세계:** 날씨·화제, 몇 주짜리 줄거리, 숨긴 뒷이야기. **2026-11-25 배포(날씨는 위치 설정 전까지 꺼짐), 써 보기가 남음**([character-world](character-world-v0.1.md)).
 
-로드맵 1~6단계가 모두 2026-11-25 배포되었다(v21 → v26). 7·8단계는 설계만 했다. 다음은 소유자가 써 보며 고치기다.
+로드맵 1~6단계가 모두 2026-11-25 배포되었다(v21 → v26). 7·8단계는 2026-11-26 구현했고 배포 전이다(v27). 다음은 배포와 소유자가 써 보며 고치기다.
 
-6. **작업:** 프로젝트·작업자·조각, `work_done`, 자유 wake와 답 없는 wake 고침, 작가 고침. **2026-11-25 배포(v26)**([character-work](character-work-v0.1.md)). 7·8단계는 설계만 있다.
-7. **페르소나 항목:** 설계만([character-persona-fields](character-persona-fields-v0.1.md)).
-8. **설정 나누기:** 설계만([character-settings](character-settings-v0.1.md)).
+6. **작업:** 프로젝트·작업자·조각, `work_done`, 자유 wake와 답 없는 wake 고침, 작가 고침. **2026-11-25 배포(v26)**([character-work](character-work-v0.1.md)).
+7. **페르소나 항목:** 14칸, 저장할 때 글을 만듦, `persona_makes`. **2026-11-26 구현, 배포 전(v27)**([character-persona-fields](character-persona-fields-v0.1.md)).
+8. **설정 나누기:** HIMARI와 You and HIMARI, Timeline을 Moments together에. **2026-11-26 구현, 배포 전(Web만)**([character-settings](character-settings-v0.1.md)).
 
 **그 밖**(순서는 정하지 않았다):
 

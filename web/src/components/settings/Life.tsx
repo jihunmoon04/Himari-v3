@@ -253,8 +253,8 @@ export function LifeSettings() {
   const kept = entries.filter((entry) => entry.kind === "fact");
   const full = kept.length >= limits.facts && kept.every((entry) => entry.origin === "user");
   return (
-    <section className="space-y-4" aria-label="Life">
-      <h2 className="text-base font-semibold">Life</h2>
+    <section className="space-y-4" aria-label="HIMARI">
+      <h2 className="text-base font-semibold">HIMARI</h2>
       <p className="text-sm text-muted">
         <span className="font-medium text-ink">{persona ? `${persona.name}'s life` : "Default (no persona)"}</span>.
         HIMARI lives it apart from you: the facts it has settled about itself, the arcs it follows over weeks, its
@@ -280,15 +280,15 @@ export function LifeSettings() {
           {now && (now.doing ? `Doing: ${now.doing}${now.since ? ` (from ${now.since})` : ""}` : "Asleep")}
         </p>
       )}
+      <Group title="Work" note="what HIMARI makes for its projects, a piece at each work plan"
+        empty="No projects yet.">{projectBlocks}</Group>
+      <Group title="Arcs" note="the story writer starts, carries on and ends them; at most 2 open"
+        empty="No arcs yet.">{rows("arc")}</Group>
+      <Group title="Plans" empty="No plans.">{rows("plan")}</Group>
       <Group title="Facts" note={`${facts.length} of ${limits.facts}`} empty="No facts yet."
         top={<AddFact personaId={persona?.id ?? null} full={full} max={limits.chars} />}>
         {facts}
       </Group>
-      <Group title="Arcs" note="the story writer starts, carries on and ends them; at most 2 open"
-        empty="No arcs yet.">{rows("arc")}</Group>
-      <Group title="Work" note="what HIMARI makes for its projects, a piece at each work plan"
-        empty="No projects yet.">{projectBlocks}</Group>
-      <Group title="Plans" empty="No plans.">{rows("plan")}</Group>
       <Group title="Diary" empty="No diary yet.">{rows("diary")}</Group>
     </section>
   );
