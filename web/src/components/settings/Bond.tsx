@@ -1,15 +1,18 @@
-// The bond (character-bond §1): for the persona in use (or the default), what is really settled between the user and
-// HIMARI — names, promises, jokes, firsts and days to mark — how close the two are (the stage, which the owner may set
-// up or down) and the moments together (the bond's entries with the conversations' episodes, newest first). Entries
-// are added, edited from the revision opened (a save over a change made elsewhere is refused with 409 and says so) and
-// deleted (they retire: no undo). The app never shows any of it.
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+// You and HIMARI (character-settings §2): what HIMARI remembers from talking with the user. The bond
+// (character-bond §1), for the persona in use (or the default): what is really settled between the user and HIMARI —
+// names, promises, jokes, firsts and days to mark — and how close the two are (the stage, which the owner may set up
+// or down). Entries are added, edited from the revision opened (a save over a change made elsewhere is refused with
+// 409 and says so) and deleted (they retire: no undo). Then what HIMARI remembers about the user (the notes, shared by
+// every persona), and the moments together: the conversations' episodes (edited and deleted here, S3) with the bond's
+// entries, newest first. The app never shows any of it.
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError } from "@/api/client";
 import {
-  addBond, BOND_STAGES, BOND_TAGS, deleteBond, editBond, readBond, setBondStage, type Bond, type BondEntry,
-  type BondStage, type BondTag,
+  addBond, BOND_STAGES, BOND_TAGS, deleteBond, editBond, readBond, readEpisodes, setBondStage, type Bond,
+  type BondEntry, type BondStage, type BondTag, type Episode,
 } from "@/api/settings";
+import { EpisodeRow, RememberedAboutYou } from "@/components/settings/Memory";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
@@ -142,22 +145,52 @@ function Stage({ bond, onChanged }: { bond: Bond; onChanged: () => void }) {
   );
 }
 
-function Moments({ bond }: { bond: Bond }) {
+type Moment = { at: number; episode: Episode; entry?: undefined } | { at: number; entry: BondEntry; episode?: undefined };
+
+/** The moments together, newest first: the conversations' episodes, read a page at a time (edited and deleted here,
+ * character-settings S3), with the bond's entries (edited above) as far back as the episodes read so far go. */
+export function momentsOf(episodes: Episode[], entries: BondEntry[], more: boolean): Moment[] {
+  const oldest = episodes.length ? Date.parse(episodes[episodes.length - 1]!.started_at) : null;
+  const moments: Moment[] = [
+    ...episodes.map((episode) => ({ at: Date.parse(episode.started_at), episode })),
+    ...entries.map((entry) => ({ at: Date.parse(entry.created_at), entry }))
+      .filter((m) => !more || oldest === null || m.at >= oldest),
+  ];
+  return moments.sort((a, b) => b.at - a.at);
+}
+
+function Moments({ entries, onChanged }: { entries: BondEntry[]; onChanged: () => void }) {
+  const client = useQueryClient();
+  const pages = useInfiniteQuery({
+    queryKey: ["settings", "episodes"],
+    queryFn: ({ pageParam }) => readEpisodes(pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next ?? undefined,
+  });
+  const episodes = pages.data?.pages.flatMap((p) => p.episodes) ?? [];
+  const moments = momentsOf(episodes, entries, pages.hasNextPage);
+  const changed = () => { void client.invalidateQueries({ queryKey: ["settings", "episodes"] }); onChanged(); };
   return (
     <section className="space-y-2" aria-label="Moments together">
       <h3 className="text-sm font-semibold">Moments together</h3>
-      {bond.memories.length ? (
-        <ul className="space-y-2">
-          {bond.memories.map((m) => (
-            <li key={`${m.kind}-${m.id}`} className="rounded-lg border border-line px-3 py-2 text-sm">
-              <p className="text-xs text-faint">
-                {localDay(m.at)} · {m.kind === "bond" ? TAG_NAMES[m.tag] : (m.title || "A conversation")}
-              </p>
-              <p className="mt-1 whitespace-pre-wrap break-words">{m.text}</p>
+      <p className="text-xs text-faint">What you did together in each conversation, with what the two of you settled.</p>
+      {pages.isLoading && <p className="text-sm text-faint">Loading…</p>}
+      {pages.error && <p role="alert" className="text-sm text-danger">Could not read the conversations' moments.</p>}
+      {moments.length ? (
+        <ul className="space-y-2" aria-label="Moments">
+          {moments.map((m) => m.episode ? <EpisodeRow key={`e${m.episode.id}`} episode={m.episode} onChanged={changed} /> : (
+            <li key={`b${m.entry.id}`} className="rounded-lg border border-line px-3 py-2 text-sm">
+              <p className="text-xs text-faint">{localDay(m.entry.created_at)} · {TAG_NAMES[m.entry.tag]}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words">{m.entry.text}</p>
             </li>
           ))}
         </ul>
-      ) : <p className="text-sm text-faint">Nothing yet.</p>}
+      ) : !pages.isLoading && <p className="text-sm text-faint">Nothing yet.</p>}
+      {pages.hasNextPage && (
+        <Button variant="ghost" disabled={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}>
+          {pages.isFetchingNextPage ? "Loading…" : "Show more"}
+        </Button>
+      )}
     </section>
   );
 }
@@ -169,7 +202,16 @@ export function BondSettings() {
   const [busy, setBusy] = useState(false);
   const refresh = () => void client.invalidateQueries({ queryKey: KEY });
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
-  if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read the bond.</p>;
+  if (query.error || !query.data) {
+    return ( // the notes and the conversations' moments do not hang on the bond
+      <section className="space-y-4" aria-label="You and HIMARI">
+        <h2 className="text-base font-semibold">You and HIMARI</h2>
+        <p role="alert" className="text-sm text-danger">Could not read the bond.</p>
+        <RememberedAboutYou />
+        <Moments entries={[]} onChanged={refresh} />
+      </section>
+    );
+  }
   const bond = query.data;
   const { persona, enabled, entries, limits } = bond;
   const add = async (tag: BondTag, text: string, monthDay: string | null) => {
@@ -222,12 +264,13 @@ export function BondSettings() {
   const locked = busy || open !== null; // while an entry is open, nothing else may change under its unsaved text
   const full = entries.length >= limits.entries && entries.every((e) => e.origin === "user");
   return (
-    <section className="space-y-4" aria-label="Bond">
-      <h2 className="text-base font-semibold">Bond</h2>
+    <section className="space-y-4" aria-label="You and HIMARI">
+      <h2 className="text-base font-semibold">You and HIMARI</h2>
       <p className="text-sm text-muted">
         <span className="font-medium text-ink">{persona ? `${persona.name} and you` : "Default (no persona) and you"}</span>.
-        {" "}What the two of you have really settled — what you call each other, promises, jokes, firsts and days to
-        mark — and how close you are. Each persona has its own. The app never shows it. {NEXT_TURN}
+        {" "}What HIMARI remembers from talking with you. What the two of you have really settled — what you call each
+        other, promises, jokes, firsts and days to mark — and how close you are is each persona's own. The app never
+        shows it. {NEXT_TURN}
       </p>
       {bond.since && (
         <p className="text-sm">Together {bond.together_days.toLocaleString()} days, since {bond.since}.</p>
@@ -265,7 +308,8 @@ export function BondSettings() {
           </ul>
         ) : <p className="text-sm text-faint">Nothing settled yet.</p>}
       </section>
-      <Moments bond={bond} />
+      <RememberedAboutYou />
+      <Moments entries={entries} onChanged={refresh} />
     </section>
   );
 }

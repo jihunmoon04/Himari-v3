@@ -1,13 +1,17 @@
-// The bond screen (character-bond §1): whose bond it is, the days together and today's days, the stage set from the
-// revision read, an entry added (a day to mark needs its day), edited from the revision it was opened with or deleted,
-// and the moments together, newest first.
+// You and HIMARI (character-settings §2; the bond, character-bond §1): whose bond it is, the days together and today's
+// days, the stage set from the revision read, an entry added (a day to mark needs its day), edited from the revision it
+// was opened with or deleted, what HIMARI remembers about the user, and the moments together (the conversations'
+// episodes, edited and deleted there, with the bond's entries), newest first.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
-import { addBond, deleteBond, editBond, setBondStage, type Bond, type BondEntry } from "@/api/settings";
+import {
+  addBond, deleteBond, deleteEpisode, editBond, setBondStage, type Bond, type BondEntry, type Episode,
+} from "@/api/settings";
 import { toast } from "@/features/toast";
-import { BondSettings, localDay } from "./Bond";
+import { BondSettings, momentsOf } from "./Bond";
 
 const at = "2026-11-20T12:00:00+00:00";
 const entry = (id: number, tag: BondEntry["tag"], text: string, origin: BondEntry["origin"] = "conversation",
@@ -36,7 +40,13 @@ function aBond(): Bond {
   };
 }
 
-const state: { data: Bond } = { data: aBond() };
+const episode = (id: number, startedAt: string, text: string, title: string | null): Episode =>
+  ({ id, conversation: { id: `conv_${id}`, title, preview: "미리보기" }, started_at: startedAt, ended_at: startedAt, text,
+    origin: "pass", revision: 3 });
+const EPISODES = [episode(4, "2026-11-22T12:00:00+00:00", "같이 발표 자료를 다듬었다.", "발표"),
+  episode(2, "2026-11-19T12:00:00+00:00", "산책 이야기를 했다.", null)];
+
+const state: { data: Bond; episodes: Episode[]; next: string | null } = { data: aBond(), episodes: EPISODES, next: null };
 
 vi.mock("@/api/settings", async (original) => ({
   ...(await original<typeof import("@/api/settings")>()),
@@ -45,20 +55,25 @@ vi.mock("@/api/settings", async (original) => ({
   editBond: vi.fn(async () => ({})),
   deleteBond: vi.fn(async () => undefined),
   setBondStage: vi.fn(async () => ({})),
+  readEpisodes: vi.fn(async () => ({ episodes: state.episodes, next: state.next })),
+  deleteEpisode: vi.fn(async () => undefined),
+  readMemories: vi.fn(async () => ({ memories: [], enabled: true, auto: { running: true, model: null,
+    last_applied_at: null }, max_count: 200 })),
+  readProposals: vi.fn(async () => ({ proposals: [] })),
 }));
 
 vi.mock("@/features/toast", () => ({ toast: vi.fn() }));
 
 async function shown() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><BondSettings /></QueryClientProvider>);
-  await screen.findByRole("region", { name: "Bond" }); // read
+  render(<MemoryRouter><QueryClientProvider client={client}><BondSettings /></QueryClientProvider></MemoryRouter>);
+  await screen.findByRole("region", { name: "You and HIMARI" }); // read
 }
 
 const part = (name: string) => within(screen.getByRole("region", { name }));
 
 describe("the bond screen", () => {
-  beforeEach(() => { state.data = aBond(); vi.clearAllMocks(); });
+  beforeEach(() => { state.data = aBond(); state.episodes = EPISODES; state.next = null; vi.clearAllMocks(); });
   afterEach(cleanup);
 
   it("says whose bond it is, the days together, today's days, the stage and the entries", async () => {
@@ -75,23 +90,37 @@ describe("the bond screen", () => {
     expect(screen.queryByText(/not used now/)).toBeNull();
   });
 
-  it("shows the moments together newest first, with the episodes' conversations", async () => {
+  it("shows the moments together newest first: the episodes, editable here, with the bond's entries", async () => {
     await shown();
-    const lines = part("Moments together").getAllByText(/^2026-11-2\d · /).map((line) => line.textContent);
-    expect(lines).toEqual([`${localDay("2026-11-24T12:00:00+00:00")} · Day to mark`,
-      `${localDay("2026-11-22T12:00:00+00:00")} · 발표`, `${localDay("2026-11-21T12:00:00+00:00")} · A conversation`]);
-    expect(part("Moments together").getByText("같이 발표 자료를 다듬었다.")).toBeTruthy();
+    await part("Moments together").findByText("같이 발표 자료를 다듬었다."); // the episodes read
+    const moments = part("Moments together").getAllByRole("listitem");
+    expect(moments.map((m) => m.textContent?.includes("같이 발표") ? "e4" : m.textContent?.includes("산책") ? "e2"
+      : "bond")).toEqual(["e4", "bond", "bond", "bond", "e2"]); // the entries were made on 11-20
+    expect(part("Moments together").getByText("발표")).toBeTruthy(); // the episode's conversation
+    expect(part("What HIMARI remembers about you").getByText(/Every persona shares them/)).toBeTruthy();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const [first] = within(moments[0]!).getAllByRole("button", { name: "Delete" });
+    fireEvent.click(first!);
+    await waitFor(() => expect(deleteEpisode).toHaveBeenCalledWith(4, 3)); // from the revision shown
+  });
+
+  it("goes back only as far as the episodes read so far while there are more", () => {
+    const old = { ...entry(9, "joke", "감자 사건"), created_at: "2026-11-01T00:00:00+00:00" };
+    const kinds = (more: boolean) => momentsOf(EPISODES, [old], more).map((m) => (m.episode ? m.episode.id : "b"));
+    expect(kinds(true)).toEqual([4, 2]); // older than the oldest episode read: shown with the next page
+    expect(kinds(false)).toEqual([4, 2, "b"]);
   });
 
   it("shows the default's bond, no days before a conversation, and says when it is not used", async () => {
     state.data = { ...aBond(), persona: null, enabled: false, since: null, together_days: 0, today: [], entries: [],
       memories: [] };
+    state.episodes = [];
     await shown();
     expect(screen.getByText("Default (no persona) and you")).toBeTruthy();
     expect(screen.queryByText(/^Together/)).toBeNull();
     expect(screen.getByText(/not used now/)).toBeTruthy();
     expect(screen.getByText("Nothing settled yet.")).toBeTruthy();
-    expect(screen.getByText("Nothing yet.")).toBeTruthy();
+    expect(await screen.findByText("Nothing yet.")).toBeTruthy();
   });
 
   it("sets the stage from the revision read, for the persona shown", async () => {
@@ -110,7 +139,7 @@ describe("the bond screen", () => {
 });
 
 describe("an entry of the bond", () => {
-  beforeEach(() => { state.data = aBond(); vi.clearAllMocks(); });
+  beforeEach(() => { state.data = aBond(); state.episodes = EPISODES; state.next = null; vi.clearAllMocks(); });
   afterEach(cleanup);
 
   it("is added with its kind, a day to mark only with its day", async () => {

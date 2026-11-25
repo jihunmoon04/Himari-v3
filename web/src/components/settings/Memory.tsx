@@ -1,12 +1,13 @@
-// What HIMARI remembers (V3-P71, V3-P85): its notes (add, edit, delete; each from the revision shown), the notes it
-// suggests and waits on the user for (keep, discard), and its timeline of conversations (edit, delete).
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+// What HIMARI remembers about the user (V3-P71, V3-P85): its notes (add, edit, delete; each from the revision shown)
+// and the notes it suggests and waits on the user for (keep, discard). character-settings §2: shown under You and
+// HIMARI, which also edits and deletes the conversations' episodes (EpisodeRow) in its moments together.
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router";
 import { ApiError } from "@/api/client";
 import {
-  addNote, CATEGORIES, decideProposal, deleteEpisode, deleteNote, editEpisode, editNote, readEpisodes, readMemories,
-  readProposals, type Category, type Episode, type Note, type NoteInput,
+  addNote, CATEGORIES, decideProposal, deleteEpisode, deleteNote, editEpisode, editNote, readMemories, readProposals,
+  type Category, type Episode, type Note, type NoteInput,
 } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/features/toast";
@@ -167,7 +168,7 @@ function Suggestions() {
   );
 }
 
-function EpisodeRow({ episode, onChanged }: { episode: Episode; onChanged: () => void }) {
+export function EpisodeRow({ episode, onChanged }: { episode: Episode; onChanged: () => void }) {
   const [editing, setEditing] = useState<number | null>(null); // the revision the draft was opened from
   const [text, setText] = useState(episode.text);
   const act = async (run: () => Promise<unknown>, done: string) => {
@@ -192,7 +193,7 @@ function EpisodeRow({ episode, onChanged }: { episode: Episode; onChanged: () =>
       </p>
       {editing !== null ? (
         <>
-          <textarea aria-label="Timeline entry" value={text} rows={3} onChange={(event) => setText(event.target.value)}
+          <textarea aria-label="Moment" value={text} rows={3} onChange={(event) => setText(event.target.value)}
             className={cn(field, "mt-1 block w-full resize-y")} />
           <div className="mt-1 flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
@@ -211,48 +212,20 @@ function EpisodeRow({ episode, onChanged }: { episode: Episode; onChanged: () =>
   );
 }
 
-function Timeline() {
-  const client = useQueryClient();
-  const pages = useInfiniteQuery({
-    queryKey: ["settings", "episodes"],
-    queryFn: ({ pageParam }) => readEpisodes(pageParam),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.next ?? undefined,
-  });
-  if (pages.isLoading) return <p className="text-sm text-faint">Loading…</p>;
-  if (pages.error) return <p role="alert" className="text-sm text-danger">Could not read the timeline.</p>;
-  const episodes = pages.data?.pages.flatMap((p) => p.episodes) ?? [];
-  if (!episodes.length) return <p className="text-sm text-faint">Nothing on the timeline yet.</p>;
+/** character-settings §2 (S2): the notes HIMARI keeps about the user and the ones it suggests, under You and HIMARI.
+ * Every persona shares them. */
+export function RememberedAboutYou() {
   return (
-    <>
-      <ul className="space-y-2" aria-label="Timeline">
-        {episodes.map((e) => (
-          <EpisodeRow key={e.id} episode={e} onChanged={() => void client.invalidateQueries({ queryKey: ["settings", "episodes"] })} />
-        ))}
-      </ul>
-      {pages.hasNextPage && (
-        <Button variant="ghost" className="mt-2" disabled={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}>
-          {pages.isFetchingNextPage ? "Loading…" : "Show more"}
-        </Button>
-      )}
-    </>
-  );
-}
-
-export function MemorySettings() {
-  const [tab, setTab] = useState<"notes" | "suggestions" | "timeline">("notes");
-  return (
-    <section className="space-y-4" aria-label="Memory">
-      <h2 className="text-base font-semibold">Memory</h2>
-      <div className="flex gap-1 border-b border-line" role="tablist" aria-label="Memory">
-        {(["notes", "suggestions", "timeline"] as const).map((t) => (
-          <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
-            className={cn("border-b-2 px-3 py-1.5 text-sm capitalize", tab === t ? "border-accent text-ink" : "border-transparent text-muted")}>
-            {t}
-          </button>
-        ))}
-      </div>
-      {tab === "notes" ? <Notes /> : tab === "suggestions" ? <Suggestions /> : <Timeline />}
+    <section className="space-y-4" aria-label="What HIMARI remembers about you">
+      <h3 className="text-sm font-semibold">What HIMARI remembers about you</h3>
+      <p className="text-xs text-faint">
+        Notes about you, your plans and what to bring up again; reminders come from these. Every persona shares them.
+      </p>
+      <Notes />
+      <section className="space-y-2" aria-label="Suggestions">
+        <h4 className="text-xs font-semibold text-muted">Suggestions waiting for you</h4>
+        <Suggestions />
+      </section>
     </section>
   );
 }

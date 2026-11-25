@@ -101,8 +101,8 @@ function SettingsMenu() {
         <MenuSeparator />
         <MenuItem onSelect={() => navigate("/settings/instructions")}>Instructions</MenuItem>
         <MenuItem onSelect={() => navigate("/settings/personas")}>Personas</MenuItem>
-        <MenuItem onSelect={() => navigate("/settings/life")}>Life</MenuItem>
-        <MenuItem onSelect={() => navigate("/settings/memory")}>Memory</MenuItem>
+        <MenuItem onSelect={() => navigate("/settings/himari")}>HIMARI</MenuItem>
+        <MenuItem onSelect={() => navigate("/settings/together")}>You and HIMARI</MenuItem>
         <MenuItem onSelect={() => navigate("/settings/devices")}>Devices</MenuItem>
         <MenuItem onSelect={() => navigate("/settings/tools")}>Tool servers</MenuItem>
         <MenuItem onSelect={() => navigate("/trash")}>Trash</MenuItem>
