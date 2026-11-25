@@ -79,6 +79,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 6. **작업:** 프로젝트·작업자·조각, `work_done`, 자유 wake와 답 없는 wake 고침, 작가 고침. **2026-11-25 배포(v26)**([character-work](character-work-v0.1.md)).
 7. **페르소나 항목:** 14칸, 저장할 때 글을 만듦, `persona_makes`. **2026-11-26 배포(v27)**([character-persona-fields](character-persona-fields-v0.1.md)).
 8. **설정 나누기:** HIMARI와 You and HIMARI, Timeline을 Moments together에. **2026-11-26 배포(Web만)**([character-settings](character-settings-v0.1.md)).
+9. **마음:** 의식(HIMARI 대화 모델, 생각의 사슬 `[[think]]` 먼저)·무의식(기억, 말하지 않은 생각을 며칠짜리로 남김)·세계(아침의 사건). 일기·일정·작업을 HIMARI가 직접 쓰고 작업은 시작·끝 두 단계. 설계만([character-mind](character-mind-v0.1.md)).
 
 **그 밖**(순서는 정하지 않았다):
 
