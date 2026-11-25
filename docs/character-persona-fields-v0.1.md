@@ -52,3 +52,13 @@
 | P1 | 칸 13개(§2), 새 칸 `makes` |
 | P2 | 저장은 `fields`, 모델이 보는 글은 저장할 때 만든다. 숨긴 이야기 칸은 `[familiar]`·`[close]` 줄로 |
 | P3 | 지금 페르소나는 `free`로 옮겨 모델이 보는 글이 바뀌지 않는다 |
+
+## 7. 구현에서 정한 것 (2026-11-26, H-82, 배포 전)
+
+- **칸은 14개다.** 설계의 13개 앞에 `name`(이름: HIMARI의 이름)을 더했다. 첫 양식의 첫 줄이 "이름:"이었고, 목록 이름은 모델에 가지 않으므로 캐릭터 이름을 쓸 칸이 따로 있어야 했다.
+- **모델이 보는 글**(`data/rules.py` `persona_text`): 칸 순서대로 `칸 이름: 내용`(여러 줄이면 `칸 이름:` 다음 줄부터), `familiar`·`close`는 빈 줄을 빼고 줄마다 `[familiar] `·`[close] `(이미 붙은 표시는 한 번만), `free`는 맨 끝에 쓴 그대로. 한 줄 내용이 `[familiar]`·`[close]`(앞에 목록 표시가 있어도)로 시작하면 줄머리 다음 줄에 둬서 표시가 줄 앞에 남게 한다(검토). 줄은 `\n` 하나로 잇는다. `free`만 있으면 글은 `free` 그대로다(P3). 칸 이름은 첫 양식의 한국어 줄머리(`PERSONA_LABELS`).
+- **검사**(`check_persona_fields`): 모르는 칸·글이 아닌 값은 `INVALID_ARGUMENT`, 칸마다 지시문과 같은 검사(줄바꿈 정리, 제어 문자 거부, 원래 길이로 `MAX_PERSONA_CHARS`), `free` 말고는 앞뒤 공백을 뗀다. 만든 글이 `MAX_PERSONA_CHARS`를 넘으면 `TOO_LARGE`.
+- **저장**: 스키마 v27 `personas.fields`(JSON, 칸 순서). 업그레이드는 `json_object('free', text)`로 글 있는 페르소나를 `free` 하나로 옮긴다. `PersonaStore.create_persona`·`update_persona`가 `fields`를 받고(없으면 `text`가 `free`), `Persona.fields`가 칸들이다.
+- **API**: `GET /api/personas`의 각 페르소나에 `fields`, 맨 위에 칸 순서 `fields`. `POST`·`PUT`은 `fields`(주면 `text`는 무시)나 옛 `text`. 거부 메시지에 "only the known fields"를 더했다. 앱(`/api/device/personas`)은 이름만 읽어 그대로다.
+- **작가와 작업자**: `makes`가 있으면 `persona_makes`로 따로 준다. 그 안의 `[familiar]`·`[close]` 줄도 페르소나처럼 관계 단계까지 숨긴다(검토). 작가 지시문: "When persona_makes is given, start projects out of it."
+- **Web**: 편집 화면은 칸들(이름·관계·세계·부르는 말은 한 줄, 나머지는 여러 줄), 첫 양식의 안내는 placeholder로 옮기고 `STARTER`는 없앴다. 접힌 "What HIMARI is told"가 서버와 같은 규칙으로 만든 글을 보이고(Python `strip`처럼 U+FEFF는 남김), 글자 수는 만든 글로 센다. 칸 하나가 원래 길이로 상한을 넘으면 Save가 꺼진다. 복제는 칸째 복사한다.
