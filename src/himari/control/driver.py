@@ -924,7 +924,10 @@ class Driver:
                     scope, run_id, payload.calls, stop=lambda: signal.cancel_requested,
                     read_only=scope.conversation_id in self._read_only,
                     turn=self._turn_sources.get(scope.conversation_id),
-                    capabilities=self._options_for(scope).tool_capabilities))
+                    capabilities=self._options_for(scope).tool_capabilities,
+                    # character-mind §14.7: the persona this turn chose, while its life is told
+                    persona_id=self._turn_personas.get(scope.conversation_id)
+                    if self._life is not None and self._companion else None))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
         if signal.cancel_requested:  # arrived as the group stopped (STOPPED, or blocked): close what did not start

@@ -174,6 +174,7 @@ class Dispatcher:
         read_only: bool = False,
         turn: TurnSource | None = None,
         capabilities: frozenset[str] = frozenset(),
+        persona_id: int | None = None,
     ) -> GroupDispatchResult:
         count = len(await self._log.read_tool_executions(scope, run_id))
         stopped = False
@@ -189,7 +190,7 @@ class Dispatcher:
             if stop is not None and stop():
                 stopped = True  # nothing more starts; the rest stays PENDING for cancel_group
                 break
-            await self._run_one(scope, record, read_only, turn, capabilities)
+            await self._run_one(scope, record, read_only, turn, capabilities, persona_id)
         records = await self._log.read_tool_executions(scope, run_id)
         await self._report_reportable(scope, records)
         state = self._group_state(run_id, await self._log.read_tool_executions(scope, run_id))
@@ -217,7 +218,7 @@ class Dispatcher:
 
     async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord,
                        read_only: bool = False, turn: TurnSource | None = None,
-                       capabilities: frozenset[str] = frozenset()) -> None:
+                       capabilities: frozenset[str] = frozenset(), persona_id: int | None = None) -> None:
         handler = self._registry.get(record.tool_id)
         if handler is not None and handler.definition.requires not in (None, *capabilities):
             handler = None  # V3-P91 §3.2: not offered to this model, so unknown to it as well
@@ -247,7 +248,7 @@ class Dispatcher:
             await self._log.claim_tool_execution(
                 scope, record.call, unknown_outcome=d.unknown_outcome, record_event=record_event
             )
-        ctx = ToolContext(scope=scope, turn=turn, run_id=record.call.run_id)
+        ctx = ToolContext(scope=scope, turn=turn, run_id=record.call.run_id, persona_id=persona_id)
         invocation = ToolInvocation(record.tool_id, record.call.call_id, record.arguments)
         try:
             outcome = await handler.run(invocation, ctx)

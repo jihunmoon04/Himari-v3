@@ -1155,7 +1155,9 @@ LIFE_RULE = (
     "up, say it as if for the first time."
 )
 # character-life §5: added to FREE_RULE when HIMARI's life is told (no daily limit, owner 2026-11-25).
-FREE_LIFE_NOTE = "Instead of their task, you may also talk about your own day or plans from himari_life."
+# character-mind §4.2: a thought kept as something HIMARI wanted to say may be what a free wake brings up.
+FREE_LIFE_NOTE = ("Instead of their task, you may also talk about your own day or plans from himari_life, or bring "
+                  "up something you meant to say (a kept thought about intent in himari_mind).")
 # character-bond §5: right after LIFE_RULE (the bond is told with HIMARI's life). A relationship the persona
 # sets wins over the stage; days are marked once; nothing shared is made up.
 BOND_RULE = (

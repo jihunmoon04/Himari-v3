@@ -354,3 +354,26 @@ def test_null_optional_arguments_pass_the_dispatcher(tmp_path: Path) -> None:
             await app.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("life", [True, False])
+def test_memory_search_finds_the_chosen_personas_own_life_through_the_turn(tmp_path: Path, life: bool) -> None:
+    """character-mind §6, §14.7: the Driver gives the call the persona the turn chose; with the life off,
+    kind life is refused."""
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_search", {"query": "고양이", "kind": "life"}), final()])
+        app = await opened(tmp_path, adapter, life=life)
+        try:
+            lucy = await app.data.create_persona(ME, "Lucy", "이름: 루시.")
+            await app.data.choose_persona(ME, lucy.persona_id, 0)
+            await app.data.add_life_fact(ME, lucy.persona_id, "고양이를 무서워한다.")
+            await app.data.add_life_fact(ME, 0, "기본 페르소나의 고양이.")
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, scope)
+            found = last_result(adapter.prepared_inputs[-1])
+            assert found == ("[your fact] 고양이를 무서워한다." if life
+                             else "your own life is not kept here; search notes or episodes")
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

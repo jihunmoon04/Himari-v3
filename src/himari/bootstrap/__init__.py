@@ -102,7 +102,10 @@ def build_runtime(
         snapshot = await data.get_latest_snapshot(scope)
         return snapshot.covers_through_sequence if snapshot is not None and read_summary(snapshot) else None
 
-    registry = ToolRegistry([*tools, *(memory_tools(data, time_zone=time_zone or "UTC") if memory else ()),
+    # character-mind §6: memory_search also finds HIMARI's own life while it is told
+    lived = life and system is not None and system.companion
+    registry = ToolRegistry([*tools, *(memory_tools(data, time_zone=time_zone or "UTC", life=data if lived else None)
+                                       if memory else ()),
                              *(conversation_search_tools(data, compacted_through) if conversation_search else ()),
                              *((ScreenTool(screen),) if screen is not None else ())],
                             allow_require_user=allow_require_user_tools)

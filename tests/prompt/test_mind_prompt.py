@@ -21,6 +21,8 @@ from himari.data.api import (
     UserMessage,
 )
 from himari.prompt.api import (
+    FREE_LIFE_NOTE,
+    FREE_RULE,
     LIFE_RULE,
     MIND_ABOUT,
     MIND_KEPT,
@@ -165,3 +167,12 @@ def test_himari_now_carries_the_draft_under_way_and_the_talking_rule_says_to_put
     told = "\n".join(Composer().compose(inputs(SystemSpec(companion=True, life=True), events=())).stable_prefix)
     assert f"{TALKING_RULE} {WORK_TALK_NOTE}" in told
     assert WORK_TALK_NOTE not in "\n".join(Composer().compose(inputs(SystemSpec(companion=True), events=())).stable_prefix)
+
+
+def test_a_free_wake_may_bring_up_a_kept_intent() -> None:
+    """§4.2: the free wake's life note names the kept thoughts about intent; no new wake reason."""
+    assert "intent" in FREE_LIFE_NOTE and "himari_mind" in FREE_LIFE_NOTE
+    told = "\n".join(Composer().compose(replace(inputs(SystemSpec(companion=True, life=True, proactive=True)),
+                                                events=(), request_options=RequestOptions(
+                                                    "m", speaks_first=True, free_wake=True))).stable_prefix)
+    assert f"{FREE_RULE} {FREE_LIFE_NOTE}" in told
