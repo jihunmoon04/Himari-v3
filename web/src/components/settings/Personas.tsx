@@ -43,6 +43,8 @@ export const FIELDS: FieldSpec[] = [
 const HIDDEN = new Set<PersonaField>(["familiar", "close"]);
 const MARK = /^\[(familiar|close)\][ \t]?/i;
 const LINE_BREAKS = /\r\n?/g;
+// a value that starts as a hidden line does goes under its label, so its mark stays at the line's start (review)
+const MARKED_START = /^(?:[-*•][ \t]*)?\[(familiar|close)\]/i;
 // Python's str.strip(): JavaScript's trim() also takes U+FEFF, which Python keeps (review)
 const EDGES = /^[^\S﻿]+|[^\S﻿]+$/g;
 const strip = (value: string) => value.replace(EDGES, "");
@@ -59,7 +61,7 @@ export function personaText(fields: PersonaFields): string {
     else if (HIDDEN.has(key)) {
       parts.push(value.split("\n").filter((line) => strip(line))
         .map((line) => `[${key}] ${strip(line).replace(MARK, "")}`).join("\n"));
-    } else parts.push(value.includes("\n") ? `${label}:\n${value}` : `${label}: ${value}`);
+    } else parts.push(value.includes("\n") || MARKED_START.test(value) ? `${label}:\n${value}` : `${label}: ${value}`);
   }
   return parts.join("\n");
 }
@@ -95,7 +97,10 @@ function Editor({ draft, limits, onDone }: {
   const dirty = name !== draft.name || !same(fields, draft.fields) || draft.id === null;
   const told = personaText(fields);
   // the server checks each field as written, before trimming, against the same limit (review)
-  const overLong = FIELDS.some(({ key }) => length((fields[key] ?? "").replace(LINE_BREAKS, "\n")) > limits.text_chars);
+  const overLong = FIELDS.some(({ key }) => {
+    const raw = (fields[key] ?? "").replace(LINE_BREAKS, "\n");
+    return strip(raw) !== "" && length(raw) > limits.text_chars; // only whitespace is no text, whatever its length
+  });
   const set = (key: PersonaField, value: string) => setFields((now) => ({ ...now, [key]: value }));
   const save = async () => {
     setSaving(true);

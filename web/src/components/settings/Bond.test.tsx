@@ -67,7 +67,7 @@ vi.mock("@/features/toast", () => ({ toast: vi.fn() }));
 async function shown() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<MemoryRouter><QueryClientProvider client={client}><BondSettings /></QueryClientProvider></MemoryRouter>);
-  await screen.findByRole("region", { name: "You and HIMARI" }); // read
+  await screen.findByRole("region", { name: "Settled between you" }); // the bond read
 }
 
 const part = (name: string) => within(screen.getByRole("region", { name }));
@@ -102,6 +102,13 @@ describe("the bond screen", () => {
     const [first] = within(moments[0]!).getAllByRole("button", { name: "Delete" });
     fireEvent.click(first!);
     await waitFor(() => expect(deleteEpisode).toHaveBeenCalledWith(4, 3)); // from the revision shown
+  });
+
+  it("goes by the episodes' ends, as the pages do", () => {
+    const long = { ...episode(5, "2026-11-22T09:00:00+00:00", "긴 대화", null), ended_at: "2026-11-22T12:00:00+00:00" };
+    const settled = { ...entry(9, "joke", "감자 사건"), created_at: "2026-11-22T09:30:00+00:00" };
+    const order = momentsOf([long], [settled], true).map((m) => (m.episode ? m.episode.id : "b"));
+    expect(order).toEqual([5]); // 09:30 is after the episode's start but before its end: it waits for the next page
   });
 
   it("goes back only as far as the episodes read so far while there are more", () => {

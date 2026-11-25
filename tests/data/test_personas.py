@@ -202,7 +202,9 @@ def test_a_persona_is_saved_from_its_fields_and_its_text_is_made_from_them() -> 
         assert again.text == made.text and again.fields == made.fields
         only_free = await data.update_persona(ALICE, 1, "Lucy", "", 2, {"free": "  as written \n"})
         assert only_free.text == "  as written \n"  # free alone is the text itself (P3)
-        texted = await data.update_persona(ALICE, 1, "Lucy", "옛 클라이언트의 글.", 3)
+        marked = await data.update_persona(ALICE, 1, "Lucy", "", 3, {"makes": "[close] 몰래 쓰는 일기", "speech": "- [familiar] 반말"})
+        assert marked.text == "말투:\n- [familiar] 반말\n하는 일과 만드는 것:\n[close] 몰래 쓰는 일기"  # marks at the line's start
+        texted = await data.update_persona(ALICE, 1, "Lucy", "옛 클라이언트의 글.", 4)
         assert dict(texted.fields) == {"free": "옛 클라이언트의 글."}  # text alone: the field free
         data = data_for(restart(store))
         assert (await data.list_personas(ALICE)).personas == (texted,)

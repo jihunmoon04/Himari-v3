@@ -25,7 +25,7 @@ const MOVED: Record<string, string> = { life: "himari", memory: "together" };
 
 export function Settings() {
   const section = useParams().section ?? "instructions";
-  const moved = MOVED[section];
+  const moved = Object.hasOwn(MOVED, section) ? MOVED[section] : undefined; // not /settings/constructor (review)
   if (moved) return <Navigate to={`/settings/${moved}`} replace />;
   const shown = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
   return (

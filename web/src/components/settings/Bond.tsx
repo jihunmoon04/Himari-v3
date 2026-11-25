@@ -150,9 +150,10 @@ type Moment = { at: number; episode: Episode; entry?: undefined } | { at: number
 /** The moments together, newest first: the conversations' episodes, read a page at a time (edited and deleted here,
  * character-settings S3), with the bond's entries (edited above) as far back as the episodes read so far go. */
 export function momentsOf(episodes: Episode[], entries: BondEntry[], more: boolean): Moment[] {
-  const oldest = episodes.length ? Date.parse(episodes[episodes.length - 1]!.started_at) : null;
+  // the API reads episodes newest first by their end: the moments go by it too, so a page's edge is a time
+  const oldest = episodes.length ? Date.parse(episodes[episodes.length - 1]!.ended_at) : null;
   const moments: Moment[] = [
-    ...episodes.map((episode) => ({ at: Date.parse(episode.started_at), episode })),
+    ...episodes.map((episode) => ({ at: Date.parse(episode.ended_at), episode })),
     ...entries.map((entry) => ({ at: Date.parse(entry.created_at), entry }))
       .filter((m) => !more || oldest === null || m.at >= oldest),
   ];
@@ -198,21 +199,24 @@ function Moments({ entries, onChanged }: { entries: BondEntry[]; onChanged: () =
 export function BondSettings() {
   const client = useQueryClient();
   const query = useQuery({ queryKey: KEY, queryFn: readBond });
+  const refresh = () => void client.invalidateQueries({ queryKey: KEY });
+  // the notes and the conversations' moments stay where they are whatever the bond's read does (an open draft in them
+  // survives a failed refresh, review)
+  return (
+    <section className="space-y-4" aria-label="You and HIMARI">
+      <h2 className="text-base font-semibold">You and HIMARI</h2>
+      {query.isLoading ? <p className="text-sm text-faint">Loading…</p>
+        : query.error || !query.data ? <p role="alert" className="text-sm text-danger">Could not read the bond.</p>
+          : <TheBond bond={query.data} refresh={refresh} />}
+      <RememberedAboutYou />
+      <Moments entries={query.data?.entries ?? []} onChanged={refresh} />
+    </section>
+  );
+}
+
+function TheBond({ bond, refresh }: { bond: Bond; refresh: () => void }) {
   const [open, setOpen] = useState<{ id: number; revision: number } | null>(null); // the entry being edited
   const [busy, setBusy] = useState(false);
-  const refresh = () => void client.invalidateQueries({ queryKey: KEY });
-  if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
-  if (query.error || !query.data) {
-    return ( // the notes and the conversations' moments do not hang on the bond
-      <section className="space-y-4" aria-label="You and HIMARI">
-        <h2 className="text-base font-semibold">You and HIMARI</h2>
-        <p role="alert" className="text-sm text-danger">Could not read the bond.</p>
-        <RememberedAboutYou />
-        <Moments entries={[]} onChanged={refresh} />
-      </section>
-    );
-  }
-  const bond = query.data;
   const { persona, enabled, entries, limits } = bond;
   const add = async (tag: BondTag, text: string, monthDay: string | null) => {
     setBusy(true);
@@ -264,8 +268,7 @@ export function BondSettings() {
   const locked = busy || open !== null; // while an entry is open, nothing else may change under its unsaved text
   const full = entries.length >= limits.entries && entries.every((e) => e.origin === "user");
   return (
-    <section className="space-y-4" aria-label="You and HIMARI">
-      <h2 className="text-base font-semibold">You and HIMARI</h2>
+    <>
       <p className="text-sm text-muted">
         <span className="font-medium text-ink">{persona ? `${persona.name} and you` : "Default (no persona) and you"}</span>.
         {" "}What HIMARI remembers from talking with you. What the two of you have really settled — what you call each
@@ -308,8 +311,6 @@ export function BondSettings() {
           </ul>
         ) : <p className="text-sm text-faint">Nothing settled yet.</p>}
       </section>
-      <RememberedAboutYou />
-      <Moments entries={entries} onChanged={refresh} />
-    </section>
+    </>
   );
 }

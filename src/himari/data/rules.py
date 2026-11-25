@@ -181,6 +181,9 @@ PERSONA_LABELS = {
     "likes": "좋아하는 것 / 싫어하는 것", "makes": "하는 일과 만드는 것", "never": "하지 않는 것",
 }
 _HIDDEN_MARK = re.compile(r"^\[(familiar|close)\][ \t]?", re.IGNORECASE)
+# A value that starts as a hidden line does (prompt/api.py HIDDEN_LINE): put after "label: " its mark would be told
+# from the first stage on, so it goes under its label instead (review).
+_MARKED_START = re.compile(r"(?:[-*•][ \t]*)?\[(familiar|close)\]", re.IGNORECASE)
 
 
 def persona_text(fields: Mapping[str, str]) -> str:
@@ -198,7 +201,7 @@ def persona_text(fields: Mapping[str, str]) -> str:
         elif key in PERSONA_HIDDEN_FIELDS:
             parts.append("\n".join(f"[{key}] " + _HIDDEN_MARK.sub("", line.strip())
                                    for line in value.split("\n") if line.strip()))
-        elif "\n" in value:
+        elif "\n" in value or _MARKED_START.match(value):  # a marked line keeps its mark at the line's start
             parts.append(f"{PERSONA_LABELS[key]}:\n{value}")
         else:
             parts.append(f"{PERSONA_LABELS[key]}: {value}")

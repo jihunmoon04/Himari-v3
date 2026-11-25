@@ -93,6 +93,8 @@ describe("what HIMARI is told", () => {
       "[close] 세계를 구하러 왔다.\n자유 글."); // the same case as tests/data/test_personas.py
     expect(personaText({})).toBe("");
     expect(personaText({ name: "x﻿ " })).toBe("이름: x﻿"); // Python keeps U+FEFF where trim() drops it
+    expect(personaText({ makes: "[close] 몰래 쓰는 일기", speech: "- [familiar] 반말" })).toBe(
+      "말투:\n- [familiar] 반말\n하는 일과 만드는 것:\n[close] 몰래 쓰는 일기"); // marks kept at the line's start
   });
 });
 
