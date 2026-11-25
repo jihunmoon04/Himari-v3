@@ -92,6 +92,7 @@ describe("what HIMARI is told", () => {
       "이름: 루시\n말투: 반말\n대사 예시:\n- 왔어?\n- 밥은?\n[familiar] 사실 해커였다.\n[familiar] 이미 표시된 줄\n" +
       "[close] 세계를 구하러 왔다.\n자유 글."); // the same case as tests/data/test_personas.py
     expect(personaText({})).toBe("");
+    expect(personaText({ name: "x﻿ " })).toBe("이름: x﻿"); // Python keeps U+FEFF where trim() drops it
   });
 });
 

@@ -158,9 +158,12 @@ class LifeWriter:
         chosen = await self._data.active_persona(principal)
         persona_id = NO_PERSONA if chosen is None else chosen.persona_id
         persona = "" if chosen is None else chosen.text
+        makes = "" if chosen is None else chosen.fields.get("makes", "")
         if persona:
-            persona = persona_for_stage(persona, (await self._data.bond_stage(principal, persona_id)).stage)
-        return persona_id, persona, "" if chosen is None else chosen.fields.get("makes", "")
+            stage = (await self._data.bond_stage(principal, persona_id)).stage
+            persona = persona_for_stage(persona, stage)
+            makes = persona_for_stage(makes, stage).strip()  # a marked line in it waits for its stage too (review)
+        return persona_id, persona, makes
 
     async def _work(self, principal: PrincipalId) -> WriteOutcome:
         now = self._clock()

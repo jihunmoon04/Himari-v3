@@ -120,12 +120,13 @@ def test_the_writer_is_told_the_personas_field_makes() -> None:
     """character-persona-fields §4: a persona written in fields gives its makes apart (persona_makes)."""
     async def scenario() -> None:
         _, data, provider, writer = setup(Measured(day_answer(), 900, 90))
-        lucy = await data.create_persona(ME, "Lucy", "", {"name": "루시", "makes": "블랙홀 무기 설정집"})
+        lucy = await data.create_persona(ME, "Lucy", "", {"name": "루시",
+                                                          "makes": "블랙홀 무기 설정집\n[close] 몰래 쓰는 일기"})
         await data.choose_persona(ME, lucy.persona_id, 0)
         assert await writer.write(ME) is WriteOutcome.WRITTEN
         asked = told(provider)
-        assert asked["persona"] == "이름: 루시\n하는 일과 만드는 것: 블랙홀 무기 설정집"
-        assert asked["persona_makes"] == "블랙홀 무기 설정집"
+        assert asked["persona"] == "이름: 루시\n하는 일과 만드는 것:\n블랙홀 무기 설정집"
+        assert asked["persona_makes"] == "블랙홀 무기 설정집"  # its [close] line waits for the stage (review)
 
     asyncio.run(scenario())
 

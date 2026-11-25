@@ -43,6 +43,9 @@ export const FIELDS: FieldSpec[] = [
 const HIDDEN = new Set<PersonaField>(["familiar", "close"]);
 const MARK = /^\[(familiar|close)\][ \t]?/i;
 const LINE_BREAKS = /\r\n?/g;
+// Python's str.strip(): JavaScript's trim() also takes U+FEFF, which Python keeps (review)
+const EDGES = /^[^\S﻿]+|[^\S﻿]+$/g;
+const strip = (value: string) => value.replace(EDGES, "");
 
 /** What HIMARI is told, made as the server makes it (data/rules.py persona_text): ``label: value`` (several lines
  * under the label), each hidden story line marked for its stage, free last as written; empty fields left out. */
@@ -50,12 +53,12 @@ export function personaText(fields: PersonaFields): string {
   const parts: string[] = [];
   for (const { key, label } of FIELDS) {
     const raw = (fields[key] ?? "").replace(LINE_BREAKS, "\n");
-    if (!raw.trim()) continue;
-    const value = key === "free" ? raw : raw.trim();
+    if (!strip(raw)) continue;
+    const value = key === "free" ? raw : strip(raw);
     if (key === "free") parts.push(value);
     else if (HIDDEN.has(key)) {
-      parts.push(value.split("\n").filter((line) => line.trim())
-        .map((line) => `[${key}] ${line.trim().replace(MARK, "")}`).join("\n"));
+      parts.push(value.split("\n").filter((line) => strip(line))
+        .map((line) => `[${key}] ${strip(line).replace(MARK, "")}`).join("\n"));
     } else parts.push(value.includes("\n") ? `${label}:\n${value}` : `${label}: ${value}`);
   }
   return parts.join("\n");
@@ -91,6 +94,8 @@ function Editor({ draft, limits, onDone }: {
   const [conflict, setConflict] = useState(false);
   const dirty = name !== draft.name || !same(fields, draft.fields) || draft.id === null;
   const told = personaText(fields);
+  // the server checks each field as written, before trimming, against the same limit (review)
+  const overLong = FIELDS.some(({ key }) => length((fields[key] ?? "").replace(LINE_BREAKS, "\n")) > limits.text_chars);
   const set = (key: PersonaField, value: string) => setFields((now) => ({ ...now, [key]: value }));
   const save = async () => {
     setSaving(true);
@@ -141,7 +146,7 @@ function Editor({ draft, limits, onDone }: {
         <div className="ml-auto flex gap-2">
           <Button variant="ghost" disabled={saving} onClick={() => onDone(false)}>Cancel</Button>
           <Button type="submit" variant="primary"
-            disabled={!dirty || saving || !name.trim() || length(told) > limits.text_chars}>Save</Button>
+            disabled={!dirty || saving || !name.trim() || length(told) > limits.text_chars || overLong}>Save</Button>
         </div>
       </div>
       {conflict && (
