@@ -8,8 +8,8 @@ from datetime import UTC, datetime, time, timedelta
 import pytest
 
 from himari.common import ConversationId, PrincipalId
-from himari.data.api import (Anniversary, Memory, MemoryCategory, MemoryOrigin, WakeKind, WakeReason, WakeRecord,
-                             WakeStatus, free_wake, parse_note_date)
+from himari.data.api import (Anniversary, LifeEntry, LifeKind, LifeOrigin, Memory, MemoryCategory, MemoryOrigin,
+                             WakeKind, WakeReason, WakeRecord, WakeStatus, free_wake, parse_note_date)
 from himari.presence.api import ActivitySignal, DeviceState, EndedActivity, TaskEnded, TaskSignal
 from himari.proactive import (
     CHECK_IN_WINDOW,
@@ -398,80 +398,138 @@ def free_at(minutes_ago: float, status: WakeStatus = WakeStatus.ANSWERED) -> Wak
                       (WakeReason(WakeKind.FREE, group="work", minutes=1, step=1),), "d1", status, at, at)
 
 
-def test_the_first_free_wake_comes_thirty_minutes_into_a_task() -> None:
-    assert decide(situation(device=working(29), free_ok=True)).reasons == ()
-    decided = decide(situation(device=working(31), free_ok=True))
-    assert decided.reasons == (WakeReason(WakeKind.FREE, group="work", minutes=31, step=1),)
-    assert decided.keys == ("free:d1:2026-11-04T06:29Z:1",)
+def test_a_free_wake_comes_thirty_minutes_after_the_last_word_at_the_computer() -> None:
+    """character-work §7.2 (K5): the user at the computer (awake, input within ten minutes) and thirty minutes
+    since the last wake or their last message, whatever they are doing; the task goes with it when there is one."""
+    said = {"last_user_message_at": NOW - timedelta(minutes=29), "free_ok": True}
+    assert decide(situation(**said)).reasons == ()
+    decided = decide(situation(**{**said, "last_user_message_at": NOW - timedelta(minutes=31)}))
+    assert decided.reasons == (WakeReason(WakeKind.FREE, step=1),)
+    assert decided.keys == ("free:d1:2026-11-04T06:29Z",)
+    tasked = decide(situation(device=working(5), free_ok=True))  # a task of five minutes is no matter now
+    assert tasked.reasons == (WakeReason(WakeKind.FREE, group="work", minutes=5, step=1),)
+    assert tasked.keys == ("free:d1:start",)  # no wake and no message read: the wait started long ago
     assert decide(situation(device=working(31))).reasons == ()  # the model was not checked for it
-    assert decide(situation(device=working(31), free_ok=True, settings=replace(ON, free_minutes=0))).reasons == ()
-    assert decide(situation(device=working(16), free_ok=True, settings=replace(ON, free_minutes=15))).reasons
+    assert decide(situation(free_ok=True, settings=replace(ON, free_minutes=0))).reasons == ()
+    for away in (replace(device(), idle_seconds=11 * 60.0), replace(device(), idle_seconds=None),
+                 replace(device(), locked=True), replace(device(), connected=False),
+                 device(sleeps=True, sleep="idle")):
+        assert decide(situation(device=away, free_ok=True)).reasons == (), away  # not at the computer
 
 
 def test_one_interval_from_the_latest_wake() -> None:
-    """V3-P107 §4: FREE_MINUTES each time, no growing steps; a pass is a step; any wake restarts the
-    wait, not the step."""
-    task = working(100)
-    one = free_at(80, WakeStatus.PASSED)  # step 1 at minute 20
-    assert decide(situation(device=task, wakes=(one,), free_ok=True)).reasons[0].step == 2  # 80 ≥ 30
+    """V3-P107 §4: FREE_MINUTES each time, no growing steps; a pass counts; any wake restarts the wait.
+    character-work §7.2: the step counts the free wakes since the user's last message."""
+    one = free_at(80, WakeStatus.PASSED)
+    assert decide(situation(wakes=(one,), free_ok=True)).reasons[0].step == 2  # 80 ≥ 30
     two = free_at(29)
-    assert decide(situation(device=task, wakes=(one, two), free_ok=True)).reasons == ()  # 29 < 30
-    later = situation(now=NOW + timedelta(minutes=1), device=working(101), wakes=(one, two), free_ok=True)
+    assert decide(situation(wakes=(one, two), free_ok=True)).reasons == ()  # 29 < 30
+    later = situation(now=NOW + timedelta(minutes=1), wakes=(one, two), free_ok=True)
     assert decide(later).reasons[0].step == 3  # 30 again, not 60
     other = (one, replace(wake(NOW - timedelta(minutes=20), WakeKind.LOOP_DUE), wake_id="loop"))
-    assert decide(situation(device=task, wakes=other, free_ok=True)).reasons == ()  # waits 30 from that loop
+    assert decide(situation(wakes=other, free_ok=True)).reasons == ()  # waits 30 from that loop
+    after = situation(wakes=(one,), free_ok=True, last_user_message_at=NOW - timedelta(minutes=50))
+    assert decide(after).reasons[0].step == 1  # the user spoke since that one
 
 
-def test_a_user_message_holds_the_step_due_for_ten_minutes_only() -> None:
-    """Owner 2026-11-03: a message neither starts the steps again nor restarts the wait. Task at 0, step 1
-    at 30, the user talks at 59: step 2, due at 60, is held by talking and opens at 69; step 3 at 99."""
-    start = NOW - timedelta(minutes=60)
-
-    def at(minute: float, wakes: tuple[WakeRecord, ...]) -> Situation:
-        return situation(now=start + timedelta(minutes=minute), device=working(minute), free_ok=True,
-                         last_user_message_at=start + timedelta(minutes=59), wakes=wakes)
-
-    one = replace(free_at(0), created_at=start + timedelta(minutes=30))
-    held = decide(at(60, (one,)))
-    assert held.reasons == () and held.blocked == "talking" and held.held[0].reason.step == 2
-    assert decide(at(68.9, (one,))).reasons == ()
-    two = decide(at(69, (one,)))
-    assert two.reasons == (WakeReason(WakeKind.FREE, group="work", minutes=69, step=2),)
-    assert two.keys[0].endswith(":2")  # the same cycle: the task's start, not the message
-    spoke = replace(free_at(0), wake_id="two", created_at=start + timedelta(minutes=69))
-    assert decide(at(98.9, (one, spoke))).reasons == ()
-    assert decide(at(99, (one, spoke))).reasons[0].step == 3
-
-
-def test_a_new_task_starts_the_steps_again() -> None:
-    """PR #162 review P1-8: a task that starts again (or changes) is a new cycle — its first step opens
-    again, under another key."""
-    first = decide(situation(device=working(31), free_ok=True))
-    later = NOW + timedelta(minutes=40)
-    again = decide(situation(now=later, device=working(31), free_ok=True, wakes=(free_at(-1),)),
-                   frozenset(first.keys))
-    assert again.reasons[0].step == 1 and again.keys != first.keys
+def test_each_wait_opens_once() -> None:
+    """Its key names the moment the wait started: taken, it is not opened again until another wake or message."""
+    first = decide(situation(free_ok=True, last_user_message_at=NOW - timedelta(minutes=40)))
+    again = decide(situation(now=NOW + timedelta(minutes=5), free_ok=True,
+                             last_user_message_at=NOW - timedelta(minutes=40)), frozenset(first.keys))
+    assert first.reasons and again.reasons == ()
+    later = decide(situation(now=NOW + timedelta(minutes=40), free_ok=True, wakes=(free_at(0),),
+                             last_user_message_at=NOW - timedelta(minutes=40)), frozenset(first.keys))
+    assert later.reasons[0].step == 2 and later.keys != first.keys
 
 
 def test_a_free_wake_is_held_by_every_rule_and_its_day() -> None:
-    task = working(31)
-    for changes, blocked in (({"device": replace(task, sleeps=True, sleep="idle")}, "asleep"),
-                             ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
-                             ({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
+    for changes, blocked in (({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
                              ({"unanswered_wake": True}, "unanswered"),
+                             ({"working": True}, "working"),
                              ({"quiet_until": NOW + timedelta(hours=1)}, "quiet")):
-        decided = decide(situation(**{"device": task, "free_ok": True, **changes}))
+        decided = decide(situation(**{"free_ok": True, **changes}))
         assert decided.reasons == () and decided.blocked == blocked, changes
-    # V3-P107 §4: earlier today, before this task: ten opened — spoken or passed alike (each cost a request)
+    # V3-P107 §4: earlier today: ten opened — spoken or passed alike (each cost a request)
     spoken = tuple(replace(free_at(40 + 20 * i), wake_id=f"s{i}") for i in range(10))
-    assert decide(situation(device=task, wakes=spoken, free_ok=True)).blocked == "daily"
-    assert decide(situation(device=task, wakes=spoken[1:], free_ok=True)).reasons != ()
+    assert decide(situation(wakes=spoken, free_ok=True)).blocked == "daily"
+    assert decide(situation(wakes=spoken[1:], free_ok=True)).reasons != ()
     passes = tuple(replace(free_at(40 + 20 * i, WakeStatus.PASSED), wake_id=f"p{i}") for i in range(10))
-    assert decide(situation(device=task, wakes=passes, free_ok=True)).blocked == "daily"
+    assert decide(situation(wakes=passes, free_ok=True)).blocked == "daily"
     yesterday = tuple(replace(w, created_at=local_midnight(NOW, SEOUL) - timedelta(minutes=1 + i))
                       for i, w in enumerate(spoken))
-    assert decide(situation(device=task, wakes=yesterday, free_ok=True)).reasons != ()
+    assert decide(situation(wakes=yesterday, free_ok=True)).reasons != ()
 
+
+# --- character-work §7.3 (K6): an unanswered wake -------------------------------------------------
+
+def test_one_unanswered_wake_holds_himaris_openings_two_hours() -> None:
+    told = {"unanswered_wake": True, "last_user_message_at": NOW - timedelta(hours=5)}
+    for ago, blocked in ((60, "unanswered"), (119, "unanswered"), (121, None)):
+        decided = decide(situation(loops=DUE, wakes=(wake(NOW - timedelta(minutes=ago), WakeKind.RETURNED),),
+                                   **told))
+        assert decided.blocked == blocked and bool(decided.reasons) == (blocked is None), ago
+    passed = replace(free_at(30, WakeStatus.PASSED), wake_id="passed")  # never shown: not unanswered
+    assert decide(situation(loops=DUE, wakes=(wake(NOW - timedelta(hours=3)), passed), **told)).reasons
+
+
+def test_two_unanswered_wakes_hold_them_until_the_user_speaks() -> None:
+    two = (replace(wake(NOW - timedelta(hours=4)), wake_id="a"), replace(wake(NOW - timedelta(hours=3)), wake_id="b"))
+    held = decide(situation(loops=DUE, wakes=two, unanswered_wake=True,
+                            last_user_message_at=NOW - timedelta(hours=5)))
+    assert held.reasons == () and held.blocked == "unanswered"
+    answered = decide(situation(loops=DUE, wakes=two, unanswered_wake=True,
+                                last_user_message_at=NOW - timedelta(minutes=210)))  # between the two
+    assert answered.reasons  # one since the user spoke, three hours ago
+    unread = decide(situation(loops=DUE, unanswered_wake=True))  # none read: as before, until the user speaks
+    assert unread.blocked == "unanswered"
+    # what just happened and a reminder are not held (V3-P107 §3)
+    back = Return("d1", NOW - timedelta(minutes=1), "unlock", 120)
+    assert decide(situation(returned=back, wakes=two, unanswered_wake=True)).reasons
+
+
+# --- character-work §7.1: a piece of work just finished --------------------------------------------
+
+def piece(entry_id: int, minutes_ago: float) -> LifeEntry:
+    at = NOW - timedelta(minutes=minutes_ago)
+    return LifeEntry(entry_id, 0, LifeKind.WORK, "2026-11-04", "조각", LifeOrigin.WRITER, 1, at, at,
+                     title="냉각부", summary="냉각부 설계 끝냈어.", arc_id=1, plan_id=2)
+
+
+def test_a_finished_piece_is_spoken_of_once_within_three_hours_and_may_pass() -> None:
+    made = situation(work=(piece(9, 60),))
+    decided = decide(made)
+    assert decided.reasons == (WakeReason(WakeKind.WORK_DONE, entry_id=9),) and decided.keys == ("work:9",)
+    assert free_wake(decided.reasons)  # hidden until it speaks, and it may pass
+    assert decide(made, frozenset(decided.keys)).reasons == ()  # once
+    assert decide(situation(work=(piece(9, 181),))).reasons == ()  # past three hours
+    assert decide(situation(work=(piece(9, 60),), device_id=None, device=None)).reasons == ()
+
+
+def test_a_finished_piece_waits_as_himaris_own_openings_do_and_counts_in_the_day() -> None:
+    work = {"work": (piece(9, 30),)}
+    for changes, blocked in (({"unanswered_wake": True}, "unanswered"),
+                             ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
+                             ({"wakes": (wake(NOW - timedelta(minutes=5)),)}, "gap")):
+        decided = decide(situation(**{**work, **changes}))
+        assert decided.reasons == () and decided.blocked == blocked, changes
+    night = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)  # 23:30 KST, a piece made half an hour before
+    late = situation(now=night, work=(replace(piece(9, 0), created_at=night - timedelta(minutes=30)),))
+    assert decide(late).blocked == "quiet_hours"
+    spoken = tuple(replace(free_at(40 + 20 * i), wake_id=f"s{i}") for i in range(10))
+    assert decide(situation(**work, wakes=spoken)).blocked == "daily"
+    finished = replace(free_at(40), reasons=(WakeReason(WakeKind.WORK_DONE, entry_id=9),))
+    assert free_today(situation(wakes=(finished,))) == 1
+
+
+def test_a_finished_piece_goes_right_after_an_anniversary_and_before_a_loop() -> None:
+    assert MERGE_ORDER.index(WakeKind.WORK_DONE) == MERGE_ORDER.index(WakeKind.ANNIVERSARY) + 1
+    assert MERGE_ORDER.index(WakeKind.WORK_DONE) + 1 == MERGE_ORDER.index(WakeKind.LOOP_DUE)
+    merged = decide(situation(work=(piece(9, 30),), loops=DUE, anniversaries=(HUNDRED,), bond_day="2026-11-04"))
+    assert [r.kind for r in merged.reasons] == [WakeKind.ANNIVERSARY, WakeKind.WORK_DONE, WakeKind.LOOP_DUE]
+    alone = decide(situation(work=(piece(9, 30),), free_ok=True))
+    assert [r.kind for r in alone.reasons] == [WakeKind.WORK_DONE]  # a free wake waits behind it
+    assert [c.reason.kind for c in alone.held] == [WakeKind.FREE]
 
 def test_a_free_wake_goes_alone() -> None:
     """V3-P90 §7.3: never merged — another wake due goes first, the free one waits."""

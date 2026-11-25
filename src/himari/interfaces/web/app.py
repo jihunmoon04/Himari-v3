@@ -137,6 +137,8 @@ from himari.data.api import (
     MAX_LIST_LIMIT,
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
+    MAX_WORK_CHARS,
+    MAX_WORK_SUMMARY_CHARS,
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
@@ -468,9 +470,10 @@ class LifeFactBody(_Body):  # character-life §6: the limits are Data's
 
 
 class LifeEditBody(_Body):
-    text: str  # an arc's goal (character-world §4)
+    text: str  # an arc's goal (character-world §4); a work piece's text (character-work §4)
     revision: int = Field(ge=1)  # the revision the entry was edited from
-    title: str | None = None  # an arc's title; null or left out: kept
+    title: str | None = None  # an arc's or a work piece's title; null or left out: kept
+    summary: str | None = None  # a work piece's one line; null or left out: kept
 
 
 type BondTagName = Literal["name", "promise", "joke", "first", "date"]  # BondTag's values
@@ -678,6 +681,8 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
             parts.append(f"a game ended after {_span(r.minutes or 0)}")
         elif r.kind is WakeKind.TASK_ENDED:
             parts.append(f"{'a game' if r.group == 'game' else 'a video'} ended after {_span(r.minutes or 0)}")
+        elif r.kind is WakeKind.WORK_DONE:  # character-work §7.1
+            parts.append(f"finished a piece of work (w{r.entry_id})")
         elif r.kind is WakeKind.ANNIVERSARY:  # character-bond §6
             parts.append(f"{r.days} days together" if r.days is not None else
                          f"{r.years} year{'s' if (r.years or 0) > 1 else ''} together" if r.years is not None else
@@ -1024,8 +1029,10 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
             "created_at": _time(entry.created_at), "updated_at": _time(entry.updated_at)}
     if entry.kind is LifeKind.ARC:  # character-world §4: its title, open or closed, and how it ended
         view |= {"title": entry.title, "status": "open" if entry.arc_open else "closed", "end_day": entry.end_day,
-                 "ending": entry.ending}
-    elif entry.arc_id is not None:  # a diary: the arc its day moved
+                 "ending": entry.ending, "so_far": entry.so_far}  # character-work §3: where the project stands
+    elif entry.kind is LifeKind.WORK:  # character-work §4: a piece, its project and its plan
+        view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id}
+    elif entry.arc_id is not None:  # a diary: the arc its day moved; a plan: its project (character-work §4)
         view["arc_id"] = entry.arc_id
     return view
 
@@ -1087,10 +1094,12 @@ LIFE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "It was changed elsewhere since it was opened."),
     DataErrorCode.LIMIT_EXCEEDED: (409, "life_full", f"At most {MAX_LIFE_FACTS} facts, all yours; delete one first."),
     DataErrorCode.TOO_LARGE: (422, "too_large", f"A fact or a plan is at most {MAX_LIFE_CHARS:,} characters, a diary "
-                                                f"{MAX_DIARY_CHARS:,}, an arc's goal {MAX_ARC_CHARS:,} and its title "
-                                                f"{MAX_ARC_TITLE_CHARS:,}."),
+                                                f"{MAX_DIARY_CHARS:,}, an arc's goal {MAX_ARC_CHARS:,}, a title "
+                                                f"{MAX_ARC_TITLE_CHARS:,}, a work piece {MAX_WORK_CHARS:,} and its "
+                                                f"summary {MAX_WORK_SUMMARY_CHARS:,}."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters; only "
-                                                          "an arc has a title, on one line."),
+                                                          "an arc or a work piece has a title, and only a piece a "
+                                                          "summary, each on one line."),
 }
 
 
@@ -1774,13 +1783,18 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         return {"persona": None if chosen is None else {"id": chosen.persona_id, "name": chosen.name},
                 "enabled": application.life_enabled,
                 "writer": {"running": application.life_writer is not None, "told": application.auto_life},
+                # character-work §8: the worker runs with the story writer; the next work plan
+                "work": {"running": application.life_writer is not None,
+                         "next": None if (planned := application.next_work(entries)) is None
+                         else life_entry_view(planned)},
                 "mood": mood_view(mood), "now": now_view(now),
                 # character-world §2, §3: what the writer and a turn know of the real world, as told at startup
                 "world": {"weather": application.world_weather, "today": application.weather_today(),
                           "topics": application.world_topics},
                 "entries": [life_entry_view(e) for e in entries],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
-                           "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS}}
+                           "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
+                           "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS}}
 
     @app.post("/api/life", status_code=201)
     async def add_life_fact(body: LifeFactBody, request: Request,
@@ -1799,7 +1813,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         try:
             return life_entry_view(await himari(request).data.edit_life(who, entry_id, body.text,
                                                                         expected_revision=body.revision,
-                                                                        title=body.title))
+                                                                        title=body.title, summary=body.summary))
         except DataError as error:
             raise life_refused(error) from None
 

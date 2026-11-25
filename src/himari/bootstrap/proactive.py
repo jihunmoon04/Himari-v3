@@ -21,6 +21,8 @@ from himari.control.runner import BackgroundRunner
 from himari.data.api import (
     NO_PERSONA,
     Anniversary,
+    LifeEntry,
+    LifeKind,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -44,6 +46,7 @@ from himari.proactive import (
     RETURN_WAIT,
     TALKING,
     TALKING_KINDS,
+    WORK_FRESH,
     Decision,
     Return,
     Situation,
@@ -197,7 +200,8 @@ async def settle_cut_wakes(data: SqliteData, driver: Driver) -> int:
 
 INPUT_EVERY = timedelta(minutes=10)  # §3.3: a device's last input is written at most this often (and when locked)
 PROACTIVE_SECONDS = 30.0  # §7: the scheduler's period
-WAKES_READ = timedelta(hours=26)  # enough for the gap and the device's day (§6.2); a task's steps read further
+WAKES_READ = timedelta(hours=26)  # enough for the gap and the device's day (§6.2); back to the user's last message too
+UNANSWERED_READ = timedelta(days=7)  # character-work §7.3: how far back the wakes since the user's last message are read
 TAIL_EVENTS = 40  # §6.1: how far back the most recent conversation is read for an unanswered wake
 
 
@@ -291,9 +295,11 @@ class ProactiveScheduler:
                  recent: Callable[[PrincipalId], Awaitable[ConversationSummary | None]],
                  zones: frozenset[str] = frozenset(), clock: Callable[[], datetime] = lambda: datetime.now(UTC),
                  poke: Callable[[float], None] = lambda after: None,
-                 free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None, bond: bool = False) -> None:
+                 free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None, bond: bool = False,
+                 work: bool = False) -> None:
         self._data, self._hub, self._devices, self._runner = data, hub, devices, runner
         self._bond = bond  # character-bond §6: the bond is told, so its anniversaries may open a wake
+        self._work = work  # character-work §7.1: HIMARI's life is told, so a finished piece may open a wake
         self._inputs = inputs
         self.settings = settings
         self._zone = server_zone
@@ -350,30 +356,37 @@ class ProactiveScheduler:
         unanswered = recent is not None and await self._unanswered(TrustedScope(principal, recent.conversation_id),
                                                                    recent.last_sequence)
         loops = tuple(m for m in await self._data.list_memories(principal) if m.category is MemoryCategory.LOOP)
+        last_said = await self._data.last_user_message_at(principal)
         read_from = now - WAKES_READ
-        if device is not None and device.task is not None:
-            # V3-P90 §6.2 (PR #170 review P2-1): a task's steps count every free wake since it started,
-            # however long it went on — read back to its start, or the step would fall to a taken key
-            read_from = min(read_from, now - timedelta(seconds=device.task.for_seconds))
+        if last_said is not None:
+            # character-work §7.2, §7.3: the free wakes' steps and the unanswered wakes count every wake since the
+            # user's last message — read back to it (within UNANSWERED_READ)
+            read_from = min(read_from, max(last_said, now - UNANSWERED_READ))
         wakes = await self._data.wakes_since(principal, read_from)
         # V3-P90 §7.5: a model checked for free wakes may take one that may pass (character-bond §6 too)
         model_ok = recent is not None and self._free_ok is not None \
             and await self._free_ok(TrustedScope(principal, recent.conversation_id))
         anniversaries: tuple[Anniversary, ...] = ()
         bond_day = None
-        if self._bond and model_ok and device_id is not None:  # character-bond §6: the server's day, as a turn's
+        work: tuple[LifeEntry, ...] = ()
+        if (self._bond or self._work) and model_ok and device_id is not None:
             chosen = await self._data.active_persona(principal)
-            bond = await self._data.read_bond(principal, NO_PERSONA if chosen is None else chosen.persona_id,
-                                              now=now, zone=self._zone)
-            anniversaries, bond_day = bond.today, now.astimezone(ZoneInfo(self._zone)).date().isoformat()
+            persona_id = NO_PERSONA if chosen is None else chosen.persona_id
+            if self._bond:  # character-bond §6: the server's day, as a turn's
+                bond = await self._data.read_bond(principal, persona_id, now=now, zone=self._zone)
+                anniversaries, bond_day = bond.today, now.astimezone(ZoneInfo(self._zone)).date().isoformat()
+            if self._work:  # character-work §7.1: the pieces made lately
+                since = (now.astimezone(ZoneInfo(self._zone)).date() - timedelta(days=1)).isoformat()
+                work = tuple(e for e in await self._data.list_life(principal, persona_id, since=since)
+                             if e.kind is LifeKind.WORK and timedelta(0) <= now - e.created_at < WORK_FRESH)
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),
-            last_user_message_at=await self._data.last_user_message_at(principal),
+            last_user_message_at=last_said,
             working=bool(self._runner.running(principal)), unanswered_wake=unanswered,
             wakes=wakes, loops=loops, returned=self._returns.get(principal),
             said=await self._said(principal, wakes), free_ok=model_ok and self.settings.free_minutes > 0,
-            anniversaries=anniversaries, bond_day=bond_day), recent
+            anniversaries=anniversaries, bond_day=bond_day, work=work), recent
 
     async def _said(self, principal: PrincipalId, wakes: Sequence[WakeRecord]) -> frozenset[str]:
         """PR #156 re-review P2-2: of the failed wakes, those whose turn left assistant

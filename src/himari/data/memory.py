@@ -81,6 +81,7 @@ from himari.data.api import (
     LifeWrite,
     LifeWriteStart,
     LifeWriteStatus,
+    WorkPiece,
     Persona,
     PersonaChoice,
     PersonaList,
@@ -1271,11 +1272,14 @@ class InMemoryData:
                         since: str | None = None) -> tuple[LifeEntry, ...]:
         persona_id = rules.check_life_persona(persona_id)
         since = None if since is None else rules.check_life_day(since)
+        open_arcs = {e.entry_id for (owner, _), (e, retired) in self._store.life.items()
+                     if owner == principal and retired is None and e.arc_open}
         return rules.order_life(
             e for (owner, _), (e, retired) in self._store.life.items()
             if owner == principal and retired is None and e.persona_id == persona_id and e.kind is not LifeKind.BOND
             and (e.kind is LifeKind.FACT or since is None or (e.day or "") >= since
-                 or (e.kind is LifeKind.ARC and (e.end_day is None or e.end_day >= since))))
+                 or (e.kind is LifeKind.ARC and (e.end_day is None or e.end_day >= since))
+                 or (e.kind is LifeKind.WORK and e.arc_id in open_arcs)))
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         persona_id = rules.check_life_persona(persona_id)
@@ -1288,14 +1292,17 @@ class InMemoryData:
         return added
 
     async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
-                        expected_revision: int, title: str | None = None) -> LifeEntry:
+                        expected_revision: int, title: str | None = None,
+                        summary: str | None = None) -> LifeEntry:
         entry = self._live_entry(principal, entry_id)
         text = rules.check_life_text(entry.kind, text)
         titled = rules.edited_title(entry, title)
+        summed = rules.edited_summary(entry, summary)
         if expected_revision != entry.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
-        return self._put_life(principal, replace(entry, text=text, title=titled, origin=LifeOrigin.USER,
-                                                 revision=entry.revision + 1, updated_at=datetime.now(UTC)))
+        return self._put_life(principal, replace(entry, text=text, title=titled, summary=summed,
+                                                 origin=LifeOrigin.USER, revision=entry.revision + 1,
+                                                 updated_at=datetime.now(UTC)))
 
     async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
         entry = self._live_entry(principal, entry_id)
@@ -1340,7 +1347,11 @@ class InMemoryData:
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
         return sum(1 for w in self._store.life_writes.values()
-                   if w.owner == principal and w.record.persona_id == persona_id and w.record.day == day)
+                   if w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
+                   and w.record.plan_id is None)
+
+    async def work_attempts(self, principal: PrincipalId, plan_id: int) -> int:
+        return sum(1 for w in self._store.life_writes.values() if w.owner == principal and w.record.plan_id == plan_id)
 
     async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
         return sum(w.record.charged_tokens for w in self._store.life_writes.values()
@@ -1353,13 +1364,15 @@ class InMemoryData:
         return found
 
     async def begin_life_write(self, principal: PrincipalId, start: LifeWriteStart) -> str:
-        if (not isinstance(start, LifeWriteStart) or not isinstance(start.body, bytes) or start.reserved_tokens < 0):
+        if (not isinstance(start, LifeWriteStart) or not isinstance(start.body, bytes) or start.reserved_tokens < 0
+                or not rules.check_plan_ref(start.plan_id)):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life write")
         persona_id, day = rules.check_life_persona(start.persona_id), rules.check_life_day(start.day)
         write_id = self._store.new_id("lwrite")
         self._store.life_writes[write_id] = _LifeWrite(principal, LifeWrite(
             write_id, persona_id, day, LifeWriteStatus.PREPARED, start.provider_key, start.model_id,
-            start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None), start.body)
+            start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None, start.plan_id),
+            start.body)
         return write_id
 
     async def mark_life_write_dispatched(self, write_id: str) -> None:
@@ -1396,6 +1409,8 @@ class InMemoryData:
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.plan_id is not None:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is a worker's call")
         principal, persona_id, day = row.owner, row.record.persona_id, row.record.day
         written: list[LifeEntry] = []
         before = next((e for (owner, _), (e, retired) in self._store.life.items()
@@ -1413,10 +1428,12 @@ class InMemoryData:
             written.append(self._put_life(principal, replace(before, text=diary, origin=LifeOrigin.WRITER,
                                                              revision=before.revision + 1, updated_at=now,
                                                              source=write_id, arc_id=arc_id)))
-        for plan_day, text, at in plans:
-            written.append(self._new_life(principal, LifeEntry(0, persona_id, LifeKind.PLAN, plan_day, text,
-                                                               LifeOrigin.WRITER, 1, now, now, source=write_id,
-                                                               time_of_day=at)))
+        started = None if arc is None or arc.op is not ArcOp.START or moved is None else moved.entry_id
+        open_arcs = self._open_arcs(principal, persona_id)
+        for plan_day, text, at, project in plans:
+            written.append(self._new_life(principal, LifeEntry(
+                0, persona_id, LifeKind.PLAN, plan_day, text, LifeOrigin.WRITER, 1, now, now, source=write_id,
+                time_of_day=at, arc_id=rules.plan_project(project, at, open_arcs, started))))
         for text in facts:
             added = self._add_fact(principal, LifeEntry(0, persona_id, LifeKind.FACT, None, text, LifeOrigin.WRITER,
                                                         1, now, now, source=write_id), dedupe=True)
@@ -1430,8 +1447,7 @@ class InMemoryData:
     def _move_arc(self, principal: PrincipalId, persona_id: int, day: str, move: ArcMove, write_id: str,
                   now: datetime) -> tuple[int | None, LifeEntry | None]:
         """character-world §4: as SqliteData._move_arc."""
-        arcs = [e for (owner, _), (e, retired) in self._store.life.items()
-                if owner == principal and retired is None and e.persona_id == persona_id and e.arc_open]
+        arcs = self._open_arcs(principal, persona_id)
         if move.op is ArcOp.START:
             if not rules.arc_starts(move, arcs):
                 return None, None
@@ -1447,6 +1463,28 @@ class InMemoryData:
             return target.entry_id, None
         return target.entry_id, self._put_life(principal, replace(target, revision=target.revision + 1,
                                                                   updated_at=now, end_day=day, ending=move.ending))
+
+    def _open_arcs(self, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
+        return [e for (owner, _), (e, retired) in self._store.life.items()
+                if owner == principal and retired is None and e.persona_id == persona_id and e.arc_open]
+
+    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:
+        piece = rules.check_work_piece(piece)
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        principal, persona_id, plan_id = row.owner, row.record.persona_id, row.record.plan_id
+        found = None if plan_id is None else self._store.life.get((principal, plan_id))
+        plan = None if found is None or found[1] is not None else found[0]
+        pieces = [] if plan is None else [e for (owner, _), (e, retired) in self._store.life.items()
+                                          if owner == principal and retired is None and e.kind is LifeKind.WORK
+                                          and e.plan_id == plan.entry_id]
+        project = rules.work_project(plan, persona_id, self._open_arcs(principal, persona_id), pieces)
+        assert plan is not None
+        made = self._new_life(principal, rules.work_entry(plan, project, piece, write_id, now))
+        moved = self._put_life(principal, rules.worked_on(project, plan, piece, now))
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return made, moved
 
     @staticmethod
     def _end_write(row: _LifeWrite, status: LifeWriteStatus, error: str) -> None:

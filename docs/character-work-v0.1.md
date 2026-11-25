@@ -100,3 +100,67 @@
 | K5 | 자유 wake는 작업 종류가 아니라 "마지막으로 말한 때에서 30분" |
 | K6 | 답 없는 wake 하나 뒤에는 2시간, 둘 이어지면 사용자가 말할 때까지 |
 | K7 | 작가: 일정·프로젝트는 HIMARI의 목소리로, 재료는 사용자 대화가 아니라 HIMARI 자신, 일기는 HIMARI의 하루 중심 |
+
+## 11. 구현에서 정한 것 (2026-11-25)
+
+설계대로 만들었다(H-81, 배포 전). 아래는 만든 것과, 설계가 비워 둔 곳에서 기존 방식에 맞춰 정한 것이다(소유자 방침: 묻지 않고 권고안으로 정하고, 써 보며 고친다).
+
+### 11.1 만든 것
+
+| 부분 | 자리 |
+| --- | --- |
+| 계약 | `data/api.py`: `LifeKind.WORK`, `LifeEntry.summary`·`plan_id`·`so_far`(일정·조각의 프로젝트는 `arc_id`), `LifePlan.plan_arcs`, `NEW_ARC`(0), `WorkPiece`, `LifeWriteStart.plan_id`·`LifeWrite.plan_id`, `LifeWriteLog.work_attempts`·`apply_work_write`, `LifeStore.edit_life(..., summary=)`, `MAX_WORK_CHARS`(3,000), `MAX_WORK_SUMMARY_CHARS`(200), `MAX_SO_FAR_CHARS`(600), `WakeKind.WORK_DONE`(`PASSABLE_KINDS`에 더함) |
+| 저장 | 스키마 v26: `life_entries`에 `summary`·`plan_id`·`so_far`, `life_writes`에 `plan_id`. `data/sqlite.py`와 `data/memory.py` 둘 다, 공통 규칙(`plan_project`, `check_work_piece`, `work_project`, `work_entry`, `worked_on`, `edited_summary`, `check_plan_ref`)은 `data/rules.py` |
+| 작업자 | 새 `life/work.py`(순수: `WORKER_INSTRUCTIONS`, `due_plan`, `next_plan`, `request_data`, `parse_piece`, `WORK_MINUTES` 60, `WORK_WINDOW` 6시간). `life/worker.py`: `LifeWriter.work`(같은 주기 작업, 같은 잠금, 쓰기 다음에) |
+| 이야기 작가 | `life/writer.py`: K7 규칙, 입력에 `work`(그날 조각)·`arcs[].so_far`·`plans[].arc`·`quiet_hours`, 답의 `plans[].arc`(`plan_arc`) |
+| 프롬프트 | `prompt/api.py`: `himari_life.work`(`WORK_HOURS` 48, `WORK_SHOWN` 2, `WORK_TEXT_CHARS` 800), `arcs[].so_far`(`LIFE_ARCS_CHARS` 500 → 1,800), `LIFE_RULE`에 한 구절, `WORK_RULE`, `FREE_RULE` 새 문장, `wake_text`의 `work_done`. `prompt/system.py`: `ANNIVERSARY_RULE` 뒤 `WORK_RULE`, 원칙 문단 "your own life and work (himari_life)". `prompt/composer.py`: 턴의 삶으로 `work_done`을 그림 |
+| 먼저 말 걸기 | `proactive/rules.py`: `work_candidates`, `at_computer`, 새 `free_candidate`(K5), `unanswered`(K6), `WORK_FRESH` 3시간, `PRESENT_IDLE` 10분, `UNANSWERED_WAIT` 2시간, `MERGE_ORDER`·`DAILY_KINDS`에 `work_done`. `bootstrap/proactive.py`: `Situation.work`(지금 페르소나의 3시간 안 조각), wake를 사용자의 마지막 메시지까지(7일 안) 읽음 |
+| 서버 | `Application.open`이 작가에 조용한 시간을 주고 스케줄러에 `work=`를 켠다. `/api/life`에 `work`(`running`, `next`), 항목의 `so_far`·`summary`·`plan_id`, 일정의 `arc_id`, 한도 `work_chars`·`summary_chars`. `PUT /api/life/{id}`가 `summary`를 받는다. 대화 기록의 wake 줄 "finished a piece of work (w…)" |
+| Web | Settings → Life에 Work 묶음(프로젝트마다 "지금까지"와 조각: 날짜·시각, 제목, 요약, "Show the piece"로 전문, 고치기·지우기), "Work: on · next: …" 줄, 작업 일정에 "work on <프로젝트>", 줄거리에 "So far" |
+
+### 11.2 정한 것
+
+1. **작업자는 작가와 같은 주기 작업 안에 둔다(K1).** `LifeWriter.run`이 사용자마다 작가 쓰기 다음에 `work`를 부른다(같은 사람 잠금). 그래서 따로 켜고 끄는 설정이 없고, 작가가 꺼지면 작업자도 꺼진다(Web 줄 "Work: off (it runs with the story writer)").
+2. **기록과 예산.** 작업자 호출도 `life_writes` 한 줄이다(`plan_id`가 있으면 작업자의 것, 날짜는 일정의 날짜). 요청을 먼저 저장하고 예약 토큰을 같은 하루 예산(`HIMARI_LIFE_DAILY_TOKENS`)에 건다. 작가의 "하루 3번"은 `plan_id` 없는 것만 센다.
+3. **시도 횟수는 일정마다 3번**(`work_attempts`). 하루 작업 일정은 대개 하나라 "하루 3번"과 같다. 3번 다 실패하면 그 일정은 넘긴다.
+4. **언제 부르나(K3).** 작업 일정 = 시각이 있고, 프로젝트(`arc_id`)가 열린 줄거리인 일정. 시작 + 60분(`WORK_MINUTES`)이 지난 뒤 6시간(`WORK_WINDOW`) 안이고 그 일정의 조각이 없으면 부른다. 여럿이면 일찍 끝난 것부터, 주기마다 하나. 날짜·시각은 서버 시간대. `Doing`은 4단계 그대로 시작부터 90분(`NOW_MINUTES`)이다(설계 "지금 그대로").
+5. **조각 길이.** 모델에게는 400~2,000자를 청하고, 검사는 200~3,000자로 통과시킨다(조금 짧거나 길다고 버리지 않게). 저장 한도와 Web에서 고치는 한도도 3,000자다. 제목 60자 한 줄, 요약 200자 한 줄, "지금까지" 600자(줄바꿈 됨), 끝 한 줄 200자. `done`이 빈 글·`false`·`null`이면 끝이 아니다. 나머지는 답 전체를 버린다.
+6. **작업자 입력.** 페르소나(관계 단계로 거름), 정사, 프로젝트(제목·목표·시작일·지금까지), 최근 조각 2개 전문과 그 앞 조각 요약(최근 20개까지), 일정(날짜·시각·글), 날짜·요일·지금, 기분(알리는 동안만, 6시간). 사용자 대화는 넣지 않는다(§9).
+7. **조각 저장.** 조각의 날짜·시각은 일정의 것이고, `created_at`이 실제로 만든 때다(대화의 48시간과 wake의 3시간은 이것으로 잰다). 조각 저장, "지금까지" 고치기, `done`이면 그 일정 날짜로 프로젝트 닫기를 한 트랜잭션에서 한다. 그 일정에 조각이 이미 있거나, 일정이 지워졌거나, 프로젝트가 닫혔거나 지워졌으면 거절하고(던져 버림) 다음 주기에 다시 보지 않는다(일정이 더는 작업 일정이 아니므로). 사용자가 고친 프로젝트도 "지금까지"는 작업자가 계속 고친다(제목·목표는 사용자의 것 그대로).
+8. **목록.** `list_life`는 열린 프로젝트의 조각을 날짜와 상관없이 모두 준다(작업자와 Web이 프로젝트 전체를 보게). 닫힌 프로젝트의 조각은 날짜로만(Web은 30일).
+9. **작가의 `plans[].arc`.** 열린 줄거리 번호(숫자 글도 됨) 또는 `"new"`(같은 답에서 시작하는 줄거리, 저장은 `NEW_ARC`)다. 틀린 모양, 시각 없음, 조용한 시간 안의 시각이면 그 칸만 버리고 일정은 남는다. 저장소는 열린 줄거리(또는 같은 쓰기에서 시작한 것)일 때만 잇는다. 옛 모양 답은 그대로 통과한다.
+10. **작가의 조용한 시간.** 먼저 말 걸기의 조용한 시간(`HIMARI_PROACTIVE_QUIET`, 기본 23–08시, 4단계의 자는 시간과 같음)을 입력 `quiet_hours`로 주고 답 검사에도 쓴다.
+11. **작가 규칙(K7).** 일정은 "수첩에 적는 메모, 페르소나 목소리" 예시 한 줄과 함께, 프로젝트 목표를 되풀이하지 않음, 프로젝트는 페르소나(정체성·세계·좋아하는 것·하는 일)에서 나오고 사용자 대화에서 만들지 않음, 제목은 몇 단어, 목표는 평범한 한 줄, 열린 것이 없으면 오늘 하나 시작, 대부분의 날에 작업 일정 하나. 일기는 HIMARI의 하루와 그날 만든 것이 중심이고 사용자는 일화에 있는 것만 한두 문장까지. "열린 것이 없으면 시작"은 규칙 문장뿐이고 코드로 강제하지 않는다.
+12. **작가 입력 `work`.** 그날(쓰는 날짜) 조각의 시각·프로젝트 제목·조각 제목·요약. 전문은 주지 않는다. 열린 줄거리에 `so_far`, 일정에 `arc`를 붙인다.
+13. **대화 쪽(§6).** `himari_life.work`는 만든 지(`created_at`) 48시간 안의 조각 중 최근 2개(제목, 요약, 프로젝트 제목, 날짜), 가장 최근 것만 글 앞 800자(넘으면 "…"). 조각만 있어도 `himari_life`가 생긴다. 열린 줄거리에 `so_far`를 더하고 그 몫(`LIFE_ARCS_CHARS`)을 500자에서 1,800자로 늘렸다. 새 state 항목은 없다(`himari_life` 안). 원칙 문단은 "your own life and work (himari_life)"로 바꿨다.
+14. **`LIFE_RULE` 한 구절:** "himari_life.work is what you made lately in your projects: you may share it or show it off, but do not read it out at length unless they ask."
+15. **`work_done` wake(K4).** 이유의 `entry_id`가 조각 번호, 열쇠 `work:{번호}`. 만든 지 3시간(`WORK_FRESH`) 안. 삶이 켜지고 대화 모델이 자유 wake용으로 확인된 것일 때만 후보가 된다(넘길 수 있으므로, 기념일과 같음). `PASSABLE_KINDS`에 들어가 혼자면 자유 wake 길(보이기 전 숨김, `[[pass]]` 가능)로 간다. HIMARI가 꺼내는 등급이고 하루 셈(`DAILY_KINDS`)에 든다. 합치는 순서는 기념일 다음, 열린 고리 앞. wake 글은 그릴 때 읽은 조각으로 `{"kind": "work_done", "work": {"project", "title", "summary"}}`(지워졌으면 `{"deleted": true}`). 반려 절의 `WORK_RULE`(기념일 줄 다음, 자유 wake용 모델만): 한두 문장으로 자기 말로 나누고, 읽어 주지 않고, 안 맞으면 `[[pass]]`.
+16. **자유 wake(K5).** "컴퓨터 앞" = 지금 기기가 연결되어 있고, 잠기지 않았고, 잠(`sleep`)이 아니고, 입력이 10분(`PRESENT_IDLE`) 안(`idle_seconds`). 기다림은 마지막 wake(어느 종류든, pass 포함)와 사용자의 마지막 메시지 중 늦은 것부터 30분(`HIMARI_PROACTIVE_FREE_MINUTES`). 읽은 것이 둘 다 없으면 바로 열린다. 열쇠는 `free:<기기>:<기다림 시작 분>`(없으면 `:start`)이라 기다림마다 한 번. `step`은 사용자의 마지막 메시지 뒤 자유 wake 수 + 1. 작업이 있으면 `group`·`minutes`를 그대로 넣는다. 30분을 기다리므로 "대화 중 10분" 규칙이 자유 wake를 막을 일은 없어졌다. `FREE_RULE` 첫 문장을 "the user is at their computer and you have not talked for a while (with a group, that is what they are doing)"로 바꿨다.
+17. **답 없는 wake(K6).** 대화 끝이 답하지 않은 wake일 때, 사용자의 마지막 메시지 뒤에 보인 wake(`spoke`: 말한 것, pass·버림·운영자 시험은 빼고)가 하나면 그 wake부터 2시간(`UNANSWERED_WAIT`) 막고, 둘 이상이면 사용자가 말할 때까지 막는다. 읽은 wake가 없으면(7일보다 오래됨) 지금처럼 말할 때까지. 보인 wake는 종류를 가리지 않는다(돌아옴·알림도 "답 없는 wake"로 센다). 이 규칙은 HIMARI가 꺼내는 것(고리, 자유, 기념일, `work_done`)에만 걸리고 돌아옴·작업 끝남·알림은 그대로다. 그래서 스케줄러는 wake를 사용자의 마지막 메시지까지(26시간보다 길면 7일까지) 읽는다. 옛 "작업이 이어진 만큼 읽기"는 없앴다.
+18. **Web.** 프로젝트는 열린 것과 조각이 있는 닫힌 것을 목록 순서(열린 것 먼저)로 보이고, 각각 "So far"(없으면 "Nothing made yet.")와 조각(최신 먼저). 조각은 요약이 보이고 "Show the piece"(`details`)를 열면 전문. 고치기는 제목·요약·글, 지우기는 다른 항목과 같다. 요약은 조각만 가진다(다른 항목에 주면 422 `invalid_life`). 상태 줄은 "Work: on · next: <날짜 시각> <일정> (<프로젝트>)" 또는 "no work plan ahead". 다음 작업 일정은 작업 시간이 끝나지 않았고 조각이 없는 가장 이른 것.
+19. **옛 코드와 wake 기록.** `work_done`은 다른 이유처럼 종류와 `entry_id`만 JSON으로 남는다. 이 빌드의 모든 `WakeKind` 분기(대화 기록의 wake 줄, 그리기, 규칙)가 이를 안다. v25 빌드는 v26 DB를 열지 않으므로(스키마 확인) 옛 코드가 이 기록을 읽을 일은 없다.
+
+### 11.3 시험
+
+- 전체 pytest(WSL): **2991 passed, 85 skipped**(7분 56초. 세계 때보다 32개 늘었다). `mypy --strict` 문제 없음(279 파일). `scripts/check_imports.py` OK.
+- Web: `npx vitest run` 7파일 37개 통과(Life 2개 더함), `npm run typecheck`, `npm run lint` 통과.
+- 새 시험: `tests/data/test_work.py`(두 저장소: 작업 일정의 프로젝트, 조각·"지금까지"·닫기, 거절, 고치기·지우기), `tests/data/test_sqlite.py`(v25 → v26, `V26_UNDO`·`_ADDED_IN[26]`, 옛 스키마 시험은 v26을 먼저 되돌림), `tests/life/test_work.py`(언제 부르나, 입력, 답 검사, 한 번·세 번·예산·창), `tests/life/test_writer.py`(K7 입력과 `plans[].arc`), `tests/prompt/test_work_prompt.py`, `tests/proactive/test_rules.py`(K5·K6·`work_done`, 자유 wake 시험은 새 규칙으로 다시 씀), `tests/bootstrap/test_proactive_scheduler.py`(`work_done` 끝까지, 자유 wake 시험 시각), `tests/interfaces/test_web_life.py`(Work), `Life.test.tsx`, 실제 모델 확인 `tests/live/test_life_live.py`(작가 입력에 작업 칸, 작업자 호출 하나 더함).
+
+### 11.4 실제 확인 (2026-11-25)
+
+`tests/live/test_life_live.py -k "story_writer or worker"`(`HIMARI_LIVE=1`)를 운영 키로 한 번 돌렸다. 모델 `deepseek/deepseek-v4.1-flash-1017`, 작가 호출 하나와 작업자 호출 하나, 실제 코드 경로(입력 만들기, 요청, 답 검사). **2 passed.** 운영 서버는 키 읽기 말고 건드리지 않았다.
+
+- **작가:** 입력 1,970·출력 758 토큰. 입력에 열린 프로젝트("커버곡 연습", 지금까지 있음), 그날 조각 하나, 조용한 시간. 모든 칸이 모양대로 왔다: 일정 하나 `{"date": "2026-11-26", "time": "21:00", "text": "후렴 가사부터 붙여 보고, 안 되면 코드부터 다시.", "arc": 5}`(작업 일정으로 이어짐), 정사 하나, 기분 `thinking`("후렴이 아직 안 잡혀서"), `arc`는 `advance` 5. 일정이 할 일 목록이 아니라 HIMARI의 메모처럼 짧고 목표를 되풀이하지 않았다. 일기는 레코드 가게와 그날 조각("1절 가사를 끝까지 옮겼는데, 'How does it feel'을 어떻게 살릴지가…")이 중심이고 사용자는 한 문장("너는 회사 발표 자료를 마무리했다고 해서…")이었다.
+- **작업자:** 입력 1,003·출력 888 토큰. 조각 469자, 제목 "후렴 가사 — 꺼지지 않은 채로", 요약 "후렴 가사 붙였어. '파래'라는 말 하나가 제일 마음에 들어. 이제 편곡만 남았네.", `done` 없음. 조각은 보고가 아니라 실제 내용이었다: 코드 표기, 프리코러스와 후렴 가사("어떤 기분이야, 이렇게 다뤄지면 / 난 아직 파래, 월요일처럼 …"), 편곡 메모. "지금까지"는 앞 것을 이어 "후렴이랑 프리코러스 가사까지 붙였다 … 남은 건 편곡"으로 고쳤다.
+- 합계 약 4,600토큰(1센트 아래. 키 사용량 숫자는 실행 직후 바뀌지 않았다).
+
+### 11.5 알려진 한계
+
+- **자유 wake가 훨씬 자주 열린다.** 컴퓨터 앞에서 30분마다(하루 10번까지, pass 포함) 열리므로 지금보다 많이 말할 수 있다. 많으면 `HIMARI_PROACTIVE_FREE_MINUTES`·`HIMARI_PROACTIVE_FREE_DAILY`로 줄인다. 입력 10분 기준은 영상을 보는 동안 입력이 없으면 열리지 않는다.
+- 답 없는 wake는 돌아옴·알림 wake도 센다. 사용자가 다른 대화에서 말하면 그 대화가 가장 최근이 되어 막힘이 풀린다(지금과 같음).
+- 작업자는 지금 고른 페르소나의 작업 일정만 본다. 다른 페르소나의 일정은 그 페르소나를 고른 동안에만 작업된다. 한 주기에 한 조각이라 겹친 일정은 다음 주기로 간다. 예산에 막혀 미루다 6시간을 넘기면 그 일정은 조각 없이 지나간다.
+- 사용자가 6시간 안에 조각을 지우면 그 일정이 다시 작업될 수 있다(시도 횟수 안에서).
+- "프로젝트는 페르소나에서, 사용자 대화에서 만들지 않음"과 "열린 것이 없으면 시작"은 작가 규칙 문장뿐이다. 실제 확인에서도 일기에 사용자 한 문장이 남았다(규칙 안).
+- `Doing`(90분)과 작업 시간(60분)이 다르다. 작업 시간이 끝난 뒤 30분 동안은 "작업 중"으로 보이는데 조각이 아직 없을 수 있다(작업자는 끝난 뒤에 부른다).
+- 조각 전문은 Web에서만 본다(앱에는 없음, 설계대로). Work 묶음을 브라우저로 직접 보지 않았다(컴포넌트 시험만).
+- 작업자의 "지금까지"가 앞 것을 잘못 요약하면 다음 조각이 그것을 따른다. 사용자는 Web에서 "지금까지"를 고칠 수 없다(조각만 고침).

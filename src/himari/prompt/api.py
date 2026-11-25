@@ -695,7 +695,10 @@ LIFE_FACTS_CHARS = 1_500  # the facts the state carries: the user's first, then 
 LIFE_DAYS = 3  # the newest diaries
 LIFE_DAYS_CHARS = 1_500
 LIFE_PLANS_CHARS = 800  # the plans from today on, the soonest first
-LIFE_ARCS_CHARS = 500  # character-world §4: the open arcs' titles and goals, the newest first
+LIFE_ARCS_CHARS = 1_800  # character-world §4: the open arcs' titles, goals and so far (character-work §6)
+WORK_HOURS = 48  # character-work §6: the pieces made this recently are told
+WORK_SHOWN = 2  # at most this many, the newest first
+WORK_TEXT_CHARS = 800  # the newest one's text, its start (to talk about what is in it)
 LIFE_READ_DAYS = timedelta(days=14)  # how far back a turn reads diaries and plans
 
 
@@ -704,7 +707,10 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     their text fits in LIFE_FACTS_CHARS; the newest LIFE_DAYS diaries within
     LIFE_DAYS_CHARS (newest first); the plans dated today (``now``'s date) or
     later, soonest first, within LIFE_PLANS_CHARS; the open arcs' titles and
-    goals within LIFE_ARCS_CHARS (character-world §4). None when none is shown."""
+    goals within LIFE_ARCS_CHARS (character-world §4) with their so far, and the work
+    pieces made in the last WORK_HOURS (at most WORK_SHOWN, the newest first: title,
+    summary and project; the newest also its text's first WORK_TEXT_CHARS, character-work
+    §6). None when none is shown."""
     today = None if now is None else now.date().isoformat()
     facts: list[str] = []
     room = LIFE_FACTS_CHARS
@@ -739,12 +745,26 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     for entry in entries:
         if not entry.arc_open:
             continue
-        size = len(entry.title or "") + len(entry.text)
+        size = len(entry.title or "") + len(entry.text) + len(entry.so_far or "")
         if size > room:
             break
-        arcs.append({"title": entry.title, "goal": entry.text})
+        arcs.append({"title": entry.title, "goal": entry.text, **({"so_far": entry.so_far} if entry.so_far else {})})
         room -= size
-    if not facts and not days and not plans and not arcs:
+    titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
+    pieces = sorted((e for e in entries if e.kind is LifeKind.WORK
+                     and (now is None or timedelta(0) <= now - e.created_at < timedelta(hours=WORK_HOURS))),
+                    key=lambda e: (e.created_at, e.entry_id), reverse=True)[:WORK_SHOWN]
+    work: list[dict[str, object]] = []
+    for index, entry in enumerate(pieces):
+        item: dict[str, object] = {"title": entry.title, "summary": entry.summary}
+        if entry.arc_id in titles:
+            item["project"] = titles[entry.arc_id]
+        if entry.day:
+            item["date"] = entry.day
+        if index == 0:
+            item["text"] = entry.text if len(entry.text) <= WORK_TEXT_CHARS else entry.text[:WORK_TEXT_CHARS] + "…"
+        work.append(item)
+    if not facts and not days and not plans and not arcs and not work:
         return None
     data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
     if days:
@@ -753,6 +773,8 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         data["plans"] = plans
     if arcs:
         data["arcs"] = arcs
+    if work:
+        data["work"] = work
     return data
 
 
@@ -987,9 +1009,12 @@ ACTIVITY_RULE = (
 # V3-P87 §8.2: right after SPEAKING_RULE when HIMARI may speak first.
 # V3-P90 §7.2: after "Speaking first", for a model checked for free wakes. Owner 2026-11-04: the task the
 # user kept at is the topic — engage with it in your own words; saying you will leave them be is a [[pass]].
+# character-work §7.2 (K5): a free wake opens when the user is at the computer and you have not talked for a while;
+# what they are doing is told when known (a group), never needed.
 FREE_RULE = (
-    "- A free wake: a <wake> whose reasons are all \"free\" means the user kept at the same task. Talk with them "
-    "about it, freely and briefly — how it is going, a thought on it, or help you could give. Answer exactly "
+    "- A free wake: a <wake> whose reasons are all \"free\" means the user is at their computer and you have not "
+    "talked for a while (with a group, that is what they are doing). Talk with them, freely and briefly — how "
+    "their task is going, a thought on it, or help you could give. Answer exactly "
     "[[pass]] instead of saying you will leave them be, and when they should not be interrupted: a call or a "
     "meeting (a call or meeting app with the microphone or camera on), the middle of a match, or you would only "
     "repeat what you said last time. A fullscreen video, or the microphone or camera alone, is no reason to stay "
@@ -1009,6 +1034,8 @@ LIFE_RULE = (
     "it and never contradict it; what "
     "you add about yourself as you talk must fit it. Answer from it when asked about yourself, and bring up your "
     "own day, plans and likes freely whenever it fits: in a greeting, when you speak first, or as you talk. "
+    "himari_life.work is what you made lately in your projects: you may share it or show it off, but do not read "
+    "it out at length unless they ask. "
     "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
     "what you are doing right now: when it says you are asleep and the user talks to you, you may answer briefly, "
     "as if just woken; say what you are doing when they ask."
@@ -1037,6 +1064,12 @@ ANNIVERSARY_RULE = (
     "own words. Answer exactly [[pass]] instead when it does not fit now (a call, a match) or you marked it already "
     "today."
 )
+# character-work §7.1: after the anniversary's line, for a model checked for free wakes (a work_done wake may pass).
+WORK_RULE = (
+    "- Your work: a <wake> reason \"work_done\" means you just finished a piece of your own project (it is in "
+    "himari_life.work). If you feel like it, share it in a sentence or two, in your own words; do not read it "
+    "out. Answer exactly [[pass]] instead when it does not fit now (a call, a match) or they seem busy."
+)
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "
@@ -1046,10 +1079,12 @@ PROACTIVE_RULE = (
 )
 
 
-def wake_text(wake: Wake, notes: Mapping[int, Memory], bond: Mapping[int, LifeEntry] = FrozenMap()) -> str:
+def wake_text(wake: Wake, notes: Mapping[int, Memory], bond: Mapping[int, LifeEntry] = FrozenMap(),
+              life: Mapping[int, LifeEntry] = FrozenMap()) -> str:
     """V3-P87 §8.1: the wake as the model reads it — JSON, escaped like the state;
     a loop's text read now (a deleted one says so), never copied into the Event.
-    character-bond §6: so is an anniversary's ``date`` entry, from ``bond``."""
+    character-bond §6: so is an anniversary's ``date`` entry, from ``bond``;
+    character-work §7.1: and a work_done's piece (its project, title and summary), from ``life``."""
     reasons: list[dict[str, object]] = []
     for reason in wake.reasons:
         item: dict[str, object] = {"kind": reason.kind.value}
@@ -1066,7 +1101,13 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory], bond: Mapping[int, LifeEn
             item["together_days"] = reason.days
         if reason.years is not None:
             item["years_together"] = reason.years
-        if reason.entry_id is not None:
+        if reason.entry_id is not None and reason.kind is WakeKind.WORK_DONE:
+            made = life.get(reason.entry_id)
+            project = None if made is None or made.arc_id is None else life.get(made.arc_id)
+            item["work"] = {"deleted": True} if made is None or made.kind is not LifeKind.WORK else {
+                **({"project": project.title} if project is not None else {}), "title": made.title,
+                "summary": made.summary}
+        elif reason.entry_id is not None:
             entry = bond.get(reason.entry_id)
             item["day"] = {"deleted": True} if entry is None else {
                 "text": entry.text, **({"date": entry.month_day} if entry.month_day else {})}

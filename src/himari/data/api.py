@@ -193,9 +193,10 @@ class WakeKind(Enum):
     FOCUS = "focus"  # V3-P87; no longer made (V3-P90), still read
     GAME_ENDED = "game_ended"  # V3-P87; no longer made (V3-P90), still read
     TASK_ENDED = "task_ended"  # V3-P90 §5.3: a game or a video that clearly ended
-    FREE = "free"  # V3-P90 §7: no news — the same task went on; the model may pass
+    FREE = "free"  # V3-P90 §7, character-work §7.2: no news — the user at the computer a while; the model may pass
     TRY = "try"  # the operator's try (§11)
     ANNIVERSARY = "anniversary"  # character-bond §6: a day to mark together; the model may pass
+    WORK_DONE = "work_done"  # character-work §7.1: HIMARI just finished a piece of its work; the model may pass
 
 
 @dataclass(frozen=True)
@@ -213,7 +214,8 @@ class WakeReason(DeepFrozen):
     group: str | None = None  # TASK_ENDED (V3-P90 §5.3): "game" or "video"; FREE: the task's group
     step: int | None = None  # FREE (V3-P90 §6.2): which of the timer's steps, from 1
     # ANNIVERSARY (character-bond §6): days together (100, 200, 300), years together, or a ``date``
-    # entry of the bond (its id only: the prompt reads its text when it draws the wake)
+    # entry of the bond (its id only: the prompt reads its text when it draws the wake).
+    # WORK_DONE (character-work §7.1): ``entry_id`` is the work piece's (read when the wake is drawn).
     days: int | None = None
     years: int | None = None
     entry_id: int | None = None
@@ -1491,13 +1493,15 @@ class WakeStatus(Enum):
         return self in (WakeStatus.OPENED, WakeStatus.SPEAKING)
 
 
-# V3-P90 §7.3, character-bond §6: what a wake may pass on — HIMARI's own openings with no news
-PASSABLE_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY})
+# V3-P90 §7.3, character-bond §6: what a wake may pass on — HIMARI's own openings with no news;
+# character-work §7.1: a piece of work just finished too
+PASSABLE_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY, WakeKind.WORK_DONE})
 
 
 def free_wake(reasons: Sequence[WakeReason]) -> bool:
     """V3-P90 §7.3: a wake whose reasons are all FREE — its own path (hidden until it speaks, may pass).
-    character-bond §6: an anniversary takes the same path (it may pass too)."""
+    character-bond §6: an anniversary takes the same path (it may pass too); character-work §7.1: so does
+    a piece of work just finished."""
     return bool(reasons) and all(r.kind in PASSABLE_KINDS for r in reasons)
 
 
@@ -1741,6 +1745,9 @@ NO_PERSONA = 0  # L2: the life HIMARI has while no persona is chosen
 MAX_ARC_TITLE_CHARS = 60  # character-world §4: an arc's title, one line
 MAX_ARC_CHARS = 200  # an arc's goal and its ending, one line each
 MAX_OPEN_ARCS = 2  # W3: a persona's open arcs; a start past it is left out
+MAX_WORK_CHARS = 3_000  # character-work §4: a work piece's text (the worker is asked for 400 to 2,000)
+MAX_WORK_SUMMARY_CHARS = 200  # a work piece's one-line summary, in HIMARI's voice
+MAX_SO_FAR_CHARS = 600  # §3: an arc's (a project's) "so far", rewritten with each piece
 
 
 class LifeKind(Enum):
@@ -1749,6 +1756,7 @@ class LifeKind(Enum):
     PLAN = "plan"  # something ahead, on a date
     BOND = "bond"  # character-bond §2: settled between the user and HIMARI (BondStore, never list_life)
     ARC = "arc"  # character-world §4: a thread of HIMARI's life over weeks (the story writer starts and ends it)
+    WORK = "work"  # character-work §4: a piece of an arc's (a project's) work, made by the worker at a work plan
 
 
 class LifeOrigin(Enum):
@@ -1775,7 +1783,10 @@ class LifeEntry(DeepFrozen):
     only for a diary, a plan or an arc (the day it started); ``tag`` only for a bond
     entry and ``month_day`` (MM-DD) only for a ``date`` one (character-bond §2).
     character-world §4: an arc's ``text`` is its goal, with its ``title`` and, once
-    closed, its ``end_day`` and ``ending``; a diary's ``arc_id`` is the arc its day moved."""
+    closed, its ``end_day`` and ``ending``; a diary's ``arc_id`` is the arc its day moved.
+    character-work §3, §4: an arc (a project) also has its ``so_far``; a plan's ``arc_id`` is the project
+    it is work time for (a work plan); a work piece has its plan's ``day`` and ``time_of_day``, its
+    ``title``, the piece as ``text``, its ``summary``, its project (``arc_id``) and plan (``plan_id``)."""
 
     entry_id: int  # per principal, never given out again
     persona_id: int  # NO_PERSONA: the life of no chosen persona
@@ -1797,7 +1808,10 @@ class LifeEntry(DeepFrozen):
     title: str | None = None  # character-world §4: an arc's title
     end_day: str | None = None  # an arc's last day (YYYY-MM-DD) once closed; None: open
     ending: str | None = None  # a closed arc's one-line ending
-    arc_id: int | None = None  # a diary's: the arc its day started, carried on or closed
+    arc_id: int | None = None  # a diary's: the arc its day moved; a plan's, a piece's: the project (character-work)
+    summary: str | None = None  # character-work §4: a work piece's one line
+    plan_id: int | None = None  # a work piece's plan
+    so_far: str | None = None  # §3: an arc's "so far" (None: no piece yet)
 
     @property
     def arc_open(self) -> bool:
@@ -1849,7 +1863,8 @@ class LifePlan(DeepFrozen):
     """What one story writer call writes for its date (§3), checked by the life module.
     character-state §2, §3: the plans' start times by position (HH:MM; missing or None: no
     time), and HIMARI's mood at the day's end with why, as of ``mood_at`` (None: when applied).
-    character-world §4: the day's one arc move, if any."""
+    character-world §4: the day's one arc move, if any. character-work §4: the plans' projects by
+    position (an open arc's id, NEW_ARC for the arc this write starts; missing or None: not a work plan)."""
 
     diary: str
     plans: tuple[tuple[str, str], ...] = ()  # (YYYY-MM-DD, text)
@@ -1859,6 +1874,23 @@ class LifePlan(DeepFrozen):
     mood_reason: str | None = None
     mood_at: datetime | None = None
     arc: ArcMove | None = None
+    plan_arcs: tuple[int | None, ...] = ()
+
+
+NEW_ARC = 0  # character-work §4: a plan's project is the arc the same write starts
+
+
+@dataclass(frozen=True)
+class WorkPiece(DeepFrozen):
+    """character-work §4: what one worker call made for a work plan, checked by the life module:
+    the piece, its title and one-line summary, the project's new "so far", and an ending when
+    the piece finishes the project (it closes)."""
+
+    text: str
+    title: str
+    summary: str
+    so_far: str
+    done: str | None = None
 
 
 class LifeStore(Protocol):
@@ -1869,14 +1901,17 @@ class LifeStore(Protocol):
     MAX_LIFE_CHARS, a diary MAX_DIARY_CHARS, an arc's goal MAX_ARC_CHARS and its
     title MAX_ARC_TITLE_CHARS), INVALID_ARGUMENT (no text, a control character
     other than newline and tab — none at all in an arc's title — or a title for an
-    entry that is not an arc), LIMIT_EXCEEDED (MAX_LIFE_FACTS live facts, all the user's)."""
+    entry that is not an arc or a work piece, or a summary for one that is not a piece),
+    LIMIT_EXCEEDED (MAX_LIFE_FACTS live facts, all the user's). character-work §4: a work piece's
+    text is at most MAX_WORK_CHARS, its title as an arc's, its summary MAX_WORK_SUMMARY_CHARS (one line)."""
 
     async def list_life(self, principal: PrincipalId, persona_id: int, *,
                         since: str | None = None) -> tuple[LifeEntry, ...]:
         """The persona's live entries: every fact (the user's first, then newest
         first), then its arcs — the open ones (newest first), then those started or
-        closed ``since`` or later (character-world §4) — then the plans and diaries
-        dated ``since`` or later (None: all), newest date first. Never the bond
+        closed ``since`` or later (character-world §4) — then the plans, diaries and
+        work pieces dated ``since`` or later (None: all), newest date first, with every
+        piece of an open arc whatever its date (character-work §4). Never the bond
         (character-bond: BondStore.list_bond)."""
         ...
 
@@ -1886,9 +1921,11 @@ class LifeStore(Protocol):
         ...
 
     async def edit_life(self, principal: PrincipalId, entry_id: int, text: str, *,
-                        expected_revision: int, title: str | None = None) -> LifeEntry:
+                        expected_revision: int, title: str | None = None,
+                        summary: str | None = None) -> LifeEntry:
         """The user's rewrite: it becomes the user's (revision + 1). An arc's ``text`` is
-        its goal and ``title`` (None: kept) its title (character-world §4)."""
+        its goal and ``title`` (None: kept) its title (character-world §4); a work piece's
+        ``text`` is the piece, with its ``title`` and ``summary`` (None: kept, character-work §4)."""
         ...
 
     async def retire_life(self, principal: PrincipalId, entry_id: int, *, expected_revision: int) -> None:
@@ -1913,6 +1950,7 @@ class LifeWriteStart(DeepFrozen):
     body: bytes  # the request, stored before it is sent
     content_type: str
     reserved_tokens: int
+    plan_id: int | None = None  # character-work §4: a worker call's work plan; None: a story writer call
 
 
 class LifeWriteStatus(Enum):
@@ -1941,6 +1979,7 @@ class LifeWrite(DeepFrozen):
     error: str | None
     created_at: datetime
     finished_at: datetime | None
+    plan_id: int | None = None  # character-work §4: a worker call's work plan
 
 
 class LifeWriteLog(Protocol):
@@ -1952,11 +1991,15 @@ class LifeWriteLog(Protocol):
         ...
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
-        """The writes made for this persona and date, whatever came of them."""
+        """The story writer's writes made for this persona and date, whatever came of them."""
+        ...
+
+    async def work_attempts(self, principal: PrincipalId, plan_id: int) -> int:
+        """character-work §4: the worker's calls made for this work plan, whatever came of them."""
         ...
 
     async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
-        """The tokens charged by the principal's writes prepared since then."""
+        """The tokens charged by the principal's writes (the worker's calls too) prepared since then."""
         ...
 
     async def begin_life_write(self, principal: PrincipalId, start: LifeWriteStart) -> str:
@@ -1983,7 +2026,17 @@ class LifeWriteLog(Protocol):
         a start below MAX_OPEN_ARCS open arcs and not titled as an open one, or an
         advance or close of an open arc of the persona — else it is left out alone;
         the diary the writer wrote that day names the arc moved); the write APPLIED.
+        character-work §4: a plan's project is kept only when it names an open arc of the persona
+        (or NEW_ARC with a start made), else the plan stays without one.
         The entries written. INVALID_STATE_TRANSITION unless RECEIVED."""
+        ...
+
+    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:
+        """character-work §4, one transaction: the worker call's piece (a WORK entry with its plan's
+        day and time, its project and plan), the project's "so far" rewritten and, with ``done``, the
+        project closed on the plan's day with that ending; the write APPLIED. The piece first, then
+        the project. INVALID_ARGUMENT when the call is not a worker's, its plan is no live work plan
+        of an open arc, or the plan has a piece already; INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
     async def fail_life_write(self, write_id: str, error: str) -> None:

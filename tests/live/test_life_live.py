@@ -4,7 +4,9 @@ operator configuration names), to see that the JSON round-trips with a real mode
 check, and the pass keeps what HIMARI said of itself. With ``HIMARI_LIVE_LIFE_OUT`` set to a file, both answers and
 their usage are appended as JSON lines. Machine checks are only "is it the shape asked for" (character-architecture
 §10); whether the writing is good is the owner's to judge. The writer's input also holds a sample weather line, five
-sample topic titles and one open arc (character-world v0.1), never the production search."""
+sample topic titles and one open arc (character-world v0.1), never the production search. character-work v0.1:
+the writer is also told the quiet hours, the arc's so far and the day's work piece, and may name a plan's project;
+one worker call makes a piece for a work plan and its answer passes every check (``-k worker``)."""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import asyncio
 import json
 import os
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -35,7 +37,7 @@ from himari.data.api import (
     RecentEpisode,
     UserMessage,
 )
-from himari.life import writer
+from himari.life import work, writer
 from himari.memory import passes
 from himari.prompt.api import RequestOptions
 from himari.provider.api import NativeReceived, NormalizedFinal, ProviderCapabilities
@@ -75,9 +77,17 @@ LIFE = (entry(1, LifeKind.FACT, "고양이를 무서워한다.", origin=LifeOrig
         entry(3, LifeKind.DIARY, "오늘은 하루 종일 비가 왔다. 창가에 앉아 오래된 신스팝을 들었다. 선인장에 물을 줬다.",
               "2026-11-24"),
         replace(entry(4, LifeKind.PLAN, "중고 레코드 가게 목록을 정리한다.", "2026-11-25"), time_of_day="10:00"),
-        # character-world §4: one open arc, moved once since it started
-        replace(entry(5, LifeKind.ARC, "한 달 안에 신스팝 커버곡 하나를 완성한다.", "2026-11-18"), title="커버곡 연습"),
-        replace(entry(6, LifeKind.DIARY, "커버곡 연습을 시작했다. 첫 소절부터 막혔다.", "2026-11-18"), arc_id=5))
+        # character-world §4: one open arc, moved once since it started; character-work §3: with its so far
+        replace(entry(5, LifeKind.ARC, "한 달 안에 신스팝 커버곡 하나를 완성한다.", "2026-11-18"), title="커버곡 연습",
+                so_far="곡은 'Blue Monday'로 정했다. 신스 베이스 라인을 따서 코드 진행(Dm-C-F-Am)을 적었고, "
+                       "1절 가사는 한국어로 옮겼다. 후렴 가사와 편곡이 남았다."),
+        replace(entry(6, LifeKind.DIARY, "커버곡 연습을 시작했다. 첫 소절부터 막혔다.", "2026-11-18"), arc_id=5),
+        # character-work §4: today's work plan and the piece the worker made for it
+        replace(entry(7, LifeKind.PLAN, "오늘 밤엔 1절 가사 마저 옮겨야지.", "2026-11-25"), time_of_day="20:00",
+                arc_id=5),
+        replace(entry(8, LifeKind.WORK, "1절 번역 노트 …", "2026-11-25"), time_of_day="20:00", title="1절 가사 옮기기",
+                summary="1절 가사 다 옮겼어. 'How does it feel'을 어떻게 살릴지가 제일 어려웠어.", arc_id=5, plan_id=7))
+QUIET = (time(23, 0), time(8, 0))
 # character-world §2, §3: sample inputs (never the production search)
 WEATHER = "light rain, 3 to 9°C, rain 2.1 mm"
 TOPICS = ("수도권 첫눈 예보, 주말 기온 뚝", "연말 공연 예매 시작", "국회 예산안 처리 두고 공방", "새 스마트폰 출시 첫날 매진",
@@ -121,15 +131,16 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
                      "사용자가 회사 발표 자료를 마무리했고, HIMARI가 마지막 장의 문장을 다듬자고 했다.", (1,), (2,),
                      MemoryOrigin.EXTRACTOR, None, 1, NOW, NOW)
     data = writer.request_data(PERSONA, LIFE, [RecentEpisode(talked, "발표")], day=day, now=NOW, zone=SEOUL,
-                               weather=WEATHER, topics=TOPICS)
+                               weather=WEATHER, topics=TOPICS, quiet=QUIET)
     assert data["arcs"] == [{"id": 5, "title": "커버곡 연습", "goal": "한 달 안에 신스팝 커버곡 하나를 완성한다.",
-                             "started": "2026-11-18", "moved_on": ["2026-11-18"]}]
+                             "started": "2026-11-18", "so_far": LIFE[4].so_far, "moved_on": ["2026-11-18"]}]
+    assert data["work"] and data["quiet_hours"] == "23:00-08:00"
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
                              max_output_tokens=writer.WRITER_MAX_OUTPUT_TOKENS)
     text, usage = call(writer.model_input(data, options))
-    plan = writer.parse_answer(text, day)  # every §3 check: shape, lengths, counts, plan dates
+    plan = writer.parse_answer(text, day, QUIET)  # every §3 check: shape, lengths, counts, plan dates
     record("writer", text, usage, plans=len(plan.plans), facts=len(plan.facts), diary_chars=len(plan.diary),
-           times=list(plan.times), mood=plan.mood, mood_reason=plan.mood_reason,
+           times=list(plan.times), plan_arcs=list(plan.plan_arcs), mood=plan.mood, mood_reason=plan.mood_reason,
            arc=None if plan.arc is None else {"move": plan.arc.op.value, "id": plan.arc.entry_id,
                                               "title": plan.arc.title, "goal": plan.arc.goal,
                                               "ending": plan.arc.ending})
@@ -150,6 +161,28 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
     # character-world §4: an arc move, when given, is in the shape asked for (an out-of-shape one is left out)
     if raw.get("arc") is not None:
         assert plan.arc is not None, raw["arc"]
+    # character-work §4: a plan's project, when given with a time outside the quiet hours, is kept
+    arcs = plan.plan_arcs or (None,) * len(plan.plans)
+    for asked, project, at in zip(raw.get("plans") or [], arcs, times):
+        if isinstance(asked, dict) and asked.get("arc") is not None and at is not None \
+                and not writer.in_quiet_hours(time.fromisoformat(at), *QUIET):
+            assert project is not None, asked
+
+
+def test_the_worker_makes_a_piece_that_passes_its_checks() -> None:
+    """character-work §4: one worker call for the work plan of the open project, after its hour."""
+    plan = replace(LIFE[6], text="오늘 밤엔 후렴 가사 붙여 봐야지.", entry_id=9)
+    life = (*LIFE[:6], plan, LIFE[7])
+    at = datetime(2026, 11, 25, 12, 10, tzinfo=UTC)  # 21:10 in Seoul: the 20:00 work time is over
+    data = work.request_data(PERSONA, life, plan, LIFE[4], now=at, zone=SEOUL)
+    told = data["project"]
+    assert data["recent_pieces"] and isinstance(told, dict) and told.get("so_far")
+    options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
+                             max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
+    text, usage = call(work.model_input(data, options))
+    piece = work.parse_piece(text)  # every §4 check, the whole answer
+    record("worker", text, usage, piece_chars=len(piece.text), title=piece.title, summary=piece.summary,
+           so_far=piece.so_far, done=piece.done)
 
 
 def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import secrets
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
 from pathlib import Path
@@ -126,10 +127,61 @@ def test_an_anniversary_is_marked_once_that_day_and_may_pass(tmp_path: Path) -> 
     asyncio.run(scenario())
 
 
+def test_a_finished_piece_is_shared_once_and_may_pass(tmp_path: Path) -> None:
+    """character-work §7.1: a piece the worker made for the chosen persona opens a wake that may pass, once;
+    the drawn wake names the piece and its project."""
+    from himari.data.api import NEW_ARC, ArcMove, ArcOp, LifePlan, LifeWriteStart, RawReceived, WorkPiece
+
+    async def scenario() -> None:
+        adapter = answers("응", "설정집 냉각부 끝냈어. 나중에 보여 줄게.")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device = await paired(app)
+            app.presence.subscribe(ME, device)
+            app.presence.signal(ME, device, 0, "Asia/Seoul")
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            today = datetime.now(ZoneInfo(app.time_zone)).date().isoformat()
+
+            async def received(plan_id: int | None = None) -> str:
+                write_id = await app.data.begin_life_write(ME, LifeWriteStart(0, today, "p", "m", b"{}", "j", 1,
+                                                                              plan_id=plan_id))
+                await app.data.mark_life_write_dispatched(write_id)
+                await app.data.record_life_write(write_id, RawReceived(b"{}", "j"))
+                return write_id
+
+            _, _, plan = await app.data.apply_life_write(await received(), LifePlan(
+                "전자포를 구상했다.", ((today, "냉각부 도면 그려야지."),), times=("20:00",),
+                arc=ArcMove(ArcOp.START, title="블랙홀 전자포", goal="설정집 한 권"), plan_arcs=(NEW_ARC,)),
+                now=datetime.now(UTC))
+            made, _ = await app.data.apply_work_write(await received(plan.entry_id), WorkPiece(
+                "냉각부 설계. " * 40, "냉각부", "냉각부 설계 끝냈어.", "냉각부까지."), now=datetime.now(UTC))
+            scheduler = app.scheduler
+            assert scheduler is not None
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=15)  # past the talking
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke", look
+            assert look.decision.reasons == (WakeReason(WakeKind.WORK_DONE, entry_id=made.entry_id),)
+            await settled(app, scope)
+            drawn = adapter.prepared_inputs[-1].conversation[-1].blocks[-1].text  # type: ignore[union-attr]
+            assert "work_done" in drawn and "냉각부 설계 끝냈어." in drawn and "블랙홀 전자포" in drawn
+            wake, answer = (await app.data.read_events(scope))[-2:]
+            assert isinstance(wake.payload, Wake) and answer.kind is EventKind.ASSISTANT_FINAL
+            again = await scheduler.look(ME)
+            assert again.decision.reasons == ()  # once
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
 def test_a_return_after_hours_away_is_greeted(tmp_path: Path) -> None:
     async def scenario() -> None:
         root = tmp_path / "data"
-        app = await opened(root, answers("응"))
+        # character-work §7.2: no free wakes here — the user at the computer hours after their last word is one
+        quiet = replace(ON, free_minutes=0)
+        app = await opened(root, answers("응"), quiet)
         device = await paired(app)
         scope = TrustedScope(ME, await app.create_conversation(ME))
         await app.send(scope, "잘 자", origin=MessageOrigin(OriginKind.WEB))
@@ -142,7 +194,7 @@ def test_a_return_after_hours_away_is_greeted(tmp_path: Path) -> None:
         store.connection.commit()
         store.close()
 
-        app = await opened(root, answers("좋은 아침!"))  # the server restarted meanwhile
+        app = await opened(root, answers("좋은 아침!"), quiet)  # the server restarted meanwhile
         try:
             app.presence.subscribe(ME, device)
             app.presence.signal(ME, device, 0, "Asia/Seoul", Signals(after=After.UNLOCK))
@@ -456,8 +508,8 @@ def working_signals(minutes: float) -> Signals:
 
 
 def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> None:
-    """V3-P90 §7, V3-P107 §4: thirty minutes into a task the model is asked; a pass is never seen, and
-    counts toward the day."""
+    """V3-P90 §7, V3-P107 §4: the model is asked (character-work §7.2: thirty minutes after the user's last
+    message, at the computer); a pass is never seen, and counts toward the day."""
     async def scenario() -> None:
         adapter = answers("응", "[[pass]]")
         app = await opened(tmp_path / "data", adapter)
@@ -470,8 +522,8 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
             scheduler = app.scheduler
             assert scheduler is not None
-            # 31 minutes into the task, the message 16 minutes ago (past talking): step 1 is due
-            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
+            # the message 31 minutes ago: step 1 is due
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=31)
             app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(31))
             look = await scheduler.look(ME)
             assert look.outcome == "spoke" and look.decision.reasons[0].kind is WakeKind.FREE, look
@@ -490,9 +542,9 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
     asyncio.run(scenario())
 
 
-def test_a_task_longer_than_the_wakes_read_keeps_its_steps(tmp_path: Path) -> None:
-    """PR #170 review P2-1: a task 27 hours on, its two free wakes older than WAKES_READ — the step is
-    still the third (counted back to the task's start), not the first again under a taken key."""
+def test_free_wakes_older_than_the_wakes_read_keep_their_steps(tmp_path: Path) -> None:
+    """PR #170 review P2-1, character-work §7.2: two free wakes since the user's last message, older than
+    WAKES_READ — the step is still the third (the wakes are read back to that message)."""
     from himari.data.api import WakeStatus
     from himari.proactive.rules import _minute
 
@@ -538,7 +590,7 @@ def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
             await app.runner.wait(scope)
             scheduler = app.scheduler
             assert scheduler is not None
-            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=31)
             app.presence.signal(ME, device, 0, "Asia/Seoul", working_signals(31))
             assert (await scheduler.look(ME)).outcome == "spoke"
             await settled(app, scope)
@@ -547,7 +599,7 @@ def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
             record = await app.data.read_wake(ME, wake.payload.wake_id)
             assert record.status.value == "answered"
             assert "A free wake" in "\n".join(adapter.prepared_inputs[-1].stable_prefix)  # its line, for a checked model
-            scheduler._clock = lambda: record.created_at  # The earlier +16 minutes may have crossed local midnight.
+            scheduler._clock = lambda: record.created_at  # The earlier +31 minutes may have crossed local midnight.
             status = await app.proactive_status(ME)
             assert status["today"] == 1
         finally:

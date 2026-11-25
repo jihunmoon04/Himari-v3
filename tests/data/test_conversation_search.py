@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from testkit import V17_UNDO, V20_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, FOREIGN, SCOPE, V15_UNDO, data_for, new_store, restart, text_result, user
+from testkit import V17_UNDO, V20_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, V26_UNDO, FOREIGN, SCOPE, V15_UNDO, data_for, new_store, restart, text_result, user
 
 from himari.common import CallId, CallRef, ConversationId, RawRepresentation, RunId, TextBlock, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
@@ -252,7 +252,7 @@ def test_an_upgrade_fills_in_batches_without_missing_or_repeating_one(tmp_path: 
     store.close()
     conn = sqlite3.connect(path)
     try:
-        for statement in (*V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO, *V20_UNDO, *V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
+        for statement in (*V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO, *V20_UNDO, *V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
                           "DROP TABLE devices"):  # v14 (V3-P83)
             conn.execute(statement)
         conn.execute("DROP INDEX bindings_by_workspace")  # v13 (V3-P74)

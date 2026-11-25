@@ -73,11 +73,11 @@ def test_the_open_arcs_are_in_himari_life_by_title_and_goal() -> None:
     life = himari_life_data((arc(1, "그림 연습", "풍경화 한 장"), arc(2, "옛 일", "끝난 것", "2026-11-20")), NOW)
     assert life is not None and life["arcs"] == [{"title": "그림 연습", "goal": "풍경화 한 장"}]  # open ones only
     assert himari_life_data((arc(2, "옛 일", "끝난 것", "2026-11-20"),), NOW) is None
-    many = tuple(arc(n, "제목" * 5, "목표" * 90) for n in range(5))
+    many = tuple(arc(n, "제목" * 5, "목표" * 90) for n in range(12))
     told = himari_life_data(many, NOW)
     assert told is not None
     arcs = told["arcs"]
-    assert isinstance(arcs, list) and 0 < len(arcs) < 5
+    assert isinstance(arcs, list) and 0 < len(arcs) < 12
     assert sum(len(a["title"]) + len(a["goal"]) for a in arcs) <= LIFE_ARCS_CHARS
     assert "(arcs)" in LIFE_RULE
 
