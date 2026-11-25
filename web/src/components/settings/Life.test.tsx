@@ -178,6 +178,50 @@ describe("an entry", () => {
     await waitFor(() => expect(editLife).toHaveBeenCalledWith(11, "풍경화 한 장", 1, "수채화 연습"));
   });
 
+  it("shows the projects with their so far and pieces, the worker and the next work plan (character-work §8)",
+    async () => {
+      const plan = { ...entry(21, "plan", "2026-11-26", "냉각부 도면 그려야지.", "writer"), time: "20:00", arc_id: 11 };
+      state.data = {
+        ...aLife(),
+        work: { running: true, next: plan },
+        entries: [
+          { ...entry(11, "arc", "2026-11-10", "설정집 한 권", "writer"), title: "블랙홀 전자포", status: "open",
+            end_day: null, so_far: "포신과 냉각부까지 정했다." },
+          { ...entry(12, "arc", "2026-11-12", "매일 한 곡", "writer"), title: "작곡 노트", status: "open", end_day: null },
+          plan,
+          { ...entry(30, "work", "2026-11-25", "냉각부 설계.\n증발열은 포신 뒤로.", "writer"), time: "20:00",
+            title: "냉각부", summary: "냉각부 설계 끝냈어.", arc_id: 11, plan_id: 20 },
+        ],
+        limits: { ...aLife().limits, work_chars: 3000, summary_chars: 200, arc_title_chars: 60 },
+      };
+      await shown();
+      expect(screen.getByLabelText("Work status").textContent).toBe(
+        "Work: on · next: 2026-11-26 20:00 냉각부 도면 그려야지. (블랙홀 전자포)");
+      const project = within(part("Work").getByLabelText("Project 블랙홀 전자포"));
+      expect(project.getByText("So far: 포신과 냉각부까지 정했다.")).toBeTruthy();
+      expect(project.getByText("냉각부 설계 끝냈어.")).toBeTruthy();
+      expect(project.getByText("2026-11-25 20:00 · written by the story writer")).toBeTruthy();
+      expect(project.getByText("Show the piece")).toBeTruthy();
+      expect(within(part("Work").getByLabelText("Project 작곡 노트")).getByText("Nothing made yet.")).toBeTruthy();
+      expect(part("Plans").getByText("2026-11-26 20:00 · work on 블랙홀 전자포 · written by the story writer"))
+        .toBeTruthy();
+      fireEvent.click(project.getByRole("button", { name: "Edit" }));
+      const summary = screen.getByLabelText("Piece summary") as HTMLInputElement;
+      expect([summary.value, summary.maxLength]).toEqual(["냉각부 설계 끝냈어.", 200]);
+      expect((screen.getByLabelText("Piece text") as HTMLTextAreaElement).maxLength).toBe(3000);
+      fireEvent.change(summary, { target: { value: " 냉각부 끝! " } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(editLife).toHaveBeenCalledWith(
+        30, "냉각부 설계.\n증발열은 포신 뒤로.", 1, "냉각부", "냉각부 끝!"));
+    });
+
+  it("says when the worker is off", async () => {
+    state.data = { ...aLife(), work: { running: false, next: null } };
+    await shown();
+    expect(screen.getByLabelText("Work status").textContent).toBe("Work: off (it runs with the story writer)");
+    expect(part("Work").getByText("No projects yet.")).toBeTruthy();
+  });
+
   it("is deleted only when confirmed", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     await shown();

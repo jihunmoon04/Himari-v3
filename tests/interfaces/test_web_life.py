@@ -21,11 +21,15 @@ from himari.data.api import (  # noqa: E402
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
+    MAX_WORK_CHARS,
+    MAX_WORK_SUMMARY_CHARS,
+    NEW_ARC,
     ArcMove,
     ArcOp,
     LifePlan,
     LifeWriteStart,
     RawReceived,
+    WorkPiece,
 )
 from himari.interfaces.web import app as web  # noqa: E402
 
@@ -53,8 +57,10 @@ def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Se
                      "writer": {"running": False, "told": "off (no HIMARI_MEMORY_MODEL)"}, "mood": None, "entries": [],
                      "world": {"weather": "off (no HIMARI_LOCATION)", "today": None,
                                "topics": "off (no story writer)"},
+                     "work": {"running": False, "next": None},  # character-work §8
                      "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
-                                "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS}}
+                                "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
+                                "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS}}
     added = server.post("/api/life", {"text": " 비 오는 날을 좋아한다. ", "persona_id": None})
     assert added.status_code == 201
     fact = added.json()
@@ -133,6 +139,54 @@ def test_an_arc_is_seen_with_its_title_and_status_and_its_title_and_goal_are_edi
     long = server.client.put(f"/api/life/{arc['id']}", json={"text": "g", "title": "x" * (MAX_ARC_TITLE_CHARS + 1),
                                                              "revision": edited.json()["revision"]}, headers=SEND)
     assert (long.status_code, error_code(long)) == (422, "too_large")
+
+
+def test_a_project_shows_its_so_far_its_pieces_and_the_next_work_plan(server: Server) -> None:
+    """character-work §8: a work plan names its project and is the next one until its piece is made; the
+    piece is seen with its title, summary, project and plan, and its text, title and summary are edited."""
+    async def planned() -> None:
+        assert server.application is not None
+        data = server.application.data
+        write_id = await data.begin_life_write(ME, LifeWriteStart(0, "2099-01-01", "p", "m", b"{}", "j", 1))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+        await data.apply_life_write(write_id, LifePlan(
+            "전자포를 구상했다.", (("2099-01-02", "내일 밤엔 냉각부 도면 그려야지."),), times=("21:00",),
+            arc=ArcMove(ArcOp.START, title="블랙홀 전자포", goal="설정집 한 권"), plan_arcs=(NEW_ARC,)),
+            now=datetime.now(UTC))
+
+    async def worked(plan_id: int) -> None:
+        assert server.application is not None
+        data = server.application.data
+        write_id = await data.begin_life_write(ME, LifeWriteStart(0, "2099-01-02", "p", "m", b"{}", "j", 1,
+                                                                  plan_id=plan_id))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+        await data.apply_work_write(write_id, WorkPiece("냉각부 설계. " * 40, "냉각부", "냉각부 끝냈어.",
+                                                        "포신과 냉각부까지 정했다."), now=datetime.now(UTC))
+
+    server.client.portal.call(planned)  # type: ignore[union-attr]
+    seen = server.client.get("/api/life").json()
+    arc, plan, _diary = seen["entries"]
+    assert (arc["kind"], arc["so_far"], plan["kind"], plan["arc_id"]) == ("arc", None, "plan", arc["id"])
+    assert seen["work"]["next"]["id"] == plan["id"]
+    server.client.portal.call(worked, plan["id"])  # type: ignore[union-attr]
+    seen = server.client.get("/api/life").json()
+    assert seen["work"]["next"] is None  # made
+    arc, piece, plan, _diary = seen["entries"]
+    assert arc["so_far"] == "포신과 냉각부까지 정했다." and arc["status"] == "open"
+    assert (piece["kind"], piece["day"], piece["time"], piece["title"], piece["summary"], piece["arc_id"],
+            piece["plan_id"]) == ("work", "2099-01-02", "21:00", "냉각부", "냉각부 끝냈어.", arc["id"], plan["id"])
+    edited = server.client.put(f"/api/life/{piece['id']}", json={"text": "고친 조각.", "title": "냉각부 (고침)",
+                                                                 "summary": "고쳤어.", "revision": 1}, headers=SEND)
+    assert edited.status_code == 200
+    assert (edited.json()["text"], edited.json()["title"], edited.json()["summary"], edited.json()["origin"]) == (
+        "고친 조각.", "냉각부 (고침)", "고쳤어.", "user")
+    summed = server.client.put(f"/api/life/{plan['id']}", json={"text": "일정", "summary": "요약",
+                                                                "revision": plan["revision"]}, headers=SEND)
+    assert (summed.status_code, error_code(summed)) == (422, "invalid_life")  # only a piece has a summary
+    gone = server.client.delete(f"/api/life/{piece['id']}", params={"revision": 2}, headers=SEND)
+    assert gone.status_code == 204
 
 
 def test_life_needs_a_signed_in_user_and_an_allowed_origin(server: Server) -> None:

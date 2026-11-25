@@ -89,7 +89,7 @@ def test_the_companion_section_has_the_life_rule_after_the_persona_and_it_is_fre
     # the bond's after it, then the mood's (character-state §2)
     assert f"{PERSONA_RULE}\n{LIFE_RULE}\n{BOND_RULE}\n{MOOD_RULE}\n{TALKING_RULE}" in life
     assert f"{FREE_RULE} {FREE_LIFE_NOTE}" in life
-    assert "your own life (himari_life)" in life
+    assert "your own life and work (himari_life)" in life
     # owner 2026-11-25: she brings up her own life freely; no daily limit
     assert "freely" in LIFE_RULE and "once a day" not in LIFE_RULE + FREE_LIFE_NOTE
     assert "never make up things you did together" in LIFE_RULE

@@ -8,10 +8,17 @@ device that is awake and not working. A reminder (the user asked for it) needs
 no more. Something that just happened — a return, a game or a video that
 ended (V3-P90 §5.3, let go past ENDED_FRESH) — also waits for the user's quiet
 and for talk to end. HIMARI's own openings — a loop, a free wake (V3-P90 §6.2,
-§7), an anniversary (character-bond §6) — also wait for an answer to the last
-wake, the quiet hours and the gap, and a free wake and an anniversary for the
+§7), an anniversary (character-bond §6), a piece of work just finished
+(character-work §7.1) — also wait for an answer to the last wake, the quiet
+hours and the gap, and a free wake, an anniversary and a finished piece for the
 day's count. A long focus and a game's end by the program in front (V3-P87
 §5.4) are made no more.
+
+character-work §7.2 (K5): a free wake opens when the user is at the computer (the
+current device awake with recent input) and FREE_MINUTES passed since the last wake
+or the user's last message, whatever they are doing. §7.3 (K6): after one
+unanswered wake HIMARI's own openings wait UNANSWERED_WAIT; after two in a row,
+until the user speaks.
 """
 
 from __future__ import annotations
@@ -26,6 +33,8 @@ from himari.data.api import (
     REMIND_LATE,
     REMIND_ON_TIME,
     Anniversary,
+    LifeEntry,
+    LifeKind,
     Memory,
     MemoryCategory,
     WakeKind,
@@ -51,10 +60,15 @@ EVENT_KINDS = frozenset({WakeKind.RETURNED, WakeKind.TASK_ENDED})
 TALKING_KINDS = frozenset(set(WakeKind) - {WakeKind.REMINDER, WakeKind.TRY})
 # §6.4, V3-P90 §4: the order reasons are told in, and kept when over MAX_WAKE_REASONS; character-bond §6 (B5):
 # an anniversary right after a reminder
-MERGE_ORDER = (WakeKind.REMINDER, WakeKind.ANNIVERSARY, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FREE,
-               WakeKind.RETURNED)
-# character-bond §6: the kinds the day's count holds (an anniversary counts with the free wakes)
-DAILY_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY})
+# character-work §7.1: a finished piece right after an anniversary, before a loop
+MERGE_ORDER = (WakeKind.REMINDER, WakeKind.ANNIVERSARY, WakeKind.WORK_DONE, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED,
+               WakeKind.FREE, WakeKind.RETURNED)
+# character-bond §6: the kinds the day's count holds (an anniversary counts with the free wakes; character-work
+# §7.1: a finished piece too)
+DAILY_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY, WakeKind.WORK_DONE})
+WORK_FRESH = timedelta(hours=3)  # character-work §7.1: a piece is spoken of within this of when it was made
+PRESENT_IDLE = timedelta(minutes=10)  # §7.2: input this recent on the current device: the user is at the computer
+UNANSWERED_WAIT = timedelta(hours=2)  # §7.3 (K6): after one unanswered wake, HIMARI's own openings wait this
 
 
 @dataclass(frozen=True)
@@ -67,7 +81,7 @@ class ProactiveSettings:
     quiet_end: time | None = time(8, 0)
     gap_minutes: int = 15  # V3-P90: for a loop and a free wake
     daily: int = 10  # V3-P107 §4: free wakes opened a day, passes too (each costs a request)
-    free_minutes: int = 30  # V3-P107 §4: the same task this long since it started or the last wake; 0: none
+    free_minutes: int = 30  # character-work §7.2: this long since the last wake or the user's message; 0: none
     return_hours: int = 1  # 0: no greeting on a return
     ended_minutes: int = 60  # V3-P90 §5.3: a game or a video this long; 0: no TASK_ENDED
 
@@ -127,6 +141,9 @@ class Situation:
     # server's zone) — given only with the bond told and a model checked for free wakes (it may pass)
     anniversaries: tuple[Anniversary, ...] = ()
     bond_day: str | None = None
+    # character-work §7.1: the chosen persona's work pieces made lately — given only with the life told and a
+    # model checked for free wakes (it may pass)
+    work: tuple[LifeEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -249,24 +266,41 @@ def task_ended_candidate(device_id: str | None, device: DeviceState | None, sett
                      key, at, aliases)
 
 
+def at_computer(device: DeviceState | None) -> bool:
+    """character-work §7.2: the user is at the computer — the current device connected, not locked
+    nor asleep, with input within PRESENT_IDLE (what Presence already knows)."""
+    return (device is not None and device.connected and not device.locked and device.sleep is None
+            and device.idle_seconds is not None and device.idle_seconds <= PRESENT_IDLE.total_seconds())
+
+
 def free_candidate(s: Situation) -> Candidate | None:
-    """V3-P90 §6.2, V3-P107 §4: the same task went on FREE_MINUTES since it started or since the
-    latest wake of any kind. A cycle is the task (it starts again only when the task starts or
-    changes); each free wake of the cycle (a pass too) is a step. A user message changes neither
-    (owner 2026-11-03): it holds a free wake back for TALKING only, then the one due opens. Its key
-    names the cycle's start and the step, so a new task opens its first step again (PR #162 review P1-8)."""
+    """character-work §7.2 (K5): the user is at the computer and FREE_MINUTES passed since the
+    latest wake of any kind (a pass too) or the user's last message, whatever the task. The task,
+    when there is one, goes with it (its group and minutes); ``step`` counts the free wakes since
+    the user's last message (from 1). Its key names the moment the wait started, so each wait
+    opens once."""
+    if not s.free_ok or s.settings.free_minutes <= 0 or s.device_id is None or not at_computer(s.device):
+        return None
+    marks = [w.created_at for w in s.wakes] + ([s.last_user_message_at] if s.last_user_message_at else [])
+    wait_from = max(marks, default=None)
+    if wait_from is not None and s.now - wait_from < timedelta(minutes=s.settings.free_minutes):
+        return None
+    step = sum(1 for w in s.wakes if w.reasons and all(r.kind is WakeKind.FREE for r in w.reasons)
+               and (s.last_user_message_at is None or w.created_at > s.last_user_message_at))
     task = None if s.device is None else s.device.task
-    if not s.free_ok or s.settings.free_minutes <= 0 or s.device_id is None or task is None:
-        return None
-    cycle = s.now - timedelta(seconds=task.for_seconds)
-    since = [w for w in s.wakes if w.created_at >= cycle]
-    step = sum(1 for w in since if w.reasons and all(r.kind is WakeKind.FREE for r in w.reasons))
-    wait_from = max([cycle, *(w.created_at for w in since)])
-    if s.now - wait_from < timedelta(minutes=s.settings.free_minutes):
-        return None
-    key, aliases = _around(f"free:{s.device_id}", cycle)  # a task's start moves by a second from look to look
-    return Candidate(WakeReason(WakeKind.FREE, group=task.group, minutes=int(task.for_seconds // 60), step=step + 1),
-                     f"{key}:{step + 1}", s.now, tuple(f"{a}:{step + 1}" for a in aliases))
+    key = f"free:{s.device_id}:{'start' if wait_from is None else _minute(wait_from)}"
+    return Candidate(WakeReason(WakeKind.FREE, group=None if task is None else task.group,
+                                minutes=None if task is None else int(task.for_seconds // 60), step=step + 1),
+                     key, s.now)
+
+
+def work_candidates(s: Situation) -> list[Candidate]:
+    """character-work §7.1: each work piece made less than WORK_FRESH ago, once (its key names
+    the piece), on the current device."""
+    if s.device_id is None:
+        return []
+    return [Candidate(WakeReason(WakeKind.WORK_DONE, entry_id=e.entry_id), f"work:{e.entry_id}", e.created_at)
+            for e in s.work if e.kind is LifeKind.WORK and timedelta(0) <= s.now - e.created_at < WORK_FRESH]
 
 
 def anniversary_candidates(s: Situation) -> list[Candidate]:
@@ -293,6 +327,7 @@ def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | Non
     if (ended := task_ended_candidate(s.device_id, s.device, s.settings, s.now)) is not None:
         found.append(ended)
     found += anniversary_candidates(s)
+    found += work_candidates(s)
     if (free := free_candidate(s)) is not None:
         found.append(free)
     return found, expired, upcoming
@@ -331,12 +366,24 @@ def spoke(record: WakeRecord, said: frozenset[str] = frozenset()) -> bool:
         record.status is WakeStatus.FAILED and record.wake_id in said)
 
 
+def unanswered(s: Situation) -> bool:
+    """character-work §7.3 (K6): whether the unanswered wake still holds HIMARI's own openings —
+    the wakes shown since the user's last message (``spoke``): one holds them UNANSWERED_WAIT, two
+    or more until the user speaks (as does none read: the wake is older than what was read)."""
+    if not s.unanswered_wake:
+        return False
+    shown = [w for w in s.wakes if spoke(w, s.said)
+             and (s.last_user_message_at is None or w.created_at > s.last_user_message_at)]
+    return len(shown) != 1 or s.now - shown[0].created_at < UNANSWERED_WAIT
+
+
 def _blocked(s: Situation, kind: WakeKind) -> str | None:
     """V3-P107 §3: the first rule that keeps a wake of this ``kind`` from being spoken, in three
     tiers. Every wake: a current device, awake, no work running. A reminder: nothing more (the
     user asked for it: past their quiet too, Q8 of V3-P87). What just happened (EVENT_KINDS): the
-    user's quiet and talk. HIMARI's own openings (a loop, a free wake): also an unanswered wake,
-    the quiet hours and the gap, and a free wake its day's count."""
+    user's quiet and talk. HIMARI's own openings (a loop, a free wake, an anniversary, a finished
+    piece): also an unanswered wake (character-work §7.3: for a while after one, until the user
+    speaks after two), the quiet hours and the gap, and the free kinds their day's count."""
     if s.device_id is None:
         return "no_device"
     if s.working:
@@ -351,7 +398,7 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
         return "talking"
     if kind in EVENT_KINDS:
         return None
-    if s.unanswered_wake:
+    if unanswered(s):
         return "unanswered"
     if in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
         return "quiet_hours"
@@ -366,7 +413,8 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
 
 def free_today(s: Situation) -> int:
     """V3-P107 §4: the free wakes opened since the device's midnight — a pass too (it cost a request).
-    character-bond §6 (B5): an anniversary wake (one that may pass) counts with them."""
+    character-bond §6 (B5): an anniversary wake (one that may pass) counts with them; character-work §7.1:
+    so does a finished piece's."""
     midnight = local_midnight(s.now, s.zone)
     return sum(1 for w in s.wakes if w.created_at >= midnight and free_wake(w.reasons))
 

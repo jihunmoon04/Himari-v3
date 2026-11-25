@@ -14,6 +14,11 @@ from himari.data.api import (
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
     MAX_OPEN_ARCS,
+    MAX_SO_FAR_CHARS,
+    MAX_WORK_CHARS,
+    MAX_WORK_SUMMARY_CHARS,
+    NEW_ARC,
+    WorkPiece,
     ArcMove,
     ArcOp,
     BOND_CLOSE_DAYS,
@@ -537,7 +542,7 @@ def check_life_text(kind: LifeKind, text: object) -> str:
     if not text:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
     limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS,
-             LifeKind.ARC: MAX_ARC_CHARS}.get(kind, MAX_LIFE_CHARS)
+             LifeKind.ARC: MAX_ARC_CHARS, LifeKind.WORK: MAX_WORK_CHARS}.get(kind, MAX_LIFE_CHARS)
     if len(text) > limit:
         raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
     return text
@@ -790,13 +795,28 @@ def check_mood(persona_id: object, mood: object, source: object, at: object, rea
     return HimariMood(persona, mood, at, source, why)
 
 
-def check_life_plans(plan: LifePlan) -> list[tuple[str, str, str | None]]:
-    """A writer's plans as stored: each date, text and (by position in ``plan.times``) start time."""
-    if len(plan.times) > len(plan.plans):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a time for no plan")
+def check_life_plans(plan: LifePlan) -> list[tuple[str, str, str | None, int | None]]:
+    """A writer's plans as stored: each date, text and (by position in ``plan.times`` and
+    ``plan.plan_arcs``) start time and project (character-work §4: an arc id or NEW_ARC)."""
+    if len(plan.times) > len(plan.plans) or len(plan.plan_arcs) > len(plan.plans):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a time or a project for no plan")
+    arcs = [plan.plan_arcs[i] if i < len(plan.plan_arcs) else None for i in range(len(plan.plans))]
+    if any(a is not None and (isinstance(a, bool) or not isinstance(a, int) or a < NEW_ARC) for a in arcs):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a plan's project is an arc's id")
     return [(check_life_day(day), check_life_text(LifeKind.PLAN, text),
-             check_time_of_day(plan.times[i] if i < len(plan.times) else None))
+             check_time_of_day(plan.times[i] if i < len(plan.times) else None), arcs[i])
             for i, (day, text) in enumerate(plan.plans)]
+
+
+def plan_project(arc: int | None, at: str | None, arcs: Sequence[LifeEntry], started: int | None) -> int | None:
+    """character-work §4: the project a writer's plan is kept with — an open arc of the persona
+    (``arcs``: its open ones), or the arc the same write started (NEW_ARC) — and only with a time
+    (a work plan has one); else None (the plan stays, not a work plan)."""
+    if arc is None or at is None:
+        return None
+    if arc == NEW_ARC:
+        return started
+    return arc if any(a.entry_id == arc and a.arc_open for a in arcs) else None
 
 
 # --- World: HIMARI's arcs (character-world v0.1 §4) -------------------------------------------
@@ -817,13 +837,89 @@ def check_arc_title(title: object) -> str:
 
 
 def edited_title(entry: LifeEntry, title: object) -> str | None:
-    """The title after the user's edit: an arc's given one, checked, else the entry's own.
-    INVALID_ARGUMENT for a title given to an entry that is not an arc."""
+    """The title after the user's edit: an arc's or a work piece's given one, checked, else the
+    entry's own. INVALID_ARGUMENT for a title given to an entry that is neither."""
     if title is None:
         return entry.title
-    if entry.kind is not LifeKind.ARC:
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only an arc has a title")
+    if entry.kind not in (LifeKind.ARC, LifeKind.WORK):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only an arc or a work piece has a title")
     return check_arc_title(title)
+
+
+def check_work_summary(summary: object) -> str:
+    """character-work §4: a work piece's summary — one line, trimmed, at most MAX_WORK_SUMMARY_CHARS."""
+    if not isinstance(summary, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a summary is text")
+    if any(unicodedata.category(c) in ("Cc", "Cs") for c in summary):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a summary is one line, with no control characters")
+    summary = summary.strip()
+    if not summary:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a summary needs some text")
+    if len(summary) > MAX_WORK_SUMMARY_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"a summary is at most {MAX_WORK_SUMMARY_CHARS} characters")
+    return summary
+
+
+def edited_summary(entry: LifeEntry, summary: object) -> str | None:
+    """The summary after the user's edit: a work piece's given one, checked, else the entry's own."""
+    if summary is None:
+        return entry.summary
+    if entry.kind is not LifeKind.WORK:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a work piece has a summary")
+    return check_work_summary(summary)
+
+
+def check_work_piece(piece: object) -> WorkPiece:
+    """character-work §4: a worker's piece as stored — its text as a WORK entry's, its title as an
+    arc's, its summary one line, the "so far" within MAX_SO_FAR_CHARS and an ending as an arc's."""
+    if not isinstance(piece, WorkPiece):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a work piece")
+    return WorkPiece(check_life_text(LifeKind.WORK, piece.text), check_arc_title(piece.title),
+                     check_work_summary(piece.summary), _so_far(piece.so_far),
+                     None if piece.done is None else check_life_text(LifeKind.ARC, piece.done))
+
+
+def check_plan_ref(plan_id: object) -> bool:
+    """A life write's work plan: None (the story writer's) or an entry id."""
+    return plan_id is None or (isinstance(plan_id, int) and not isinstance(plan_id, bool) and plan_id > 0)
+
+
+def work_project(plan: LifeEntry | None, persona_id: int, arcs: Sequence[LifeEntry],
+                 pieces: Sequence[LifeEntry]) -> LifeEntry:
+    """character-work §4: the open arc a worker call's piece goes to — its plan a live work plan of
+    the call's persona, its project one of the persona's open ``arcs``, and no live piece of that
+    plan yet (``pieces``); else INVALID_ARGUMENT (the piece is thrown away)."""
+    if plan is None or plan.kind is not LifeKind.PLAN or plan.persona_id != persona_id or plan.arc_id is None:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the call's plan is no live work plan")
+    project = next((a for a in arcs if a.entry_id == plan.arc_id and a.arc_open), None)
+    if project is None:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan's project is not open")
+    if pieces:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan has a piece already")
+    return project
+
+
+def work_entry(plan: LifeEntry, project: LifeEntry, piece: WorkPiece, write_id: str, now: datetime) -> LifeEntry:
+    """§4: the piece as a WORK entry (its id given as it is inserted): the plan's day and time."""
+    return LifeEntry(0, plan.persona_id, LifeKind.WORK, plan.day, piece.text, LifeOrigin.WRITER, 1, now, now,
+                     source=write_id, time_of_day=plan.time_of_day, title=piece.title, arc_id=project.entry_id,
+                     summary=piece.summary, plan_id=plan.entry_id)
+
+
+def worked_on(project: LifeEntry, plan: LifeEntry, piece: WorkPiece, now: datetime) -> LifeEntry:
+    """§3, §4: the project after a piece — its "so far" rewritten and, with ``done``, closed on
+    the plan's day with that ending (its title and goal stay, the user's too)."""
+    worked = dataclasses.replace(project, so_far=piece.so_far, revision=project.revision + 1, updated_at=now)
+    return worked if piece.done is None else dataclasses.replace(worked, end_day=plan.day, ending=piece.done)
+
+
+def _so_far(text: object) -> str:
+    if not isinstance(text, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a project's so far is text")
+    checked = check_life_text(LifeKind.WORK, text)
+    if len(checked) > MAX_SO_FAR_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"a project's so far is at most {MAX_SO_FAR_CHARS} characters")
+    return checked
 
 
 def check_arc_move(move: object) -> ArcMove | None:

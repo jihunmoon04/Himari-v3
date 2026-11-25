@@ -172,3 +172,45 @@ def test_the_days_arc_move_comes_with_it_and_a_bad_one_is_only_left_out() -> Non
 def test_an_answer_out_of_shape_is_thrown_away_whole(bad: str) -> None:
     with pytest.raises(AnswerError):
         parse_answer(bad, DAY)
+
+
+# --- character-work v0.1 §4, §5 (K7) ----------------------------------------------------------
+
+def test_the_input_holds_each_projects_so_far_the_plans_projects_the_days_work_and_the_quiet_hours() -> None:
+    arc = replace(entry(5, LifeKind.ARC, "설정집 한 권", "2026-11-20"), title="블랙홀 전자포", so_far="포신까지.")
+    plan = replace(entry(6, LifeKind.PLAN, "냉각부 도면 그려야지.", "2026-11-26"), time_of_day="20:00", arc_id=5)
+    piece = replace(entry(7, LifeKind.WORK, "조각 본문", "2026-11-25"), time_of_day="20:00", title="포신",
+                    summary="포신 다 그렸어.", arc_id=5, plan_id=4)
+    old = replace(piece, entry_id=8, day="2026-11-24", title="어제 것")
+    data = request_data("", (arc, plan, piece, old), (), day=DAY, now=NOW, zone=SEOUL,
+                        quiet=(time(23, 0), time(8, 0)))
+    assert data["arcs"] == [{"id": 5, "title": "블랙홀 전자포", "goal": "설정집 한 권", "started": "2026-11-20",
+                             "so_far": "포신까지.", "moved_on": []}]
+    assert data["plans"] == [{"date": "2026-11-26", "time": "20:00", "text": "냉각부 도면 그려야지.", "arc": 5}]
+    assert data["work"] == [{"time": "20:00", "project": "블랙홀 전자포", "title": "포신", "summary": "포신 다 그렸어."}]
+    assert data["quiet_hours"] == "23:00-08:00"
+    bare = request_data("", (), (), day=DAY, now=NOW, zone=SEOUL)
+    assert "work" not in bare and "quiet_hours" not in bare
+    # K7: HIMARI's own memo, projects out of itself and never the user's conversations, a day of its own
+    for words in ("memo", "never the project's goal again", "Never make one out of the user's conversations",
+                  "when no arc is open, start one today", "a sentence or two at most", "outside quiet_hours"):
+        assert words in WRITER_INSTRUCTIONS, words
+
+
+def test_a_plans_project_comes_with_a_time_outside_the_quiet_hours_and_a_bad_one_is_only_left_out() -> None:
+    def plans(*raw: dict[str, object]) -> str:
+        return json.dumps({"diary": "하루.", "plans": list(raw)}, ensure_ascii=False)
+
+    quiet = (time(23, 0), time(8, 0))
+    told = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "a", "arc": 5},
+                              {"date": "2026-11-26", "time": "21:00", "text": "b", "arc": "new"},
+                              {"date": "2026-11-27", "time": "21:00", "text": "c", "arc": "7"}), DAY, quiet)
+    assert told.plan_arcs == (5, 0, 7)
+    dropped = parse_answer(plans({"date": "2026-11-26", "text": "no time", "arc": 5},
+                                 {"date": "2026-11-26", "time": "02:00", "text": "asleep", "arc": 5},
+                                 {"date": "2026-11-27", "time": "21:00", "text": "bad", "arc": [5]}), DAY, quiet)
+    assert len(dropped.plans) == 3 and dropped.plan_arcs == ()
+    assert parse_answer(plans({"date": "2026-11-26", "time": "02:00", "text": "x", "arc": 5}), DAY).plan_arcs == (5,)
+    assert parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x", "arc": True}), DAY).plan_arcs == ()
+    old = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x"}), DAY, quiet)  # the old shape
+    assert old.plan_arcs == () and old.times == ("20:00",)

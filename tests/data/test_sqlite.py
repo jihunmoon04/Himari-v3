@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from testkit import (FAKE, SCOPE, V15_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, FakeEnvironment, RecordingTool, final,
+from testkit import (FAKE, SCOPE, V15_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, V26_UNDO, FakeEnvironment, RecordingTool, final,
                      text_result, user)
 
 from himari.bootstrap import build_runtime
@@ -44,6 +44,7 @@ from himari.data.api import (
     LifeKind,
     LifePlan,
     LifeWriteStart,
+    WorkPiece,
     BondStage,
     BondTag,
     MoodSource,
@@ -288,6 +289,7 @@ _ADDED_IN = {
     23: V23_UNDO,
     24: V24_UNDO,
     25: V25_UNDO,
+    26: V26_UNDO,
 }
 
 
@@ -303,13 +305,13 @@ def old_database(path: Path, version: int) -> None:
 
 
 @pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-                                     24])
+                                     24, 25])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 25
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 26
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -399,7 +401,7 @@ def test_a_v21_database_gains_an_empty_life_and_keeps_its_personas(tmp_path: Pat
     asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
     asyncio.run(data.choose_persona(SCOPE.principal_id, 1, 0))
     store.close()
-    tamper(path, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, "PRAGMA user_version=21")
+    tamper(path, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, "PRAGMA user_version=21")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v21-*.bak"))
@@ -423,7 +425,7 @@ def test_a_v22_database_keeps_its_life_and_gains_the_bond(tmp_path: Path) -> Non
     asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     store.close()
-    tamper(path, *V25_UNDO, *V24_UNDO, *V23_UNDO, "PRAGMA user_version=22")
+    tamper(path, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, "PRAGMA user_version=22")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v22-*.bak"))
@@ -449,7 +451,7 @@ def test_a_v23_database_keeps_its_life_and_bond_and_gains_moods(tmp_path: Path) 
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     joke = asyncio.run(data.add_bond(SCOPE.principal_id, 1, BondTag.JOKE, "감자 사건"))
     store.close()
-    tamper(path, *V25_UNDO, *V24_UNDO, "PRAGMA user_version=23")
+    tamper(path, *V26_UNDO, *V25_UNDO, *V24_UNDO, "PRAGMA user_version=23")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v23-*.bak"))
@@ -474,7 +476,7 @@ def test_a_v24_database_keeps_its_life_and_gains_arcs(tmp_path: Path) -> None:
     asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     store.close()
-    tamper(path, *V25_UNDO, "PRAGMA user_version=24")
+    tamper(path, *V26_UNDO, *V25_UNDO, "PRAGMA user_version=24")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v24-*.bak"))
@@ -494,6 +496,53 @@ def test_a_v24_database_keeps_its_life_and_gains_arcs(tmp_path: Path) -> None:
             LifeKind.ARC, "그림 연습", "한 달 안에 풍경화 한 장", "2026-11-25", None)
         assert diary.arc_id == arc.entry_id
         assert await_(data.list_life(SCOPE.principal_id, 1)) == (fact, arc, diary)
+    finally:
+        store.close()
+
+
+def test_a_v25_database_keeps_its_arcs_and_gains_work(tmp_path: Path) -> None:
+    """v26 (character-work §3, §4): backed up first; the arcs and plans stay as they were (no so far, no
+    project), the story writer's calls stay its own, and a work plan, a worker's call and its piece are kept."""
+    path = tmp_path / "h.db"
+    old_database(path, 25)
+    store = SqliteStore(path)
+    data = SqliteData(store)
+    asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
+    write = asyncio.run(data.begin_life_write(SCOPE.principal_id, LifeWriteStart(
+        1, "2026-11-24", "scripted", "m", b"{}", "application/json", 10)))
+    asyncio.run(data.mark_life_write_dispatched(write))
+    asyncio.run(data.record_life_write(write, RawReceived(b"{}", "application/json", None)))
+    arc, _ = asyncio.run(data.apply_life_write(write, LifePlan(
+        "전자포를 구상했다.", arc=ArcMove(ArcOp.START, title="블랙홀 전자포", goal="설정집 한 권")),
+        now=datetime(2026, 11, 24, 13, 0, tzinfo=UTC)))
+    store.close()
+    tamper(path, *V26_UNDO, "PRAGMA user_version=25")
+    store = SqliteStore(path)
+    try:
+        assert list(tmp_path.glob("h.db.v25-*.bak"))
+        data = SqliteData(store)
+        (kept,) = await_(data.list_life(SCOPE.principal_id, 1, since="2026-11-25"))
+        assert kept == arc and kept.so_far is None
+        assert await_(data.life_attempts(SCOPE.principal_id, 1, "2026-11-24")) == 1
+        assert (await_(data.list_life_writes(SCOPE.principal_id))[0]).plan_id is None
+        write = await_(data.begin_life_write(SCOPE.principal_id, LifeWriteStart(
+            1, "2026-11-25", "scripted", "m", b"{}", "application/json", 10)))
+        await_(data.mark_life_write_dispatched(write))
+        await_(data.record_life_write(write, RawReceived(b"{}", "application/json", None)))
+        now = datetime(2026, 11, 25, 13, 0, tzinfo=UTC)
+        written = await_(data.apply_life_write(write, LifePlan(
+            "하루.", (("2026-11-26", "냉각부 도면 그려야지."),), times=("20:00",), plan_arcs=(arc.entry_id,)), now=now))
+        plan = written[-1]
+        assert plan.arc_id == arc.entry_id
+        work = await_(data.begin_life_write(SCOPE.principal_id, LifeWriteStart(
+            1, "2026-11-26", "scripted", "m", b"{}", "application/json", 10, plan_id=plan.entry_id)))
+        await_(data.mark_life_write_dispatched(work))
+        await_(data.record_life_write(work, RawReceived(b"{}", "application/json", None)))
+        piece, project = await_(data.apply_work_write(work, WorkPiece("냉각부 설계.", "냉각부", "끝냈어.",
+                                                                      "냉각부까지."), now=now))
+        assert (piece.kind, piece.plan_id, piece.summary, project.so_far) == (
+            LifeKind.WORK, plan.entry_id, "끝냈어.", "냉각부까지.")
+        assert await_(data.work_attempts(SCOPE.principal_id, plan.entry_id)) == 1
     finally:
         store.close()
 
@@ -535,7 +584,7 @@ def test_a_v20_conversation_keeps_its_environments_and_loses_the_rest(tmp_path: 
         store.create_conversation(scope)
         asyncio.run(SqliteData(store).append_event(scope, user(f"in {scope.conversation_id}")))
     store.close()
-    tamper(path, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO,
+    tamper(path, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO,
            "INSERT INTO activations (conversation_id, environment_instance_id, environment_kind, default_binding_id)"
            " VALUES ('conv_1', 'env_a', 'machine', 'bind_a'), ('conv_1', 'env_b', 'machine', NULL),"
            " ('conv_2', 'env_c', 'inside', 'bind_c')",
@@ -571,7 +620,7 @@ def test_a_v20_conversation_keeps_its_environments_and_loses_the_rest(tmp_path: 
 
 
 @pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-                                     24])
+                                     24, 25])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -933,7 +982,7 @@ def test_files_of_a_v8_database_read_as_not_images(tmp_path: Path) -> None:
     blob = asyncio.run(data.blobs.put(SCOPE.principal_id, chunks(), 1 << 20))
     record = asyncio.run(data.stage_upload(SCOPE, blob, "old.png", "image/png"))
     store.close()
-    tamper(path, *_ADDED_IN[25], *_ADDED_IN[24], *_ADDED_IN[23], *_ADDED_IN[22], *_ADDED_IN[21], *_ADDED_IN[20], *_ADDED_IN[17], *_ADDED_IN[16], *_ADDED_IN[15], *_ADDED_IN[14], *_ADDED_IN[13], *_ADDED_IN[12], *_ADDED_IN[11], *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
+    tamper(path, *_ADDED_IN[26], *_ADDED_IN[25], *_ADDED_IN[24], *_ADDED_IN[23], *_ADDED_IN[22], *_ADDED_IN[21], *_ADDED_IN[20], *_ADDED_IN[17], *_ADDED_IN[16], *_ADDED_IN[15], *_ADDED_IN[14], *_ADDED_IN[13], *_ADDED_IN[12], *_ADDED_IN[11], *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
     store = SqliteStore(path)
     try:
         again, = asyncio.run(SqliteData(store).read_file_records(SCOPE, [(record.file_id, 1)]))

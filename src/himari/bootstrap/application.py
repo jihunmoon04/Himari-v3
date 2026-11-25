@@ -83,6 +83,7 @@ from himari.control.api import (
 from himari.control.driver import MAX_RUNS, Driver
 from himari.control.runner import BackgroundRunner
 from himari.life.api import DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS, DEFAULT_WRITE_AT, LifeSettings
+from himari.life.work import next_plan
 from himari.life.worker import LifeWriter
 from himari.bootstrap.world import WEATHER_SECONDS, search_tool, topic_search
 from himari.world.topics import SearchTopics
@@ -1012,7 +1013,9 @@ class Application:
                                     else "off (no MCP search Tool)" if found is None
                                     else f"on ({found.definition.tool_id})")
         if writing is not None:  # character-life §3: a periodic job, never a Conversation's Run
-            application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics)
+            # character-work §4: the worker runs with it; no work plan in HIMARI's sleeping hours
+            application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics,
+                                                 quiet=quiet_hours(speaking_first))
             await application.life_writer.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
@@ -1031,7 +1034,8 @@ class Application:
                                                poke=lambda after: ticker.poke("proactive", after),
                                                recent=application.recent_companion_conversation,
                                                free_ok=runtime.driver.free_wake_ok,
-                                               bond=life and companion)  # character-bond §6: anniversaries
+                                               bond=life and companion,  # character-bond §6: anniversaries
+                                               work=life and companion)  # character-work §7.1: finished pieces
                 hub.on_returned = scheduler.returned
                 application.scheduler = scheduler
                 ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)
@@ -1240,6 +1244,10 @@ class Application:
         entries = await self.data.list_life(principal, NO_PERSONA if chosen is None else chosen.persona_id,
                                             since=since)
         return chosen, entries
+
+    def next_work(self, entries: Sequence[LifeEntry]) -> LifeEntry | None:
+        """character-work §8: the next work plan among the life as read (the server's clock and zone)."""
+        return next_plan(entries, datetime.now(UTC), ZoneInfo(self.time_zone))
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int | None, text: str) -> LifeEntry:
         """The user's fact for the persona the page showed (None: no persona). LifeChanged when

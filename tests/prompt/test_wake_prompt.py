@@ -165,9 +165,12 @@ def test_the_free_wakes_screen_line_only_with_the_screen_tool() -> None:
 
 def test_the_free_wake_engages_with_the_task() -> None:
     """Owner 2026-11-04: the task is the topic, saying you will leave them be is a [[pass]], and looking
-    at the screen is how to find what to say — not an exception to a no-tool rule."""
+    at the screen is how to find what to say — not an exception to a no-tool rule. character-work §7.2: the
+    wake means the user is at the computer and you have not talked for a while."""
     from himari.prompt.api import FREE_RULE, FREE_SCREEN_RULE
 
-    assert "Talk with them about it" in FREE_RULE and "instead of saying you will leave them be" in FREE_RULE
+    assert "how their task is going" in FREE_RULE and "instead of saying you will leave them be" in FREE_RULE
+    assert "is at their computer and you have not talked for a while" in FREE_RULE
+    assert "kept at the same task" not in FREE_RULE
     assert "no news" not in FREE_RULE and "use no tool" not in FREE_RULE
     assert "look first" in FREE_SCREEN_RULE and "answer exactly [[pass]], not that you will wait" in FREE_SCREEN_RULE

@@ -70,8 +70,10 @@ class Composer:
                     pass  # rendered inside its group, in ordinal order
                 case Wake():  # V3-P87 §8.1: a user-role line the server wrote (character-bond §6: a day's entry)
                     days = {} if inputs.bond is None else {e.entry_id: e for e in inputs.bond.entries}
+                    # character-work §7.1: a work_done's piece and its project, from the turn's life
+                    lived = {} if inputs.life is None else {e.entry_id: e for e in inputs.life}
                     history.append(UserTurn(event.event_id,
-                                            (TextBlock(wake_text(event.payload, inputs.wake_notes, days)),),
+                                            (TextBlock(wake_text(event.payload, inputs.wake_notes, days, lived)),),
                                             wake=True))
         summary = read_summary(inputs.snapshot)
         snapshot_revision = None

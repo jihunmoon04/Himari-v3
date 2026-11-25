@@ -41,6 +41,7 @@ from himari.prompt.api import (
     TIME_NOTE,
     TOOL_IMAGES_NOTE,
     TURN_GUIDANCE,
+    WORK_RULE,
     PromptInputs,
     SourceNote,
     SystemSpec,
@@ -82,7 +83,7 @@ def principle_section(persona: bool, wake: bool = False, life: bool = False) -> 
     §2–§3, character-world §2, H-24)."""
     own = "standing instructions and companion persona" if persona else "standing instructions"
     titles = "window or media titles from the user's computer"
-    memories = ("saved memories, your own life (himari_life), your bond with the user (bond), your mood "
+    memories = ("saved memories, your own life and work (himari_life), your bond with the user (bond), your mood "
                 "(himari_mood), what you are doing now (himari_now), the weather on the user's side (world)"
                 ) if life else "saved memories"
     return (
@@ -134,11 +135,11 @@ def companion_section(screen_points: bool, proactive: bool = False, free: bool =
     Tool's line when it is offered (V3-P91 §8). With HIMARI's life told (character-life §5), its
     rule follows the persona's and the free wake may be about HIMARI's own day; the bond's rule
     follows it (character-bond §5), then the mood's (character-state §2), and an anniversary
-    wake's after the free wake's (§6)."""
+    wake's after the free wake's (§6), then a work_done wake's (character-work §7.1)."""
     screens = SCREEN_NOTE + (" " + SCREEN_MOVE_NOTE if screen_points else "")
     free_rule = FREE_RULE + (" " + FREE_LIFE_NOTE if life else "")
     free_lines = (free_rule, *((FREE_SCREEN_RULE,) if screen_tool else ()),
-                  *((ANNIVERSARY_RULE,) if life else ())) if free else ()
+                  *((ANNIVERSARY_RULE, WORK_RULE) if life else ())) if free else ()
     speaking = (SPEAKING_RULE, PROACTIVE_RULE, *free_lines) if proactive else (SPEAKING_RULE,)
     lived = (LIFE_RULE, BOND_RULE, MOOD_RULE) if life else ()
     return "\n".join((COMPANION_HEAD, PERSONA_RULE, *lived, TALKING_RULE,

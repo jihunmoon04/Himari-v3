@@ -2,6 +2,9 @@
 // its arcs (character-world §4: threads over weeks the story writer starts and ends), its plans and its diary. The
 // owner adds facts, edits any entry from the revision opened (an arc's title and goal; a save over a change made
 // elsewhere is refused with 409 and says so) and deletes them (they retire: no undo). The app never shows them.
+// character-work §8: the Work group shows each project (open first) with its "so far" and its pieces (date and time,
+// title, summary, the full text when opened), which are edited and deleted like any entry; the status line says
+// whether the worker runs and the next work plan, and a work plan names its project.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { ApiError } from "@/api/client";
@@ -24,9 +27,14 @@ const ORIGINS: Record<LifeOrigin, string> = {
   conversation: "from a conversation",
   user: "yours",
 };
-const NAMES: Record<LifeKind, string> = { fact: "fact", plan: "plan", diary: "diary entry", arc: "arc" };
+const NAMES: Record<LifeKind, string> = {
+  fact: "fact", plan: "plan", diary: "diary entry", arc: "arc", work: "work piece",
+};
 const ARC_CHARS = 200; // as the server's, when it does not say
 const ARC_TITLE_CHARS = 60;
+const WORK_CHARS = 3000;
+const SUMMARY_CHARS = 200;
+const when = (entry: LifeEntry) => `${entry.day ?? ""}${entry.time ? ` ${entry.time}` : ""}`;
 
 function Editor({ entry, revision, limits, onDone }: {
   entry: LifeEntry; revision: number; limits: Life["limits"]; onDone: () => void;
@@ -34,15 +42,21 @@ function Editor({ entry, revision, limits, onDone }: {
   const client = useQueryClient();
   const [text, setText] = useState(entry.text);
   const arc = entry.kind === "arc";
+  const piece = entry.kind === "work";
+  const titled = arc || piece;
   const [title, setTitle] = useState(entry.title ?? "");
+  const [summary, setSummary] = useState(entry.summary ?? "");
   const [saving, setSaving] = useState(false);
-  const max = entry.kind === "diary" ? limits.diary_chars : arc ? limits.arc_chars ?? ARC_CHARS : limits.chars;
-  const changed = text !== entry.text || (arc && title !== (entry.title ?? ""));
+  const max = entry.kind === "diary" ? limits.diary_chars : arc ? limits.arc_chars ?? ARC_CHARS
+    : piece ? limits.work_chars ?? WORK_CHARS : limits.chars;
+  const changed = text !== entry.text || (titled && title !== (entry.title ?? ""))
+    || (piece && summary !== (entry.summary ?? ""));
   const save = async () => {
     setSaving(true);
     try {
       // from the revision it was opened with, whatever is read later
-      if (arc) await editLife(entry.id, text.trim(), revision, title.trim());
+      if (piece) await editLife(entry.id, text.trim(), revision, title.trim(), summary.trim());
+      else if (arc) await editLife(entry.id, text.trim(), revision, title.trim());
       else await editLife(entry.id, text.trim(), revision);
       toast(`Saved. ${NEXT_TURN}`);
       onDone();
@@ -59,38 +73,56 @@ function Editor({ entry, revision, limits, onDone }: {
   return (
     <form className="space-y-2" aria-label="Life entry editor"
       onSubmit={(event) => { event.preventDefault(); void save(); }}>
-      {arc && (
-        <input aria-label="Arc title" value={title} maxLength={limits.arc_title_chars ?? ARC_TITLE_CHARS} autoFocus
-          readOnly={saving} onChange={(event) => setTitle(event.target.value)} className={field} />
+      {titled && (
+        <input aria-label={arc ? "Arc title" : "Piece title"} value={title}
+          maxLength={limits.arc_title_chars ?? ARC_TITLE_CHARS} autoFocus readOnly={saving}
+          onChange={(event) => setTitle(event.target.value)} className={field} />
       )}
-      <textarea aria-label={arc ? "Arc goal" : "Entry text"} value={text} rows={entry.kind === "diary" ? 6 : 2}
-        maxLength={max} autoFocus={!arc} readOnly={saving} onChange={(event) => setText(event.target.value)}
-        className={cn(field, "resize-y")} />
+      {piece && (
+        <input aria-label="Piece summary" value={summary} maxLength={limits.summary_chars ?? SUMMARY_CHARS}
+          readOnly={saving} onChange={(event) => setSummary(event.target.value)} className={field} />
+      )}
+      <textarea aria-label={arc ? "Arc goal" : piece ? "Piece text" : "Entry text"} value={text}
+        rows={entry.kind === "diary" ? 6 : piece ? 12 : 2} maxLength={max} autoFocus={!titled} readOnly={saving}
+        onChange={(event) => setText(event.target.value)} className={cn(field, "resize-y")} />
       <div className="flex items-center gap-3 text-xs text-faint">
         <span>{text.length.toLocaleString()} / {max.toLocaleString()}</span>
         <div className="ml-auto flex gap-2">
           <Button variant="ghost" disabled={saving} onClick={onDone}>Cancel</Button>
           <Button type="submit" variant="primary"
-            disabled={saving || !text.trim() || (arc && !title.trim()) || !changed}>Save</Button>
+            disabled={saving || !text.trim() || (titled && !title.trim()) || (piece && !summary.trim()) || !changed}>
+            Save
+          </Button>
         </div>
       </div>
     </form>
   );
 }
 
-function Row({ entry, locked, onEdit, onDelete }: {
-  entry: LifeEntry; locked: boolean; onEdit: () => void; onDelete: () => void;
+function Row({ entry, locked, onEdit, onDelete, project }: {
+  entry: LifeEntry; locked: boolean; onEdit: () => void; onDelete: () => void; project?: string | null;
 }) {
+  const piece = entry.kind === "work";
   return (
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
-        {entry.kind === "arc" && <p className="font-medium text-ink">{entry.title}</p>}
-        <p className="whitespace-pre-wrap break-words">{entry.text}</p>
+        {(entry.kind === "arc" || piece) && <p className="font-medium text-ink">{entry.title}</p>}
+        {piece ? (
+          <>
+            <p className="break-words">{entry.summary}</p>
+            <details className="mt-1">
+              <summary className="cursor-pointer text-xs text-muted">Show the piece</summary>
+              <p className="mt-1 whitespace-pre-wrap break-words">{entry.text}</p>
+            </details>
+          </>
+        ) : <p className="whitespace-pre-wrap break-words">{entry.text}</p>}
+        {entry.kind === "arc" && entry.so_far && <p className="mt-1 text-muted">So far: {entry.so_far}</p>}
         {entry.kind === "arc" && entry.ending && <p className="mt-1 text-muted">Ending: {entry.ending}</p>}
         <p className="mt-1 text-xs text-faint">
           {entry.kind === "arc"
             ? `${entry.status === "closed" ? `${entry.day} – ${entry.end_day} · closed` : `since ${entry.day} · open`} · `
-            : entry.day ? `${entry.day}${entry.time ? ` ${entry.time}` : ""} · ` : ""}
+            : entry.day ? `${when(entry)} · ` : ""}
+          {project ? `work on ${project} · ` : ""}
           {ORIGINS[entry.origin]}
         </p>
       </div>
@@ -156,7 +188,11 @@ export function LifeSettings() {
   const [busy, setBusy] = useState(false);
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read HIMARI's life.</p>;
-  const { persona, enabled, writer, entries, limits, mood, now, world } = query.data;
+  const { persona, enabled, writer, entries, limits, mood, now, world, work } = query.data;
+  // character-work §8: the projects by id, for a work plan's project and the Work group
+  const titles = new Map(entries.filter((entry) => entry.kind === "arc").map((entry) => [entry.id, entry.title]));
+  const projectOf = (entry: LifeEntry) =>
+    entry.kind === "plan" && entry.arc_id != null ? titles.get(entry.arc_id) ?? null : null;
   const remove = async (entry: LifeEntry) => {
     const what = NAMES[entry.kind];
     if (!window.confirm(`Delete this ${what}? HIMARI will not know it any more; there is no undo.`)) return;
@@ -174,16 +210,44 @@ export function LifeSettings() {
     }
   };
   const locked = busy || open !== null; // while an entry is open, nothing else may change under its unsaved text
-  const rows = (kind: LifeKind) => entries.filter((entry) => entry.kind === kind).map((entry) => (
+  const item = (entry: LifeEntry) => (
     <li key={entry.id} className="rounded-lg border border-line px-3 py-2 text-sm">
       {open?.id === entry.id ? (
         <Editor entry={entry} revision={open.revision} limits={limits} onDone={() => setOpen(null)} />
       ) : (
         <Row entry={entry} locked={locked} onEdit={() => setOpen({ id: entry.id, revision: entry.revision })}
-          onDelete={() => void remove(entry)} />
+          onDelete={() => void remove(entry)} project={projectOf(entry)} />
       )}
     </li>
-  ));
+  );
+  const rows = (kind: LifeKind) => entries.filter((entry) => entry.kind === kind).map(item);
+  // the projects (open first, as listed) with their pieces, newest first; a piece of a project not listed goes last
+  const pieces = entries.filter((entry) => entry.kind === "work");
+  const projects = entries.filter((entry) => entry.kind === "arc"
+    && (entry.status === "open" || pieces.some((made) => made.arc_id === entry.id)));
+  const loose = pieces.filter((made) => made.arc_id == null || !titles.has(made.arc_id));
+  const projectBlocks = [
+    ...projects.map((project) => {
+      const own = pieces.filter((made) => made.arc_id === project.id);
+      return (
+        <li key={`p${project.id}`} className="space-y-2" aria-label={`Project ${project.title ?? ""}`}>
+          <div className="text-sm">
+            <p className="font-medium text-ink">
+              {project.title}<span className="ml-2 text-xs font-normal text-faint">{project.status}</span>
+            </p>
+            <p className="text-muted">{project.so_far ? `So far: ${project.so_far}` : "Nothing made yet."}</p>
+          </div>
+          {own.length > 0 && <ul className="space-y-2">{own.map(item)}</ul>}
+        </li>
+      );
+    }),
+    ...(loose.length ? [<li key="loose"><ul className="space-y-2">{loose.map(item)}</ul></li>] : []),
+  ];
+  const next = work?.next;
+  const workLine = !work ? null : work.running
+    ? `Work: on${next ? ` · next: ${when(next)} ${next.text}${projectOf(next) ? ` (${projectOf(next)})` : ""}`
+      : " · no work plan ahead"}`
+    : "Work: off (it runs with the story writer)";
   const facts = rows("fact");
   // §2: at the limit a new fact retires the oldest one not yours; only when all are yours is there no room
   const kept = entries.filter((entry) => entry.kind === "fact");
@@ -202,6 +266,7 @@ export function LifeSettings() {
         </p>
       )}
       <p className="text-xs text-faint">Story writer: {writer.told}</p>
+      {workLine && <p className="text-xs text-faint" aria-label="Work status">{workLine}</p>}
       {world && (
         <p className="text-xs text-faint" aria-label="World">
           Weather: {world.today ?? world.weather} · The day's topics: {world.topics}
@@ -221,6 +286,8 @@ export function LifeSettings() {
       </Group>
       <Group title="Arcs" note="the story writer starts, carries on and ends them; at most 2 open"
         empty="No arcs yet.">{rows("arc")}</Group>
+      <Group title="Work" note="what HIMARI makes for its projects, a piece at each work plan"
+        empty="No projects yet.">{projectBlocks}</Group>
       <Group title="Plans" empty="No plans.">{rows("plan")}</Group>
       <Group title="Diary" empty="No diary yet.">{rows("diary")}</Group>
     </section>
