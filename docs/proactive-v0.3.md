@@ -80,7 +80,7 @@
 - 스케줄러(`tests/bootstrap/test_proactive_scheduler.py`): 잠든 동안 알림이 `asleep`으로 막히고 `scheduled`로 남았다가, 깨면 `asleep`/`again` 표시 없이 말하고 `delivered`.
 - 설정(`tests/interfaces/test_web_devices.py`): 기본값, 잘못된 값, 옛 변수 무시.
 
-## 8. 작업 단계에서 바꾼 것 (character-work, 2026-11-25, 배포 전)
+## 8. 작업 단계에서 바꾼 것 (character-work, 2026-11-25, 배포)
 
 [작업 설계 §7](character-work-v0.1.md#7-먼저-말-걸기)(H-81)이 이 문서의 §3·§4를 다시 바꾼다. 자세한 것은 [구현에서 정한 것](character-work-v0.1.md#11-구현에서-정한-것-2026-11-25) 15~17번.
 
