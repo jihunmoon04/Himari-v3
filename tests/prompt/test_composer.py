@@ -129,3 +129,26 @@ def test_the_users_instructions_are_part_of_the_context_key() -> None:
     assert context_key(base) != context_key(replace(base, user_instructions="Be brief."))
     assert context_key(replace(base, user_instructions="Be brief.")) == context_key(
         replace(base, user_instructions="Be brief."))
+
+
+def test_an_answers_thought_is_not_in_the_history() -> None:
+    """character-mind §3.4: the model never sees its thoughts again; what it said stays as written."""
+    from himari.data.api import AssistantFinal
+    from himari.prompt.api import AssistantTurn
+
+    KINDS[AssistantFinal] = EventKind.ASSISTANT_FINAL
+    commented = AssistantToolCalls((ToolCall(CallId("a"), 0, ToolId("t"), {}),),
+                                   (TextBlock("[[think]]찾아보자[[/think]]잠깐만!"),))
+    events = (
+        event(1, UserMessage((TextBlock("안녕"),))),
+        event(2, AssistantFinal((TextBlock("[[think]]반갑다[[/think]][[mood:happy]]안녕!"),)), RUN),
+        event(3, UserMessage((TextBlock("찾아 줘"),))),
+        event(4, commented, RunId("r2")),
+        event(5, ToolResultRecord(CallRef(RunId("r2"), CallId("a")), text_result("A")), RunId("r2")),
+    )
+    done = ToolExecutionRecord(call=CallRef(RunId("r2"), CallId("a")), ordinal=0, tool_id=ToolId("t"), arguments={},
+                               status=ToolExecutionStatus.SUCCEEDED, model_result=text_result("A"))
+    out = Composer().compose(inputs(events, (done,)))
+    answer, group = out.conversation[1], out.conversation[3]
+    assert isinstance(answer, AssistantTurn) and answer.blocks == (TextBlock("[[mood:happy]]안녕!"),)
+    assert isinstance(group, ToolGroupTurn) and group.commentary == (TextBlock("잠깐만!"),)

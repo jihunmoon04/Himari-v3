@@ -122,6 +122,7 @@ from himari.common import (
     TextBlock,
     TrustedScope,
     split_marks,
+    thought_of,
     thaw,
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
@@ -717,11 +718,13 @@ def event_view(event: ConversationEvent,
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
         view["display"] = display_view(view["text"])
+        view["thought"] = thought_of(payload.blocks)  # character-mind §3.2: shown folded to the owner
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id  # the live output it replaces (V3-P73 §7.2)
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
         view["display"] = display_view(view["text"])
+        view["thought"] = thought_of(payload.commentary)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}

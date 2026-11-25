@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
-from himari.common import CallId, CallRef, ModelToolResult, RunId, TextBlock
+from himari.common import CallId, CallRef, ModelToolResult, RunId, TextBlock, drop_thought
 from himari.data.api import (
     AssistantFinal,
     AssistantToolCalls,
@@ -60,7 +60,8 @@ class Composer:
                     pass  # an older ask_user answer: rendered once, as its call's result (V3-P18)
                 case AssistantFinal(blocks=blocks):
                     continuation = inputs.continuations.get(event.origin_run_id) if event.origin_run_id else None
-                    history.append(AssistantTurn(event.event_id, blocks, continuation))
+                    # character-mind §3.4: a thought is never seen again in the history
+                    history.append(AssistantTurn(event.event_id, drop_thought(blocks), continuation))
                 case AssistantToolCalls():
                     if event.origin_run_id is None:
                         raise PromptError(PromptErrorCode.INCOMPLETE_HISTORY, f"{event.event_id} has no run")
@@ -120,7 +121,7 @@ class Composer:
                     PromptErrorCode.INCOMPLETE_HISTORY, f"{run_id}/{call.call_id} is {status}"
                 )
             results[call.call_id] = record.model_result
-        return ToolGroupTurn(run_id, payload.commentary, calls, results)
+        return ToolGroupTurn(run_id, drop_thought(payload.commentary), calls, results)
 
 
 def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]:

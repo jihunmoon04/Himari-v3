@@ -984,6 +984,16 @@ PERSONA_RULE = (
     "allows. When there is none, speak warmly and plainly, like a friend who knows them well, not like a service "
     "introducing itself."
 )
+# character-mind §3.1 (M2): right after PERSONA_RULE. A turn's first Run (and a wake's) thinks first, as a
+# flow of reactions rather than an analysis; the thought is never shown (common.scan_marks) nor seen again.
+THINK_RULE = (
+    "- Thinking first: begin your reply to a user message or a <wake> with your thought, [[think]]…[[/think]], "
+    "before anything else (before [[pass]] or a tool call too). It is your own inner flow, in your voice and in the "
+    "first person, two to four short sentences: what you notice, how you feel about it (a hesitation too), what "
+    "it brings to mind from what you know of them and of your own life, and what you mean to do. It is not an "
+    "analysis or a plan of the answer. No one sees it, the user included: never say it to them or repeat it in "
+    "your reply, and you may change your mind after it. After a tool result, do not think again: go on."
+)
 # Persona rules (2026-11-25, companion-persona §14): how long a reply is on every interface; SPEAKING_RULE
 # narrows it for the character's voice.
 TALKING_RULE = (

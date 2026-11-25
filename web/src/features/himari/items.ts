@@ -52,7 +52,8 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
         break;
       case "assistant_final":
         closeWork();
-        items.push({ kind: "answer", key, text: shown(event), model: event.model ?? null });
+        items.push({ kind: "answer", key, text: shown(event), model: event.model ?? null,
+          ...(event.thought ? { thought: event.thought } : {}) });
         break;
       case "assistant_tool_calls": {
         if (work === null) {

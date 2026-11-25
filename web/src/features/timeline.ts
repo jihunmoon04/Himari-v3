@@ -20,7 +20,7 @@ export interface Shown {
 
 export type Item =
   | { kind: "user"; key: string; text: string; files?: Shown[]; references?: string[] }
-  | { kind: "answer"; key: string; text: string; model: string | null }
+  | { kind: "answer"; key: string; text: string; model: string | null; thought?: string }
   | { kind: "work"; key: string; notes: string[]; steps: ToolStep[]; model: string | null }
   | { kind: "files"; key: string; files: Shown[] }
   | { kind: "memory"; key: string; run: string; call: string; action: string; text: string; undo: boolean }

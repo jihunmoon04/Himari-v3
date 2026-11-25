@@ -139,6 +139,12 @@ export function Timeline({ items, live, running, conversation }: {
           case "answer":
             return (
               <div key={item.key} className="group">
+                {item.thought && (
+                  <details className="mb-1 text-xs text-faint">
+                    <summary className="cursor-pointer select-none">Thought</summary>
+                    <p className="mt-1 whitespace-pre-wrap">{item.thought}</p>
+                  </details>
+                )}
                 <AssistantText text={item.text} />
                 <CopyButton text={item.text} />
               </div>
