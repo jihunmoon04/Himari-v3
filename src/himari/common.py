@@ -339,7 +339,8 @@ def thought_end(text: str, *, complete: bool, limit: int = THINK_CHARS) -> tuple
     and within ``limit``)."""
     n = len(text)
     j = 0
-    while j < n and text[j].isspace():  # any Unicode white space (review P0-2: U+3000 too)
+    # any Unicode white space (review P0-2: U+3000 too) and an invisible U+FEFF (review 2: a BOM), before the open only
+    while j < n and (text[j].isspace() or text[j] == "﻿"):
         j += 1
     if j == n:
         return None if not complete else (0, 0, 0)

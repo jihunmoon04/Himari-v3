@@ -90,6 +90,7 @@ export interface EventView {
   text?: string;
   display?: Display | null;
   thought?: string | null; // character-mind §3.2: HIMARI's thought before an answer (the owner's view only)
+  status?: "passed" | "dropped"; // a wake_thought's: the model passed, or it was dropped unshown
   model?: string | null;
   run_id?: string | null;
   call_id?: string;

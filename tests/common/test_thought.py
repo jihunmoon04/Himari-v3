@@ -102,10 +102,8 @@ def test_blocks_lose_their_thought() -> None:
 ])
 def test_unicode_white_space_around_a_thought_never_lets_it_show(text: str) -> None:
     """Review P0-2: white space is any Unicode white space (str.isspace), before the open and after the close;
-    live and whole agree, and the thought reaches neither the text, nor the history, nor search."""
-    if text.startswith("\ufeff"):  # not white space: the thought is not at the start, so it is text
-        assert split_thought(text)[0] is None
-        return
+    review 2: an invisible U+FEFF before the open is passed over too (a BOM must not leak the thought). Live and
+    whole agree, and the thought reaches neither the text, nor the history, nor search."""
     assert shown(text) == "안녕"
     assert split_thought(text)[0] == "몰래 걱정했다."
     assert drop_thought((TextBlock(text),)) == (TextBlock("안녕"),)
@@ -114,3 +112,22 @@ def test_unicode_white_space_around_a_thought_never_lets_it_show(text: str) -> N
         cuts = sorted(rng.sample(range(1, len(text)), k=4))
         assert live(text, cuts) == "안녕"
     assert thought_end("\u3000\u3000", complete=False) is None  # still may open one
+
+
+@pytest.mark.parametrize("text", [
+    "\ufeff[[think]]몰래 걱정했다.[[/think]]안녕",
+    "\ufeff\ufeff [[think]]몰래 걱정했다.[[/think]] 안녕",
+])
+def test_a_leading_bom_never_lets_a_thought_show(text: str) -> None:
+    """Review 2 (P0 BOM): U+FEFF is ignorable before the open only, live (in every chunking) and whole alike."""
+    assert shown(text) == "안녕"
+    assert split_thought(text)[0] == "몰래 걱정했다."
+    assert drop_thought((TextBlock(text),)) == (TextBlock("안녕"),)
+    for end in range(1, text.index("안")):  # nothing confirmed while it may still be thinking
+        assert scan_marks(text[:end], MarkScan(), complete=False)[0] == ""
+    rng = random.Random(13)
+    for _ in range(40):
+        cuts = sorted(rng.sample(range(1, len(text)), k=4))
+        assert live(text, cuts) == "안녕"
+    assert thought_end("\ufeff", complete=False) is None
+    assert split_thought("안녕\ufeff[[think]]글[[/think]]")[0] is None  # only before the open: elsewhere it is text

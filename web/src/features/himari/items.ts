@@ -95,9 +95,9 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
         closeWork();
         items.push({ kind: "notice", key, text: event.text ?? "" });
         break;
-      case "wake_thought": // character-mind §3.3: a free wake it let pass, with what it thought
+      case "wake_thought": // character-mind §3.3: a free wake it let pass (or one dropped unshown), with its thought
         closeWork();
-        items.push({ kind: "notice", key, text: `Let pass: ${event.text ?? ""}`,
+        items.push({ kind: "notice", key, text: `${event.status === "dropped" ? "Not said" : "Let pass"}: ${event.text ?? ""}`,
           ...(event.thought ? { thought: event.thought } : {}) });
         break;
       default:

@@ -1060,7 +1060,10 @@ def wake_thought_view(wake: WakeRecord) -> dict[str, Any]:
     """character-mind §3.3, §8 (review P1-5): a free wake that thought and then passed — never shown as a
     wake, so the owner's Web gets its own dim line with the thought folded."""
     return {"sequence": wake.event_sequence, "kind": "wake_thought", "created_at": _time(wake.created_at),
-            "text": wake_summary(wake.reasons), "thought": wake.thought}
+            "text": wake_summary(wake.reasons), "thought": wake.thought,
+            # review 2: what really came of it — the model passed, or it was dropped (the user came first,
+            # or it was found unshown at a restart): the Web words the dropped one neutrally
+            "status": wake.status.value}
 
 
 def mind_view(mind: MindModel) -> dict[str, Any]:
@@ -1610,6 +1613,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
         application, scope = himari(request), scope_of(conversation_id, who)
         events = await application.data.read_events(scope, after_sequence=after, limit=limit)
+        # character-mind §3.3 (review 2): the page's sequence range, as read (before anything is left out)
+        through = events[-1].sequence if len(events) == limit else None
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
             events = tuple(e for e in events if e.sequence not in unshown)
         writers = [e.origin_run_id for e in events
@@ -1629,10 +1634,11 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         # character-mind §3.2: a device never gets a thought
         items = [event_view(e, models, files, presented, memory, device=by.device is not None) for e in events]
         if by.device is None:  # §3.3 (review P1-5): a free wake that thought and passed: its thought, the owner's
-            end = events[-1].sequence if events and len(events) == limit else None
-            items += [wake_thought_view(w) for w in await application.data.wake_thoughts(scope, after=after)
-                      if end is None or w.event_sequence <= end]
-            items.sort(key=lambda item: int(item["sequence"]))
+            # review 2: only those within the page's range, merged in order, the page held to ``limit``; the next
+            # page starts after the last row given (an event or a wake's line)
+            items += [wake_thought_view(w) for w in await application.data.wake_thoughts(
+                scope, after=after, through=through, limit=limit)]
+            items = sorted(items, key=lambda item: int(item["sequence"]))[:limit]
         return {"items": items, "last_sequence": items[-1]["sequence"] if items else after}
 
     @app.get("/api/conversations/{conversation_id}/live")

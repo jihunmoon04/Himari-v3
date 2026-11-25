@@ -1596,9 +1596,11 @@ class WakeStore(Protocol):
         ``read_events`` at all, their held Run's events neither."""
         ...
 
-    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0) -> tuple[WakeRecord, ...]:
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0, through: int | None = None,
+                            limit: int | None = None) -> tuple[WakeRecord, ...]:
         """character-mind §3.3 (review P1-5): this Conversation's free wakes that ended unshown (passed or
-        dropped) with a thought, their event after ``after``, by sequence — for the owner's Web only."""
+        dropped) with a thought, their event after ``after`` and at most ``through`` (None: any), by
+        sequence, at most ``limit`` (None: all) — for the owner's Web only."""
         ...
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:

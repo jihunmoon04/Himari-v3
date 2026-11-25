@@ -1915,12 +1915,15 @@ class InMemoryData:
         if record.status is WakeStatus.OPENED:
             self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC), thought=thought)
 
-    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0) -> tuple[WakeRecord, ...]:
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0, through: int | None = None,
+                            limit: int | None = None) -> tuple[WakeRecord, ...]:
         self._conv(scope)
-        return tuple(sorted((w for w in self._store.wakes.values()
-                             if w.conversation_id == scope.conversation_id and w.event_sequence > after
-                             and w.thought is not None and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)),
-                            key=lambda w: w.event_sequence))
+        found = sorted((w for w in self._store.wakes.values()
+                        if w.conversation_id == scope.conversation_id and w.event_sequence > after
+                        and (through is None or w.event_sequence <= through)
+                        and w.thought is not None and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)),
+                       key=lambda w: w.event_sequence)
+        return tuple(found if limit is None else found[:max(0, limit)])
 
     async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
         self._run(self._conv(scope), run_id)

@@ -124,3 +124,10 @@ describe("HIMARI's thoughts (character-mind §3.2, §3.3)", () => {
     expect(items).toEqual([{ kind: "notice", key: "4", text: "Let pass: spoke on its own", thought: "회의 중이다. 두자." }]);
   });
 });
+
+describe("a wake dropped unshown (review 2)", () => {
+  it("is worded as not said, not as one the model let pass", () => {
+    const items = toItems([event(5, "wake_thought", { text: "spoke on its own", thought: "말할까 했다.", status: "dropped" })]);
+    expect(items).toEqual([{ kind: "notice", key: "5", text: "Not said: spoke on its own", thought: "말할까 했다." }]);
+  });
+});

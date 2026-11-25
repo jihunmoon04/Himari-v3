@@ -3613,12 +3613,14 @@ class SqliteData:
                             f" ({', '.join('?' * len(held))})", scope.conversation_id, *held) if held else []
             return frozenset({int(r["event_sequence"]) for r in opened} | {int(r["sequence"]) for r in events})
 
-    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0) -> tuple[WakeRecord, ...]:
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0, through: int | None = None,
+                            limit: int | None = None) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:
             tx.authorized(scope)
             return tuple(_wake(r) for r in tx.all(
-                "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence>? AND thought IS NOT NULL"
-                " AND status IN ('passed', 'dropped') ORDER BY event_sequence", scope.conversation_id, after))
+                "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence>? AND (? IS NULL OR event_sequence<=?)"
+                " AND thought IS NOT NULL AND status IN ('passed', 'dropped') ORDER BY event_sequence LIMIT ?",
+                scope.conversation_id, after, through, through, -1 if limit is None else max(0, limit)))
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:
