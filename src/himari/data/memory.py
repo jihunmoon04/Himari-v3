@@ -72,6 +72,8 @@ from himari.data.api import (
     together_days,
     LifeChange,
     LifeChangeOp,
+    ThoughtChange,
+    ThoughtOp,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -980,6 +982,8 @@ class InMemoryData:
                 continue
             if entry.kind is LifeKind.BOND and entry.origin is not LifeOrigin.USER:  # character-bond §2: as notes
                 del self._store.life[key]
+            elif entry.kind is LifeKind.THOUGHT:  # character-mind §3.4: the thoughts kept from it go with it
+                del self._store.life[key]
             else:
                 self._store.life[key] = (replace(entry, source_conversation=None, source_sequences=(), source=None),
                                          retired)
@@ -1271,15 +1275,17 @@ class InMemoryData:
         return self._new_life(principal, fact)
 
     async def list_life(self, principal: PrincipalId, persona_id: int, *,
-                        since: str | None = None) -> tuple[LifeEntry, ...]:
+                        since: str | None = None, now: datetime | None = None) -> tuple[LifeEntry, ...]:
         persona_id = rules.check_life_persona(persona_id)
         since = None if since is None else rules.check_life_day(since)
+        at = now or datetime.now(UTC)
         open_arcs = {e.entry_id for (owner, _), (e, retired) in self._store.life.items()
                      if owner == principal and retired is None and e.arc_open}
         return rules.order_life(
             e for (owner, _), (e, retired) in self._store.life.items()
             if owner == principal and retired is None and e.persona_id == persona_id and e.kind is not LifeKind.BOND
-            and (e.kind is LifeKind.FACT or since is None or (e.day or "") >= since
+            and rules.live_thought(e, at)  # character-mind §5.2: until it expires
+            and (e.kind in (LifeKind.FACT, LifeKind.THOUGHT) or since is None or (e.day or "") >= since
                  or (e.kind is LifeKind.ARC and (e.end_day is None or e.end_day >= since))
                  or (e.kind is LifeKind.WORK and e.arc_id in open_arcs)))
 
@@ -1297,6 +1303,7 @@ class InMemoryData:
                         expected_revision: int, title: str | None = None,
                         summary: str | None = None) -> LifeEntry:
         entry = self._live_entry(principal, entry_id)
+        rules.check_editable(entry)
         text = rules.check_life_text(entry.kind, text)
         titled = rules.edited_title(entry, title)
         summed = rules.edited_summary(entry, summary)
@@ -1339,6 +1346,31 @@ class InMemoryData:
                                                   revision=entry.revision + 1, updated_at=now,
                                                   source_conversation=conversation, source_sequences=sequences,
                                                   source=source))
+            outcomes.append("applied")
+        return tuple(outcomes)
+
+    def _live_thoughts(self, principal: PrincipalId, persona_id: int, now: datetime) -> list[LifeEntry]:
+        return [e for (owner, _), (e, retired) in self._store.life.items()
+                if owner == principal and retired is None and e.persona_id == persona_id
+                and e.kind is LifeKind.THOUGHT and rules.live_thought(e, now)]
+
+    async def apply_thought_changes(self, principal: PrincipalId, persona_id: int,
+                                    changes: Sequence[ThoughtChange], *, conversation: ConversationId, source: str,
+                                    now: datetime) -> tuple[str, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        outcomes: list[str] = []
+        for change in changes:
+            thoughts = self._live_thoughts(principal, persona_id, now)
+            outcome = rules.thought_change_outcome(change, thoughts)
+            if outcome is not None:
+                outcomes.append(outcome)
+                continue
+            if change.op is ThoughtOp.SAID:  # character-mind §5.1: said now, so no longer unsaid
+                self._retire_life(principal, next(t for t in thoughts if t.entry_id == change.entry_id), now)
+            else:
+                if (old := rules.thought_room(thoughts)) is not None:
+                    self._retire_life(principal, old, now)
+                self._new_life(principal, rules.kept_thought(persona_id, change, conversation, source, now))
             outcomes.append("applied")
         return tuple(outcomes)
 

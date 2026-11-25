@@ -14,7 +14,7 @@ pytest.importorskip("fastapi")
 
 from webkit import SEND, Server  # noqa: E402
 
-from himari.common import PrincipalId  # noqa: E402
+from himari.common import ConversationId, PrincipalId  # noqa: E402
 from himari.data.api import (  # noqa: E402
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
@@ -29,6 +29,9 @@ from himari.data.api import (  # noqa: E402
     LifePlan,
     LifeWriteStart,
     RawReceived,
+    ThoughtAbout,
+    ThoughtChange,
+    ThoughtOp,
     WorkPiece,
 )
 from himari.interfaces.web import app as web  # noqa: E402
@@ -187,6 +190,27 @@ def test_a_project_shows_its_so_far_its_pieces_and_the_next_work_plan(server: Se
     assert (summed.status_code, error_code(summed)) == (422, "invalid_life")  # only a piece has a summary
     gone = server.client.delete(f"/api/life/{piece['id']}", params={"revision": 2}, headers=SEND)
     assert gone.status_code == 204
+
+
+def test_a_kept_thought_is_seen_with_what_it_is_about_and_only_deleted(server: Server) -> None:
+    """character-mind §8: the kept thoughts come last, with what each is about and when it expires; a save is
+    refused (only deleted)."""
+    async def kept() -> None:
+        assert server.application is not None
+        await server.application.data.apply_thought_changes(ME, 0, [ThoughtChange(
+            ThoughtOp.KEEP, "요즘 지쳐 보인다.", ThoughtAbout.USER, sequences=(2,))],
+            conversation=ConversationId("conv_x"), source="mpass_1", now=datetime.now(UTC))
+
+    server.client.portal.call(kept)  # type: ignore[union-attr]
+    (thought,) = server.client.get("/api/life").json()["entries"]
+    assert (thought["kind"], thought["text"], thought["about"], thought["origin"], thought["day"]) == (
+        "thought", "요즘 지쳐 보인다.", "user", "conversation", None)
+    assert thought["expires_at"] > thought["created_at"]
+    edited = server.client.put(f"/api/life/{thought['id']}", json={"text": "고쳐 봄", "revision": 1}, headers=SEND)
+    assert (edited.status_code, error_code(edited)) == (422, "invalid_life")
+    gone = server.client.delete(f"/api/life/{thought['id']}", params={"revision": 1}, headers=SEND)
+    assert gone.status_code == 204
+    assert server.client.get("/api/life").json()["entries"] == []
 
 
 def test_life_needs_a_signed_in_user_and_an_allowed_origin(server: Server) -> None:

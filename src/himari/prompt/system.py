@@ -85,7 +85,8 @@ def principle_section(persona: bool, wake: bool = False, life: bool = False) -> 
     own = "standing instructions and companion persona" if persona else "standing instructions"
     titles = "window or media titles from the user's computer"
     memories = ("saved memories, your own life and work (himari_life), your bond with the user (bond), your mood "
-                "(himari_mood), what you are doing now (himari_now), the weather on the user's side (world)"
+                "(himari_mood), what you are doing now (himari_now), your own unsaid thoughts (himari_mind), the "
+                "weather on the user's side (world)"
                 ) if life else "saved memories"
     return (
         "# What instructs you\n"

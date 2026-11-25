@@ -222,6 +222,24 @@ describe("an entry", () => {
     expect(part("Work").getByText("No projects yet.")).toBeTruthy();
   });
 
+  it("lists the kept thoughts with what they are about, and deletes but never edits one (character-mind §8)",
+    async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      state.data = {
+        ...aLife(),
+        entries: [{ ...entry(12, "thought", null, "요즘 지쳐 보인다.", "conversation"), about: "user",
+          expires_at: "2026-11-28T01:00:00+00:00" }],
+      };
+      await shown();
+      expect(part("Thoughts").getByText("요즘 지쳐 보인다.")).toBeTruthy();
+      expect(part("Thoughts").getByText(/^about you · kept .* · until .* · from a conversation$/)).toBeTruthy();
+      expect(part("Thoughts").queryByRole("button", { name: "Edit" })).toBeNull();
+      fireEvent.click(part("Thoughts").getByRole("button", { name: "Delete" }));
+      await waitFor(() => expect(deleteLife).toHaveBeenCalledWith(12, 1));
+      expect(part("Diary").getByText("No diary yet.")).toBeTruthy();
+      confirm.mockRestore();
+    });
+
   it("is deleted only when confirmed", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     await shown();

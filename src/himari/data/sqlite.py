@@ -119,6 +119,9 @@ from himari.data.api import (
     together_days,
     LifeChange,
     LifeChangeOp,
+    ThoughtAbout,
+    ThoughtChange,
+    ThoughtOp,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -205,7 +208,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -799,12 +802,24 @@ _V27_ADDITIONS = """
 ALTER TABLE personas ADD COLUMN fields TEXT NOT NULL DEFAULT '{}';
 UPDATE personas SET fields=json_object('free', text) WHERE text <> '';
 """
+# v28 (character-mind v0.1 §14.2): a kept thought is a life entry of kind 'thought' with what it is about and when it
+# expires (its conversation and answers the source columns); a work piece may be a draft; a life write names its job
+# (from before: a worker's call 'work_end', else 'review'), why its model was chosen, and the thought it began with.
+_V28_ADDITIONS = """
+ALTER TABLE life_entries ADD COLUMN about TEXT;
+ALTER TABLE life_entries ADD COLUMN expires_at TEXT;
+ALTER TABLE life_entries ADD COLUMN draft INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE life_writes ADD COLUMN job TEXT NOT NULL DEFAULT 'review';
+ALTER TABLE life_writes ADD COLUMN model_reason TEXT;
+ALTER TABLE life_writes ADD COLUMN thought TEXT;
+UPDATE life_writes SET job='work_end' WHERE plan_id IS NOT NULL;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
               _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS, _V25_ADDITIONS,
-              _V26_ADDITIONS, _V27_ADDITIONS)  # what each version from v3 added
+              _V26_ADDITIONS, _V27_ADDITIONS, _V28_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1274,7 +1289,8 @@ def _life_entry(row: sqlite3.Row) -> LifeEntry:
                      datetime.fromisoformat(row["updated_at"]), source, tuple(json.loads(row["source_sequences"])),
                      row["source"], None if row["tag"] is None else BondTag(row["tag"]), row["month_day"],
                      row["time_of_day"], row["title"], row["end_day"], row["ending"], row["arc_id"], row["summary"],
-                     row["plan_id"], row["so_far"])
+                     row["plan_id"], row["so_far"], None if row["about"] is None else ThoughtAbout(row["about"]),
+                     _moment(row["expires_at"]), bool(row["draft"]))
 
 
 def _mood(persona_id: int, row: sqlite3.Row | None) -> HimariMood | None:
@@ -2169,6 +2185,8 @@ class SqliteData:
         # character-bond §2: what the two settled in it rests on the user's words: it goes, as its notes do,
         # unless the user has made it their own since
         "DELETE FROM life_entries WHERE kind='bond' AND origin<>'user' AND source_conversation=?",
+        # character-mind §3.4: the thoughts kept from it go with it (as its notes do)
+        "DELETE FROM life_entries WHERE kind='thought' AND source_conversation=?",
         # character-life §2: HIMARI's facts from it stay (its life, not the user's words); the link goes
         "UPDATE life_entries SET source_conversation=NULL, source_sequences='[]', source=NULL"
         " WHERE source_conversation=?",
@@ -2550,7 +2568,7 @@ class SqliteData:
 
     _LIFE_COLUMNS = ("entry_id, persona_id, kind, day, text, origin, revision, created_at, updated_at,"
                      " source_conversation, source_sequences, source, tag, month_day, time_of_day, title, end_day,"
-                     " ending, arc_id, summary, plan_id, so_far")
+                     " ending, arc_id, summary, plan_id, so_far, about, expires_at, draft")
 
     def _live_entry(self, tx: _Tx, principal: PrincipalId, entry_id: object) -> LifeEntry:
         row = None if isinstance(entry_id, bool) or not isinstance(entry_id, int) else tx.one(
@@ -2574,24 +2592,28 @@ class SqliteData:
                    " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, entry.entry_id)
         tx.execute("INSERT INTO life_entries (owner, entry_id, persona_id, kind, day, text, origin, revision,"
                    " created_at, updated_at, retired_at, source_conversation, source_sequences, source, tag,"
-                   " month_day, time_of_day, title, end_day, ending, arc_id, summary, plan_id, so_far)"
-                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   " month_day, time_of_day, title, end_day, ending, arc_id, summary, plan_id, so_far, about,"
+                   " expires_at, draft)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                    principal, entry.entry_id, entry.persona_id, entry.kind.value, entry.day, entry.text,
                    entry.origin.value, entry.revision, _timestamp(entry.created_at), _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
                    None if entry.tag is None else entry.tag.value, entry.month_day, entry.time_of_day, entry.title,
-                   entry.end_day, entry.ending, entry.arc_id, entry.summary, entry.plan_id, entry.so_far)
+                   entry.end_day, entry.ending, entry.arc_id, entry.summary, entry.plan_id, entry.so_far,
+                   None if entry.about is None else entry.about.value,
+                   None if entry.expires_at is None else _timestamp(entry.expires_at), int(entry.draft))
         return entry
 
     @staticmethod
     def _rewrite_life(tx: _Tx, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
         tx.execute("UPDATE life_entries SET text=?, origin=?, revision=?, updated_at=?, source_conversation=?,"
                    " source_sequences=?, source=?, tag=?, month_day=?, title=?, end_day=?, ending=?, arc_id=?,"
-                   " summary=?, so_far=? WHERE owner=? AND entry_id=?",
+                   " summary=?, so_far=?, time_of_day=?, draft=? WHERE owner=? AND entry_id=?",
                    entry.text, entry.origin.value, entry.revision, _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
                    None if entry.tag is None else entry.tag.value, entry.month_day, entry.title, entry.end_day,
-                   entry.ending, entry.arc_id, entry.summary, entry.so_far, principal, entry.entry_id)
+                   entry.ending, entry.arc_id, entry.summary, entry.so_far, entry.time_of_day, int(entry.draft),
+                   principal, entry.entry_id)
         return entry
 
     @staticmethod
@@ -2612,17 +2634,20 @@ class SqliteData:
         return self._new_life(tx, principal, fact)
 
     async def list_life(self, principal: PrincipalId, persona_id: int, *,
-                        since: str | None = None) -> tuple[LifeEntry, ...]:
+                        since: str | None = None, now: datetime | None = None) -> tuple[LifeEntry, ...]:
         persona_id = rules.check_life_persona(persona_id)
         since = None if since is None else rules.check_life_day(since)
+        at = now or datetime.now(UTC)
         with self._tx() as tx:
             rows = tx.all(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
-                          " AND retired_at IS NULL AND kind <> 'bond' AND (kind='fact' OR ? IS NULL OR day >= ?"
+                          " AND retired_at IS NULL AND kind <> 'bond' AND (kind='fact' OR kind='thought'"
+                          " OR ? IS NULL OR day >= ?"
                           " OR (kind='arc' AND (end_day IS NULL OR end_day >= ?))"
                           " OR (kind='work' AND arc_id IN (SELECT a.entry_id FROM life_entries a WHERE a.owner=?"
                           " AND a.kind='arc' AND a.end_day IS NULL AND a.retired_at IS NULL)))",
                           principal, persona_id, since, since, since, principal)
-            return rules.order_life(_life_entry(r) for r in rows)
+            # character-mind §5.2: a kept thought is listed until it expires
+            return rules.order_life(e for e in map(_life_entry, rows) if rules.live_thought(e, at))
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         persona_id = rules.check_life_persona(persona_id)
@@ -2640,6 +2665,7 @@ class SqliteData:
                         summary: str | None = None) -> LifeEntry:
         with self._tx() as tx:
             entry = self._live_entry(tx, principal, entry_id)
+            rules.check_editable(entry)
             text = rules.check_life_text(entry.kind, text)
             titled = rules.edited_title(entry, title)
             summed = rules.edited_summary(entry, summary)
@@ -2683,6 +2709,32 @@ class SqliteData:
                     self._rewrite_life(tx, principal, dataclasses.replace(
                         entry, text=text, origin=LifeOrigin.CONVERSATION, revision=entry.revision + 1, updated_at=now,
                         source_conversation=conversation, source_sequences=sequences, source=source))
+                outcomes.append("applied")
+            return tuple(outcomes)
+
+    def _live_thoughts(self, tx: _Tx, principal: PrincipalId, persona_id: int, now: datetime) -> list[LifeEntry]:
+        return [e for e in map(_life_entry, tx.all(
+            f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND kind='thought'"
+            " AND retired_at IS NULL", principal, persona_id)) if rules.live_thought(e, now)]
+
+    async def apply_thought_changes(self, principal: PrincipalId, persona_id: int,
+                                    changes: Sequence[ThoughtChange], *, conversation: ConversationId, source: str,
+                                    now: datetime) -> tuple[str, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            outcomes: list[str] = []
+            for change in changes:
+                thoughts = self._live_thoughts(tx, principal, persona_id, now)
+                outcome = rules.thought_change_outcome(change, thoughts)
+                if outcome is not None:
+                    outcomes.append(outcome)
+                    continue
+                if change.op is ThoughtOp.SAID:  # §5.1: said now, so no longer unsaid
+                    self._retire_life(tx, principal, next(t for t in thoughts if t.entry_id == change.entry_id), now)
+                else:
+                    if (old := rules.thought_room(thoughts)) is not None:
+                        self._retire_life(tx, principal, old, now)
+                    self._new_life(tx, principal, rules.kept_thought(persona_id, change, conversation, source, now))
                 outcomes.append("applied")
             return tuple(outcomes)
 

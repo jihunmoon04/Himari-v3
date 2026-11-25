@@ -17,6 +17,11 @@ resting on HIMARI's replies only (``plan_self``), applied by Data's LifeStore.
 It is also shown that persona's bond with the user and answers ``bond``: what
 the two really settled, resting on the user's messages (``plan_bond``,
 character-bond v0.1 §3), applied by Data's BondStore.
+
+character-mind v0.1 §5: such a pass also reads the thoughts HIMARI's answers began
+with (never ground for ``self``: that rests on what was said) and the persona's kept
+thoughts, and answers ``thoughts`` — at most two of this part's left unsaid, to keep —
+and ``said``: the kept ones HIMARI has now said (``plan_thoughts``).
 """
 
 from __future__ import annotations
@@ -31,9 +36,13 @@ from zoneinfo import ZoneInfo
 
 import jsonschema
 
-from himari.common import AttachmentRef, EventId, FileReference, JsonValue, TextBlock, split_marks
+from himari.common import AttachmentRef, EventId, FileReference, JsonValue, TextBlock, split_marks, thought_of
 from himari.data.api import (
     AssistantFinal,
+    AssistantToolCalls,
+    ThoughtAbout,
+    ThoughtChange,
+    ThoughtOp,
     BondChange,
     BondTag,
     ConversationEvent,
@@ -44,6 +53,7 @@ from himari.data.api import (
     LifeEntry,
     LifeKind,
     LifeOrigin,
+    MAX_THOUGHT_CHARS,
     Memory,
     MemoryCategory,
     MemoryOrigin,
@@ -153,10 +163,28 @@ BOND_INSTRUCTIONS = (
 PASS_BOND_CHARS = 3_000  # the persona's bond entries a pass is shown, in list_bond's order
 PASS_MAX_BOND = 5  # bond decisions one pass may make
 
+# character-mind §5.1, §5.2: told after SELF_INSTRUCTIONS when HIMARI's life is kept (the input then holds
+# himari_thoughts, the part's, and kept_thoughts, the chosen persona's live ones). Only what was left unsaid is kept.
+THOUGHT_INSTRUCTIONS = (
+    "HIMARI's thoughts (thoughts, said): himari_thoughts are the thoughts HIMARI had before its replies in this "
+    "part (seq: the reply's), which the user never saw; they are not facts and never ground for notes or self. "
+    "kept_thoughts are thoughts kept before (id t<n>). In thoughts, keep at most 2 of this part's thoughts that "
+    "HIMARI left unsaid and that may matter later: a feeling it did not show, something it meant to say and did "
+    "not, something it wants to say or do next time, an impression of the user (e.g. that they seem tired). Never "
+    "one its replies said, never one kept_thoughts already holds; keeping none is usual. Write each as a line or "
+    f"two in HIMARI's own voice (at most {MAX_THOUGHT_CHARS} characters), with about: user (an impression or a "
+    "worry about the user), self (its own feeling), work (its own work) or intent (what it wants to say or do), "
+    "and evidence: the seq of the replies whose thoughts it rests on. In said, list the ids of kept_thoughts that "
+    "HIMARI's replies in this part actually said. Shape: \"thoughts\": [{\"text\": \"...\", \"about\": \"user\", "
+    "\"evidence\": [2]}], \"said\": [\"t3\"]. Both are [] when there are none."
+)
+PASS_MAX_THOUGHTS = 2  # §5.2: thoughts one pass may keep
+
 
 def pass_instructions(life: bool, bond: bool = False) -> str:
-    """With HIMARI's life kept, its own facts (self); with the bond too, what the two settled (character-bond §3)."""
-    return (MEMORY_PASS_INSTRUCTIONS + ("\n" + SELF_INSTRUCTIONS if life else "")
+    """With HIMARI's life kept, its own facts (self) and its thoughts (character-mind §5); with the bond too,
+    what the two settled (character-bond §3)."""
+    return (MEMORY_PASS_INSTRUCTIONS + ("\n" + SELF_INSTRUCTIONS + "\n" + THOUGHT_INSTRUCTIONS if life else "")
             + ("\n" + BOND_INSTRUCTIONS if bond else ""))
 
 
@@ -195,6 +223,8 @@ ANSWER_SCHEMA: dict[str, Any] = {
         # alone and never fails the pass's notes
         "self": {"type": ["array", "null"]},
         "bond": {"type": ["array", "null"]},  # character-bond §3: read by plan_bond, as self is
+        "thoughts": {"type": ["array", "null"]},  # character-mind §5: read by plan_thoughts, as self is
+        "said": {"type": ["array", "null"]},
     },
 }
 
@@ -211,6 +241,7 @@ class Message:
     at: datetime
     text: str
     omitted: int = 0  # characters left out of its middle (§4.2)
+    thought: str | None = None  # character-mind §5.1: the thought a reply began with (never shown)
 
 
 @dataclass(frozen=True)
@@ -259,8 +290,15 @@ def message_of(event: ConversationEvent) -> Message | None:
         return Message(event.sequence, "user", event.created_at, text)
     if isinstance(payload, AssistantFinal):
         text = "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
-        text = split_marks(text, complete=True)[0]
-        return Message(event.sequence, "himari", event.created_at, text[:ASSISTANT_CHARS])
+        text = split_marks(text, complete=True)[0]  # character-mind §5.1: what was said, the thought left out
+        return Message(event.sequence, "himari", event.created_at, text[:ASSISTANT_CHARS],
+                       thought=thought_of(payload.blocks))
+    if isinstance(payload, AssistantToolCalls):  # character-mind §3.3: a turn's first Run may think, then call
+        thought = thought_of(payload.commentary)
+        if thought is None:
+            return None
+        said = split_marks("\n".join(b.text for b in payload.commentary if isinstance(b, TextBlock)), complete=True)[0]
+        return Message(event.sequence, "himari", event.created_at, said[:ASSISTANT_CHARS], thought=thought)
     if isinstance(payload, Wake):  # V3-P87 §8.3: why HIMARI spoke first — context, never the user's words
         return Message(event.sequence, "context", event.created_at, wake_context(payload))
     return None
@@ -358,14 +396,21 @@ def shown_bond(entries: Sequence[LifeEntry]) -> list[LifeEntry]:
 
 def request_data(part: Part, notes: Sequence[Memory], previous: Episode | None, *, now: datetime, zone: str,
                  kind: PassKind, facts: Sequence[LifeEntry] | None = None,
-                 bond: Sequence[LifeEntry] | None = None) -> dict[str, JsonValue]:
+                 bond: Sequence[LifeEntry] | None = None,
+                 thoughts: Sequence[LifeEntry] | None = None) -> dict[str, JsonValue]:
     """The pass's input (§4.2), as JSON data; with ``facts`` (character-life §4)
     the chosen persona's, as himari_facts, and with ``bond`` (character-bond §3)
-    its bond entries, as bond_entries."""
+    its bond entries, as bond_entries. With ``facts`` and ``thoughts`` (character-mind §5),
+    the part's thoughts as himari_thoughts and the persona's kept ones as kept_thoughts."""
     where = ZoneInfo(zone)
     data = _request_data(part, notes, previous, where, now=now, zone=zone, kind=kind)
     if facts is not None:
         data["himari_facts"] = [{"id": f"f{f.entry_id}", "text": f.text, "written_by": f.origin.value} for f in facts]
+    if facts is not None and thoughts is not None:
+        data["himari_thoughts"] = [{"seq": m.sequence, "thought": m.thought} for m in part.messages
+                                   if m.thought is not None]
+        data["kept_thoughts"] = [{"id": f"t{t.entry_id}", "about": None if t.about is None else t.about.value,
+                                  "text": t.text, "kept": _local(t.created_at, where)} for t in thoughts]
     if bond is not None:
         data["bond_entries"] = [{"id": f"b{e.entry_id}", "tag": None if e.tag is None else e.tag.value, "text": e.text,
                                  **({"month_day": e.month_day} if e.month_day else {}),
@@ -632,6 +677,44 @@ def plan_self(answer: Mapping[str, Any], part: Part, facts: Sequence[LifeEntry])
         elif op == "retire":
             changes.append(LifeChange(LifeChangeOp.RETIRE, None, target.entry_id, target.revision, tuple(evidence)))
     return changes
+
+
+_ABOUT = {a.value: a for a in ThoughtAbout}
+
+
+def plan_thoughts(answer: Mapping[str, Any], part: Part, kept: Sequence[LifeEntry]) -> list[ThoughtChange]:
+    """character-mind §5.1, §5.2: the answer's ``thoughts`` (at most PASS_MAX_THOUGHTS) and ``said``
+    as Data's changes. A thought kept rests on thoughts of this part's replies (its evidence, at
+    least one) and says what it is about; a said one names a kept thought the pass was shown.
+    Anything else is left out, alone; repeats and the limits are Data's."""
+    thought = {m.sequence for m in part.messages if m.thought is not None}
+    changes: list[ThoughtChange] = []
+    raws = answer.get("thoughts")
+    for raw in (raws if isinstance(raws, list) else [])[:PASS_MAX_THOUGHTS]:
+        if not isinstance(raw, Mapping):
+            continue
+        evidence = _seqs(raw.get("evidence"), thought)
+        text, about = raw.get("text"), raw.get("about")
+        if (not evidence or not isinstance(text, str) or not text.strip() or not isinstance(about, str)
+                or about.strip().lower() not in _ABOUT):
+            continue
+        changes.append(ThoughtChange(ThoughtOp.KEEP, text.strip(), _ABOUT[about.strip().lower()],
+                                     sequences=tuple(evidence)))
+    shown = {t.entry_id for t in kept}
+    said = answer.get("said")
+    for raw in said if isinstance(said, list) else []:
+        entry_id = _thought_id(raw)
+        if entry_id in shown:
+            shown.discard(entry_id)  # once each
+            changes.append(ThoughtChange(ThoughtOp.SAID, entry_id=entry_id))
+    return changes
+
+
+def _thought_id(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    digits = value[1:] if value.startswith("t") else value
+    return int(digits) if digits.isdigit() else None
 
 
 def _seqs(value: object, allowed: set[int]) -> list[int] | None:

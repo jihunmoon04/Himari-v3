@@ -10,7 +10,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 
-from himari.common import ContentBlock, FrozenMap, TextBlock, split_marks, tool_id_problem
+from himari.common import ContentBlock, ConversationId, FrozenMap, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
     PERSONA_FIELDS,
     PERSONA_HIDDEN_FIELDS,
@@ -20,7 +20,14 @@ from himari.data.api import (
     MAX_SO_FAR_CHARS,
     MAX_WORK_CHARS,
     MAX_WORK_SUMMARY_CHARS,
+    MAX_THOUGHT_CHARS,
+    MAX_THOUGHTS,
+    THOUGHT_DAYS,
+    INTENT_DAYS,
     NEW_ARC,
+    ThoughtAbout,
+    ThoughtChange,
+    ThoughtOp,
     WorkPiece,
     ArcMove,
     ArcOp,
@@ -613,8 +620,8 @@ def check_life_text(kind: LifeKind, text: object) -> str:
     text = text.strip()
     if not text:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
-    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS,
-             LifeKind.ARC: MAX_ARC_CHARS, LifeKind.WORK: MAX_WORK_CHARS}.get(kind, MAX_LIFE_CHARS)
+    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS, LifeKind.ARC: MAX_ARC_CHARS,
+             LifeKind.WORK: MAX_WORK_CHARS, LifeKind.THOUGHT: MAX_THOUGHT_CHARS}.get(kind, MAX_LIFE_CHARS)
     if len(text) > limit:
         raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
     return text
@@ -641,15 +648,66 @@ def check_life_persona(persona_id: object) -> int:
 def order_life(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
     """Facts first (the user's, then newest), then the arcs (character-world §4: the open
     ones, newest start first, then the closed ones, newest end first), then the dated
-    entries, newest date first."""
+    entries, newest date first, then the kept thoughts, newest first (character-mind §5.2)."""
     listed = list(entries)
     facts = sorted((e for e in listed if e.kind is LifeKind.FACT),
                    key=lambda e: (e.origin is not LifeOrigin.USER, -e.updated_at.timestamp(), -e.entry_id))
     arcs = sorted((e for e in listed if e.kind is LifeKind.ARC),
                   key=lambda e: (e.end_day is None, e.end_day or e.day or "", e.entry_id), reverse=True)
-    dated_ = sorted((e for e in listed if e.kind not in (LifeKind.FACT, LifeKind.ARC)),
+    dated_ = sorted((e for e in listed if e.kind not in (LifeKind.FACT, LifeKind.ARC, LifeKind.THOUGHT)),
                     key=lambda e: (e.day or "", e.kind is LifeKind.DIARY, e.entry_id), reverse=True)
-    return (*facts, *arcs, *dated_)
+    thoughts = sorted((e for e in listed if e.kind is LifeKind.THOUGHT),
+                      key=lambda e: (e.created_at, e.entry_id), reverse=True)
+    return (*facts, *arcs, *dated_, *thoughts)
+
+
+def check_editable(entry: LifeEntry) -> None:
+    """character-mind §5.2: the user deletes a kept thought, never rewrites it (INVALID_ARGUMENT)."""
+    if entry.kind is LifeKind.THOUGHT:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a kept thought is only deleted")
+
+
+def live_thought(entry: LifeEntry, now: datetime) -> bool:
+    """character-mind §5.2: a kept thought not expired at ``now`` (any other entry: True)."""
+    return entry.kind is not LifeKind.THOUGHT or entry.expires_at is None or entry.expires_at > now
+
+
+def thought_expiry(about: ThoughtAbout, now: datetime) -> datetime:
+    """§5.2: when a thought kept at ``now`` stops being told: THOUGHT_DAYS, an intent INTENT_DAYS."""
+    return now + (INTENT_DAYS if about is ThoughtAbout.INTENT else THOUGHT_DAYS)
+
+
+def thought_change_outcome(change: object, thoughts: Sequence[LifeEntry]) -> str | None:
+    """§5.1, §5.2: why a memory pass's thought decision cannot be applied to the persona's live
+    kept ``thoughts``, or None when it can (a KEEP's room is made as it is kept)."""
+    if not isinstance(change, ThoughtChange) or not isinstance(change.op, ThoughtOp):
+        return "invalid"
+    if change.op is ThoughtOp.SAID:
+        return None if any(t.entry_id == change.entry_id for t in thoughts) else "unknown"
+    if not isinstance(change.about, ThoughtAbout):
+        return "invalid"
+    try:
+        text = check_life_text(LifeKind.THOUGHT, change.text)
+    except DataError:
+        return "invalid"
+    folded = fold(text)
+    return "duplicate" if any(fold(t.text) == folded for t in thoughts) else None
+
+
+def thought_room(thoughts: Sequence[LifeEntry]) -> LifeEntry | None:
+    """§5.2: the kept thought to retire so one more fits within MAX_THOUGHTS: the oldest, or None."""
+    if len(thoughts) < MAX_THOUGHTS:
+        return None
+    return min(thoughts, key=lambda t: (t.created_at, t.entry_id))
+
+
+def kept_thought(persona_id: int, change: ThoughtChange, conversation: str, source: str,
+                 now: datetime) -> LifeEntry:
+    """§5.2: a KEEP as stored (its id given as it is inserted), origin CONVERSATION."""
+    assert change.about is not None
+    return LifeEntry(0, persona_id, LifeKind.THOUGHT, None, check_life_text(LifeKind.THOUGHT, change.text),
+                     LifeOrigin.CONVERSATION, 1, now, now, ConversationId(conversation), tuple(change.sequences),
+                     source, about=change.about, expires_at=thought_expiry(change.about, now))
 
 
 def same_fact(text: str, facts: Iterable[LifeEntry]) -> bool:

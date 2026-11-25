@@ -1762,6 +1762,10 @@ MAX_OPEN_ARCS = 2  # W3: a persona's open arcs; a start past it is left out
 MAX_WORK_CHARS = 3_000  # character-work §4: a work piece's text (the worker is asked for 400 to 2,000)
 MAX_WORK_SUMMARY_CHARS = 200  # a work piece's one-line summary, in HIMARI's voice
 MAX_SO_FAR_CHARS = 600  # §3: an arc's (a project's) "so far", rewritten with each piece
+MAX_THOUGHT_CHARS = 200  # character-mind §5.2: a kept thought, a line or two in HIMARI's voice
+MAX_THOUGHTS = 30  # §5.2: a persona's live kept thoughts; past it the oldest retires
+THOUGHT_DAYS = timedelta(days=3)  # §5.2: a kept thought lasts this long from when it was kept
+INTENT_DAYS = timedelta(days=2)  # an ``intent`` one (what HIMARI wants to say or do) this long
 
 
 class LifeKind(Enum):
@@ -1771,6 +1775,16 @@ class LifeKind(Enum):
     BOND = "bond"  # character-bond §2: settled between the user and HIMARI (BondStore, never list_life)
     ARC = "arc"  # character-world §4: a thread of HIMARI's life over weeks (the story writer starts and ends it)
     WORK = "work"  # character-work §4: a piece of an arc's (a project's) work, made by the worker at a work plan
+    THOUGHT = "thought"  # character-mind §5.2: what HIMARI thought and left unsaid, kept a few days by a memory pass
+
+
+class ThoughtAbout(Enum):
+    """character-mind §5.2: what a kept thought is about."""
+
+    USER = "user"  # an impression of the user, a worry
+    SELF = "self"  # HIMARI's own feeling, left unshown
+    WORK = "work"  # its own work
+    INTENT = "intent"  # something it wants to say or do (kept INTENT_DAYS)
 
 
 class LifeOrigin(Enum):
@@ -1826,6 +1840,11 @@ class LifeEntry(DeepFrozen):
     summary: str | None = None  # character-work §4: a work piece's one line
     plan_id: int | None = None  # a work piece's plan
     so_far: str | None = None  # §3: an arc's "so far" (None: no piece yet)
+    # character-mind §5.2: a kept thought's ``about`` and when it stops being told (``expires_at``); its
+    # conversation and answers are ``source_conversation`` and ``source_sequences``, the pass ``source``.
+    about: ThoughtAbout | None = None
+    expires_at: datetime | None = None
+    draft: bool = False  # character-mind §4.4: a work piece begun at the start step, not finished yet
 
     @property
     def arc_open(self) -> bool:
@@ -1849,6 +1868,24 @@ class LifeChange(DeepFrozen):
     text: str | None = None
     entry_id: int | None = None
     expected_revision: int | None = None
+    sequences: tuple[int, ...] = ()
+
+
+class ThoughtOp(Enum):
+    KEEP = "keep"  # character-mind §5.2: a thought of this part left unsaid, kept
+    SAID = "said"  # §5.1: a kept thought HIMARI has now said: it retires
+
+
+@dataclass(frozen=True)
+class ThoughtChange(DeepFrozen):
+    """One ``thoughts`` or ``said`` decision of a memory pass (character-mind §5), checked by the
+    memory module: KEEP carries the text, what it is about and the answers whose thoughts it rests
+    on (``sequences``); SAID the kept thought (``entry_id``)."""
+
+    op: ThoughtOp
+    text: str | None = None
+    about: ThoughtAbout | None = None
+    entry_id: int | None = None
     sequences: tuple[int, ...] = ()
 
 
@@ -1917,16 +1954,18 @@ class LifeStore(Protocol):
     other than newline and tab — none at all in an arc's title — or a title for an
     entry that is not an arc or a work piece, or a summary for one that is not a piece),
     LIMIT_EXCEEDED (MAX_LIFE_FACTS live facts, all the user's). character-work §4: a work piece's
-    text is at most MAX_WORK_CHARS, its title as an arc's, its summary MAX_WORK_SUMMARY_CHARS (one line)."""
+    text is at most MAX_WORK_CHARS, its title as an arc's, its summary MAX_WORK_SUMMARY_CHARS (one line).
+    character-mind §5.2: a kept thought is only deleted by the user, never edited (INVALID_ARGUMENT)."""
 
     async def list_life(self, principal: PrincipalId, persona_id: int, *,
-                        since: str | None = None) -> tuple[LifeEntry, ...]:
+                        since: str | None = None, now: datetime | None = None) -> tuple[LifeEntry, ...]:
         """The persona's live entries: every fact (the user's first, then newest
         first), then its arcs — the open ones (newest first), then those started or
         closed ``since`` or later (character-world §4) — then the plans, diaries and
         work pieces dated ``since`` or later (None: all), newest date first, with every
-        piece of an open arc whatever its date (character-work §4). Never the bond
-        (character-bond: BondStore.list_bond)."""
+        piece of an open arc whatever its date (character-work §4), then the kept thoughts
+        not expired at ``now`` (None: the clock's), newest first (character-mind §5.2).
+        Never the bond (character-bond: BondStore.list_bond)."""
         ...
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
@@ -1952,6 +1991,16 @@ class LifeStore(Protocol):
         transaction, each on its own: ``applied``, or why not (``unknown``: not
         a live fact of this persona; ``user_owned``; ``conflict``: another
         revision; ``duplicate``: the same text is a live fact; ``full``; ``invalid``)."""
+        ...
+
+    async def apply_thought_changes(self, principal: PrincipalId, persona_id: int,
+                                    changes: Sequence[ThoughtChange], *, conversation: ConversationId, source: str,
+                                    now: datetime) -> tuple[str, ...]:
+        """character-mind §5.1, §5.2: a memory pass's ``thoughts`` and ``said`` on the persona's kept
+        thoughts, in one transaction, each on its own, as ``apply_life_changes`` answers: a KEEP is
+        a new thought of ``conversation`` (origin CONVERSATION, expiring THOUGHT_DAYS from ``now``,
+        an ``intent`` INTENT_DAYS; past MAX_THOUGHTS the oldest retires; ``duplicate``: the same text
+        is kept), a SAID retires a live one of the persona (``unknown`` otherwise); ``invalid``."""
         ...
 
 

@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.data.api import (
     AssistantFinal,
+    AssistantToolCalls,
+    LifeKind,
     BondStore,
     ConversationEvent,
     DataError,
@@ -56,6 +58,7 @@ from himari.memory.passes import (
     plan_episode,
     plan_items,
     plan_self,
+    plan_thoughts,
     request_data,
     reservation,
     shown_bond,
@@ -230,7 +233,8 @@ class MemoryPasses:
                     if e.sequence <= last[0]]
             if not page:
                 break
-            kept.extend(e for e in page if isinstance(e.payload, (UserMessage, AssistantFinal)))
+            # character-mind §5.1: a call's thought too (a turn's first Run may think, then call a Tool)
+            kept.extend(e for e in page if isinstance(e.payload, (UserMessage, AssistantFinal, AssistantToolCalls)))
             after = page[-1].sequence
             end = (after, page[-1].created_at)
             found = next_part(kept, cursor, end)
@@ -340,11 +344,12 @@ class MemoryPasses:
         previous = await self._data.last_episode(scope) if live else None
         shown = shown_notes(notes)
         zone = self._settings.time_zone if self._zone_for is None else await self._zone_for(scope, part.origin)
-        persona_id, facts = await self._facts(scope, now, zone) if live else (NO_PERSONA, None)
+        persona_id, facts, thoughts = await self._facts(scope, now, zone) if live else (NO_PERSONA, None, None)
         bond = None if facts is None else await self._bond_entries(scope, persona_id)
         options = RequestOptions(self._settings.model_id, self._settings.reasoning_effort,
                                  provider_key=self._provider.provider_key, max_output_tokens=PASS_MAX_OUTPUT_TOKENS)
-        asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=kind, facts=facts, bond=bond),
+        asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=kind, facts=facts, bond=bond,
+                                         thoughts=thoughts),
                             options, life=facts is not None, bond=bond is not None)
         reserve = reservation(self._provider.prepare_native_request(asked).body)
         if await self._data.pass_usage(scope.principal_id, self._day_start(now)) + reserve > self._settings.daily_tokens:
@@ -385,6 +390,8 @@ class MemoryPasses:
         if result.status is PassStatus.APPLIED:
             if facts is not None:
                 await self._apply_self(scope, pass_id, answer, part, persona_id, facts)
+            if thoughts is not None:
+                await self._apply_thoughts(scope, pass_id, answer, part, persona_id, thoughts)
             if bond is not None:
                 await self._apply_bond(scope, pass_id, answer, part, persona_id, bond, episode is not None)
             if self.on_applied is not None:
@@ -396,15 +403,35 @@ class MemoryPasses:
         log.info("memory pass %s of %s discarded: %s", pass_id, scope.conversation_id, result.reason)
         return PassOutcome.DISCARDED
 
-    async def _facts(self, scope: TrustedScope, now: datetime, zone: str) -> tuple[int, list[LifeEntry] | None]:
+    async def _facts(self, scope: TrustedScope, now: datetime,
+                     zone: str) -> tuple[int, list[LifeEntry] | None, list[LifeEntry] | None]:
         """character-life §4: the persona chosen now (V3-P108 Q7: turns do not record
-        theirs) and its facts a pass is shown; None without HIMARI's life."""
+        theirs) and its facts a pass is shown, with its live kept thoughts (character-mind §5);
+        None without HIMARI's life."""
         if self._life is None:
-            return NO_PERSONA, None
+            return NO_PERSONA, None, None
         chosen = None if self._personas is None else await self._personas.active_persona(scope.principal_id)
         persona_id = NO_PERSONA if chosen is None else chosen.persona_id
         today = now.astimezone(ZoneInfo(zone)).date().isoformat()  # facts, and only the few plans ahead
-        return persona_id, shown_facts(await self._life.list_life(scope.principal_id, persona_id, since=today))
+        entries = await self._life.list_life(scope.principal_id, persona_id, since=today, now=now)
+        return persona_id, shown_facts(entries), [e for e in entries if e.kind is LifeKind.THOUGHT]
+
+    async def _apply_thoughts(self, scope: TrustedScope, pass_id: str, answer: dict[str, Any], part: Part,
+                              persona_id: int, kept: Sequence[LifeEntry]) -> None:
+        """character-mind §5.1, §5.2: after the pass applied, as ``self``: the thoughts left unsaid
+        kept, the ones now said retired — on their own, their trouble logged, never the pass's."""
+        assert self._life is not None
+        changes = plan_thoughts(answer, part, kept)
+        if not changes:
+            return
+        try:
+            outcomes = await self._life.apply_thought_changes(scope.principal_id, persona_id, changes,
+                                                              conversation=scope.conversation_id, source=pass_id,
+                                                              now=self._clock())
+        except Exception:  # noqa: BLE001 — the notes and the episode are applied already
+            log.exception("could not keep HIMARI's thoughts in memory pass %s", pass_id)
+            return
+        log.info("memory pass %s kept HIMARI's thoughts of persona %d: %s", pass_id, persona_id, ", ".join(outcomes))
 
     async def _apply_self(self, scope: TrustedScope, pass_id: str, answer: dict[str, Any], part: Part,
                           persona_id: int, facts: Sequence[LifeEntry]) -> None:

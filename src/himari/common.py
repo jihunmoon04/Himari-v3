@@ -443,10 +443,10 @@ def scan_marks(rest: str, state: MarkScan, *, complete: bool) -> tuple[str, Mood
     fence, line_start = state.fence, state.line_start
     i, n = 0, len(rest)
     if state.raw == 0:
-        found = thought_end(rest, complete=complete)
-        if found is None:
+        thought = thought_end(rest, complete=complete)
+        if thought is None:
             return "", (), (), state
-        i = found[2]
+        i = thought[2]
 
     def emit(piece: str) -> None:
         nonlocal plain

@@ -1039,6 +1039,9 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
                  "ending": entry.ending, "so_far": entry.so_far}  # character-work §3: where the project stands
     elif entry.kind is LifeKind.WORK:  # character-work §4: a piece, its project and its plan
         view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id}
+    elif entry.kind is LifeKind.THOUGHT:  # character-mind §5.2: what it is about and when it stops being told
+        view |= {"about": None if entry.about is None else entry.about.value,
+                 "expires_at": None if entry.expires_at is None else _time(entry.expires_at)}
     elif entry.arc_id is not None:  # a diary: the arc its day moved; a plan: its project (character-work §4)
         view["arc_id"] = entry.arc_id
     return view
@@ -1106,7 +1109,8 @@ LIFE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
                                                 f"summary {MAX_WORK_SUMMARY_CHARS:,}."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters; only "
                                                           "an arc or a work piece has a title, and only a piece a "
-                                                          "summary, each on one line."),
+                                                          "summary, each on one line; a kept thought is only "
+                                                          "deleted."),
 }
 
 

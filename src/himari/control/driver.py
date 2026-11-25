@@ -575,7 +575,7 @@ class Driver:
         weather = None
         if self._life is not None and self._companion:  # character-life §5: the chosen persona's (L2: none's is 0)
             since = ((local or now).date() - LIFE_READ_DAYS).isoformat()
-            life = await self._life.list_life(scope.principal_id, persona_id, since=since)
+            life = await self._life.list_life(scope.principal_id, persona_id, since=since, now=now)
             if self._bond is not None:  # character-bond §5: with the life; its stage moves as it is read (§4)
                 bond = await self._bond.read_bond(scope.principal_id, persona_id, now=now, zone=self._zone_name)
             if self._moods is not None:  # character-state §2: while it is told (S1: MOOD_HOURS)

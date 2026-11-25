@@ -5,6 +5,8 @@
 // character-work §8: the Work group shows each project (open first) with its "so far" and its pieces (date and time,
 // title, summary, the full text when opened), which are edited and deleted like any entry; the status line says
 // whether the worker runs and the next work plan, and a work plan names its project.
+// character-mind §8: the Thoughts group lists the kept thoughts (what HIMARI thought and left unsaid: the text, what it
+// is about, when it was kept and when it stops being told); they are only deleted, never edited.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { ApiError } from "@/api/client";
@@ -28,8 +30,13 @@ const ORIGINS: Record<LifeOrigin, string> = {
   user: "yours",
 };
 const NAMES: Record<LifeKind, string> = {
-  fact: "fact", plan: "plan", diary: "diary entry", arc: "arc", work: "work piece",
+  fact: "fact", plan: "plan", diary: "diary entry", arc: "arc", work: "work piece", thought: "kept thought",
 };
+const ABOUT: Record<string, string> = {
+  user: "about you", self: "about itself", work: "about its work", intent: "something it wants to say or do",
+};
+const clock = (at: string) =>
+  new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const ARC_CHARS = 200; // as the server's, when it does not say
 const ARC_TITLE_CHARS = 60;
 const WORK_CHARS = 3000;
@@ -103,6 +110,7 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
   entry: LifeEntry; locked: boolean; onEdit: () => void; onDelete: () => void; project?: string | null;
 }) {
   const piece = entry.kind === "work";
+  const thought = entry.kind === "thought";
   return (
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
@@ -119,6 +127,8 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
         {entry.kind === "arc" && entry.so_far && <p className="mt-1 text-muted">So far: {entry.so_far}</p>}
         {entry.kind === "arc" && entry.ending && <p className="mt-1 text-muted">Ending: {entry.ending}</p>}
         <p className="mt-1 text-xs text-faint">
+          {thought ? `${entry.about ? `${ABOUT[entry.about] ?? entry.about} · ` : ""}kept ${clock(entry.created_at)}`
+            + `${entry.expires_at ? ` · until ${clock(entry.expires_at)}` : ""} · ` : ""}
           {entry.kind === "arc"
             ? `${entry.status === "closed" ? `${entry.day} – ${entry.end_day} · closed` : `since ${entry.day} · open`} · `
             : entry.day ? `${when(entry)} · ` : ""}
@@ -126,7 +136,9 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
           {ORIGINS[entry.origin]}
         </p>
       </div>
-      <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>Edit</Button>
+      {!thought && (
+        <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>Edit</Button>
+      )}
       <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger" disabled={locked} onClick={onDelete}>
         Delete
       </Button>
@@ -290,6 +302,8 @@ export function LifeSettings() {
         {facts}
       </Group>
       <Group title="Diary" empty="No diary yet.">{rows("diary")}</Group>
+      <Group title="Thoughts" note="what HIMARI thought and left unsaid, kept a few days from conversations"
+        empty="No kept thoughts.">{rows("thought")}</Group>
     </section>
   );
 }

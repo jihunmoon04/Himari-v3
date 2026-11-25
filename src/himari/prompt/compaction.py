@@ -105,6 +105,7 @@ from himari.prompt.api import (
     blocks_text,
     image_plan,
     image_tokens,
+    recent_thoughts,
     tool_images,
     json_data,
     state_block,
@@ -287,7 +288,9 @@ def current_state(inputs: PromptInputs) -> CurrentStateProjection:
                                   memories=inputs.memories, now=inputs.now, presence=inputs.presence,
                                   episodes=inputs.episodes, episode_count=inputs.episode_count,
                                   interface=inputs.interface, life=inputs.life, bond=inputs.bond,
-                                  mood=inputs.mood, himari_now=inputs.himari_now, weather=inputs.weather)
+                                  mood=inputs.mood, himari_now=inputs.himari_now, weather=inputs.weather,
+                                  # character-mind §6: told with the life, from the history as read
+                                  recent_thoughts=() if inputs.life is None else recent_thoughts(inputs.events))
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:

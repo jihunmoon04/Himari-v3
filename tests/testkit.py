@@ -99,6 +99,9 @@ V26_UNDO = ("ALTER TABLE life_writes DROP COLUMN plan_id",
             *(f"ALTER TABLE life_entries DROP COLUMN {c}" for c in ("so_far", "plan_id", "summary")))
 # what v27 added (character-persona-fields v0.1), undone
 V27_UNDO = ("ALTER TABLE personas DROP COLUMN fields",)
+# what v28 added (character-mind v0.1), undone
+V28_UNDO = (*(f"ALTER TABLE life_writes DROP COLUMN {c}" for c in ("thought", "model_reason", "job")),
+            *(f"ALTER TABLE life_entries DROP COLUMN {c}" for c in ("draft", "expires_at", "about")))
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")
