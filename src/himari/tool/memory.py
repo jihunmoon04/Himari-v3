@@ -335,14 +335,21 @@ def _words(query: str) -> list[str]:
     return list(dict.fromkeys(_fold(query).split()))  # a word said twice counts once
 
 
-def search_life(entries: Sequence[LifeEntry], query: str, first: str | None, last: str | None) -> list[LifeEntry]:
+def search_life(entries: Sequence[LifeEntry], query: str, first: str | None, last: str | None,
+                now: datetime | None = None) -> list[LifeEntry]:
     """character-mind §6: the persona's facts, diaries and events with any of the query's words, most words
     first, then the newest; ``first``/``last`` (YYYY-MM-DD) keep the diaries and events of those days and the
-    facts written then."""
+    facts written then. An event whose time is still ahead of ``now`` (in the user's zone) has not happened
+    yet and is never found (review P1-4: as the runtime state tells them)."""
     def day(entry: LifeEntry) -> str:
         return entry.day or entry.updated_at.date().isoformat()
 
-    pool = [e for e in entries if e.kind in _LIFE_KINDS and (first is None or day(e) >= first)
+    def ahead(entry: LifeEntry) -> bool:
+        if entry.kind is not LifeKind.EVENT or now is None:
+            return False
+        return (entry.day or "", entry.time_of_day or "00:00") > (now.date().isoformat(), now.strftime("%H:%M"))
+
+    pool = [e for e in entries if e.kind in _LIFE_KINDS and not ahead(e) and (first is None or day(e) >= first)
             and (last is None or day(e) <= last)]
     words = _words(query)
     scored = [(sum(1 for w in words if w in _fold(e.text)) if words else 1, e) for e in pool]
@@ -382,6 +389,12 @@ class MemorySearch:
         self._zone = time_zone
         self._clock = clock
         self._life = life  # character-mind §6: None: HIMARI's life is not kept here
+
+    def _zone_info(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self._zone)
+        except (ValueError, ZoneInfoNotFoundError):
+            return ZoneInfo("UTC")
 
     def _day(self, args: Mapping[str, JsonValue], key: str) -> tuple[datetime | None, str | None]:
         """A from/to day: its first (from: local midnight, so a day of 23 or 25
@@ -446,7 +459,7 @@ class MemorySearch:
             assert self._life is not None and ctx.persona_id is not None
             first, last = (_given_day(args, "from"), _given_day(args, "to"))
             found_life = search_life(await self._life.list_life(principal, ctx.persona_id, now=now), query, first,
-                                     last)
+                                     last, now.astimezone(self._zone_info()))
             shown_life = found_life[:LIFE_LIMIT]
             lines += [life_line(e) for e in shown_life]
             life_ids = [e.entry_id for e in shown_life]

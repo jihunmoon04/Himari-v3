@@ -112,25 +112,31 @@ def _finished(entries: Sequence[LifeEntry]) -> set[int | None]:
     return {e.plan_id for e in entries if e.kind is LifeKind.WORK and not e.draft}
 
 
-def due_start(entries: Sequence[LifeEntry], now: datetime, zone: tzinfo) -> LifeEntry | None:
-    """character-mind §4.4: the work plan that started less than WORK_START_WINDOW before ``now`` and has
-    no piece (not even a draft) among ``entries`` — the earliest such."""
+def starts_due(entries: Sequence[LifeEntry], now: datetime, zone: tzinfo) -> list[LifeEntry]:
+    """character-mind §4.4: the work plans that started less than WORK_START_WINDOW before ``now`` and
+    have no piece (not even a draft) among ``entries``, earliest first."""
     begun = {e.plan_id for e in entries if e.kind is LifeKind.WORK}
-    for start, plan in work_plans(entries, zone):
-        if plan.entry_id not in begun and start <= now < start + WORK_START_WINDOW:
-            return plan
-    return None
+    return [plan for start, plan in work_plans(entries, zone)
+            if plan.entry_id not in begun and start <= now < start + WORK_START_WINDOW]
+
+
+def ends_due(entries: Sequence[LifeEntry], now: datetime, zone: tzinfo) -> list[LifeEntry]:
+    """§4: the work plans whose work time ended (start + WORK_MINUTES) less than WORK_WINDOW before
+    ``now`` and that have no finished piece among ``entries`` yet (a draft waits for it), earliest first."""
+    made = _finished(entries)
+    return [plan for start, plan in work_plans(entries, zone)
+            if plan.entry_id not in made
+            and start + timedelta(minutes=WORK_MINUTES) <= now < start + timedelta(minutes=WORK_MINUTES) + WORK_WINDOW]
+
+
+def due_start(entries: Sequence[LifeEntry], now: datetime, zone: tzinfo) -> LifeEntry | None:
+    """The earliest of ``starts_due``, or None."""
+    return next(iter(starts_due(entries, now, zone)), None)
 
 
 def due_plan(entries: Sequence[LifeEntry], now: datetime, zone: tzinfo) -> LifeEntry | None:
-    """§4: the work plan whose work time ended (start + WORK_MINUTES) less than WORK_WINDOW
-    before ``now`` and that has no finished piece among ``entries`` yet (a draft waits for it)."""
-    made = _finished(entries)
-    for start, plan in work_plans(entries, zone):
-        end = start + timedelta(minutes=WORK_MINUTES)
-        if plan.entry_id not in made and end <= now < end + WORK_WINDOW:
-            return plan
-    return None
+    """The earliest of ``ends_due``, or None."""
+    return next(iter(ends_due(entries, now, zone)), None)
 
 
 def next_plan(entries: Sequence[LifeEntry], now: datetime, zone: tzinfo) -> LifeEntry | None:

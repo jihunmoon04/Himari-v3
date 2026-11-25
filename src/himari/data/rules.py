@@ -1076,6 +1076,14 @@ def work_project(plan: LifeEntry | None, persona_id: int, arcs: Sequence[LifeEnt
     return project
 
 
+def check_draft_read(draft: LifeEntry | None, read: tuple[int, int] | None) -> None:
+    """character-mind §4.4 (review P0-3): the plan's live ``draft`` is the one the end step read — the same
+    entry at the same revision, or none when it read none; else VERSION_CONFLICT (a stale piece)."""
+    now = None if draft is None else (draft.entry_id, draft.revision)
+    if now != (None if read is None else (read[0], read[1])):
+        raise DataError(DataErrorCode.VERSION_CONFLICT, "the draft changed since the work's end read it")
+
+
 def check_work_draft(draft: object) -> WorkDraft:
     """character-mind §4.4: a start step's draft as stored — its title as an arc's, its concept as a
     piece's summary (one line) and its text as a WORK entry's."""

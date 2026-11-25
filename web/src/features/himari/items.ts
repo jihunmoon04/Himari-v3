@@ -61,6 +61,8 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
           items.push(work);
         }
         const block: Extract<Item, { kind: "work" }> = work;
+        // character-mind §3.3 (review P1-6): a first Run that thought, then called a Tool, keeps its foldout
+        if (event.thought) block.thoughts = [...(block.thoughts ?? []), event.thought];
         if (shown(event).trim()) block.notes.push(shown(event));
         for (const call of event.calls ?? []) {
           const step: ToolStep = {
@@ -92,6 +94,11 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
       case "wake":
         closeWork();
         items.push({ kind: "notice", key, text: event.text ?? "" });
+        break;
+      case "wake_thought": // character-mind §3.3: a free wake it let pass, with what it thought
+        closeWork();
+        items.push({ kind: "notice", key, text: `Let pass: ${event.text ?? ""}`,
+          ...(event.thought ? { thought: event.thought } : {}) });
         break;
       default:
         break; // a kind this page does not know yet

@@ -81,6 +81,7 @@ from himari.common import (
     TextBlock,
     TrustedScope,
     split_marks,
+    thought_of,
 )
 from himari.control.api import (
     ContextStatus,
@@ -801,7 +802,12 @@ class Driver:
             live = held is not None and held.wake_id == wake.wake_id
             verdict = free_wake_verdict(normalized, wake.status, live=live)
             if verdict is not None:
-                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, verdict)
+                # character-mind §3.3 (review P1-5): a wake that thought, then passed, keeps its thought for
+                # the owner's Web (never spoken, never a device's)
+                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, verdict,
+                                                      thought=thought_of(normalized.blocks
+                                                                         if isinstance(normalized, NormalizedFinal)
+                                                                         else normalized.commentary))
                 return None
             if wake.status is WakeStatus.OPENED and held is not None and live and not await held.show():
                 await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, WakeStatus.DROPPED)

@@ -421,7 +421,11 @@ class MemoryPasses:
         """character-mind §5.1, §5.2: after the pass applied, as ``self``: the thoughts left unsaid
         kept, the ones now said retired — on their own, their trouble logged, never the pass's."""
         assert self._life is not None
-        changes = plan_thoughts(answer, part, kept)
+        try:  # review P1-9: a decision the model got wrong is dropped, never the pass's other ones
+            changes = plan_thoughts(answer, part, kept)
+        except Exception:  # noqa: BLE001
+            log.exception("could not read the decisions of memory pass %s", pass_id)
+            return
         if not changes:
             return
         try:
@@ -438,7 +442,11 @@ class MemoryPasses:
         """After the pass applied (its checks held): HIMARI's own facts, on their own —
         their trouble is logged, never the pass's."""
         assert self._life is not None
-        changes = plan_self(answer, part, facts)
+        try:  # review P1-9: a decision the model got wrong is dropped, never the pass's other ones
+            changes = plan_self(answer, part, facts)
+        except Exception:  # noqa: BLE001
+            log.exception("could not read the decisions of memory pass %s", pass_id)
+            return
         if not changes:
             return
         try:
@@ -461,7 +469,11 @@ class MemoryPasses:
         """After the pass applied, as ``self``: what the two settled, on its own — its trouble is
         logged, never the pass's. The stage moves when the bond is next read (each turn)."""
         assert self._bond is not None
-        changes = plan_bond(answer, part, entries, episode=episode)
+        try:  # review P1-9: a decision the model got wrong is dropped, never the pass's other ones
+            changes = plan_bond(answer, part, entries, episode=episode)
+        except Exception:  # noqa: BLE001
+            log.exception("could not read the decisions of memory pass %s", pass_id)
+            return
         if not changes:
             return
         try:

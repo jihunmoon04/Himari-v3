@@ -255,3 +255,11 @@ def test_settling_reads_the_diary_and_the_facts_and_keeps_at_most_three() -> Non
         with pytest.raises(AnswerError):
             parse_facts(bad)
     assert MAX_SETTLED == 3 and "never anything about the user" in SETTLE_INSTRUCTIONS
+
+
+def test_a_non_ascii_digit_is_never_a_time_or_an_id() -> None:
+    """Review P1-9: "²" passes str.isdigit() but is no number: it is only left out, never a ValueError."""
+    told = parse_answer(json.dumps({"diary": "하루.", "plans": [
+        {"date": "2026-11-26", "time": "²0:00", "text": "a", "arc": "²"}],
+        "arc": {"move": "advance", "id": "²"}}, ensure_ascii=False), DAY)
+    assert told.times == () and told.plan_arcs == () and told.arc is None

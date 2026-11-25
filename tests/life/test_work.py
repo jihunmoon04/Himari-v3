@@ -298,3 +298,78 @@ def test_the_work_shares_the_daily_budget_and_waits_for_its_time() -> None:
             assert await writer.work(ME) is WriteOutcome.NOTHING
 
     asyncio.run(scenario())
+
+
+class EditingAdapter(ScriptedAdapter):
+    """Runs ``meanwhile`` while the first call is out: the user's edit lands before its answer."""
+
+    def __init__(self) -> None:
+        super().__init__(memory_passes=True)
+        self.meanwhile: Any = None
+
+    async def invoke_prepared(self, request: Any, sink: Any = None, capture: Any = None) -> Any:
+        if self.meanwhile is not None:
+            hook, self.meanwhile = self.meanwhile, None
+            await hook()
+        return await super().invoke_prepared(request, sink, capture)
+
+
+def test_a_draft_edited_while_the_end_waits_is_not_overwritten_and_the_next_round_uses_the_edit() -> None:
+    """Review P0-3: the stale piece is thrown away (an attempt); the next round finishes the user's draft."""
+    async def scenario() -> None:
+        data = InMemoryData(InMemoryStore())
+        provider = EditingAdapter()
+        provider.extend([final(start_answer()), final(piece_answer()), final(piece_answer())])
+        moments = [START]
+        writer = LifeWriter(data, provider, SETTINGS, clock=lambda: moments[0], composer=Composer())
+        await planned(data)
+        assert await writer.work_start(ME) is WriteOutcome.WRITTEN
+        (draft,) = [e for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.WORK]
+        mine = "사용자가 고친 스케치: 방열판은 두 겹으로. " * 3
+
+        async def edit() -> None:
+            await data.edit_life(ME, draft.entry_id, mine, expected_revision=draft.revision)
+
+        provider.meanwhile = edit
+        moments[0] = NOW
+        assert await writer.work(ME) is WriteOutcome.FAILED
+        (record, *_) = await data.list_life_writes(ME)
+        assert record.error == "stale: the draft changed"
+        (kept,) = [e for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.WORK]
+        assert (kept.text, kept.draft, kept.origin) == (mine.strip(), True, LifeOrigin.USER)
+        assert await writer.work(ME) is WriteOutcome.WRITTEN
+        assert told(provider)["draft"]["text"] == mine.strip()
+        (piece,) = [e for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.WORK]
+        assert (piece.entry_id, piece.draft) == (draft.entry_id, False)
+
+    asyncio.run(scenario())
+
+
+def test_a_plan_given_up_never_blocks_a_later_one_due_at_the_same_time() -> None:
+    """Review P1-7: of two plans due at once, the earliest with tries left is worked (start and end)."""
+    async def scenario() -> None:
+        data, provider, writer, moments = setup(final("no"), final("no"), final("no"), final(start_answer()),
+                                                final("no"), final("no"), final("no"), final(piece_answer()),
+                                                now=START)
+        arc, first = await planned(data)
+        write_id = await data.begin_life_write(ME, LifeWriteStart(NO_PERSONA, "2026-11-24", "scripted", "m", b"{}",
+                                                                  "application/json", 10))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "application/json", TokenUsage(5, 5)))
+        second = (await data.apply_life_write(write_id, LifePlan(
+            "또 하루.", (("2026-11-25", "같은 시각의 다른 일정."),), times=("20:00",), plan_arcs=(arc.entry_id,)),
+            now=NOW - timedelta(days=1)))[-1]
+        assert [p.entry_id for p in work.starts_due(await data.list_life(ME, NO_PERSONA), START, SEOUL)] == [
+            first.entry_id, second.entry_id]
+        assert [await writer.work_start(ME) for _ in range(3)] == [WriteOutcome.FAILED] * 3
+        assert await writer.work_start(ME) is WriteOutcome.WRITTEN  # the second plan, not GAVE_UP
+        (begun,) = [e for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.WORK]
+        assert begun.plan_id == second.entry_id
+        moments[0] = NOW
+        assert [await writer.work(ME) for _ in range(3)] == [WriteOutcome.FAILED] * 3  # the first plan's end
+        assert await writer.work(ME) is WriteOutcome.WRITTEN
+        finished = [e for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.WORK and not e.draft]
+        assert [e.plan_id for e in finished] == [second.entry_id]
+        assert await writer.work(ME) is WriteOutcome.GAVE_UP and await writer.work_start(ME) is WriteOutcome.NOTHING
+
+    asyncio.run(scenario())

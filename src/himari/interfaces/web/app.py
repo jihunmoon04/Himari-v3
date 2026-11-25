@@ -123,6 +123,7 @@ from himari.common import (
     TextBlock,
     TrustedScope,
     split_marks,
+    drop_thought,
     thought_of,
     thaw,
 )
@@ -186,6 +187,7 @@ from himari.data.api import (
     RecentEpisode,
     parse_note_date,
     Wake,
+    WakeRecord,
     WakeKind,
     WakeReason,
 )
@@ -700,11 +702,13 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
 def event_view(event: ConversationEvent,
                models: dict[RunId, str] | None = None, files: Files | None = None,
                presented: dict[CallRef, list[FileRecord]] | None = None,
-               memory: dict[CallRef, MemoryLine] | None = None) -> dict[str, Any]:
+               memory: dict[CallRef, MemoryLine] | None = None, *, device: bool = False) -> dict[str, Any]:
     """``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
     ``files``: the page's attachments by (id, version); ``presented``: the
     files each call gave the user (V3-P66 §7.3); ``memory``: what each
-    memory call changed (V3-P71 §7.1)."""
+    memory call changed (V3-P71 §7.1). character-mind §3.2: HIMARI's thought is
+    the owner's on the Web only — for a ``device`` the text leaves it out and
+    there is no ``thought``."""
     models = {} if models is None else models
     files = {} if files is None else files
     presented = {} if presented is None else presented
@@ -718,15 +722,17 @@ def event_view(event: ConversationEvent,
         # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
         view["origin"] = origin_view(payload.origin)
     elif isinstance(payload, AssistantFinal):
-        view["text"] = _text(payload.blocks)
+        view["text"] = _text(drop_thought(payload.blocks) if device else payload.blocks)
         view["display"] = display_view(view["text"])
-        view["thought"] = thought_of(payload.blocks)  # character-mind §3.2: shown folded to the owner
+        if not device:
+            view["thought"] = thought_of(payload.blocks)  # character-mind §3.2: shown folded to the owner
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id  # the live output it replaces (V3-P73 §7.2)
     elif isinstance(payload, AssistantToolCalls):
-        view["text"] = _text(payload.commentary)
+        view["text"] = _text(drop_thought(payload.commentary) if device else payload.commentary)
         view["display"] = display_view(view["text"])
-        view["thought"] = thought_of(payload.commentary)
+        if not device:
+            view["thought"] = thought_of(payload.commentary)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
@@ -1048,6 +1054,13 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
     elif entry.arc_id is not None:  # a diary: the arc its day moved; a plan: its project (character-work §4)
         view["arc_id"] = entry.arc_id
     return view
+
+
+def wake_thought_view(wake: WakeRecord) -> dict[str, Any]:
+    """character-mind §3.3, §8 (review P1-5): a free wake that thought and then passed — never shown as a
+    wake, so the owner's Web gets its own dim line with the thought folded."""
+    return {"sequence": wake.event_sequence, "kind": "wake_thought", "created_at": _time(wake.created_at),
+            "text": wake_summary(wake.reasons), "thought": wake.thought}
 
 
 def mind_view(mind: MindModel) -> dict[str, Any]:
@@ -1613,8 +1626,14 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         presented = {call: list(records) for call, records in given.items()}
         results = [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
         memory = await application.memory_lines(scope, results) if results else {}
-        return {"items": [event_view(e, models, files, presented, memory) for e in events],
-                "last_sequence": events[-1].sequence if events else after}
+        # character-mind §3.2: a device never gets a thought
+        items = [event_view(e, models, files, presented, memory, device=by.device is not None) for e in events]
+        if by.device is None:  # §3.3 (review P1-5): a free wake that thought and passed: its thought, the owner's
+            end = events[-1].sequence if events and len(events) == limit else None
+            items += [wake_thought_view(w) for w in await application.data.wake_thoughts(scope, after=after)
+                      if end is None or w.event_sequence <= end]
+            items.sort(key=lambda item: int(item["sequence"]))
+        return {"items": items, "last_sequence": items[-1]["sequence"] if items else after}
 
     @app.get("/api/conversations/{conversation_id}/live")
     async def read_live(conversation_id: str, request: Request,

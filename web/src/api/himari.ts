@@ -83,7 +83,9 @@ export interface MemoryView {
 
 export interface EventView {
   sequence: number;
-  kind: string; // user_message | assistant_final | assistant_tool_calls | tool_result | wake | …
+  // user_message | assistant_final | assistant_tool_calls | tool_result | wake | wake_thought (character-mind §3.3:
+  // a free wake HIMARI thought about and let pass; its thought is the owner's) | …
+  kind: string;
   created_at: string;
   text?: string;
   display?: Display | null;

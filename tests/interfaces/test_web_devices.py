@@ -24,7 +24,7 @@ from testkit import final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import MOODS, CallId, ConversationId, TextBlock, ToolCall, ToolId, TrustedScope  # noqa: E402
-from himari.data.api import MessageOrigin, OriginKind, UserMessage  # noqa: E402
+from himari.data.api import MessageOrigin, OriginKind, UserMessage, WakeKind, WakeReason  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import event_stream  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
@@ -1120,3 +1120,46 @@ def test_a_devices_character_starts_with_himaris_mood(server: Server) -> None:
     assert all(name != "mood" for name, _ in frames_of(server.client.get("/api/events").text))
     life = server.client.get("/api/life").json()
     assert life["mood"]["mood"] == "excited" and life["mood"]["source"] == "reply" and life["mood"]["reason"] is None
+
+
+def test_a_device_never_gets_himaris_thought_and_the_owners_web_does(server: Server) -> None:
+    """character-mind §3.2 (review P0-1): the raw text a device reads has the leading thought left out, and
+    there is no thought field; the owner's Web view keeps both (shown folded)."""
+    token = server.paired()
+    me = server.as_device(token)
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    server.provider.extend([final("[[think]]또 밤샜네. 잔소리는 참자.[[/think]][[mood:happy]]안녕!")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "hi"}, headers=me)
+    server.wait(cid)
+    (_, answer) = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
+    assert "thought" not in answer and "잔소리" not in answer["text"] and "think" not in answer["text"]
+    assert answer["display"]["text"] == "안녕!"
+    (_, owned) = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    assert owned["thought"] == "또 밤샜네. 잔소리는 참자." and owned["text"].startswith("[[think]]")
+
+
+def test_a_free_wake_that_thought_and_passed_leaves_its_thought_on_the_owners_web_only(server: Server) -> None:
+    """character-mind §3.3, §8 (review P1-5): never a wake line, never a device's; the owner sees a dim line
+    with the thought folded."""
+    token = server.paired()
+    me = server.as_device(token)
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    server.provider.extend([final("안녕!"), final("[[think]]회의 중인 것 같다. 지금은 두자.[[/think]][[pass]]")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "hi"}, headers=me)
+    server.wait(cid)
+    assert server.application is not None
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+
+    async def woke() -> None:
+        assert server.application is not None
+        await server.application.runner.submit_wake(scope, (WakeReason(WakeKind.FREE, step=1),), "d1", free=True)
+        await server.application.runner.wait(scope)
+
+    server.client.portal.call(woke)  # type: ignore[union-attr]
+    owned = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    assert [i["kind"] for i in owned] == ["user_message", "assistant_final", "wake_thought"]
+    assert owned[-1]["thought"] == "회의 중인 것 같다. 지금은 두자." and owned[-1]["text"]
+    later = server.client.get(f"/api/conversations/{cid}/events", params={"after": owned[-1]["sequence"]}).json()
+    assert later["items"] == []
+    seen = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
+    assert [i["kind"] for i in seen] == ["user_message", "assistant_final"]

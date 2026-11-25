@@ -27,6 +27,7 @@ and ``said``: the kept ones HIMARI has now said (``plan_thoughts``).
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -227,6 +228,21 @@ ANSWER_SCHEMA: dict[str, Any] = {
         "said": {"type": ["array", "null"]},
     },
 }
+
+
+_REF = re.compile(r"[1-9][0-9]{0,17}")  # an id the model names: ASCII digits only, bounded
+
+
+def entry_ref(value: object, letter: str) -> int | None:
+    """An id the model names — ``<letter><n>``, ``<n>`` or an int — or None for anything else (review P1-9:
+    never a ValueError: "t²" is no id, and one malformed value never fails the pass)."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if 0 < value < 10 ** 18 else None
+    if not isinstance(value, str):
+        return None
+    digits = value.strip()
+    digits = digits[1:] if digits.startswith(letter) else digits
+    return int(digits) if _REF.fullmatch(digits) else None
 
 
 def fold(text: str) -> str:
@@ -486,10 +502,7 @@ def _within(instant: datetime, now: datetime, bounds: tuple[timedelta, timedelta
 
 
 def _note_id(value: object) -> int | None:
-    if not isinstance(value, str):
-        return None
-    digits = value[1:] if value.startswith("m") else value
-    return int(digits) if digits.isdigit() else None
+    return entry_ref(value, "m")
 
 
 def _sensitive(note: Mapping[str, Any], text: str) -> bool:
@@ -641,10 +654,7 @@ def plan_episode(answer: Mapping[str, Any], part: Part, previous: Episode | None
 
 
 def _fact_id(value: object) -> int | None:
-    if not isinstance(value, str):
-        return None
-    digits = value[1:] if value.startswith("f") else value
-    return int(digits) if digits.isdigit() else None
+    return entry_ref(value, "f")
 
 
 def plan_self(answer: Mapping[str, Any], part: Part, facts: Sequence[LifeEntry]) -> list[LifeChange]:
@@ -652,7 +662,8 @@ def plan_self(answer: Mapping[str, Any], part: Part, facts: Sequence[LifeEntry])
     as Data's changes. Each rests on HIMARI's replies of this part only; an
     update or retire names a fact the pass was shown that is not the user's.
     Anything else is left out, alone."""
-    himari = {m.sequence for m in part.messages if m.role == "himari"}
+    # character-mind §5.1 (review P1-8): only what HIMARI said is ground — a reply that was only a thought is not
+    himari = {m.sequence for m in part.messages if m.role == "himari" and m.text.strip()}
     shown = {f.entry_id: f for f in facts}
     raws = answer.get("self")
     changes: list[LifeChange] = []
@@ -711,10 +722,7 @@ def plan_thoughts(answer: Mapping[str, Any], part: Part, kept: Sequence[LifeEntr
 
 
 def _thought_id(value: object) -> int | None:
-    if not isinstance(value, str):
-        return None
-    digits = value[1:] if value.startswith("t") else value
-    return int(digits) if digits.isdigit() else None
+    return entry_ref(value, "t")
 
 
 def _seqs(value: object, allowed: set[int]) -> list[int] | None:
@@ -778,10 +786,7 @@ def plan_bond(answer: Mapping[str, Any], part: Part, entries: Sequence[LifeEntry
 
 
 def _bond_id(value: object) -> int | None:
-    if not isinstance(value, str):
-        return None
-    digits = value[1:] if value.startswith("b") else value
-    return int(digits) if digits.isdigit() else None
+    return entry_ref(value, "b")
 
 
 def answer_text(blocks: Sequence[object]) -> str:

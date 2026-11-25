@@ -339,7 +339,7 @@ def thought_end(text: str, *, complete: bool, limit: int = THINK_CHARS) -> tuple
     and within ``limit``)."""
     n = len(text)
     j = 0
-    while j < n and text[j] in " \t\r\n":
+    while j < n and text[j].isspace():  # any Unicode white space (review P0-2: U+3000 too)
         j += 1
     if j == n:
         return None if not complete else (0, 0, 0)
@@ -358,7 +358,7 @@ def thought_end(text: str, *, complete: bool, limit: int = THINK_CHARS) -> tuple
     else:
         return None
     k = after
-    while k < n and text[k] in " \t\r\n":
+    while k < n and text[k].isspace():
         k += 1
     if k == n and not complete:
         return None  # what follows may still be white space

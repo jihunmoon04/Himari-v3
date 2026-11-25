@@ -62,9 +62,12 @@ def world_start(day: date, zone: tzinfo, quiet: tuple[time, time] | None) -> dat
 
 
 def due_day(now: datetime, zone: tzinfo, quiet: tuple[time, time] | None, review_at: time) -> date | None:
-    """§7: today (``now`` in ``zone``) once its quiet hours have ended and before its review time; else None."""
+    """§7: today (``now`` in ``zone``) once its quiet hours have ended, before its review time and outside the
+    quiet hours (review P2-10: they may begin again before the review, a range over midnight wraps); else None."""
     local = now.astimezone(zone)
     if local < world_start(local.date(), zone, quiet) or local.time() >= review_at:
+        return None
+    if quiet is not None and in_quiet_hours(local.time(), *quiet):
         return None
     return local.date()
 

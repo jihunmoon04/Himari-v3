@@ -74,3 +74,14 @@ def test_without_the_life_or_the_turns_persona_kind_life_is_refused_and_all_leav
         assert said(run(search, persona_id, query="고양이")) == "No saved notes or episodes match."
     (_, _, tool) = memory_tools(data, life=data)
     assert isinstance(tool, MemorySearch) and "life" in str(tool.definition.input_schema)
+
+
+def test_an_event_still_ahead_today_has_not_happened_yet() -> None:
+    """Review P1-4: at 09:00 the 15:00 event is not found (life or all); at 16:00 it is."""
+    store = new_store()
+    data = data_for(store)
+    asyncio.run(lived(data))
+    for at, seen in ((datetime(2026, 11, 25, 0, 0, tzinfo=UTC), False), (datetime(2026, 11, 25, 7, 0, tzinfo=UTC), True)):
+        search = MemorySearch(data, life=data, time_zone="Asia/Seoul", clock=lambda at=at: at)  # type: ignore[misc]
+        for kind in ("life", "all"):
+            assert ("택배로 고양이 인형이 왔다." in said(run(search, 1, query="고양이", kind=kind))) is seen

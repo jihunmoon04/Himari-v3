@@ -1533,6 +1533,9 @@ class WakeRecord(DeepFrozen):
     # V3-P91 §8: the Run whose screen-Tool group a free wake ran unshown; its events are unshown and
     # gone with the wake (``unshown_wakes``, ``read_events``). None: it held none.
     held_run_id: RunId | None = None
+    # character-mind §3.3, §8: the thought of a free wake that passed (or was dropped) unshown — the owner's
+    # to see on the Web, never spoken or sent to a device. None: none.
+    thought: str | None = None
 
 
 class WakeStore(Protocol):
@@ -1567,10 +1570,12 @@ class WakeStore(Protocol):
         False (and nothing changes) when it is not opened (ended meanwhile, the user won)."""
         ...
 
-    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus, *,
+                                  thought: str | None = None) -> None:
         """V3-P90 §7.3 (PR #162 review P1-10): one transaction — the Run ``RECEIVED → PROJECTED`` with
         no event, the free wake ``opened → status`` (PASSED or DROPPED). Each only from where it should
-        be: a Run no longer RECEIVED stays, a wake no longer opened stays."""
+        be: a Run no longer RECEIVED stays, a wake no longer opened stays. character-mind §3.3: the
+        ``thought`` its answer began with is kept with the wake as it ends (the owner's only)."""
         ...
 
     async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
@@ -1589,6 +1594,11 @@ class WakeStore(Protocol):
         """V3-P90 §7.3: the event sequences of this Conversation's free wakes not shown yet (opened), and
         of the events of the Run each holds (V3-P91 §8). Passed and dropped ones never come out of
         ``read_events`` at all, their held Run's events neither."""
+        ...
+
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0) -> tuple[WakeRecord, ...]:
+        """character-mind §3.3 (review P1-5): this Conversation's free wakes that ended unshown (passed or
+        dropped) with a thought, their event after ``after``, by sequence — for the owner's Web only."""
         ...
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
@@ -2163,14 +2173,18 @@ class LifeWriteLog(Protocol):
         INVALID_ARGUMENT when the write is not a SETTLE's; INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
-    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:
+    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime,
+                               draft_read: tuple[int, int] | None = None) -> tuple[LifeEntry, ...]:
         """character-work §4, one transaction: the worker call's piece (a WORK entry with its plan's
         day and time, its project and plan), the project's "so far" rewritten and, with ``done``, the
         project closed on the plan's day with that ending; the write APPLIED. The piece first, then
         the project. character-mind §4.4: the write is a WORK_END's, and when the plan's start step left
-        a draft, the piece fills that entry (no longer a draft, made ``now``). INVALID_ARGUMENT when the
-        call is not a work end's, its plan is no live work plan of an open arc, or the plan has a finished
-        piece already; INVALID_STATE_TRANSITION unless RECEIVED."""
+        a draft, the piece fills that entry (no longer a draft, made ``now``). ``draft_read``: the plan's
+        draft (id, revision) as read when the request was built, None for none — VERSION_CONFLICT when
+        the plan's live draft is not that one at that revision now (the user edited or deleted it, so
+        the piece rests on stale content: nothing is written). INVALID_ARGUMENT when the call is not a
+        work end's, its plan is no live work plan of an open arc, or the plan has a finished piece
+        already; INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
     async def apply_work_start(self, write_id: str, draft: WorkDraft, *, now: datetime) -> LifeEntry:

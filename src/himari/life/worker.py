@@ -454,10 +454,16 @@ class LifeWriter:
         entries = await self._data.list_life(principal, persona_id,
                                              since=(local.date() - timedelta(days=1)).isoformat(), now=now)
         start = job is LifeJob.WORK_START
-        plan = (work.due_start if start else work.due_plan)(entries, now, self._zone)
-        if plan is None:
+        due = (work.starts_due if start else work.ends_due)(entries, now, self._zone)
+        if not due:
             return WriteOutcome.NOTHING
-        if await self._data.work_attempts(principal, plan.entry_id, job=job) >= ATTEMPTS_PER_DAY:
+        # review P1-7: the earliest due plan with tries left; one given up never blocks the next
+        plan = None
+        for candidate in due:
+            if await self._data.work_attempts(principal, candidate.entry_id, job=job) < ATTEMPTS_PER_DAY:
+                plan = candidate
+                break
+        if plan is None:
             return WriteOutcome.GAVE_UP
         project = next(e for e in entries if e.entry_id == plan.arc_id)
         draft = None if start else work.draft_of(entries, plan)
@@ -483,14 +489,17 @@ class LifeWriter:
             persona_id, plan.day, self._provider.provider_key, mind.model_id, request.body, request.content_type,
             reserve, plan_id=plan.entry_id, job=job, model_reason=mind.reason))
         try:
-            return await self._worked(write_id, request, job)
+            # review P0-3: the draft as read; a user's edit meanwhile makes the piece stale
+            return await self._worked(write_id, request, job,
+                                      None if draft is None else (draft.entry_id, draft.revision))
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await self._data.fail_life_write(write_id, type(error).__name__)
             raise
 
-    async def _worked(self, write_id: str, request: NativePreparedRequest, job: LifeJob) -> WriteOutcome:
+    async def _worked(self, write_id: str, request: NativePreparedRequest, job: LifeJob,
+                      draft_read: tuple[int, int] | None = None) -> WriteOutcome:
         who = job.value
         body = await self._thought_and_json(write_id, request, who)
         if body is None:
@@ -500,7 +509,8 @@ class LifeWriter:
             if job is LifeJob.WORK_START:
                 made = (await self._data.apply_work_start(write_id, work.parse_start(body), now=self._clock()),)
             else:
-                made = await self._data.apply_work_write(write_id, work.parse_piece(body), now=self._clock())
+                made = await self._data.apply_work_write(write_id, work.parse_piece(body), now=self._clock(),
+                                                         draft_read=draft_read)
         except AnswerError as error:
             return await self._malformed(write_id, who, error)
         except DataError as error:
@@ -514,6 +524,10 @@ class LifeWriter:
         return WriteOutcome.FAILED
 
     async def _refused(self, write_id: str, who: str, error: DataError) -> WriteOutcome:
+        if error.code is DataErrorCode.VERSION_CONFLICT:  # review P0-3: stale; the next round reads it again
+            await self._data.fail_life_write(write_id, "stale: the draft changed")
+            log.info("%s call %s thrown away: the draft changed meanwhile", who, write_id)
+            return WriteOutcome.FAILED
         if error.code not in (DataErrorCode.INVALID_ARGUMENT, DataErrorCode.TOO_LARGE):
             raise error
         await self._data.fail_life_write(write_id, f"refused: {error.code.value}")

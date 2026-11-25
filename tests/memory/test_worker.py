@@ -519,3 +519,23 @@ def test_with_the_bond_a_live_pass_keeps_what_the_two_settled_for_the_chosen_per
         assert await data.list_bond(ME, 0) == ()  # the chosen persona's only
 
     asyncio.run(scenario())
+
+
+def test_a_malformed_said_id_never_loses_the_passs_other_thought_decisions() -> None:
+    """Review P1-9: "t²" once raised after the cursor moved; now it is ignored and the thought is kept."""
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        answer = {"notes": [BUILDS], "episode": None, "self": [],
+                  "thoughts": [{"text": "밤새운 게 걱정됐다.", "about": "user", "evidence": [2]}],
+                  "said": ["t²", "t١"]}
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock(json.dumps(answer, ensure_ascii=False)),))],
+                                   memory_passes=True)
+        passes = MemoryPasses(data, provider, MemoryPassSettings("m", time_zone="Asia/Seoul"), Probe(),
+                              clock=lambda: datetime.now(UTC) + LATER, life=data, personas=data)
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.", "[[think]]또 밤새웠네.[[/think]]힘내!")
+        assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+        assert [e.text for e in await data.list_life(ME, 0)] == ["밤새운 게 걱정됐다."]
+
+    asyncio.run(scenario())

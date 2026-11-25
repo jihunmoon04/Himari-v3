@@ -266,7 +266,8 @@ def plan_time(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     hour, sep, minute = value.strip().partition(":")
-    if not sep or not hour.isdigit() or not minute.isdigit() or len(hour) > 2 or len(minute) != 2:
+    if (not sep or not (hour.isascii() and hour.isdigit()) or not (minute.isascii() and minute.isdigit())
+            or len(hour) > 2 or len(minute) != 2):  # review P1-9: ASCII digits only ("²" is no hour)
         return None
     if int(hour) > 23 or int(minute) > 59:
         return None
@@ -301,7 +302,7 @@ def plan_arc(value: object, at: str | None, quiet: tuple[time, time] | None = No
         word = value.strip().lower()
         if word == "new":
             return NEW_ARC
-        value = int(word) if word.isdigit() else None
+        value = int(word) if word.isascii() and word.isdigit() and len(word) < 18 else None
     return value if isinstance(value, int) and value >= 1 else None
 
 
@@ -338,7 +339,8 @@ def answer_arc(value: object) -> ArcMove | None:
         return None
     raw = value.get("id")
     arc_id = raw if isinstance(raw, int) and not isinstance(raw, bool) else (
-        int(raw.strip()) if isinstance(raw, str) and raw.strip().isdigit() else None)
+        int(raw.strip()) if isinstance(raw, str) and raw.strip().isascii() and raw.strip().isdigit()
+        and len(raw.strip()) < 18 else None)
     if arc_id is None or arc_id < 1:
         return None
     if op is ArcOp.ADVANCE:

@@ -372,3 +372,20 @@ def test_the_screen_tools_call_does_not_show_a_streaming_free_wake() -> None:
         assert shown == ["data"]  # PR #167 review P2-4: any other tool speaks
 
     asyncio.run(scenario())
+
+
+def test_a_wake_that_thinks_then_passes_keeps_its_thought_with_the_wake_only() -> None:
+    """character-mind §3.3 (review P1-5): no Event; the thought stays with the wake for the owner's Web."""
+    rt, runner, _ = free_runner(final("[[think]]게임 중이다. 방해하지 말자.[[/think]] [[pass]]"))
+
+    async def scenario() -> None:
+        started = await runner.submit_wake(SCOPE, FREE, "d1", free=True)
+        await runner.wait(SCOPE)
+        wake = await rt.data.read_wake(SCOPE.principal_id, started.wake_id)  # type: ignore[attr-defined]
+        assert (wake.status, wake.thought) == (WakeStatus.PASSED, "게임 중이다. 방해하지 말자.")
+        assert await rt.data.read_events(SCOPE) == ()  # type: ignore[attr-defined]
+        (kept,) = await rt.data.wake_thoughts(SCOPE)  # type: ignore[attr-defined]
+        assert kept.wake_id == started.wake_id
+        assert await rt.data.wake_thoughts(SCOPE, after=kept.event_sequence) == ()  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())

@@ -93,3 +93,24 @@ def test_blocks_lose_their_thought() -> None:
     plain = (TextBlock("안녕!"),)
     assert thought_of(plain) is None
     assert drop_thought(plain) is plain
+
+
+@pytest.mark.parametrize("text", [
+    "\u3000[[think]]몰래 걱정했다.[[/think]]\u3000안녕",
+    "\u00a0\u2003\n[[think]]몰래 걱정했다.[[/think]]\u2028안녕",
+    "\ufeff\u3000[[think]]몰래 걱정했다.[[/think]]안녕",
+])
+def test_unicode_white_space_around_a_thought_never_lets_it_show(text: str) -> None:
+    """Review P0-2: white space is any Unicode white space (str.isspace), before the open and after the close;
+    live and whole agree, and the thought reaches neither the text, nor the history, nor search."""
+    if text.startswith("\ufeff"):  # not white space: the thought is not at the start, so it is text
+        assert split_thought(text)[0] is None
+        return
+    assert shown(text) == "안녕"
+    assert split_thought(text)[0] == "몰래 걱정했다."
+    assert drop_thought((TextBlock(text),)) == (TextBlock("안녕"),)
+    rng = random.Random(11)
+    for _ in range(30):
+        cuts = sorted(rng.sample(range(1, len(text)), k=4))
+        assert live(text, cuts) == "안녕"
+    assert thought_end("\u3000\u3000", complete=False) is None  # still may open one

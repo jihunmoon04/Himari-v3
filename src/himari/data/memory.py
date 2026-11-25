@@ -1557,7 +1557,8 @@ class InMemoryData:
         return [e for (owner, _), (e, retired) in self._store.life.items()
                 if owner == principal and retired is None and e.persona_id == persona_id and e.arc_open]
 
-    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:
+    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime,
+                               draft_read: tuple[int, int] | None = None) -> tuple[LifeEntry, ...]:
         piece = rules.check_work_piece(piece)
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
@@ -1573,6 +1574,7 @@ class InMemoryData:
         project = rules.work_project(plan, persona_id, self._open_arcs(principal, persona_id), pieces)
         assert plan is not None
         draft = next((p for p in pieces if p.draft), None)  # character-mind §4.4: the start step's
+        rules.check_draft_read(draft, draft_read)  # review P0-3: never over the user's newer edit
         made = (self._new_life(principal, rules.work_entry(plan, project, piece, write_id, now)) if draft is None
                 else self._put_life(principal, rules.finished(draft, piece, write_id, now)))
         moved = self._put_life(principal, rules.worked_on(project, plan, piece, now))
@@ -1901,7 +1903,8 @@ class InMemoryData:
         self._store.wakes[wake_id] = replace(record, status=WakeStatus.SPEAKING)
         return True
 
-    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus, *,
+                                  thought: str | None = None) -> None:
         if status not in (WakeStatus.PASSED, WakeStatus.DROPPED):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a hidden wake ends passed or dropped")
         conv = self._conv(scope)
@@ -1910,7 +1913,14 @@ class InMemoryData:
         if run.record.status is RunStatus.RECEIVED:  # one step, as the transaction: nothing above wrote
             run.record = replace(run.record, status=RunStatus.PROJECTED)
         if record.status is WakeStatus.OPENED:
-            self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC))
+            self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC), thought=thought)
+
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0) -> tuple[WakeRecord, ...]:
+        self._conv(scope)
+        return tuple(sorted((w for w in self._store.wakes.values()
+                             if w.conversation_id == scope.conversation_id and w.event_sequence > after
+                             and w.thought is not None and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)),
+                            key=lambda w: w.event_sequence))
 
     async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
         self._run(self._conv(scope), run_id)

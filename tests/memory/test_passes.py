@@ -460,9 +460,44 @@ def test_thoughts_kept_rest_on_the_parts_thoughts_and_said_names_a_kept_one() ->
     ], "said": ["t8", "t8", "t9", 7, "odd"]}, ensure_ascii=False))
     assert plan_thoughts(raw, THOUGHTFUL, shown) == [
         ThoughtChange(ThoughtOp.KEEP, "잔소리하고 싶었지만 참았다.", ThoughtAbout.SELF, sequences=(2,)),
-        ThoughtChange(ThoughtOp.SAID, entry_id=8)]
+        ThoughtChange(ThoughtOp.SAID, entry_id=8), ThoughtChange(ThoughtOp.SAID, entry_id=7)]  # an int names one too
     assert plan_thoughts(parse_answer(json.dumps({"notes": [], "thoughts": None, "said": None})), THOUGHTFUL,
                          shown) == []
     many = [{"text": f"생각 {i}", "about": "intent", "evidence": [2, 4]} for i in range(PASS_MAX_THOUGHTS + 2)]
     assert len(plan_thoughts(parse_answer(json.dumps({"notes": [], "thoughts": many})), THOUGHTFUL,
                              [])) == PASS_MAX_THOUGHTS
+
+
+def test_a_reply_that_was_only_a_thought_is_never_ground_for_self() -> None:
+    """Review P1-8: seq 4 (a tool call's preamble that is only a thought) and an answer of a thought and marks
+    only say nothing: a self fact resting on them is left out; its thought may still be kept."""
+    part = next_part([said(1, "뭐 해?"), thinking(2, "고양이가 무섭다고 해 둘까.", "[[mood:happy]]"),
+                      said(3, "응"), thinking(4, "사실 고양이가 무섭다.", "", calls=True), answered(5, "산책 갔어!")], 0)
+    assert part is not None
+    raw = parse_answer(json.dumps({"notes": [], "self": [
+        {"op": "add", "text": "고양이를 무서워한다.", "himari_evidence": [2]},
+        {"op": "add", "text": "고양이를 무서워한다.", "himari_evidence": [4]},
+        {"op": "add", "text": "산책을 다녀왔다.", "himari_evidence": [4, 5]},
+        {"op": "add", "text": "산책을 좋아한다.", "himari_evidence": [5]},
+    ], "thoughts": [{"text": "고양이가 무섭다는 말은 하지 않았다.", "about": "self", "evidence": [4]}]},
+        ensure_ascii=False))
+    assert [c.text for c in plan_self(raw, part, [])] == ["산책을 좋아한다."]
+    assert [c.text for c in plan_thoughts(raw, part, [])] == ["고양이가 무섭다는 말은 하지 않았다."]
+
+
+def test_an_id_the_model_names_is_read_only_as_ascii_digits_and_a_bad_one_is_ignored() -> None:
+    """Review P1-9: "t²" or "t١" is no id (never a ValueError); ints are taken; the other decisions stay."""
+    assert THOUGHTFUL is not None
+    shown = [kept(7, "요즘 지쳐 보인다."), kept(8, "다음엔 영화 얘기.", ThoughtAbout.INTENT)]
+    raw = parse_answer(json.dumps({"notes": [], "said": ["t²", "t١", "t" + "9" * 40, 8, True, " t7 "],
+                                   "thoughts": [{"text": "남길 것.", "about": "user", "evidence": [2]}],
+                                   "self": [{"op": "update", "id": "f²", "text": "x", "himari_evidence": [2]}]},
+                                  ensure_ascii=False))
+    assert plan_thoughts(raw, THOUGHTFUL, shown) == [
+        ThoughtChange(ThoughtOp.KEEP, "남길 것.", ThoughtAbout.USER, sequences=(2,)),
+        ThoughtChange(ThoughtOp.SAID, entry_id=8), ThoughtChange(ThoughtOp.SAID, entry_id=7)]
+    assert plan_self(raw, THOUGHTFUL, [fact(2, "x")]) == []
+    assert plan_bond(parse_answer(json.dumps({"notes": [], "bond": [
+        {"op": "retire", "id": "b²", "evidence": {"user": [1]}}]})), THOUGHTFUL, [], episode=False) == []
+    assert plan_items(parse_answer(json.dumps({"notes": [{"op": "forget", "id": "m²", "evidence": [1]}]})),
+                      THOUGHTFUL, [], kind=PassKind.LIVE, now=NOW, zone=SEOUL)[0].reason == "unknown_note"

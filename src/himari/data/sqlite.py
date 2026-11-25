@@ -816,6 +816,7 @@ ALTER TABLE life_entries ADD COLUMN draft INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE life_writes ADD COLUMN job TEXT NOT NULL DEFAULT 'review';
 ALTER TABLE life_writes ADD COLUMN model_reason TEXT;
 ALTER TABLE life_writes ADD COLUMN thought TEXT;
+ALTER TABLE wakes ADD COLUMN thought TEXT;
 UPDATE life_writes SET job='work_end' WHERE plan_id IS NOT NULL;
 """
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
@@ -1408,7 +1409,7 @@ def _wake(row: sqlite3.Row) -> WakeRecord:
                       int(row["event_sequence"]), codec.wake_reasons_from(json.loads(row["reasons"])),
                       row["device_id"], WakeStatus(row["status"]), datetime.fromisoformat(row["created_at"]),
                       None if row["ended_at"] is None else datetime.fromisoformat(row["ended_at"]),
-                      None if row["held_run_id"] is None else RunId(row["held_run_id"]))
+                      None if row["held_run_id"] is None else RunId(row["held_run_id"]), row["thought"])
 
 
 def _timestamp(moment: datetime) -> str:
@@ -2957,7 +2958,8 @@ class SqliteData:
             f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND kind='arc'"
             " AND retired_at IS NULL AND end_day IS NULL", principal, persona_id)]
 
-    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:
+    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime,
+                               draft_read: tuple[int, int] | None = None) -> tuple[LifeEntry, ...]:
         piece = rules.check_work_piece(piece)
         with self._tx() as tx:
             row = self._life_write_row(tx, write_id)
@@ -2977,6 +2979,7 @@ class SqliteData:
             project = rules.work_project(plan, persona_id, arcs, pieces)
             assert plan is not None
             draft = next((p for p in pieces if p.draft), None)  # character-mind §4.4: the start step's
+            rules.check_draft_read(draft, draft_read)  # review P0-3: never over the user's newer edit
             made = (self._new_life(tx, principal, rules.work_entry(plan, project, piece, write_id, now))
                     if draft is None else self._rewrite_life(tx, principal, rules.finished(draft, piece, write_id, now)))
             moved = self._rewrite_life(tx, principal, rules.worked_on(project, plan, piece, now))
@@ -3539,7 +3542,8 @@ class SqliteData:
             return tx.execute("UPDATE wakes SET status='speaking' WHERE owner=? AND wake_id=? AND status='opened'",
                               principal, wake_id).rowcount == 1
 
-    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus, *,
+                                  thought: str | None = None) -> None:
         if status not in (WakeStatus.PASSED, WakeStatus.DROPPED):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a hidden wake ends passed or dropped")
         with self._tx() as tx:
@@ -3547,8 +3551,9 @@ class SqliteData:
             run = self._run_row(tx, scope, run_id)
             if run["status"] == RunStatus.RECEIVED.value:
                 self._set_run(tx, run_id, RunStatus.PROJECTED)  # no event: projected_event_id stays NULL
-            tx.execute("UPDATE wakes SET status=?, ended_at=? WHERE owner=? AND wake_id=? AND status='opened'",
-                       status.value, _timestamp(datetime.now(UTC)), scope.principal_id, wake_id)
+            tx.execute("UPDATE wakes SET status=?, ended_at=?, thought=? WHERE owner=? AND wake_id=?"
+                       " AND status='opened'", status.value, _timestamp(datetime.now(UTC)), thought,
+                       scope.principal_id, wake_id)
 
     async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
         with self._tx() as tx:
@@ -3607,6 +3612,13 @@ class SqliteData:
             events = tx.all(f"SELECT sequence FROM events WHERE conversation_id=? AND origin_run_id IN"
                             f" ({', '.join('?' * len(held))})", scope.conversation_id, *held) if held else []
             return frozenset({int(r["event_sequence"]) for r in opened} | {int(r["sequence"]) for r in events})
+
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0) -> tuple[WakeRecord, ...]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            return tuple(_wake(r) for r in tx.all(
+                "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence>? AND thought IS NOT NULL"
+                " AND status IN ('passed', 'dropped') ORDER BY event_sequence", scope.conversation_id, after))
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:

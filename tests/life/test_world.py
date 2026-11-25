@@ -151,3 +151,13 @@ def test_the_review_is_told_all_of_the_days_events_and_the_work_those_that_have_
         assert [e.text for e in world.passed_events(entries, afternoon)] == ["비가 새서 도면이 젖었다."]
 
     asyncio.run(scenario())
+
+
+def test_the_world_never_runs_in_quiet_hours_that_begin_before_the_review() -> None:
+    """Review P2-10: quiet 20:00-08:00 and the review at 22:00 — 21:00 is asleep: no world, first or retry."""
+    quiet, at = (time(20, 0), time(8, 0)), time(22, 0)
+    assert world.due_day(datetime(2026, 11, 25, 12, 0, tzinfo=UTC), SEOUL, quiet, at) is None  # 21:00 in Seoul
+    assert world.due_day(datetime(2026, 11, 25, 10, 59, tzinfo=UTC), SEOUL, quiet, at) == DAY  # 19:59
+    daytime = (time(13, 0), time(14, 0))  # a range that does not wrap
+    assert world.due_day(datetime(2026, 11, 25, 4, 30, tzinfo=UTC), SEOUL, daytime, at) is None  # 13:30
+    assert world.due_day(datetime(2026, 11, 25, 5, 30, tzinfo=UTC), SEOUL, daytime, at) == DAY  # 14:30
