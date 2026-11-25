@@ -43,7 +43,7 @@
 | S2 | 메모는 없애지 않고 You and HIMARI의 "What HIMARI remembers about you"로 옮긴다 |
 | S3 | Timeline은 Moments together에 합친다 |
 
-## 5. 구현에서 정한 것 (2026-11-26, H-83, 배포 전)
+## 5. 구현에서 정한 것 (2026-11-26, H-83, 배포 [기록](deployments/2026-11-26-v3-persona-fields.md))
 
 - **Web만 바꿨다.** 서버와 API는 그대로다(일화 고치기·지우기는 이미 있던 `/api/episodes`로 충분했다).
 - 설정 순서: Instructions, Personas, **HIMARI**(`/settings/himari`), **You and HIMARI**(`/settings/together`), Devices, Tool servers. 옛 `/settings/life`·`/settings/memory`는 새 자리로 바꿔 보낸다. 사이드바 메뉴도 같다.
