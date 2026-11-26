@@ -11,11 +11,14 @@ from datetime import datetime, timedelta
 from random import Random
 from zoneinfo import ZoneInfo
 
+import pytest
 from testkit import data_for, new_store
 
 from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope
 from himari.data.api import (
     AsleepAnswer,
+    DataError,
+    DataErrorCode,
     DayState,
     FellBy,
     LifeKind,
@@ -87,6 +90,9 @@ def test_it_falls_asleep_at_its_slot_but_never_mid_answer_and_the_state_is_told(
         await keeper.look(ME)
         sleep = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
         assert sleep is not None and (sleep.fell_at, sleep.how_fell) == (clock.now, FellBy.SCHEDULE)
+        slot = next(e for e in await data.list_life(ME, 0, since="2026-11-26")  # type: ignore[attr-defined]
+                    if e.sleep_slot and e.time_of_day == "00:30")
+        assert sleep.slot_id == slot.entry_id  # §5.1: the slot it fell asleep in, kept with the sleep
         assert told == [SleepState.DROWSY, SleepState.ASLEEP]
         other = TrustedScope(ME, ConversationId("conv_other"))
         assert await keeper.view(other) is None and await keeper.answer(other, WEB) is None  # not the day's
@@ -239,3 +245,121 @@ def test_the_nights_with_no_slot_get_one_placed() -> None:
 
 def test_dates_move_with_the_clock() -> None:
     assert at("2026-11-27 00:30") - at("2026-11-26 23:30") == timedelta(hours=1)
+
+
+def test_the_closing_waits_for_the_day_sessions_job_taking_no_new_work_then_closes_in_one_step() -> None:
+    """§6 (review 3, 5): a job runs in the day session as the three hours come — the session is fenced (no new
+    message, Run, wake or compaction: DAY_CLOSED) and stays open; once the job ends the keeper closes it, its sleep
+    marked and its handoff kept together, told after."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-26 22:40")
+        keeper, data, scope, told = await kept(clock)
+        await data.append_event(scope, UserMessage((TextBlock("잘 자"),), origin=WEB))  # type: ignore[attr-defined]
+        other = TrustedScope(ME, await data.create_conversation(ME))  # type: ignore[attr-defined]
+        clock.go("2026-11-27 00:31")
+        await keeper.look(ME)
+        clock.go("2026-11-27 03:31")
+        keeper.busy = lambda s: s == scope  # a mumble's job, say
+        await keeper.look(ME)
+        assert (await data.read_conversation(scope)).closed_at is None  # type: ignore[attr-defined]
+        assert keeper.closing(scope) and not keeper.closing(other)
+        with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
+            await keeper.admit(scope)
+        await keeper.admit(other)  # any other conversation takes work as before
+        assert not (await data.current_sleep(ME, 0)).closed_day  # type: ignore[attr-defined]
+        keeper.busy = lambda s: False
+        keeper.job_ended(scope, None)  # the job settled: a look at once
+        await asyncio.sleep(0.05)
+        await keeper.aclose()
+        assert (await data.read_conversation(scope)).closed_at == clock.now  # type: ignore[attr-defined]
+        assert (await data.current_sleep(ME, 0)).closed_day  # type: ignore[attr-defined]
+        state = await data.read_day_state(ME, 0)  # type: ignore[attr-defined]
+        assert state.before is not None and state.before.conversation_id == scope.conversation_id
+        assert [(w.who, w.text) for w in state.before.last_words] == [("user", "잘 자")]
+        assert ("session", scope.conversation_id, True) in told and ("closed", scope.conversation_id) in told
+        with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
+            await keeper.admit(scope)  # closed: refused from now on, here and in Data
+
+    asyncio.run(scenario())
+
+
+def test_a_restart_after_the_slots_end_wakes_it_at_that_end_and_counts_no_more() -> None:
+    """§5.2, §6 (review 4): the server off from 01:00 to 11:00 — back, HIMARI woke at its slot's end (08:10)."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-27 00:31")
+        keeper, data, scope, told = await kept(clock)
+        await keeper.look(ME)
+        clock.go("2026-11-27 11:00")
+        again = DayKeeper(data, time_zone=ZONE, clock=clock, rng=Random(0))  # a new process
+        await again.look(ME)
+        woke = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
+        assert (woke.woke_at, woke.how_woke, woke.closed_day) == (at("2026-11-27 08:10"), WokeBy.SCHEDULE, True)
+
+    asyncio.run(scenario())
+
+
+def test_the_handoff_reaches_a_session_opened_the_same_date_after_the_closing() -> None:
+    """§3.3 (review 11): a session opened at 00:20 closes at 03:30; the next, opened the same date, is handed it —
+    found by the closed session's id, not its date."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-27 00:20")
+        keeper, data, scope, told = await kept(clock)
+        await data.close_day_session(ME, scope.conversation_id, clock.now)  # type: ignore[attr-defined]
+        first = await data.open_day_session(ME, "2026-11-27", "11월 27일 (금)")  # type: ignore[attr-defined]
+        await data.append_event(TrustedScope(ME, first), UserMessage((TextBlock("늦었다, 자자"),), origin=WEB))  # type: ignore[attr-defined]
+        clock.go("2026-11-27 00:31")
+        await keeper.look(ME)
+        clock.go("2026-11-27 03:31")
+        await keeper.look(ME)
+        assert (await data.read_conversation(TrustedScope(ME, first))).closed_at == clock.now  # type: ignore[attr-defined]
+        clock.go("2026-11-27 09:00")
+        await keeper.look(ME)
+        second = await data.open_day_session(ME, "2026-11-27", "11월 27일 (금)")  # type: ignore[attr-defined]
+        before = await keeper.before(TrustedScope(ME, second))
+        assert before is not None and before.conversation_id == first and before.day == "2026-11-27"
+        assert [w.text for w in before.last_words] == ["늦었다, 자자"]
+
+    asyncio.run(scenario())
+
+
+def test_a_turn_of_the_day_session_finds_tonights_slot_placed_on_first_need() -> None:
+    """§4.2 (review 13): a principal first here at night — the turn's look at the sleep places the nights' slots
+    (go_to_sleep then only moves tonight's)."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        keeper = DayKeeper(data, time_zone=ZONE, clock=lambda: at("2026-11-26 22:30"), rng=Random(5))  # type: ignore[arg-type]
+        scope = TrustedScope(ME, await data.open_day_session(ME, "2026-11-26", "11월 26일 (목)"))  # type: ignore[attr-defined]
+        view = await keeper.view(scope)
+        assert view is not None and view.tonight is not None and view.tonight.origin is LifeOrigin.WRITER
+        slots = [e for e in await data.list_life(ME, 0, since="2026-11-26") if e.sleep_slot]  # type: ignore[attr-defined]
+        assert len(slots) == 2
+
+    asyncio.run(scenario())
+
+
+def test_a_missed_promise_pulls_the_sleep_only_past_a_slot_still_between() -> None:
+    """§5.4 (review 7): missed at 03:30, the sleep put off to 05:00 for it starts at 04:30, after HIMARI's own 04:00
+    slot — it falls asleep then, waiting, and the sleep says so."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-26 22:40")
+        keeper, data, scope, told = await kept(clock)
+        slot = next(e for e in await data.list_life(ME, 0, since="2026-11-26")  # type: ignore[attr-defined]
+                    if e.sleep_slot and e.time_of_day == "00:30")
+        await data.write_plan(ME, 0, PlanWrite("2026-11-27", "05:00", 380, PlanKind.SLEEP, "잠", slot.entry_id,  # type: ignore[attr-defined]
+                                               reason="방송 보고 잘래"), origin=LifeOrigin.HIMARI, zone=ZONE, now=clock.now)
+        await data.write_plan(ME, 0, PlanWrite("2026-11-27", "03:00", 120, PlanKind.TOGETHER, "방송"),  # type: ignore[attr-defined]
+                              origin=LifeOrigin.HIMARI, zone=ZONE, now=clock.now)
+        await data.write_plan(ME, 0, PlanWrite("2026-11-27", "04:00", 30, PlanKind.OWN, "정리"),  # type: ignore[attr-defined]
+                              origin=LifeOrigin.HIMARI, zone=ZONE, now=clock.now)
+        clock.go("2026-11-27 03:30")
+        await keeper.look(ME)
+        moved = next(e for e in await data.list_life(ME, 0, since="2026-11-26")  # type: ignore[attr-defined]
+                     if e.entry_id == slot.entry_id)
+        assert (moved.time_of_day, moved.minutes, moved.reason) == ("04:30", 410, "약속을 기다리다 잠듦")
+        assert await data.current_sleep(ME, 0) is None  # type: ignore[attr-defined]
+        clock.go("2026-11-27 04:30")
+        await keeper.look(ME)
+        sleep = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
+        assert sleep is not None and (sleep.how_fell, sleep.slot_id) == (FellBy.MISSED, slot.entry_id)
+
+    asyncio.run(scenario())
