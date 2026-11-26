@@ -35,6 +35,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 - **설정 나누기(2026-11-26 배포, H-83):** Web 설정의 Life·Memory를 HIMARI와 You and HIMARI로 나누고, 메모는 "What HIMARI remembers about you", Timeline은 Moments together로 합쳤다. Web만. → [character-settings](character-settings-v0.1.md)
 - **대화 프롬프트 고침(2026-11-26 배포):** `LIFE_RULE`은 자유롭게 꺼내되 "매 답마다는 아니고, 사용자가 자기 이야기를 할 땐 그 이야기에 머문다", 상한에 안 맞는 긴 정사·일기·일정·줄거리·관계 항목 하나가 뒤의 것을 막지 않음, 글 전체가 보이는 최신 조각은 요약을 빼고 보낸다.
 - **마음(2026-11-26 배포, H-84):** 반려 답 앞의 생각 `[[think]]`(보이지 않고 대화 기록에도 안 들어감, Web에서 주인만 접어 봄), 남긴 생각(삶 항목 `thought`, `himari_mind`), 하루 돌아보기와 작업 두 단계를 대화 모델의 혼자 하는 호출로, 세계 작가(아침의 사건 `event`), 정사 추리기, `memory_search`의 `life`, Settings → HIMARI의 Events·Thoughts. 스키마 v28. → [character-mind](character-mind-v0.1.md)
+- **하루(구현, 배포 전, H-85, `feat/character-day`):** 앱 대화는 날짜 이름의 하루 세션(사용자마다 하나, 잠 정리 때 닫혀 읽기 전용), HIMARI가 Tool(`schedule_read`·`schedule_write`·`schedule_cancel`·`go_to_sleep`)로 고치는 일정표(잠·작업·약속·혼자 하는 일, 길이·취소·놓침·이유), 서버가 가진 잠(하루 지기 `life/keeper.py`: 무작위 잠 칸, 칸대로 잠들고 깸, 메시지·쿡 찌르기로 깨우기, 깨지 않은 3시간 뒤 정리), 세션 문맥에서 쓰는 일기, 정리 뒤(없으면 정오) 세계, 예비 모델 `HIMARI_BACKUP_MODEL`, luna 반려 표시. 스키마 v29(이 브랜치). → [character-day](character-day-v0.1.md)
 - **Web·CLI:** React Web(대화, 설정, 휴지통, `/` 프롬프트, 초안 보존), CLI는 `himari proactive`·`himari memory`만. → [web-console](web-console-v0.1.md) §4·§7(hub 부분 제외)
 
 ## 운영
@@ -75,7 +76,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 4. **상태와 몸:** 이어지는 기분, 하루 리듬, 앱에서 페르소나 바꾸기. **2026-11-25 배포(앱은 다시 빌드해야 함), 써 보기가 남음**([character-state](character-state-v0.1.md)). 이벤트 그림·애니메이션, 페르소나별 그림은 그림이 생기면 한다.
 5. **세계:** 날씨·화제, 몇 주짜리 줄거리, 숨긴 뒷이야기. **2026-11-25 배포(날씨는 위치 설정 전까지 꺼짐), 써 보기가 남음**([character-world](character-world-v0.1.md)).
 
-로드맵 1~6단계가 모두 2026-11-25 배포되었다(v21 → v26). 7·8단계는 2026-11-26 배포되었다(v27), 9단계도 같은 날(v28). 10단계 **하루**(하루 세션, 일정표, 잠, 모델 정리)는 같은 날 설계했다([character-day](character-day-v0.1.md), H-85, 구현 전).
+로드맵 1~6단계가 모두 2026-11-25 배포되었다(v21 → v26). 7·8단계는 2026-11-26 배포되었다(v27), 9단계도 같은 날(v28). 10단계 **하루**(하루 세션, 일정표, 잠, 모델 정리)는 같은 날 설계하고 서버(Python, Web API)를 구현했다([character-day](character-day-v0.1.md), H-85, `feat/character-day` 브랜치, 스키마 v29, 배포 전. Web 화면·Windows 앱은 따로).
 
 6. **작업:** 프로젝트·작업자·조각, `work_done`, 자유 wake와 답 없는 wake 고침, 작가 고침. **2026-11-25 배포(v26)**([character-work](character-work-v0.1.md)).
 7. **페르소나 항목:** 14칸, 저장할 때 글을 만듦, `persona_makes`. **2026-11-26 배포(v27)**([character-persona-fields](character-persona-fields-v0.1.md)).

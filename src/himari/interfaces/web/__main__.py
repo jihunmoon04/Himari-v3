@@ -3,6 +3,7 @@
 Configuration comes from the environment (see ``config.py``):
 ``HIMARI_DATA_ROOT`` (required), ``HIMARI_WEB_HOST``/``PORT``,
 ``HIMARI_MODEL`` (the default model), ``HIMARI_MODELS`` (the offered models, ``id[=effort]``),
+``HIMARI_BACKUP_MODEL`` (an offered model a call with no answer at all falls back to once, character-day v0.1),
 ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX``,
 ``HIMARI_CONTEXT_TOKENS`` (request token budget; compaction starts at 80%),
 ``HIMARI_TRASH_DAYS`` (days a deleted Conversation stays in the trash, default 30),

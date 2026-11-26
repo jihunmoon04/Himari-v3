@@ -579,3 +579,64 @@ In-memory 저장소도 같게 한다.
 7. **Web API** 마무리.
 8. (화면 갈래) **Web 화면, Windows 앱.**
 9. 실제 모델 확인(§16), 문서(이 문서 §19, 결정 기록, 로드맵, status).
+
+## 19. 구현에서 정한 것
+
+서버 갈래(§18.14 1~7, 9의 서버 몫)를 `feat/character-day`에 구현했다(2026-11-26, 배포 전). §18과 다르게 가거나 §18이 정하지 않은 것을 적는다.
+
+1. **포트.** `DayGate`에 `before(scope)`(새 세션의 첫 날에 넘기는 것, §3.3)를 더했다. `MindLink`의 `session_input(principal)`은 `SessionInput`(대화 번호, **세션을 연 날짜** `day`, 다음 턴 입력, 그 모델의 문맥 상한)을 준다. `ConversationDriver.accept`는 기록한 사건을 돌려주고(`while_asleep`이 붙은 것), `JobStatus`에 `asleep`(답 방식)을 더했다.
+2. **Data v29의 세부.**
+   - `open_day_session(principal, day, title, *, environments, model_setting)`: `now`는 받지 않는다(저장소 시계). 하루 세션도 그 사용자의 다른 대화처럼 폴더(`MACHINE`)와 반려 기본 모델을 받는다. 이미 열려 있으면 `DUPLICATE_IDENTITY`이고 Application은 열린 것을 읽는다. `close_day_session`은 닫았는지(bool)를 돌려준다.
+   - 열린 하루 세션을 휴지통에 넣으면 닫는다(되살려도 닫힌 채다). 대화를 영구히 지우면 `life_writes.conversation_id`를 비운다.
+   - `sleeps`에 `first_message_at`·`last_message_at`(§5.6의 시각 범위)을 더했다. `day_state`에 `before`(넘길 것, JSON)를 더했고 `note_closing(…, at, before)`이 `closed_day`·`last_closing_at`·`before`를 한 번에 쓴다.
+   - `cancel_plan`도 `zone`을 받는다. `apply_life_write(…, zone)`는 일기의 일정 가운데 잠 칸과 겹치는 것을 한 번 더 버리고 `minutes`·`plan_kind`를 채운다(삶 작업이 먼저 거름, 10).
+   - 거부는 `DataErrorCode.PLAN_REFUSED`이고 문장은 `DataError.message`에 있다. Tool은 실패 결과 "Not written: <문장>", Web은 `409 plan_refused`와 그 문장이다.
+   - 하루 지기는 잠 칸을 `writer`로 쓴다(알고리즘). `writer`는 잠 칸만 놓고 고친다(밤마다 하나, 시작 21:00–05:00, 다른 한계는 보지 않음). HIMARI와 사용자는 잠 칸을 새로 만들 수 없고("A sleep slot is only moved, never made…") 다른 칸을 잠 칸으로, 잠 칸을 다른 칸으로 바꿀 수도 없다.
+   - 하루 20번은 HIMARI(`origin=himari`)가 오늘(그 시간대 자정부터) 마지막으로 고친 칸의 수다.
+   - 취소·놓친 칸은 7일을 따로 세지 않는다. 다른 일정처럼 `list_life`의 `since` 범위(Web 30일, 턴은 오늘·내일, 일기는 그날)로 보인다.
+3. **잠 칸 놓기.** 하루 지기는 지금 밤과 다음 밤의 칸이 없으면 둘 다 놓는다(Current State에 오늘·내일 칸이 보이게). `place_sleep(night, rng, zone, busy)`의 `busy`는 그 밤의 다른 칸이다. 시작이 다른 칸(새벽 약속 등)을 덮으면 그 뒤로 옮긴다(05:00까지).
+4. **잠 상태.**
+   - `drowsy`는 칸 시작 30분 전부터 **잠들 때까지**다. 칸 시작에 답하는 중이면 그 답도 졸린 채로 하고 일이 끝나면 잠든다. 그 칸 안에서 사용자가 깨웠으면 깨어 있음이다.
+   - `half_asleep`은 그 턴의 Current State와 잠꼬대 때 스트림 `himari_sleep`에만 있다. 저장된 잠은 `asleep`이라 그동안 `GET /api/device`의 `himari.sleep`은 `asleep`이고, 잠꼬대 일이 끝나면 하루 지기가 `asleep`을 다시 알린다.
+   - 스트림 `himari_sleep`은 바뀔 때만 보낸다. 하루 지기가 처음 본 상태는 알리지 않고 기억만 한다(`hello`·`GET /api/device`가 지금 상태를 준다).
+   - 하루 지기의 첫 살펴보기는 `last_closing_at`을 그때로 쓴다(36시간을 거기서 센다).
+5. **반쯤 깬 턴.** Tool 목록을 비우고 Run은 1번이다. 모델이 그래도 Tool을 부르면 Driver가 실행하지 않고 묶음을 닫는다("Not run: you are half asleep."). 그 턴은 답 없이 Run 한도로 끝난다.
+6. **쿡 찌르기.** `POST /api/device/poke`는 메시지처럼 깨우기 셈에 들어가지만 잠 기록의 `messages`에는 세지 않는다. 잠꼬대나 깸이면 하루 세션에 그 기기의 wake 턴(새 계기 `WakeKind.POKE`, job origin `wake`와 그 `device_id`)을 연다. 하루 지기가 꺼져 있으면(삶 끔) `answer`는 `null`이다.
+7. **하루 세션 열기.**
+   - `GET /api/device`와 사건 흐름의 `hello`가 연다. 둘은 같은 함수라 Web이 부를 때도 연다(주인이 Web을 열면 "왔다"로 본다).
+   - 제목의 날짜는 서버 시간대(`HIMARI_TIME_ZONE`)다(기기 시간대가 아님).
+   - 정리 뒤 다음 필요 때 새 세션을 연다. 같은 날짜여도 새 세션이다.
+   - 닫힌 하루 세션에 온 메시지는 기록하지 않고 `409 day_closed`다.
+   - 하루 세션은 반려 기본 모델로 만든다. 삶이 꺼졌으면 wake·기기·시도·`remarks`는 지금처럼 가장 최근 반려 대화로 간다.
+8. **먼저 말 걸기.**
+   - `himari_asleep`은 하루 지기의 잠 상태가 `asleep`이나 `half_asleep`일 때 참이다.
+   - `together` 후보는 기기가 없어도 만든다. 그러면 `no_device`로 막혀 상태에 보인다. 시작에서 10분이 지나면 후보가 아니고, 30분이 되면 하루 지기가 놓침(§5.4)으로 한다.
+   - 자는 중 미리 알림: Driver는 잠든 동안 열린 wake 턴을 반쯤 깬 턴으로 한다. 잠을 끊지 않는다.
+9. **일기(세션 문맥).**
+   - 쓸 날짜는 22:00 뒤면 오늘, 아니면 어제다. 다만 그 날짜 21:00 뒤에 잠들었으면(가장 최근 잠의 `fell_at`) 오늘이다. 하루 지기가 잠들기를 적용하면 `write(principal)`을 깨운다.
+   - 세션은 그 날짜나 그 전에 연 것일 때만 쓴다(`SessionInput.day ≤ 날짜`). 다음 날 아침에 어제 일기를 쓰는데 오늘 세션이 열려 있으면 혼자 하는 호출로 쓴다.
+   - 모델 상한은 요청 크기/3 + 출력 4,000토큰으로 잰다. 넘거나 입력을 만들지 못하면(기록에 남김) 혼자 하는 호출로 쓴다.
+   - 세션의 요청 선택(`session_key`, 능력, `day_session`)은 그대로 두고 모델·강도는 이 호출의 것(예비 모델이면 그것), 스트림은 끄고 출력은 4,000토큰이다. `model_reason`에 ", in the day session"이 붙는다.
+   - 입력에 `schedule`(그날 칸: 시각 "HH:MM-HH:MM", 종류, 글, 취소·놓침과 이유, 잠 칸 포함)과 `sleep`(그 날짜 밤의 잠 칸 "HH:MM-HH:MM")을 넣는다. 앞으로의 일정은 살아 있는 칸(잠 칸 제외)이고 `minutes`가 붙는다. 세션 문맥이면 `episodes`는 비운다.
+   - 답의 `minutes`는 5~720이 아니면 빼고(기본 60) 일정은 남긴다. 잠 칸과 겹치는 일정은 그것만 버리고 로그에 남긴다(따로 저장하지 않음).
+   - Web: 그 세션에서 적용된 `review` 기록 가운데 일기가 아직 있는 것을, 쓴 때(`finished_at`) 직전 사건의 순번에 `{sequence, kind: "diary", created_at, text}`로 끼운다. 주인의 Web만 받는다.
+10. **세계.**
+    - 그 날짜(서버 시간대)에 하루 지기의 정리(`last_closing_at`)가 있었으면 그 뒤, 없으면 12:00 뒤, 22:00 전까지다. 정리 콜백이 바로 한 번 돌리고, 아니면 10분 주기가 돈다. 4의 첫 살펴보기 시각도 정리로 보므로 처음 켠 날은 정오 전에 돌 수 있다.
+    - 입력에 `schedule`(일기와 같은 줄)과 `sleep`(그 날짜에 걸친 잠 칸들의 "HH:MM-HH:MM")을 넣는다. 사건 시각이 잠 안이면 다른 어긋남처럼 답 전체를 버리고 다시 한다.
+    - Web의 "World: next"는 오늘 정리를 센다(`Application.next_world`).
+11. **작업.** 작업 시간은 칸의 `minutes`(없으면 60)이고 취소·놓친 칸은 하지 않는다. 작업 자료의 `plan`에 `minutes`가 들어가고, 끝 단계 과제는 "this hour" 대신 "this work time"이다.
+12. **기억 정리.** 닫힌 하루 세션은 조용한 시간을 기다리지 않고 짧은 부분도 더 기다리지 않는다(더 올 말이 없음). 그래서 기억 정리 작업자가 `read_conversation`을 읽는다.
+13. **예비 모델.**
+    - 삶 작업: 같은 일·날짜(작업은 칸)의 바로 앞 기록이 `failed`이고 그 오류가 `retryable`이면 예비 모델로 한다. 까닭은 "the backup model (the last try got no answer: <오류>)"이다. 예비 모델도 답 없이 실패하면 다음 시도도 예비 모델이다(규칙 그대로). 기록에 `last_life_write`를 더했다.
+    - 기억 정리: 그 대화의 바로 앞 정리가 `failed`·`skipped`이고 오류가 `retryable`이면 예비 모델로 한다. 기록의 `model_id`가 예비 모델이고 따로 "예비" 표시는 없다. 강도는 그 모델의 기본 강도다.
+    - Run에도 새 칸이 없다(§18.2 그대로). `/api/server`가 `backup_model`을 알려 Web이 Run의 모델과 견줄 수 있다.
+    - `HIMARI_BACKUP_MODEL`은 설정(`WebConfigError`)과 `Application.open`(`ValueError`) 두 곳에서 내놓은 모델인지 본다.
+14. **luna.** `companion=True`, `free_wake=True`를 켰다. 화면 Tool 증거 시험은 luna를 소유자 결정의 예외로 적는다(자유 wake 화면 장면은 돌리지 않았음).
+15. **Web API(§18.11에 더한 것).**
+    - 메시지 `202`는 지금의 job 모양에 `asleep`(`null` 깨어 있음, `none`·`mumble`·`wake`)을 더한 것이다. `none`이면 `running: false`이고 일이 없다. 그 대화의 `continuable`도 거짓이다.
+    - `sleep.tonight`와 `sleeps[]`의 항목에 `id`가 더 있다. `sleeps`는 최근 14번, 새것부터다.
+    - `PUT /api/life/plans/{id}`로 고친 칸은 `origin=user`가 된다. 잠 칸은 옮기기만 된다(2).
+    - `while_asleep`은 주인의 Web에만 준다(기기에는 없음).
+    - `features.day_session`과 `himari`는 하루 지기가 있을 때(삶과 반려가 켜짐)만 준다.
+16. **조용한 시간.** 삶 작업, 작업, 세계, `build_runtime`에서 조용한 시간 인자를 없앴다. `HIMARI_PROACTIVE_QUIET`는 삶이 꺼졌을 때 먼저 말 걸기만 쓴다(`himari_asleep`이 `None`일 때).
+17. **확인(§16).** `tests/live/test_day_live.py`에 네 장면을 두었다(`HIMARI_LIVE=1`과 키, 모델 `HIMARI_LIVE_DAY_MODEL` 기본 deepseek 1017). 진짜 Driver와 일정표 Tool을 메모리 저장소로 돌리고, 하루 지기 대신 잠 상태를 주는 문(gate)을 쓰며, Driver와 Tool의 시계를 오늘 날짜의 장면 시각에 둔다. 돈이 드는 호출이라 이 구현에서는 돌리지 않았고, 대본 답으로 돌려 도우미와 검사만 확인했다. 소유자가 돌려 본다.

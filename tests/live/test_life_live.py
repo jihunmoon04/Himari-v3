@@ -5,7 +5,8 @@ check, and the pass keeps what HIMARI said of itself. With ``HIMARI_LIVE_LIFE_OU
 their usage are appended as JSON lines. Machine checks are only "is it the shape asked for" (character-architecture
 §10); whether the writing is good is the owner's to judge. The writer's input also holds a sample weather line, five
 sample topic titles and one open arc (character-world v0.1), never the production search. character-work v0.1:
-the writer is also told the quiet hours, the arc's so far and the day's work piece, and may name a plan's project;
+the writer is also told the arc's so far and the day's work piece, and may name a plan's project (character-day
+v0.1: tonight's sleep slot in place of the quiet hours; a plan over the sleep is left out alone);
 one worker call makes a piece for a work plan and its answer passes every check (``-k worker``). character-mind
 v0.1: the writer's call is now the day's review, a self run with a turn's system text and runtime state, whose answer
 is a thought and then its JSON (``-k review``); the facts are settled from its diary by one more call (``-k settle``)."""
@@ -16,7 +17,7 @@ import asyncio
 import json
 import os
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ from himari.data.api import (
     LifeOrigin,
     MemoryOrigin,
     PassKind,
+    PlanKind,
     PersistedStateBasis,
     RecentEpisode,
     UserMessage,
@@ -91,8 +93,12 @@ LIFE = (entry(1, LifeKind.FACT, "고양이를 무서워한다.", origin=LifeOrig
         replace(entry(7, LifeKind.PLAN, "오늘 밤엔 1절 가사 마저 옮겨야지.", "2026-11-25"), time_of_day="20:00",
                 arc_id=5),
         replace(entry(8, LifeKind.WORK, "1절 번역 노트 …", "2026-11-25"), time_of_day="20:00", title="1절 가사 옮기기",
-                summary="1절 가사 다 옮겼어. 'How does it feel'을 어떻게 살릴지가 제일 어려웠어.", arc_id=5, plan_id=7))
-QUIET = (time(23, 0), time(8, 0))
+                summary="1절 가사 다 옮겼어. 'How does it feel'을 어떻게 살릴지가 제일 어려웠어.", arc_id=5, plan_id=7),
+        # character-day §4.1: last night's sleep slot and tonight's (the keeper's), in place of the quiet hours
+        replace(entry(10, LifeKind.PLAN, "잠", "2026-11-25"), time_of_day="00:30", minutes=470,
+                plan_kind=PlanKind.SLEEP),
+        replace(entry(11, LifeKind.PLAN, "잠", "2026-11-26"), time_of_day="00:40", minutes=460,
+                plan_kind=PlanKind.SLEEP))
 # character-world §2, §3: sample inputs (never the production search)
 WEATHER = "light rain, 3 to 9°C, rain 2.1 mm"
 TOPICS = ("수도권 첫눈 예보, 주말 기온 뚝", "연말 공연 예매 시작", "국회 예산안 처리 두고 공방", "새 스마트폰 출시 첫날 매진",
@@ -136,16 +142,18 @@ def test_the_days_review_writes_a_day_that_passes_its_checks() -> None:
                      "사용자가 회사 발표 자료를 마무리했고, HIMARI가 마지막 장의 문장을 다듬자고 했다.", (1,), (2,),
                      MemoryOrigin.EXTRACTOR, None, 1, NOW, NOW)
     data = review.request_data(LIFE, [RecentEpisode(talked, "발표")], day=day, now=NOW, zone=SEOUL,
-                               weather=WEATHER, topics=TOPICS, quiet=QUIET)
+                               weather=WEATHER, topics=TOPICS)
     assert data["arcs"] == [{"id": 5, "title": "커버곡 연습", "goal": "한 달 안에 신스팝 커버곡 하나를 완성한다.",
                              "started": "2026-11-18", "so_far": LIFE[4].so_far, "moved_on": ["2026-11-18"]}]
-    assert data["work"] and data["quiet_hours"] == "23:00-08:00"
+    assert data["work"] and data["sleep"] == "00:40-08:20"
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
                              max_output_tokens=review.REVIEW_MAX_OUTPUT_TOKENS)
     text, usage = call(self_run(options, LIFE, review.REVIEW_TASK, data))
     thought, body = review.self_answer(text)  # character-mind §4.1: the thought, then the JSON
-    plan = review.parse_answer(body, day, QUIET)  # every §3 check: shape, lengths, counts, plan dates
+    dropped: list[str] = []  # character-day §18.7: a plan over the sleep, left out alone
+    plan = review.parse_answer(body, day, review.sleep_spans(LIFE, SEOUL), SEOUL, dropped)  # every §3 check
     record("review", text, usage, thought=thought, plans=len(plan.plans), diary_chars=len(plan.diary),
+           dropped=dropped, minutes=list(plan.plan_minutes),
            times=list(plan.times), plan_arcs=list(plan.plan_arcs), mood=plan.mood, mood_reason=plan.mood_reason,
            arc=None if plan.arc is None else {"move": plan.arc.op.value, "id": plan.arc.entry_id,
                                               "title": plan.arc.title, "goal": plan.arc.goal,
@@ -154,6 +162,8 @@ def test_the_days_review_writes_a_day_that_passes_its_checks() -> None:
     # character-state §2, §3: the optional mood and plan times, when given, are in the shape asked for — kept, not
     # dropped by the checks (an out-of-shape one would be left out silently)
     raw = review.json_object(body)
+    raw["plans"] = [p for p in raw.get("plans") or []
+                    if not (isinstance(p, dict) and str(p.get("text", "")).strip() in dropped)]
     given = raw.get("mood")
     if isinstance(given, dict) and str(given.get("name", "")).strip().lower() not in ("", "neutral"):
         assert plan.mood is not None, given
@@ -164,11 +174,10 @@ def test_the_days_review_writes_a_day_that_passes_its_checks() -> None:
     # character-world §4: an arc move, when given, is in the shape asked for (an out-of-shape one is left out)
     if raw.get("arc") is not None:
         assert plan.arc is not None, raw["arc"]
-    # character-work §4: a plan's project, when given with a time outside the quiet hours, is kept
+    # character-work §4: a plan's project, when given with a time (and kept: not over the sleep), is kept
     arcs = plan.plan_arcs or (None,) * len(plan.plans)
     for asked, project, at in zip(raw.get("plans") or [], arcs, times):
-        if isinstance(asked, dict) and asked.get("arc") is not None and at is not None \
-                and not review.in_quiet_hours(time.fromisoformat(at), *QUIET):
+        if isinstance(asked, dict) and asked.get("arc") is not None and at is not None:
             assert project is not None, asked
 
 
@@ -248,10 +257,12 @@ def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:
 
 
 def test_the_world_decides_events_that_pass_their_checks() -> None:
-    """character-mind §7: one world call for the day; 0 to 2 events, each a time outside the quiet hours."""
-    data = world.request_data(PERSONA, LIFE, day=date(2026, 11, 25), weather=WEATHER, topics=TOPICS, quiet=QUIET)
+    """character-mind §7: one world call for the day; 0 to 2 events, each a time outside the sleep (character-day
+    §18.7)."""
+    day = date(2026, 11, 25)
+    data = world.request_data(PERSONA, LIFE, day=day, weather=WEATHER, topics=TOPICS, zone=SEOUL)
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
                              max_output_tokens=world.WORLD_MAX_OUTPUT_TOKENS)
     text, usage = call(review.model_input(world.WORLD_INSTRUCTIONS, data, options, "life-world-input"))
-    events = world.parse_events(text, QUIET)  # every §7 check
+    events = world.parse_events(text, day, world.day_sleeps(LIFE, day, SEOUL), SEOUL)  # every §7 check
     record("world", text, usage, events=[(e.time_of_day, e.text) for e in events])

@@ -101,11 +101,23 @@ Only three models satisfy all five requirements simultaneously:
 3. `deepseek/deepseek-v4.1-flash-1017`
 
 Excluded from all-feature companion mode:
-- `openai/gpt-6-luna`: passes `speaks_first`, `screen_points`, and `screen_tool`, but failed `free_wake` (repeating prior wake output).
+- `openai/gpt-6-luna`: passes `speaks_first`, `screen_points`, and `screen_tool`, but failed `free_wake` (repeating prior wake output). Turned on as a companion model on 2026-11-26 (below).
 - `openai/gpt-6.1-sol` and `anthropic/claude-sonnet-5.5`: lack verified `speaks_first` and `free_wake`.
 - `openai/gpt-5-nano`, `minimax/minimax-m3`, and `z-ai/glm-5.3`: lack `screen_tool` and/or `screen_points`.
 - `anthropic/claude-haiku-5.5`: latest screen reading/refusal regression failed (see refresh above).
 - `z-ai/glm-5.3-flash`: low-effort free-wake silence gate failed; web/image work only.
+
+**2026-11-26 (character-day §10, H-85, not deployed yet):** by the owner's decision `openai/gpt-6-luna`
+declares `free_wake` and `companion` although it gave 4 of 6 in the free-wake "either" scenes and its free-wake
+screen scenes were never run — a known risk (the free-wake rule and the wake algorithm change in that stage and
+after). It is the planned backup model: a call that gets no answer at all (connection, HTTP 408, 429, 5xx) is sent
+once more to `HIMARI_BACKUP_MODEL`, which must be offered. The planned operator configuration:
+
+```dotenv
+HIMARI_MODEL=deepseek/deepseek-v4.1-flash-1017
+HIMARI_MODELS=deepseek/deepseek-v4.1-flash-1017=low,openai/gpt-6-luna
+HIMARI_BACKUP_MODEL=openai/gpt-6-luna
+```
 
 When `HIMARI_COMPANION=1`, new device conversations bind atomically to a verified companion model. If `HIMARI_COMPANION_DEFAULT_MODEL` is unset, prefer `deepseek/deepseek-v4.1-flash-1017` when offered; otherwise use the server default if companion-capable, then the first offered companion model. No eligible model means device conversation creation is refused with `503 no_companion_model`, while Web/CLI remain available. An explicitly configured model must be offered and verified; a typo or missing offer is a startup error, never a silent substitution.
 
