@@ -353,9 +353,19 @@ def thought_end(text: str, *, complete: bool, limit: int = THINK_CHARS) -> tuple
     if close != -1:
         after = close + len(THINK_CLOSE)
     elif n - start > limit + len(THINK_CLOSE) or complete:
-        if n - start <= limit + len(THINK_CLOSE):
-            return (start, n, n)  # never closed: all of it was thought
-        close = after = start + limit  # cut where it should have closed
+        # live check (2026-11-26): a model may forget the close and start what it says on a new line,
+        # so a thought never closed ends at its first line break (within the window, after its first word)
+        body = start
+        while body < n and text[body].isspace():
+            body += 1
+        window = min(n, start + limit + len(THINK_CLOSE))
+        line = next((p for p in range(body, window) if text[p] in "\r\n  "), -1)
+        if line != -1:
+            close = after = line
+        elif n - start <= limit + len(THINK_CLOSE):
+            return (start, n, n)  # never closed, one line: all of it was thought
+        else:
+            close = after = start + limit  # cut where it should have closed
     else:
         return None
     k = after

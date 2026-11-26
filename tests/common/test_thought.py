@@ -42,7 +42,11 @@ def live(text: str, cuts: list[int]) -> str:
     ("[[think]]그냥 두자.[[/think]][[pass]]", "[[pass]]", "그냥 두자."),
     ("안녕 [[think]]이건 글[[/think]]", "안녕 [[think]]이건 글[[/think]]", None),  # not at the start: text
     ("안녕", "안녕", None),
-    ("[[think]]닫히지 않음", "", "닫히지 않음"),  # never closed: all of it was thought
+    ("[[think]]닫히지 않음", "", "닫히지 않음"),  # never closed, one line: all of it was thought
+    # live check 2026-11-26: the close forgotten, the answer on the next line — the thought ends at the line break
+    ("[[think]]캡틴이 왔네. 반갑게 맞자.\n[[mood:happy]]캡틴, 왔구나!", "캡틴, 왔구나!", "캡틴이 왔네. 반갑게 맞자."),
+    ("[[think]]\n이름을 물었네.\n\n[[mood:happy]]소라야!", "소라야!", "이름을 물었네."),
+    ("[[think]]여러 줄\n생각[[/think]]답", "답", "여러 줄\n생각"),  # closed in time: the close wins over a line break
     ("[[think]][[/think]]답", "답", None),  # an empty thought
 ])
 def test_a_leading_thought_is_left_out(text: str, plain: str, thought: str | None) -> None:
@@ -131,3 +135,16 @@ def test_a_leading_bom_never_lets_a_thought_show(text: str) -> None:
         assert live(text, cuts) == "안녕"
     assert thought_end("\ufeff", complete=False) is None
     assert split_thought("안녕\ufeff[[think]]글[[/think]]")[0] is None  # only before the open: elsewhere it is text
+
+
+@pytest.mark.parametrize("text", [
+    "[[think]]캡틴이 왔네. 반갑게 맞자.\n[[mood:happy]]캡틴, 왔구나! 오늘 어땠어?",
+    "[[think]]" + "가" * 300 + "\n" + "나" * 400 + "답",  # longer than the window: still the line break
+    "[[think]]" + "가" * (THINK_CHARS + 40) + "\n답",  # no line break in the window: cut at the limit
+])
+def test_a_thought_never_closed_ends_the_same_live_and_whole(text: str) -> None:
+    """Live check 2026-11-26: an unclosed thought ends at its first line break, and live agrees with whole."""
+    rng = random.Random(5)
+    for _ in range(40):
+        cuts = sorted(rng.sample(range(1, len(text)), k=5))
+        assert live(text, cuts) == shown(text)
