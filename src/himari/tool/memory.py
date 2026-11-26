@@ -1,5 +1,9 @@
 """Memory Tools (V3-P71 §6, V3-P85 §5.5): ``memory_save``, ``memory_forget``, ``memory_search``.
 
+character-mind v0.1 §6: while HIMARI's life is told, ``memory_search`` also finds the turn's persona's own facts,
+diaries and events (kind ``life``, and in ``all``): the way back to what the runtime state's limits left out. The
+persona is the one the Driver gives the call's context, never one the model names.
+
 Internal Tools: a note changes only through ``ToolOutcome.memory_change``,
 which Data writes in the same transaction as the result that reports it,
 with the call as the note's source. Nothing here writes Data directly
@@ -21,6 +25,9 @@ from himari.data.api import (
     MAX_MEMORY_CHARS,
     DataError,
     DataErrorCode,
+    LifeEntry,
+    LifeKind,
+    LifeStore,
     Memory,
     MemoryCategory,
     MemoryChange,
@@ -44,12 +51,15 @@ MEMORY_SEARCH = ToolId("memory_search")
 MEMORY_TOOL_IDS = frozenset({MEMORY_SAVE, MEMORY_FORGET, MEMORY_SEARCH})
 SEARCH_LIMIT = 20  # notes one memory_search returns
 EPISODE_LIMIT = 10  # episodes it returns (V3-P85 §5.5)
+LIFE_LIMIT = 10  # character-mind §6: HIMARI's own entries it returns
+LIFE_TEXT_CHARS = 400  # of a diary, its start
 DUE_RANGE = (timedelta(days=-1), timedelta(days=2 * 365))  # as memory passes take them (V3-P85 §4.4)
 VALID_RANGE = (timedelta(0), timedelta(days=365))
 REMIND_RANGE = (timedelta(minutes=-5), timedelta(days=365))  # V3-P87 §5.3: ahead (a moment ago passes: "now")
 
 _CATEGORIES = [c.value for c in MemoryCategory]
-_KINDS = ["notes", "episodes", "all"]
+_KINDS = ["notes", "episodes", "life", "all"]
+_LIFE_KINDS = (LifeKind.FACT, LifeKind.DIARY, LifeKind.EVENT)  # character-mind §6: what kind "life" finds
 _DATE_ARG: dict[str, JsonValue] = {"type": ["string", "null"]}
 _NOTE_ID = re.compile(r"m?([1-9][0-9]{0,9})")
 _ID_ARG: dict[str, JsonValue] = {"type": "string", "description": "A note's id, as m12."}
@@ -325,24 +335,66 @@ def _words(query: str) -> list[str]:
     return list(dict.fromkeys(_fold(query).split()))  # a word said twice counts once
 
 
+def search_life(entries: Sequence[LifeEntry], query: str, first: str | None, last: str | None,
+                now: datetime | None = None) -> list[LifeEntry]:
+    """character-mind §6: the persona's facts, diaries and events with any of the query's words, most words
+    first, then the newest; ``first``/``last`` (YYYY-MM-DD) keep the diaries and events of those days and the
+    facts written then. An event whose time is still ahead of ``now`` (in the user's zone) has not happened
+    yet and is never found (review P1-4: as the runtime state tells them)."""
+    def day(entry: LifeEntry) -> str:
+        return entry.day or entry.updated_at.date().isoformat()
+
+    def ahead(entry: LifeEntry) -> bool:
+        if entry.kind is not LifeKind.EVENT or now is None:
+            return False
+        return (entry.day or "", entry.time_of_day or "00:00") > (now.date().isoformat(), now.strftime("%H:%M"))
+
+    pool = [e for e in entries if e.kind in _LIFE_KINDS and not ahead(e) and (first is None or day(e) >= first)
+            and (last is None or day(e) <= last)]
+    words = _words(query)
+    scored = [(sum(1 for w in words if w in _fold(e.text)) if words else 1, e) for e in pool]
+    hits = [(score, e) for score, e in scored if score]
+    hits.sort(key=lambda pair: (pair[0], day(pair[1]), pair[1].time_of_day or "", pair[1].entry_id), reverse=True)
+    return [e for _, e in hits]
+
+
+def life_line(entry: LifeEntry) -> str:
+    """§6: one of HIMARI's own entries as memory_search shows it."""
+    if entry.kind is LifeKind.FACT:
+        return f"[your fact] {_lines(entry.text)}"
+    if entry.kind is LifeKind.EVENT:
+        return f"[happened to you {entry.day} {entry.time_of_day or ''}".rstrip() + f"] {_lines(entry.text)}"
+    text = entry.text if len(entry.text) <= LIFE_TEXT_CHARS else entry.text[:LIFE_TEXT_CHARS] + "…"
+    return f"[your diary {entry.day}] {_lines(text)}"
+
+
 class MemorySearch:
     definition = _definition(
         MEMORY_SEARCH,
-        "Find saved notes about the user and past episodes (what you did together, when). Use short key words "
-        "(a name, a project, a tool); without a query, lists the newest notes of a category or of all. from and "
-        "to (YYYY-MM-DD) limit episodes to those days, and notes to those written then.",
+        "Find saved notes about the user and past episodes (what you did together, when), and, where your own "
+        "life is kept, your own facts, diaries and what happened to you (life). Use short key words (a name, a "
+        "project, a tool); without a query, lists the newest notes of a category or of all. from and to "
+        "(YYYY-MM-DD) limit episodes, diaries and events to those days, and notes and facts to those written then.",
         {"query": {"type": ["string", "null"], "description": "Key words; a note matches when it contains any of them."},
          "category": _NULLABLE_CATEGORY,
-         "kind": {"type": ["string", "null"], "enum": [*_KINDS, None], "description": "notes, episodes or all (default)."},
+         "kind": {"type": ["string", "null"], "enum": [*_KINDS, None],
+                  "description": "notes, episodes, life (your own) or all (default)."},
          "from": {**_DATE_ARG, "description": "The first day, YYYY-MM-DD."},
          "to": {**_DATE_ARG, "description": "The last day, YYYY-MM-DD."}},
         [], EffectProfile.READ)
 
     def __init__(self, store: MemoryStore, *, time_zone: str = "UTC",
-                 clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
+                 clock: Callable[[], datetime] = lambda: datetime.now(UTC), life: LifeStore | None = None) -> None:
         self._store = store
         self._zone = time_zone
         self._clock = clock
+        self._life = life  # character-mind §6: None: HIMARI's life is not kept here
+
+    def _zone_info(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self._zone)
+        except (ValueError, ZoneInfoNotFoundError):
+            return ZoneInfo("UTC")
 
     def _day(self, args: Mapping[str, JsonValue], key: str) -> tuple[datetime | None, str | None]:
         """A from/to day: its first (from: local midnight, so a day of 23 or 25
@@ -379,9 +431,13 @@ class MemorySearch:
         if problem or later:
             return _failed(str(problem or later))
         principal, now = ctx.scope.principal_id, self._clock()
+        lived = self._life is not None and ctx.persona_id is not None  # §6: the turn's persona, from the Driver
+        if kind == "life" and not lived:
+            return _failed("your own life is not kept here; search notes or episodes")
         lines: list[str] = []
         ids: list[int] = []
         episode_ids: list[int] = []
+        life_ids: list[int] = []
         if kind in ("notes", "all"):
             notes = [n for n in await self._store.list_memories(principal)
                      if (start is None or n.updated_at >= start) and (end is None or n.updated_at <= end)]
@@ -399,13 +455,34 @@ class MemorySearch:
             episode_ids = [f.episode.episode_id for f in shown_episodes]
             if len(episodes) > len(shown_episodes):
                 lines.append("… more episodes match; narrow the days or words.")
-        if not ids and not episode_ids:
-            nothing = "No saved notes match." if kind == "notes" else "No saved notes or episodes match."
-            return ToolOutcome(ToolStatus.SUCCEEDED, _text(nothing),
-                               raw_result={"ids": [], "episodes": []})
-        return ToolOutcome(ToolStatus.SUCCEEDED, _text("\n".join(lines)),
-                           raw_result={"ids": ids, "episodes": episode_ids})
+        if kind in ("life", "all") and category is None and lived:
+            assert self._life is not None and ctx.persona_id is not None
+            first, last = (_given_day(args, "from"), _given_day(args, "to"))
+            found_life = search_life(await self._life.list_life(principal, ctx.persona_id, now=now), query, first,
+                                     last, now.astimezone(self._zone_info()))
+            shown_life = found_life[:LIFE_LIMIT]
+            lines += [life_line(e) for e in shown_life]
+            life_ids = [e.entry_id for e in shown_life]
+            if len(found_life) > len(shown_life):
+                lines.append("… more of your own life matches; narrow the days or words.")
+        result: dict[str, JsonValue] = {"ids": list(ids), "episodes": list(episode_ids)}
+        if lived:
+            result["life"] = list(life_ids)
+        if not ids and not episode_ids and not life_ids:
+            nothing = {"notes": "No saved notes match.", "life": "Nothing of your own life matches."}.get(
+                str(kind), "No saved notes or episodes match.")
+            return ToolOutcome(ToolStatus.SUCCEEDED, _text(nothing), raw_result=result)
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text("\n".join(lines)), raw_result=result)
 
 
-def memory_tools(store: MemoryStore, *, time_zone: str = "UTC") -> list[MemorySave | MemoryForget | MemorySearch]:
-    return [MemorySave(store, time_zone=time_zone), MemoryForget(store), MemorySearch(store, time_zone=time_zone)]
+def _given_day(args: Mapping[str, JsonValue], key: str) -> str | None:
+    """A from/to day as given (already checked as YYYY-MM-DD), or None."""
+    raw = args.get(key)
+    return raw.strip() if isinstance(raw, str) and _given(raw) else None
+
+
+def memory_tools(store: MemoryStore, *, time_zone: str = "UTC",
+                 life: LifeStore | None = None) -> list[MemorySave | MemoryForget | MemorySearch]:
+    """character-mind §6: with ``life``, memory_search also finds the turn's persona's own life."""
+    return [MemorySave(store, time_zone=time_zone), MemoryForget(store),
+            MemorySearch(store, time_zone=time_zone, life=life)]

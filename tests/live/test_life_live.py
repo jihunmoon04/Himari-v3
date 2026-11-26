@@ -6,7 +6,9 @@ their usage are appended as JSON lines. Machine checks are only "is it the shape
 §10); whether the writing is good is the owner's to judge. The writer's input also holds a sample weather line, five
 sample topic titles and one open arc (character-world v0.1), never the production search. character-work v0.1:
 the writer is also told the quiet hours, the arc's so far and the day's work piece, and may name a plan's project;
-one worker call makes a piece for a work plan and its answer passes every check (``-k worker``)."""
+one worker call makes a piece for a work plan and its answer passes every check (``-k worker``). character-mind
+v0.1: the writer's call is now the day's review, a self run with a turn's system text and runtime state, whose answer
+is a thought and then its JSON (``-k review``); the facts are settled from its diary by one more call (``-k settle``)."""
 
 from __future__ import annotations
 
@@ -34,12 +36,15 @@ from himari.data.api import (
     LifeOrigin,
     MemoryOrigin,
     PassKind,
+    PersistedStateBasis,
     RecentEpisode,
     UserMessage,
 )
-from himari.life import work, writer
+from himari.life import review, settle, work, world
 from himari.memory import passes
-from himari.prompt.api import RequestOptions
+from himari.prompt.api import PromptInputs, RequestOptions, SystemSpec
+from himari.prompt.composer import Composer
+from himari.prompt.system import COMPANION_BASE
 from himari.provider.api import NativeReceived, NormalizedFinal, ProviderCapabilities
 from himari.provider.openrouter import KNOWN_CAPABILITIES, OpenRouterAdapter
 
@@ -124,22 +129,23 @@ def effort() -> str | None:
     return "low" if "low" in known.reasoning_efforts else None
 
 
-def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
+def test_the_days_review_writes_a_day_that_passes_its_checks() -> None:
     day = date(2026, 11, 25)
     talked = Episode(7, CONV, 0, 4, datetime(2026, 11, 25, 11, 0, tzinfo=UTC),
                      datetime(2026, 11, 25, 11, 40, tzinfo=UTC),
                      "사용자가 회사 발표 자료를 마무리했고, HIMARI가 마지막 장의 문장을 다듬자고 했다.", (1,), (2,),
                      MemoryOrigin.EXTRACTOR, None, 1, NOW, NOW)
-    data = writer.request_data(PERSONA, LIFE, [RecentEpisode(talked, "발표")], day=day, now=NOW, zone=SEOUL,
+    data = review.request_data(LIFE, [RecentEpisode(talked, "발표")], day=day, now=NOW, zone=SEOUL,
                                weather=WEATHER, topics=TOPICS, quiet=QUIET)
     assert data["arcs"] == [{"id": 5, "title": "커버곡 연습", "goal": "한 달 안에 신스팝 커버곡 하나를 완성한다.",
                              "started": "2026-11-18", "so_far": LIFE[4].so_far, "moved_on": ["2026-11-18"]}]
     assert data["work"] and data["quiet_hours"] == "23:00-08:00"
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
-                             max_output_tokens=writer.WRITER_MAX_OUTPUT_TOKENS)
-    text, usage = call(writer.model_input(data, options))
-    plan = writer.parse_answer(text, day, QUIET)  # every §3 check: shape, lengths, counts, plan dates
-    record("writer", text, usage, plans=len(plan.plans), facts=len(plan.facts), diary_chars=len(plan.diary),
+                             max_output_tokens=review.REVIEW_MAX_OUTPUT_TOKENS)
+    text, usage = call(self_run(options, LIFE, review.REVIEW_TASK, data))
+    thought, body = review.self_answer(text)  # character-mind §4.1: the thought, then the JSON
+    plan = review.parse_answer(body, day, QUIET)  # every §3 check: shape, lengths, counts, plan dates
+    record("review", text, usage, thought=thought, plans=len(plan.plans), diary_chars=len(plan.diary),
            times=list(plan.times), plan_arcs=list(plan.plan_arcs), mood=plan.mood, mood_reason=plan.mood_reason,
            arc=None if plan.arc is None else {"move": plan.arc.op.value, "id": plan.arc.entry_id,
                                               "title": plan.arc.title, "goal": plan.arc.goal,
@@ -147,10 +153,7 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
     assert plan.diary
     # character-state §2, §3: the optional mood and plan times, when given, are in the shape asked for — kept, not
     # dropped by the checks (an out-of-shape one would be left out silently)
-    body = text.strip()
-    if body.startswith("```"):
-        body = body.split("\n", 1)[1].rsplit("```", 1)[0]
-    raw = json.loads(body)
+    raw = review.json_object(body)
     given = raw.get("mood")
     if isinstance(given, dict) and str(given.get("name", "")).strip().lower() not in ("", "neutral"):
         assert plan.mood is not None, given
@@ -165,24 +168,57 @@ def test_the_story_writer_writes_a_day_that_passes_its_checks() -> None:
     arcs = plan.plan_arcs or (None,) * len(plan.plans)
     for asked, project, at in zip(raw.get("plans") or [], arcs, times):
         if isinstance(asked, dict) and asked.get("arc") is not None and at is not None \
-                and not writer.in_quiet_hours(time.fromisoformat(at), *QUIET):
+                and not review.in_quiet_hours(time.fromisoformat(at), *QUIET):
             assert project is not None, asked
 
 
-def test_the_worker_makes_a_piece_that_passes_its_checks() -> None:
-    """character-work §4: one worker call for the work plan of the open project, after its hour."""
+def test_the_facts_settled_from_a_diary_pass_their_checks() -> None:
+    """character-mind §5.3: one settle call on a diary that newly holds a friend's name."""
+    diary = entry(9, LifeKind.DIARY, "오후에 친구 유나가 새 앨범을 들고 찾아왔다. 같이 들으면서 선인장에 물을 줬다.",
+                  "2026-11-25")
+    options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
+                             max_output_tokens=settle.SETTLE_MAX_OUTPUT_TOKENS)
+    text, usage = call(review.model_input(settle.SETTLE_INSTRUCTIONS, settle.request_data(diary, LIFE), options,
+                                          "life-settle-input"))
+    facts = settle.parse_facts(text)  # every §5.3 check
+    record("settle", text, usage, facts=list(facts))
+
+
+def self_run(options: RequestOptions, life: tuple[LifeEntry, ...], task: str, data: Any) -> Any:
+    """character-mind §4.1: a self run's request — the persona and rules of a turn, the life as its state."""
+    inputs = PromptInputs(instructions=COMPANION_BASE, tool_catalog=(), events=(), tool_executions=(), snapshot=None,
+                          state_basis=PersistedStateBasis(0, 0, ()), observations={}, request_options=options,
+                          trigger_refs=(), system=SystemSpec(companion=True, life=True), companion_persona=PERSONA,
+                          now=NOW.astimezone(SEOUL), time_zone="Asia/Seoul", life=life)
+    return Composer().self_input(inputs, task, data)
+
+
+def test_the_work_steps_make_a_draft_then_a_piece_that_pass_their_checks() -> None:
+    """character-work §4, character-mind §4.4: the start step's draft, then the end step's piece from it."""
     plan = replace(LIFE[6], text="오늘 밤엔 후렴 가사 붙여 봐야지.", entry_id=9)
     life = (*LIFE[:6], plan, LIFE[7])
-    at = datetime(2026, 11, 25, 12, 10, tzinfo=UTC)  # 21:10 in Seoul: the 20:00 work time is over
-    data = work.request_data(PERSONA, life, plan, LIFE[4], now=at, zone=SEOUL)
+    begin = datetime(2026, 11, 25, 11, 5, tzinfo=UTC)  # 20:05 in Seoul
+    data = work.step_data(life, plan, LIFE[4], now=begin, zone=SEOUL)
     told = data["project"]
     assert data["recent_pieces"] and isinstance(told, dict) and told.get("so_far")
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
-                             max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
-    text, usage = call(work.model_input(data, options))
-    piece = work.parse_piece(text)  # every §4 check, the whole answer
-    record("worker", text, usage, piece_chars=len(piece.text), title=piece.title, summary=piece.summary,
-           so_far=piece.so_far, done=piece.done)
+                             max_output_tokens=work.START_MAX_OUTPUT_TOKENS)
+    text, usage = call(self_run(options, life, work.WORK_START_TASK, data))
+    thought, body = review.self_answer(text)
+    draft = work.parse_start(body)  # every §4.4 check
+    record("work_start", text, usage, thought=thought, title=draft.title, concept=draft.concept,
+           draft_chars=len(draft.text))
+    began = replace(LIFE[7], entry_id=10, text=draft.text, title=draft.title, summary=draft.concept, plan_id=9,
+                    draft=True)
+    at = datetime(2026, 11, 25, 12, 10, tzinfo=UTC)  # 21:10 in Seoul: the 20:00 work time is over
+    data = work.step_data((*life, began), plan, LIFE[4], now=at, zone=SEOUL, draft=began,
+                          remarks=("후렴은 좀 더 짧게 가면 어때?",))
+    options = replace(options, max_output_tokens=work.WORK_MAX_OUTPUT_TOKENS)
+    text, usage = call(self_run(options, life, work.WORK_END_TASK, data))
+    thought, body = review.self_answer(text)
+    piece = work.parse_piece(body)  # every §4 check, the whole answer
+    record("work_end", text, usage, thought=thought, piece_chars=len(piece.text), title=piece.title,
+           summary=piece.summary, so_far=piece.so_far, done=piece.done)
 
 
 def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:
@@ -209,3 +245,13 @@ def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:
     record("memory_pass", text, usage, self=[(c.op.value, c.text) for c in changes], notes=len(items))
     # new things HIMARI said of itself (a ukulele, a friend Miko); never the user's own facts
     assert any(c.op is LifeChangeOp.ADD and any(w in (c.text or "") for w in ("우쿨렐레", "미코")) for c in changes)
+
+
+def test_the_world_decides_events_that_pass_their_checks() -> None:
+    """character-mind §7: one world call for the day; 0 to 2 events, each a time outside the quiet hours."""
+    data = world.request_data(PERSONA, LIFE, day=date(2026, 11, 25), weather=WEATHER, topics=TOPICS, quiet=QUIET)
+    options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
+                             max_output_tokens=world.WORLD_MAX_OUTPUT_TOKENS)
+    text, usage = call(review.model_input(world.WORLD_INSTRUCTIONS, data, options, "life-world-input"))
+    events = world.parse_events(text, QUIET)  # every §7 check
+    record("world", text, usage, events=[(e.time_of_day, e.text) for e in events])

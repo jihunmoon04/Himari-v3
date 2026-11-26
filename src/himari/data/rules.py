@@ -10,7 +10,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 
-from himari.common import ContentBlock, FrozenMap, TextBlock, split_marks, tool_id_problem
+from himari.common import ContentBlock, ConversationId, FrozenMap, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
     PERSONA_FIELDS,
     PERSONA_HIDDEN_FIELDS,
@@ -20,7 +20,20 @@ from himari.data.api import (
     MAX_SO_FAR_CHARS,
     MAX_WORK_CHARS,
     MAX_WORK_SUMMARY_CHARS,
+    MAX_THOUGHT_CHARS,
+    MAX_THOUGHTS,
+    MAX_EVENT_CHARS,
+    WorldEvent,
+    WorkDraft,
+    THOUGHT_DAYS,
+    INTENT_DAYS,
     NEW_ARC,
+    ThoughtAbout,
+    LifeJob,
+    LifeWriteStart,
+    WORK_JOBS,
+    ThoughtChange,
+    ThoughtOp,
     WorkPiece,
     ArcMove,
     ArcOp,
@@ -613,8 +626,9 @@ def check_life_text(kind: LifeKind, text: object) -> str:
     text = text.strip()
     if not text:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a life entry needs some text")
-    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS,
-             LifeKind.ARC: MAX_ARC_CHARS, LifeKind.WORK: MAX_WORK_CHARS}.get(kind, MAX_LIFE_CHARS)
+    limit = {LifeKind.DIARY: MAX_DIARY_CHARS, LifeKind.BOND: MAX_BOND_CHARS, LifeKind.ARC: MAX_ARC_CHARS,
+             LifeKind.WORK: MAX_WORK_CHARS, LifeKind.THOUGHT: MAX_THOUGHT_CHARS,
+             LifeKind.EVENT: MAX_EVENT_CHARS}.get(kind, MAX_LIFE_CHARS)
     if len(text) > limit:
         raise DataError(DataErrorCode.TOO_LARGE, f"a {kind.value} is at most {limit} characters")
     return text
@@ -641,15 +655,106 @@ def check_life_persona(persona_id: object) -> int:
 def order_life(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
     """Facts first (the user's, then newest), then the arcs (character-world §4: the open
     ones, newest start first, then the closed ones, newest end first), then the dated
-    entries, newest date first."""
+    entries, newest date first, then the kept thoughts, newest first (character-mind §5.2)."""
     listed = list(entries)
     facts = sorted((e for e in listed if e.kind is LifeKind.FACT),
                    key=lambda e: (e.origin is not LifeOrigin.USER, -e.updated_at.timestamp(), -e.entry_id))
     arcs = sorted((e for e in listed if e.kind is LifeKind.ARC),
                   key=lambda e: (e.end_day is None, e.end_day or e.day or "", e.entry_id), reverse=True)
-    dated_ = sorted((e for e in listed if e.kind not in (LifeKind.FACT, LifeKind.ARC)),
+    dated_ = sorted((e for e in listed if e.kind not in (LifeKind.FACT, LifeKind.ARC, LifeKind.THOUGHT)),
                     key=lambda e: (e.day or "", e.kind is LifeKind.DIARY, e.entry_id), reverse=True)
-    return (*facts, *arcs, *dated_)
+    thoughts = sorted((e for e in listed if e.kind is LifeKind.THOUGHT),
+                      key=lambda e: (e.created_at, e.entry_id), reverse=True)
+    return (*facts, *arcs, *dated_, *thoughts)
+
+
+def write_job(start: LifeWriteStart) -> LifeJob:
+    """character-mind §14.2: a life write's job as stored — the one given, else WORK_END with a plan and
+    REVIEW without; a work job names its plan and no other job has one, and why its model was chosen is
+    text (INVALID_ARGUMENT otherwise)."""
+    job = start.job if start.job is not None else LifeJob.WORK_END if start.plan_id is not None else LifeJob.REVIEW
+    if not isinstance(job, LifeJob) or (job in WORK_JOBS) != (start.plan_id is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a work job names its plan, and no other job has one")
+    if start.model_reason is not None and not isinstance(start.model_reason, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a model's reason is text")
+    return job
+
+
+def check_thought_note(thought: object) -> str:
+    """§4.1: a self run's thought as kept with its write: text, trimmed."""
+    if not isinstance(thought, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a thought is text")
+    return thought.strip()
+
+
+def expired_thoughts(entries: Iterable[LifeEntry], now: datetime) -> list[LifeEntry]:
+    """§5.2: the kept thoughts among ``entries`` expired by ``now`` (they retire once the review read them)."""
+    return [e for e in entries if e.kind is LifeKind.THOUGHT and not live_thought(e, now)]
+
+
+def check_world_event(event: object) -> WorldEvent:
+    """character-mind §7: a world's event as stored — its time HH:MM and one line of at most MAX_EVENT_CHARS."""
+    if not isinstance(event, WorldEvent):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not an event")
+    at = check_time_of_day(event.time_of_day)
+    if at is None or not isinstance(event.text, str) or any(c in event.text for c in "\r\n"):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an event has its time and one line")
+    return WorldEvent(at, check_life_text(LifeKind.EVENT, event.text))
+
+
+def world_entry(persona_id: int, day: str, event: WorldEvent, write_id: str, now: datetime) -> LifeEntry:
+    """§7: an event as an EVENT entry of the write's date (its id given as it is inserted)."""
+    return LifeEntry(0, persona_id, LifeKind.EVENT, day, event.text, LifeOrigin.WRITER, 1, now, now, source=write_id,
+                     time_of_day=event.time_of_day)
+
+
+def check_editable(entry: LifeEntry) -> None:
+    """character-mind §5.2: the user deletes a kept thought, never rewrites it (INVALID_ARGUMENT)."""
+    if entry.kind is LifeKind.THOUGHT:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a kept thought is only deleted")
+
+
+def live_thought(entry: LifeEntry, now: datetime) -> bool:
+    """character-mind §5.2: a kept thought not expired at ``now`` (any other entry: True)."""
+    return entry.kind is not LifeKind.THOUGHT or entry.expires_at is None or entry.expires_at > now
+
+
+def thought_expiry(about: ThoughtAbout, now: datetime) -> datetime:
+    """§5.2: when a thought kept at ``now`` stops being told: THOUGHT_DAYS, an intent INTENT_DAYS."""
+    return now + (INTENT_DAYS if about is ThoughtAbout.INTENT else THOUGHT_DAYS)
+
+
+def thought_change_outcome(change: object, thoughts: Sequence[LifeEntry]) -> str | None:
+    """§5.1, §5.2: why a memory pass's thought decision cannot be applied to the persona's live
+    kept ``thoughts``, or None when it can (a KEEP's room is made as it is kept)."""
+    if not isinstance(change, ThoughtChange) or not isinstance(change.op, ThoughtOp):
+        return "invalid"
+    if change.op is ThoughtOp.SAID:
+        return None if any(t.entry_id == change.entry_id for t in thoughts) else "unknown"
+    if not isinstance(change.about, ThoughtAbout):
+        return "invalid"
+    try:
+        text = check_life_text(LifeKind.THOUGHT, change.text)
+    except DataError:
+        return "invalid"
+    folded = fold(text)
+    return "duplicate" if any(fold(t.text) == folded for t in thoughts) else None
+
+
+def thought_room(thoughts: Sequence[LifeEntry]) -> LifeEntry | None:
+    """§5.2: the kept thought to retire so one more fits within MAX_THOUGHTS: the oldest, or None."""
+    if len(thoughts) < MAX_THOUGHTS:
+        return None
+    return min(thoughts, key=lambda t: (t.created_at, t.entry_id))
+
+
+def kept_thought(persona_id: int, change: ThoughtChange, conversation: str, source: str,
+                 now: datetime) -> LifeEntry:
+    """§5.2: a KEEP as stored (its id given as it is inserted), origin CONVERSATION."""
+    assert change.about is not None
+    return LifeEntry(0, persona_id, LifeKind.THOUGHT, None, check_life_text(LifeKind.THOUGHT, change.text),
+                     LifeOrigin.CONVERSATION, 1, now, now, ConversationId(conversation), tuple(change.sequences),
+                     source, about=change.about, expires_at=thought_expiry(change.about, now))
 
 
 def same_fact(text: str, facts: Iterable[LifeEntry]) -> bool:
@@ -966,9 +1071,40 @@ def work_project(plan: LifeEntry | None, persona_id: int, arcs: Sequence[LifeEnt
     project = next((a for a in arcs if a.entry_id == plan.arc_id and a.arc_open), None)
     if project is None:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan's project is not open")
-    if pieces:
+    if any(not p.draft for p in pieces):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan has a piece already")
     return project
+
+
+def check_draft_read(draft: LifeEntry | None, read: tuple[int, int] | None) -> None:
+    """character-mind §4.4 (review P0-3): the plan's live ``draft`` is the one the end step read — the same
+    entry at the same revision, or none when it read none; else VERSION_CONFLICT (a stale piece)."""
+    now = None if draft is None else (draft.entry_id, draft.revision)
+    if now != (None if read is None else (read[0], read[1])):
+        raise DataError(DataErrorCode.VERSION_CONFLICT, "the draft changed since the work's end read it")
+
+
+def check_work_draft(draft: object) -> WorkDraft:
+    """character-mind §4.4: a start step's draft as stored — its title as an arc's, its concept as a
+    piece's summary (one line) and its text as a WORK entry's."""
+    if not isinstance(draft, WorkDraft):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a work draft")
+    return WorkDraft(check_arc_title(draft.title), check_work_summary(draft.concept),
+                     check_life_text(LifeKind.WORK, draft.text))
+
+
+def draft_entry(plan: LifeEntry, project: LifeEntry, draft: WorkDraft, write_id: str, now: datetime) -> LifeEntry:
+    """§4.4: the draft as a WORK entry of the plan (its id given as it is inserted)."""
+    return LifeEntry(0, plan.persona_id, LifeKind.WORK, plan.day, draft.text, LifeOrigin.WRITER, 1, now, now,
+                     source=write_id, time_of_day=plan.time_of_day, title=draft.title, arc_id=project.entry_id,
+                     summary=draft.concept, plan_id=plan.entry_id, draft=True)
+
+
+def finished(draft: LifeEntry, piece: WorkPiece, write_id: str, now: datetime) -> LifeEntry:
+    """§4.4: the plan's draft filled by its end step: the piece, its title and summary, made ``now``."""
+    return dataclasses.replace(draft, text=piece.text, title=piece.title, summary=piece.summary, draft=False,
+                               origin=LifeOrigin.WRITER, revision=draft.revision + 1, created_at=now, updated_at=now,
+                               source=write_id)
 
 
 def work_entry(plan: LifeEntry, project: LifeEntry, piece: WorkPiece, write_id: str, now: datetime) -> LifeEntry:

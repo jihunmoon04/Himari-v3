@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
-from himari.common import CallId, CallRef, ModelToolResult, RunId, TextBlock
+from himari.common import CallId, CallRef, EventId, JsonValue, ModelToolResult, RunId, TextBlock, drop_thought
 from himari.data.api import (
     AssistantFinal,
     AssistantToolCalls,
@@ -39,6 +39,7 @@ from himari.prompt.api import (
     SourceNote,
     ToolGroupTurn,
     UserTurn,
+    json_data,
     time_line,
     wake_text,
 )
@@ -60,7 +61,8 @@ class Composer:
                     pass  # an older ask_user answer: rendered once, as its call's result (V3-P18)
                 case AssistantFinal(blocks=blocks):
                     continuation = inputs.continuations.get(event.origin_run_id) if event.origin_run_id else None
-                    history.append(AssistantTurn(event.event_id, blocks, continuation))
+                    # character-mind §3.4: a thought is never seen again in the history
+                    history.append(AssistantTurn(event.event_id, drop_thought(blocks), continuation))
                 case AssistantToolCalls():
                     if event.origin_run_id is None:
                         raise PromptError(PromptErrorCode.INCOMPLETE_HISTORY, f"{event.event_id} has no run")
@@ -104,6 +106,22 @@ class Composer:
             attachments=inputs.attachments,
         )
 
+    def self_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
+        """character-mind §4.1, §14.4: a self run's request — the same system text and runtime state as a
+        turn from ``inputs`` (no history, no Tools: a cache may still hold the system text), the task's
+        text and its data as the one user turn."""
+        quiet = replace(inputs, events=(), tool_executions=(), tool_catalog=(), snapshot=None)
+        return ModelInput(
+            stable_prefix=stable_prefix(quiet),
+            tool_catalog=(),
+            conversation=(UserTurn(EventId("self-run"), (TextBlock(task), TextBlock(json_data(data)))),),
+            current_state=current_state(quiet),
+            request_options=quiet.request_options,
+            trigger_refs=(),
+            prompt_basis=PromptBasis(0, quiet.state_basis.state_revision, state_key=state_key(quiet)),
+            source_notes=fit_notes(quiet.source_notes),
+        )
+
     @staticmethod
     def _group(
         run_id: RunId,
@@ -120,7 +138,7 @@ class Composer:
                     PromptErrorCode.INCOMPLETE_HISTORY, f"{run_id}/{call.call_id} is {status}"
                 )
             results[call.call_id] = record.model_result
-        return ToolGroupTurn(run_id, payload.commentary, calls, results)
+        return ToolGroupTurn(run_id, drop_thought(payload.commentary), calls, results)
 
 
 def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]:

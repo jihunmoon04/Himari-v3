@@ -89,6 +89,7 @@ from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
+from himari.life.api import MindModel
 from himari.prompt.api import HimariNow
 from himari.presence.api import (
     MAX_IDLE_SECONDS,
@@ -122,6 +123,8 @@ from himari.common import (
     TextBlock,
     TrustedScope,
     split_marks,
+    drop_thought,
+    thought_of,
     thaw,
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
@@ -140,6 +143,7 @@ from himari.data.api import (
     MAX_ARC_TITLE_CHARS,
     MAX_WORK_CHARS,
     MAX_WORK_SUMMARY_CHARS,
+    MAX_EVENT_CHARS,
     MAX_DIARY_CHARS,
     MAX_LIFE_CHARS,
     MAX_LIFE_FACTS,
@@ -183,6 +187,7 @@ from himari.data.api import (
     RecentEpisode,
     parse_note_date,
     Wake,
+    WakeRecord,
     WakeKind,
     WakeReason,
 )
@@ -697,11 +702,13 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
 def event_view(event: ConversationEvent,
                models: dict[RunId, str] | None = None, files: Files | None = None,
                presented: dict[CallRef, list[FileRecord]] | None = None,
-               memory: dict[CallRef, MemoryLine] | None = None) -> dict[str, Any]:
+               memory: dict[CallRef, MemoryLine] | None = None, *, device: bool = False) -> dict[str, Any]:
     """``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
     ``files``: the page's attachments by (id, version); ``presented``: the
     files each call gave the user (V3-P66 §7.3); ``memory``: what each
-    memory call changed (V3-P71 §7.1)."""
+    memory call changed (V3-P71 §7.1). character-mind §3.2: HIMARI's thought is
+    the owner's on the Web only — for a ``device`` the text leaves it out and
+    there is no ``thought``."""
     models = {} if models is None else models
     files = {} if files is None else files
     presented = {} if presented is None else presented
@@ -715,13 +722,17 @@ def event_view(event: ConversationEvent,
         # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
         view["origin"] = origin_view(payload.origin)
     elif isinstance(payload, AssistantFinal):
-        view["text"] = _text(payload.blocks)
+        view["text"] = _text(drop_thought(payload.blocks) if device else payload.blocks)
         view["display"] = display_view(view["text"])
+        if not device:
+            view["thought"] = thought_of(payload.blocks)  # character-mind §3.2: shown folded to the owner
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id  # the live output it replaces (V3-P73 §7.2)
     elif isinstance(payload, AssistantToolCalls):
-        view["text"] = _text(payload.commentary)
+        view["text"] = _text(drop_thought(payload.commentary) if device else payload.commentary)
         view["display"] = display_view(view["text"])
+        if not device:
+            view["thought"] = thought_of(payload.commentary)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
@@ -1035,10 +1046,29 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
         view |= {"title": entry.title, "status": "open" if entry.arc_open else "closed", "end_day": entry.end_day,
                  "ending": entry.ending, "so_far": entry.so_far}  # character-work §3: where the project stands
     elif entry.kind is LifeKind.WORK:  # character-work §4: a piece, its project and its plan
-        view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id}
+        view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id,
+                 "draft": entry.draft}  # character-mind §4.4: begun at the start step, not finished yet
+    elif entry.kind is LifeKind.THOUGHT:  # character-mind §5.2: what it is about and when it stops being told
+        view |= {"about": None if entry.about is None else entry.about.value,
+                 "expires_at": None if entry.expires_at is None else _time(entry.expires_at)}
     elif entry.arc_id is not None:  # a diary: the arc its day moved; a plan: its project (character-work §4)
         view["arc_id"] = entry.arc_id
     return view
+
+
+def wake_thought_view(wake: WakeRecord) -> dict[str, Any]:
+    """character-mind §3.3, §8 (review P1-5): a free wake that thought and then passed — never shown as a
+    wake, so the owner's Web gets its own dim line with the thought folded."""
+    return {"sequence": wake.event_sequence, "kind": "wake_thought", "created_at": _time(wake.created_at),
+            "text": wake_summary(wake.reasons), "thought": wake.thought,
+            # review 2: what really came of it — the model passed, or it was dropped (the user came first,
+            # or it was found unshown at a restart): the Web words the dropped one neutrally
+            "status": wake.status.value}
+
+
+def mind_view(mind: MindModel) -> dict[str, Any]:
+    """character-mind §8: a self run's model and why it was chosen."""
+    return {"model": mind.model_id, "reason": mind.reason}
 
 
 def mood_view(mood: HimariMood | None) -> dict[str, Any] | None:
@@ -1100,10 +1130,11 @@ LIFE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.TOO_LARGE: (422, "too_large", f"A fact or a plan is at most {MAX_LIFE_CHARS:,} characters, a diary "
                                                 f"{MAX_DIARY_CHARS:,}, an arc's goal {MAX_ARC_CHARS:,}, a title "
                                                 f"{MAX_ARC_TITLE_CHARS:,}, a work piece {MAX_WORK_CHARS:,} and its "
-                                                f"summary {MAX_WORK_SUMMARY_CHARS:,}."),
+                                                f"summary {MAX_WORK_SUMMARY_CHARS:,}, an event {MAX_EVENT_CHARS:,}."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_life", "An entry needs some text and no control characters; only "
                                                           "an arc or a work piece has a title, and only a piece a "
-                                                          "summary, each on one line."),
+                                                          "summary, each on one line; a kept thought is only "
+                                                          "deleted."),
 }
 
 
@@ -1582,6 +1613,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
         application, scope = himari(request), scope_of(conversation_id, who)
         events = await application.data.read_events(scope, after_sequence=after, limit=limit)
+        # character-mind §3.3 (review 2): the page's sequence range, as read (before anything is left out)
+        through = events[-1].sequence if len(events) == limit else None
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
             events = tuple(e for e in events if e.sequence not in unshown)
         writers = [e.origin_run_id for e in events
@@ -1598,8 +1631,15 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         presented = {call: list(records) for call, records in given.items()}
         results = [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
         memory = await application.memory_lines(scope, results) if results else {}
-        return {"items": [event_view(e, models, files, presented, memory) for e in events],
-                "last_sequence": events[-1].sequence if events else after}
+        # character-mind §3.2: a device never gets a thought
+        items = [event_view(e, models, files, presented, memory, device=by.device is not None) for e in events]
+        if by.device is None:  # §3.3 (review P1-5): a free wake that thought and passed: its thought, the owner's
+            # review 2: only those within the page's range, merged in order, the page held to ``limit``; the next
+            # page starts after the last row given (an event or a wake's line)
+            items += [wake_thought_view(w) for w in await application.data.wake_thoughts(
+                scope, after=after, through=through, limit=limit)]
+            items = sorted(items, key=lambda item: int(item["sequence"]))[:limit]
+        return {"items": items, "last_sequence": items[-1]["sequence"] if items else after}
 
     @app.get("/api/conversations/{conversation_id}/live")
     async def read_live(conversation_id: str, request: Request,
@@ -1793,14 +1833,21 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "work": {"running": application.life_writer is not None,
                          "next": None if (planned := application.next_work(entries)) is None
                          else life_entry_view(planned)},
+                # character-mind §8: the model HIMARI's self runs use now, and why
+                "mind": None if application.life_writer is None
+                else mind_view(await application.life_writer.mind_model(who)),
                 "mood": mood_view(mood), "now": now_view(now),
                 # character-world §2, §3: what the writer and a turn know of the real world, as told at startup
                 "world": {"weather": application.world_weather, "today": application.weather_today(),
-                          "topics": application.world_topics},
+                          "topics": application.world_topics,
+                          # character-mind §8: when the world next decides what happens to HIMARI
+                          "next": None if application.life_writer is None
+                          else _time(application.life_writer.next_world(datetime.now(UTC)))},
                 "entries": [life_entry_view(e) for e in entries],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                            "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
-                           "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS}}
+                           "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS,
+                           "event_chars": MAX_EVENT_CHARS}}
 
     @app.post("/api/life", status_code=201)
     async def add_life_fact(body: LifeFactBody, request: Request,

@@ -81,6 +81,7 @@ from himari.common import (
     TextBlock,
     TrustedScope,
     split_marks,
+    thought_of,
 )
 from himari.control.api import (
     ContextStatus,
@@ -575,7 +576,7 @@ class Driver:
         weather = None
         if self._life is not None and self._companion:  # character-life §5: the chosen persona's (L2: none's is 0)
             since = ((local or now).date() - LIFE_READ_DAYS).isoformat()
-            life = await self._life.list_life(scope.principal_id, persona_id, since=since)
+            life = await self._life.list_life(scope.principal_id, persona_id, since=since, now=now)
             if self._bond is not None:  # character-bond §5: with the life; its stage moves as it is read (§4)
                 bond = await self._bond.read_bond(scope.principal_id, persona_id, now=now, zone=self._zone_name)
             if self._moods is not None:  # character-state §2: while it is told (S1: MOOD_HOURS)
@@ -801,7 +802,12 @@ class Driver:
             live = held is not None and held.wake_id == wake.wake_id
             verdict = free_wake_verdict(normalized, wake.status, live=live)
             if verdict is not None:
-                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, verdict)
+                # character-mind §3.3 (review P1-5): a wake that thought, then passed, keeps its thought for
+                # the owner's Web (never spoken, never a device's)
+                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, verdict,
+                                                      thought=thought_of(normalized.blocks
+                                                                         if isinstance(normalized, NormalizedFinal)
+                                                                         else normalized.commentary))
                 return None
             if wake.status is WakeStatus.OPENED and held is not None and live and not await held.show():
                 await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, WakeStatus.DROPPED)
@@ -924,7 +930,10 @@ class Driver:
                     scope, run_id, payload.calls, stop=lambda: signal.cancel_requested,
                     read_only=scope.conversation_id in self._read_only,
                     turn=self._turn_sources.get(scope.conversation_id),
-                    capabilities=self._options_for(scope).tool_capabilities))
+                    capabilities=self._options_for(scope).tool_capabilities,
+                    # character-mind §14.7: the persona this turn chose, while its life is told
+                    persona_id=self._turn_personas.get(scope.conversation_id)
+                    if self._life is not None and self._companion else None))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
         if signal.cancel_requested:  # arrived as the group stopped (STOPPED, or blocked): close what did not start

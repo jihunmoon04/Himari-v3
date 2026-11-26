@@ -5,6 +5,10 @@
 // character-work §8: the Work group shows each project (open first) with its "so far" and its pieces (date and time,
 // title, summary, the full text when opened), which are edited and deleted like any entry; the status line says
 // whether the worker runs and the next work plan, and a work plan names its project.
+// character-mind §8: the Thoughts group lists the kept thoughts (what HIMARI thought and left unsaid: the text, what it
+// is about, when it was kept and when it stops being told); they are only deleted, never edited. The Events group lists
+// what the world made happen to HIMARI (date and time, text), edited and deleted like any entry; a line says when the
+// world next runs.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { ApiError } from "@/api/client";
@@ -28,12 +32,19 @@ const ORIGINS: Record<LifeOrigin, string> = {
   user: "yours",
 };
 const NAMES: Record<LifeKind, string> = {
-  fact: "fact", plan: "plan", diary: "diary entry", arc: "arc", work: "work piece",
+  fact: "fact", plan: "plan", diary: "diary entry", arc: "arc", work: "work piece", thought: "kept thought",
+  event: "event",
 };
+const ABOUT: Record<string, string> = {
+  user: "about you", self: "about itself", work: "about its work", intent: "something it wants to say or do",
+};
+const clock = (at: string) =>
+  new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const ARC_CHARS = 200; // as the server's, when it does not say
 const ARC_TITLE_CHARS = 60;
 const WORK_CHARS = 3000;
 const SUMMARY_CHARS = 200;
+const EVENT_CHARS = 200;
 const when = (entry: LifeEntry) => `${entry.day ?? ""}${entry.time ? ` ${entry.time}` : ""}`;
 
 function Editor({ entry, revision, limits, onDone }: {
@@ -48,7 +59,8 @@ function Editor({ entry, revision, limits, onDone }: {
   const [summary, setSummary] = useState(entry.summary ?? "");
   const [saving, setSaving] = useState(false);
   const max = entry.kind === "diary" ? limits.diary_chars : arc ? limits.arc_chars ?? ARC_CHARS
-    : piece ? limits.work_chars ?? WORK_CHARS : limits.chars;
+    : piece ? limits.work_chars ?? WORK_CHARS : entry.kind === "event" ? limits.event_chars ?? EVENT_CHARS
+    : limits.chars;
   const changed = text !== entry.text || (titled && title !== (entry.title ?? ""))
     || (piece && summary !== (entry.summary ?? ""));
   const save = async () => {
@@ -103,15 +115,23 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
   entry: LifeEntry; locked: boolean; onEdit: () => void; onDelete: () => void; project?: string | null;
 }) {
   const piece = entry.kind === "work";
+  const thought = entry.kind === "thought";
   return (
     <div className="flex items-start gap-2">
       <div className="min-w-0 flex-1">
-        {(entry.kind === "arc" || piece) && <p className="font-medium text-ink">{entry.title}</p>}
+        {(entry.kind === "arc" || piece) && (
+          <p className="font-medium text-ink">
+            {entry.title}
+            {piece && entry.draft && <span className="ml-2 text-xs font-normal text-wait">draft</span>}
+          </p>
+        )}
         {piece ? (
           <>
             <p className="break-words">{entry.summary}</p>
             <details className="mt-1">
-              <summary className="cursor-pointer text-xs text-muted">Show the piece</summary>
+              <summary className="cursor-pointer text-xs text-muted">
+                {entry.draft ? "Show the draft" : "Show the piece"}
+              </summary>
               <p className="mt-1 whitespace-pre-wrap break-words">{entry.text}</p>
             </details>
           </>
@@ -119,6 +139,8 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
         {entry.kind === "arc" && entry.so_far && <p className="mt-1 text-muted">So far: {entry.so_far}</p>}
         {entry.kind === "arc" && entry.ending && <p className="mt-1 text-muted">Ending: {entry.ending}</p>}
         <p className="mt-1 text-xs text-faint">
+          {thought ? `${entry.about ? `${ABOUT[entry.about] ?? entry.about} · ` : ""}kept ${clock(entry.created_at)}`
+            + `${entry.expires_at ? ` · until ${clock(entry.expires_at)}` : ""} · ` : ""}
           {entry.kind === "arc"
             ? `${entry.status === "closed" ? `${entry.day} – ${entry.end_day} · closed` : `since ${entry.day} · open`} · `
             : entry.day ? `${when(entry)} · ` : ""}
@@ -126,7 +148,9 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
           {ORIGINS[entry.origin]}
         </p>
       </div>
-      <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>Edit</Button>
+      {!thought && (
+        <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>Edit</Button>
+      )}
       <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger" disabled={locked} onClick={onDelete}>
         Delete
       </Button>
@@ -188,7 +212,7 @@ export function LifeSettings() {
   const [busy, setBusy] = useState(false);
   if (query.isLoading) return <p className="text-sm text-faint">Loading…</p>;
   if (query.error || !query.data) return <p role="alert" className="text-sm text-danger">Could not read HIMARI's life.</p>;
-  const { persona, enabled, writer, entries, limits, mood, now, world, work } = query.data;
+  const { persona, enabled, writer, entries, limits, mood, now, world, work, mind } = query.data;
   // character-work §8: the projects by id, for a work plan's project and the Work group
   const titles = new Map(entries.filter((entry) => entry.kind === "arc").map((entry) => [entry.id, entry.title]));
   const projectOf = (entry: LifeEntry) =>
@@ -265,11 +289,13 @@ export function LifeSettings() {
           HIMARI's life is not used now (the companion or life is off on this server); it is kept as it is.
         </p>
       )}
-      <p className="text-xs text-faint">Story writer: {writer.told}</p>
+      <p className="text-xs text-faint">Life runs: {writer.told}</p>
+      {mind && <p className="text-xs text-faint" aria-label="Mind">Mind: {mind.model} ({mind.reason})</p>}
       {workLine && <p className="text-xs text-faint" aria-label="Work status">{workLine}</p>}
       {world && (
         <p className="text-xs text-faint" aria-label="World">
           Weather: {world.today ?? world.weather} · The day's topics: {world.topics}
+          {world.next ? ` · World: next ${clock(world.next)}` : ""}
         </p>
       )}
       {(mood || now) && (
@@ -282,7 +308,9 @@ export function LifeSettings() {
       )}
       <Group title="Work" note="what HIMARI makes for its projects, a piece at each work plan"
         empty="No projects yet.">{projectBlocks}</Group>
-      <Group title="Arcs" note="the story writer starts, carries on and ends them; at most 2 open"
+      <Group title="Events" note="what the world made happen to HIMARI, at most 2 a day"
+        empty="Nothing happened lately.">{rows("event")}</Group>
+      <Group title="Arcs" note="HIMARI starts, carries on and ends them in its day's review; at most 2 open"
         empty="No arcs yet.">{rows("arc")}</Group>
       <Group title="Plans" empty="No plans.">{rows("plan")}</Group>
       <Group title="Facts" note={`${facts.length} of ${limits.facts}`} empty="No facts yet."
@@ -290,6 +318,8 @@ export function LifeSettings() {
         {facts}
       </Group>
       <Group title="Diary" empty="No diary yet.">{rows("diary")}</Group>
+      <Group title="Thoughts" note="what HIMARI thought and left unsaid, kept a few days from conversations"
+        empty="No kept thoughts.">{rows("thought")}</Group>
     </section>
   );
 }

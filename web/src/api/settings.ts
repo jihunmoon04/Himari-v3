@@ -50,8 +50,11 @@ export const deletePersona = (id: number, revision: number) =>
 export const choosePersona = (personaId: number | null, revision: number) =>
   put<PersonaChoice>("/api/personas/choice", { persona_id: personaId, revision });
 
-// arc: a thread over weeks, a project (character-world §4); work: a piece of a project (character-work §4)
-export type LifeKind = "fact" | "plan" | "diary" | "arc" | "work";
+// arc: a thread over weeks, a project (character-world §4); work: a piece of a project (character-work §4);
+// thought: what HIMARI thought and left unsaid, kept a few days (character-mind §5.2); event: what happened to it on a
+// day, decided by the world (character-mind §7: its day and time)
+export type LifeKind = "fact" | "plan" | "diary" | "arc" | "work" | "thought" | "event";
+export type ThoughtAbout = "user" | "self" | "work" | "intent";
 export type LifeOrigin = "writer" | "conversation" | "user"; // the story writer, a conversation, the user
 
 export interface LifeEntry {
@@ -76,6 +79,10 @@ export interface LifeEntry {
   so_far?: string | null;
   summary?: string | null;
   plan_id?: number | null;
+  draft?: boolean; // character-mind §4.4: a piece begun at its work time's start, not finished yet (summary: concept)
+  // character-mind §5.2: a kept thought's subject and when it stops being told (it is only deleted, never edited)
+  about?: ThoughtAbout | null;
+  expires_at?: string | null;
 }
 
 /** HIMARI's mood while it is told (character-state §2): a reply's last mood or the story writer's, with why. */
@@ -90,12 +97,16 @@ export interface Life {
   mood?: HimariMood | null; // null: none now (or the life is off)
   now?: HimariNow | null; // null: nothing now (or the life is off)
   // character-world §2, §3: whether the weather and the day's topics are used (as told at startup), today's weather
-  world?: { weather: string; today: string | null; topics: string };
-  entries: LifeEntry[]; // facts, arcs, then plans, work pieces and diaries, newest day first (the last 30 days on)
+  // character-mind §8: when the world next decides HIMARI's day (null: no life runs)
+  world?: { weather: string; today: string | null; topics: string; next?: string | null };
+  // facts, arcs, then plans, work pieces and diaries, newest day first (the last 30 days on), then the kept thoughts
+  entries: LifeEntry[];
   // character-work §8: whether the worker runs (with the story writer) and the next work plan
   work?: { running: boolean; next: LifeEntry | null };
+  // character-mind §8: the model HIMARI's self runs (the day's review) use now, and why; null: no life runs
+  mind?: { model: string; reason: string } | null;
   limits: { facts: number; chars: number; diary_chars: number; arc_chars?: number; arc_title_chars?: number;
-    work_chars?: number; summary_chars?: number };
+    work_chars?: number; summary_chars?: number; event_chars?: number };
 }
 
 export const readLife = () => get<Life>("/api/life");

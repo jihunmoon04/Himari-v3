@@ -504,6 +504,7 @@ def test_a_finished_piece_is_spoken_of_once_within_three_hours_and_may_pass() ->
     assert decide(made, frozenset(decided.keys)).reasons == ()  # once
     assert decide(situation(work=(piece(9, 181),))).reasons == ()  # past three hours
     assert decide(situation(work=(piece(9, 60),), device_id=None, device=None)).reasons == ()
+    assert decide(situation(work=(replace(piece(9, 60), draft=True),))).reasons == ()  # character-mind §4.4: a draft
 
 
 def test_a_finished_piece_waits_as_himaris_own_openings_do_and_counts_in_the_day() -> None:

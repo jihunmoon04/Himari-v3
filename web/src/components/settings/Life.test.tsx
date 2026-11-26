@@ -53,7 +53,8 @@ describe("the life screen", () => {
   it("says whose life it is and groups the entries by kind, with their dates and where they came from", async () => {
     await shown();
     expect(await screen.findByText("Friend's life")).toBeTruthy();
-    expect(screen.getByText(/Story writer: on \(deepseek/)).toBeTruthy();
+    expect(screen.getByText(/Life runs: on \(deepseek/)).toBeTruthy();
+    expect(screen.queryByLabelText("Mind")).toBeNull();
     expect(screen.queryByText(/not used now/)).toBeNull();
     expect(part("Facts").getByText("고양이를 무서워한다.")).toBeTruthy();
     expect(part("Facts").getByText("from a conversation")).toBeTruthy();
@@ -215,11 +216,70 @@ describe("an entry", () => {
         30, "냉각부 설계.\n증발열은 포신 뒤로.", 1, "냉각부", "냉각부 끝!"));
     });
 
+  it("marks a piece begun at its work time's start as a draft (character-mind §4.4)", async () => {
+    state.data = {
+      ...aLife(),
+      entries: [
+        { ...entry(11, "arc", "2026-11-10", "설정집 한 권", "writer"), title: "블랙홀 전자포", status: "open",
+          end_day: null },
+        { ...entry(31, "work", "2026-11-26", "첫 스케치.", "writer"), time: "20:00", title: "냉각부 스케치",
+          summary: "세 겹 방열판", arc_id: 11, plan_id: 21, draft: true },
+      ],
+    };
+    await shown();
+    const project = within(part("Work").getByLabelText("Project 블랙홀 전자포"));
+    expect(project.getByText("draft")).toBeTruthy();
+    expect(project.getByText("Show the draft")).toBeTruthy();
+    expect(project.getByText("세 겹 방열판")).toBeTruthy();
+  });
+
+  it("says which model HIMARI's self runs use and why (character-mind §8)", async () => {
+    state.data = { ...aLife(), mind: { model: "memory-model", reason: "the memory model (no companion conversation)" } };
+    await shown();
+    expect(screen.getByLabelText("Mind").textContent)
+      .toBe("Mind: memory-model (the memory model (no companion conversation))");
+  });
+
   it("says when the worker is off", async () => {
     state.data = { ...aLife(), work: { running: false, next: null } };
     await shown();
     expect(screen.getByLabelText("Work status").textContent).toBe("Work: off (it runs with the story writer)");
     expect(part("Work").getByText("No projects yet.")).toBeTruthy();
+  });
+
+  it("lists the kept thoughts with what they are about, and deletes but never edits one (character-mind §8)",
+    async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      state.data = {
+        ...aLife(),
+        entries: [{ ...entry(12, "thought", null, "요즘 지쳐 보인다.", "conversation"), about: "user",
+          expires_at: "2026-11-28T01:00:00+00:00" }],
+      };
+      await shown();
+      expect(part("Thoughts").getByText("요즘 지쳐 보인다.")).toBeTruthy();
+      expect(part("Thoughts").getByText(/^about you · kept .* · until .* · from a conversation$/)).toBeTruthy();
+      expect(part("Thoughts").queryByRole("button", { name: "Edit" })).toBeNull();
+      fireEvent.click(part("Thoughts").getByRole("button", { name: "Delete" }));
+      await waitFor(() => expect(deleteLife).toHaveBeenCalledWith(12, 1));
+      expect(part("Diary").getByText("No diary yet.")).toBeTruthy();
+      confirm.mockRestore();
+    });
+
+  it("lists what the world made happen under Events, edited like any entry, and when it next runs", async () => {
+    state.data = {
+      ...aLife(),
+      entries: [{ ...entry(14, "event", "2026-11-25", "택배가 늦게 왔다.", "writer"), time: "15:00" }],
+      world: { weather: "on", today: null, topics: "off", next: "2026-11-25T23:00:00+00:00" },
+    };
+    await shown();
+    expect(part("Events").getByText("택배가 늦게 왔다.")).toBeTruthy();
+    expect(part("Events").getByText("2026-11-25 15:00 · written by the story writer")).toBeTruthy();
+    expect(screen.getByLabelText("World").textContent).toContain("World: next");
+    fireEvent.click(part("Events").getByRole("button", { name: "Edit" }));
+    const text = await screen.findByLabelText("Entry text");
+    fireEvent.change(text, { target: { value: "택배가 일찍 왔다." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editLife).toHaveBeenCalledWith(14, "택배가 일찍 왔다.", 1));
   });
 
   it("is deleted only when confirmed", async () => {

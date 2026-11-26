@@ -90,35 +90,48 @@ function StepRow({ step, running }: { step: ToolStep; running: boolean }) {
   );
 }
 
+/** character-mind §3.2: HIMARI's thought, folded; the owner opens it. */
+function Thought({ text }: { text: string }) {
+  return (
+    <details className="mb-1 text-xs text-faint">
+      <summary className="cursor-pointer select-none">Thought</summary>
+      <p className="mt-1 whitespace-pre-wrap">{text}</p>
+    </details>
+  );
+}
+
 function WorkBlock({ item, running }: { item: Extract<Item, { kind: "work" }>; running: boolean }) {
   const [open, setOpen] = useState(running);
   const busy = running && item.steps.some((step) => stepState(step, true) === "running");
   return (
-    <div className="rounded-xl border border-line">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-muted hover:text-ink"
-      >
-        <ChevronRight className={cn("size-4 transition-transform", open && "rotate-90")} />
-        <span>
-          Activity · {item.steps.length} {item.steps.length === 1 ? "step" : "steps"}
-        </span>
-        {busy && <LoaderCircle className="size-3.5 animate-spin" />}
-      </button>
-      {open && (
-        <div className="space-y-2 border-t border-line px-2 py-2">
-          {item.notes.map((note, index) => (
-            <AssistantText key={index} text={note} className="px-2 text-sm text-muted" />
-          ))}
-          <ul className="space-y-0.5">
-            {item.steps.map((step) => (
-              <StepRow key={step.key} step={step} running={running} />
+    <div>
+      {item.thoughts?.map((thought, index) => <Thought key={index} text={thought} />)}
+      <div className="rounded-xl border border-line">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-muted hover:text-ink"
+        >
+          <ChevronRight className={cn("size-4 transition-transform", open && "rotate-90")} />
+          <span>
+            Activity · {item.steps.length} {item.steps.length === 1 ? "step" : "steps"}
+          </span>
+          {busy && <LoaderCircle className="size-3.5 animate-spin" />}
+        </button>
+        {open && (
+          <div className="space-y-2 border-t border-line px-2 py-2">
+            {item.notes.map((note, index) => (
+              <AssistantText key={index} text={note} className="px-2 text-sm text-muted" />
             ))}
-          </ul>
-        </div>
-      )}
+            <ul className="space-y-0.5">
+              {item.steps.map((step) => (
+                <StepRow key={step.key} step={step} running={running} />
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -139,6 +152,7 @@ export function Timeline({ items, live, running, conversation }: {
           case "answer":
             return (
               <div key={item.key} className="group">
+                {item.thought && <Thought text={item.thought} />}
                 <AssistantText text={item.text} />
                 <CopyButton text={item.text} />
               </div>
@@ -152,9 +166,10 @@ export function Timeline({ items, live, running, conversation }: {
               action={item.action} text={item.text} undo={item.undo} />;
           case "notice":
             return (
-              <p key={item.key} className="text-center text-xs text-faint">
-                {item.text}
-              </p>
+              <div key={item.key} className="text-center text-xs text-faint">
+                <p>{item.text}</p>
+                {item.thought && <Thought text={item.thought} />}
+              </div>
             );
         }
       })}

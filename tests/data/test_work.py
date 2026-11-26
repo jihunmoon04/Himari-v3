@@ -5,7 +5,7 @@ rewrites the project's "so far" and may close it; the user edits and retires pie
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from testkit import data_for, new_store, restart
@@ -21,12 +21,14 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     LifeEntry,
+    LifeJob,
     LifeKind,
     LifeOrigin,
     LifePlan,
     LifeWriteStart,
     LifeWriteStatus,
     RawReceived,
+    WorkDraft,
     WorkPiece,
 )
 from himari.data.memory import InMemoryData
@@ -173,6 +175,86 @@ def test_the_user_edits_a_pieces_text_title_and_summary_and_retires_it() -> None
         with refused(DataErrorCode.TOO_LARGE):
             await data.edit_life(ALICE, piece.entry_id, "x" * (MAX_WORK_CHARS + 1), expected_revision=3)
         await data.retire_life(ALICE, piece.entry_id, expected_revision=3)
+        assert [e for e in await data.list_life(ALICE, 1) if e.kind is LifeKind.WORK] == []
+
+    asyncio.run(scenario())
+
+
+def test_a_start_step_leaves_a_draft_its_end_fills_and_the_draft_never_counts_as_made() -> None:
+    """character-mind §4.4: one draft a plan, from a work_start write; the work_end write fills the same entry."""
+    async def scenario() -> None:
+        store = new_store()
+        data = data_for(store)
+        arc, plan = await planned(data)
+
+        async def begun(job: LifeJob) -> str:
+            write_id = await data.begin_life_write(ALICE, LifeWriteStart(1, "2026-11-25", "openrouter", "m", b"{}",
+                                                                         "application/json", 100,
+                                                                         plan_id=plan.entry_id, job=job))
+            await data.mark_life_write_dispatched(write_id)
+            await data.record_life_write(write_id, RawReceived(b"{}", "application/json", TokenUsage(10, 10)))
+            return write_id
+
+        sketch = WorkDraft("냉각부 스케치", "방열판 세 겹으로.", "첫 스케치. " * 10)
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.apply_work_start(await begun(LifeJob.WORK_END), sketch, now=NOW)  # not a start
+        start = await begun(LifeJob.WORK_START)
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.apply_work_write(start, PIECE, now=NOW)  # not an end
+        draft = await data.apply_work_start(start, sketch, now=NOW)
+        assert (draft.kind, draft.draft, draft.title, draft.summary, draft.text, draft.plan_id, draft.arc_id,
+                draft.day, draft.time_of_day, draft.source) == (
+            LifeKind.WORK, True, "냉각부 스케치", "방열판 세 겹으로.", ("첫 스케치. " * 10).strip(), plan.entry_id,
+            arc.entry_id, "2026-11-25", "20:00", start)
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.apply_work_start(await begun(LifeJob.WORK_START), sketch, now=NOW)  # one a plan
+        later = NOW + timedelta(hours=1)
+        end = await begun(LifeJob.WORK_END)
+        # review P0-3: a piece built on another draft (or on none) is stale and writes nothing
+        for stale in (None, (draft.entry_id, draft.revision - 1), (draft.entry_id + 1, draft.revision)):
+            with refused(DataErrorCode.VERSION_CONFLICT):
+                await data.apply_work_write(end, PIECE, now=later, draft_read=stale)
+        piece, project = await data.apply_work_write(end, PIECE, now=later,
+                                                     draft_read=(draft.entry_id, draft.revision))
+        assert (piece.entry_id, piece.draft, piece.text, piece.summary, piece.created_at, piece.source) == (
+            draft.entry_id, False, PIECE.text.strip(), PIECE.summary, later, end)
+        assert project.so_far == PIECE.so_far
+        data = data_for(restart(store))
+        (kept,) = [e for e in await data.list_life(ALICE, 1) if e.kind is LifeKind.WORK]
+        assert kept == piece
+        with refused(DataErrorCode.INVALID_ARGUMENT):
+            await data.apply_work_write(await begun(LifeJob.WORK_END), PIECE, now=later)  # finished already
+
+    asyncio.run(scenario())
+
+
+def test_a_draft_the_user_edits_or_deletes_while_the_end_waits_makes_its_piece_stale() -> None:
+    """Review P0-3: the end step's piece never lands over the user's edit (nor brings back a deleted draft)."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        _, plan = await planned(data)
+
+        async def begun(job: LifeJob) -> str:
+            write_id = await data.begin_life_write(ALICE, LifeWriteStart(1, "2026-11-25", "openrouter", "m", b"{}",
+                                                                         "application/json", 100,
+                                                                         plan_id=plan.entry_id, job=job))
+            await data.mark_life_write_dispatched(write_id)
+            await data.record_life_write(write_id, RawReceived(b"{}", "application/json", TokenUsage(10, 10)))
+            return write_id
+
+        draft = await data.apply_work_start(await begun(LifeJob.WORK_START),
+                                            WorkDraft("스케치", "세 겹.", "첫 스케치. " * 10), now=NOW)
+        read = (draft.entry_id, draft.revision)
+        end = await begun(LifeJob.WORK_END)  # the request is built from the draft as read
+        edited = await data.edit_life(ALICE, draft.entry_id, "내가 고친 스케치. " * 10, expected_revision=1)
+        with refused(DataErrorCode.VERSION_CONFLICT):
+            await data.apply_work_write(end, PIECE, now=NOW, draft_read=read)
+        (kept,) = [e for e in await data.list_life(ALICE, 1) if e.kind is LifeKind.WORK]
+        assert kept == edited and kept.draft  # the user's text stays
+        await data.retire_life(ALICE, edited.entry_id, expected_revision=edited.revision)
+        with refused(DataErrorCode.VERSION_CONFLICT):  # deleted meanwhile: not brought back
+            await data.apply_work_write(await begun(LifeJob.WORK_END), PIECE, now=NOW,
+                                        draft_read=(edited.entry_id, edited.revision))
         assert [e for e in await data.list_life(ALICE, 1) if e.kind is LifeKind.WORK] == []
 
     asyncio.run(scenario())

@@ -22,11 +22,15 @@ from himari.data.api import (
     PromptBasis,
     RawReceived,
     RunPreparation,
+    ThoughtAbout,
+    ThoughtChange,
+    ThoughtOp,
     UserMessage,
 )
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.memory.api import MemoryPassSettings, PassOutcome
-from himari.memory.passes import BOND_INSTRUCTIONS, MEMORY_PASS_INSTRUCTIONS, PASS_MAX_OUTPUT_TOKENS, SELF_INSTRUCTIONS
+from himari.memory.passes import (BOND_INSTRUCTIONS, MEMORY_PASS_INSTRUCTIONS, PASS_MAX_OUTPUT_TOKENS, SELF_INSTRUCTIONS,
+                                   THOUGHT_INSTRUCTIONS)
 from himari.memory.worker import MemoryPasses
 from himari.provider.api import NativeInvocationOutcome, NativeNoResponse, NativePreparedRequest, NormalizedFinal
 from himari.provider.scripted import Measured, RawBody, ScriptedAdapter
@@ -431,7 +435,7 @@ def test_with_himaris_life_a_live_pass_keeps_what_himari_said_of_itself_for_the_
         await turn(data, SCOPE, "I build HIMARI, the companion agent.", "나는 사실 고양이를 무서워해.")
         assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
         (asked,) = provider.prepared_inputs[1:]
-        assert asked.stable_prefix == (MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS,)
+        assert asked.stable_prefix == (MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS + "\n" + THOUGHT_INSTRUCTIONS,)
         shown = json.loads(asked.conversation[0].blocks[0].text)  # type: ignore[union-attr]
         assert shown["himari_facts"] == [{"id": f"f{known.entry_id}", "text": "바다를 좋아한다.", "written_by": "user"}]
         (pass_,) = await data.list_passes(SCOPE)
@@ -439,6 +443,42 @@ def test_with_himaris_life_a_live_pass_keeps_what_himari_said_of_itself_for_the_
         assert [(e.text, e.source_conversation, e.source_sequences, e.source) for e in said] == [
             ("고양이를 무서워한다.", SCOPE.conversation_id, (2,), pass_.pass_id)]
         assert len(await data.list_memories(ME)) == 1  # the notes as ever
+
+    asyncio.run(scenario())
+
+
+def test_with_himaris_life_a_live_pass_keeps_its_unsaid_thoughts_and_retires_the_said_ones() -> None:
+    """character-mind §5: the part's thoughts and the persona's kept ones go in; the thoughts kept and the
+    ones said apply after the pass did, for the persona chosen when it runs."""
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        lucy = await data.create_persona(ME, "Lucy", "이름: 루시.")
+        await data.choose_persona(ME, lucy.persona_id, 0)
+        await data.apply_thought_changes(ME, lucy.persona_id, [ThoughtChange(
+            ThoughtOp.KEEP, "다음엔 영화 얘기 해야지.", ThoughtAbout.INTENT, sequences=(9,))],
+            conversation=SCOPE.conversation_id, source="mpass_0", now=datetime.now(UTC))
+        (before,) = await data.list_life(ME, lucy.persona_id)
+        answer = {"notes": [BUILDS], "episode": None, "self": [],
+                  "thoughts": [{"text": "밤새운 게 걱정됐지만 말하지 않았다.", "about": "user", "evidence": [2]}],
+                  "said": [f"t{before.entry_id}"]}
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock(json.dumps(answer, ensure_ascii=False)),))],
+                                   memory_passes=True)
+        passes = MemoryPasses(data, provider, MemoryPassSettings("m", time_zone="Asia/Seoul"), Probe(),
+                              clock=lambda: datetime.now(UTC) + LATER, life=data, personas=data)
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.",
+                   "[[think]]또 밤새웠네. 걱정되지만 참자.[[/think]]영화 얘기 하자! 요즘 뭐 봤어?")
+        assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+        (asked,) = provider.prepared_inputs[1:]
+        shown = json.loads(asked.conversation[0].blocks[0].text)  # type: ignore[union-attr]
+        assert shown["himari_thoughts"] == [{"seq": 2, "thought": "또 밤새웠네. 걱정되지만 참자."}]
+        assert [t["id"] for t in shown["kept_thoughts"]] == [f"t{before.entry_id}"]
+        assert "걱정" not in shown["messages"][1]["text"]  # what was said only
+        (pass_,) = await data.list_passes(SCOPE)
+        (now_kept,) = await data.list_life(ME, lucy.persona_id)
+        assert (now_kept.text, now_kept.about, now_kept.source_sequences, now_kept.source) == (
+            "밤새운 게 걱정됐지만 말하지 않았다.", ThoughtAbout.USER, (2,), pass_.pass_id)
 
     asyncio.run(scenario())
 
@@ -465,7 +505,8 @@ def test_with_the_bond_a_live_pass_keeps_what_the_two_settled_for_the_chosen_per
         await turn(data, SCOPE, "I build HIMARI. 앞으로 나를 대장이라고 불러.", "좋아, 대장!")
         assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
         (asked,) = provider.prepared_inputs[1:]
-        assert asked.stable_prefix == (MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS + "\n" + BOND_INSTRUCTIONS,)
+        assert asked.stable_prefix == (MEMORY_PASS_INSTRUCTIONS + "\n" + SELF_INSTRUCTIONS + "\n" + THOUGHT_INSTRUCTIONS
+                                       + "\n" + BOND_INSTRUCTIONS,)
         shown = json.loads(asked.conversation[0].blocks[0].text)  # type: ignore[union-attr]
         assert shown["bond_entries"] == [{"id": f"b{known.entry_id}", "tag": "joke", "text": "감자 사건",
                                           "written_by": "user"}]
@@ -476,5 +517,25 @@ def test_with_the_bond_a_live_pass_keeps_what_the_two_settled_for_the_chosen_per
             BondTag.NAME, "사용자를 대장이라고 부른다.", LifeOrigin.CONVERSATION, SCOPE.conversation_id, (1, 2),
             pass_.pass_id)
         assert await data.list_bond(ME, 0) == ()  # the chosen persona's only
+
+    asyncio.run(scenario())
+
+
+def test_a_malformed_said_id_never_loses_the_passs_other_thought_decisions() -> None:
+    """Review P1-9: "t²" once raised after the cursor moved; now it is ignored and the thought is kept."""
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        answer = {"notes": [BUILDS], "episode": None, "self": [],
+                  "thoughts": [{"text": "밤새운 게 걱정됐다.", "about": "user", "evidence": [2]}],
+                  "said": ["t²", "t١"]}
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock(json.dumps(answer, ensure_ascii=False)),))],
+                                   memory_passes=True)
+        passes = MemoryPasses(data, provider, MemoryPassSettings("m", time_zone="Asia/Seoul"), Probe(),
+                              clock=lambda: datetime.now(UTC) + LATER, life=data, personas=data)
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.", "[[think]]또 밤새웠네.[[/think]]힘내!")
+        assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+        assert [e.text for e in await data.list_life(ME, 0)] == ["밤새운 게 걱정됐다."]
 
     asyncio.run(scenario())

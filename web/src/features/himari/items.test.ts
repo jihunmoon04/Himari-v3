@@ -104,3 +104,30 @@ describe("reduceLive", () => {
     expect(reduceLive(writing, { event: "snapshot", data: { run_id: "r1", text: "x", ended: true } }).text).toBe("");
   });
 });
+
+describe("HIMARI's thoughts (character-mind §3.2, §3.3)", () => {
+  it("keeps the thought of a first Run that called a Tool, folded on its work block (review P1-6)", () => {
+    const items = toItems([
+      event(1, "assistant_tool_calls", { run_id: "r1", thought: "날씨부터 보자.", text: "[[think]]날씨부터 보자.[[/think]]",
+        display: { text: "" }, calls: [{ call_id: "c", tool_id: "weather", arguments: {} }] }),
+      event(2, "tool_result", { run_id: "r1", call_id: "c", text: "맑음" }),
+      event(3, "assistant_final", { text: "맑대!", thought: null }),
+    ]);
+    const work = items[0];
+    if (work?.kind !== "work") throw new Error("work");
+    expect(work.thoughts).toEqual(["날씨부터 보자."]);
+    expect(work.notes).toEqual([]);
+  });
+
+  it("shows a free wake it let pass as a dim line with its thought (review P1-5)", () => {
+    const items = toItems([event(4, "wake_thought", { text: "spoke on its own", thought: "회의 중이다. 두자." })]);
+    expect(items).toEqual([{ kind: "notice", key: "4", text: "Let pass: spoke on its own", thought: "회의 중이다. 두자." }]);
+  });
+});
+
+describe("a wake dropped unshown (review 2)", () => {
+  it("is worded as not said, not as one the model let pass", () => {
+    const items = toItems([event(5, "wake_thought", { text: "spoke on its own", thought: "말할까 했다.", status: "dropped" })]);
+    expect(items).toEqual([{ kind: "notice", key: "5", text: "Not said: spoke on its own", thought: "말할까 했다." }]);
+  });
+});

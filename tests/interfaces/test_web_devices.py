@@ -24,7 +24,8 @@ from testkit import final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import MOODS, CallId, ConversationId, TextBlock, ToolCall, ToolId, TrustedScope  # noqa: E402
-from himari.data.api import MessageOrigin, OriginKind, UserMessage  # noqa: E402
+from himari.data.api import (MessageOrigin, OriginKind, UserMessage, WakeKind, WakeReason,  # noqa: E402
+                             WakeRecord, WakeStatus)
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import event_stream  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
@@ -1120,3 +1121,92 @@ def test_a_devices_character_starts_with_himaris_mood(server: Server) -> None:
     assert all(name != "mood" for name, _ in frames_of(server.client.get("/api/events").text))
     life = server.client.get("/api/life").json()
     assert life["mood"]["mood"] == "excited" and life["mood"]["source"] == "reply" and life["mood"]["reason"] is None
+
+
+def test_a_device_never_gets_himaris_thought_and_the_owners_web_does(server: Server) -> None:
+    """character-mind §3.2 (review P0-1): the raw text a device reads has the leading thought left out, and
+    there is no thought field; the owner's Web view keeps both (shown folded)."""
+    token = server.paired()
+    me = server.as_device(token)
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    server.provider.extend([final("[[think]]또 밤샜네. 잔소리는 참자.[[/think]][[mood:happy]]안녕!")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "hi"}, headers=me)
+    server.wait(cid)
+    (_, answer) = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
+    assert "thought" not in answer and "잔소리" not in answer["text"] and "think" not in answer["text"]
+    assert answer["display"]["text"] == "안녕!"
+    (_, owned) = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    assert owned["thought"] == "또 밤샜네. 잔소리는 참자." and owned["text"].startswith("[[think]]")
+
+
+def test_a_free_wake_that_thought_and_passed_leaves_its_thought_on_the_owners_web_only(server: Server) -> None:
+    """character-mind §3.3, §8 (review P1-5): never a wake line, never a device's; the owner sees a dim line
+    with the thought folded."""
+    token = server.paired()
+    me = server.as_device(token)
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    server.provider.extend([final("안녕!"), final("[[think]]회의 중인 것 같다. 지금은 두자.[[/think]][[pass]]")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "hi"}, headers=me)
+    server.wait(cid)
+    assert server.application is not None
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+
+    async def woke() -> None:
+        assert server.application is not None
+        await server.application.runner.submit_wake(scope, (WakeReason(WakeKind.FREE, step=1),), "d1", free=True)
+        await server.application.runner.wait(scope)
+
+    server.client.portal.call(woke)  # type: ignore[union-attr]
+    owned = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    assert [i["kind"] for i in owned] == ["user_message", "assistant_final", "wake_thought"]
+    assert owned[-1]["thought"] == "회의 중인 것 같다. 지금은 두자." and owned[-1]["text"]
+    later = server.client.get(f"/api/conversations/{cid}/events", params={"after": owned[-1]["sequence"]}).json()
+    assert later["items"] == []
+    seen = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
+    assert [i["kind"] for i in seen] == ["user_message", "assistant_final"]
+
+
+def test_passed_wakes_page_with_the_events_and_a_dropped_one_says_so(server: Server) -> None:
+    """Review 2: the wakes' lines merge with the events in sequence order within ``limit``, the next page from
+    the last row given; each says what came of it (passed, or dropped unshown)."""
+    token = server.paired()
+    me = server.as_device(token)
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    server.provider.extend([final("안녕!"), final("[[think]]첫째. 두자.[[/think]][[pass]]"),
+                            final("[[think]]둘째. 또 두자.[[/think]][[pass]]")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "hi"}, headers=me)
+    server.wait(cid)
+    assert server.application is not None
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+
+    async def woke(step: int) -> None:
+        assert server.application is not None
+        await server.application.runner.submit_wake(scope, (WakeReason(WakeKind.FREE, step=step),), "d1", free=True)
+        await server.application.runner.wait(scope)
+
+    for step in (1, 2):
+        server.client.portal.call(woke, step)  # type: ignore[union-attr]
+    seen: list[dict[str, Any]] = []
+    after = 0
+    while True:
+        page = server.client.get(f"/api/conversations/{cid}/events", params={"after": after, "limit": 1}).json()
+        assert len(page["items"]) <= 1
+        if not page["items"]:
+            break
+        seen += page["items"]
+        after = page["last_sequence"]
+    assert [i["kind"] for i in seen] == ["user_message", "assistant_final", "wake_thought", "wake_thought"]
+    assert [i["thought"] for i in seen[2:]] == ["첫째. 두자.", "둘째. 또 두자."]
+    assert [i["status"] for i in seen[2:]] == ["passed", "passed"]
+    whole = server.client.get(f"/api/conversations/{cid}/events", params={"limit": 3}).json()
+    assert [i["kind"] for i in whole["items"]] == ["user_message", "assistant_final", "wake_thought"]
+    assert whole["last_sequence"] == seen[2]["sequence"]
+
+
+def test_a_wake_dropped_unshown_keeps_its_thought_and_reads_as_dropped() -> None:
+    """Review 2: one recovered at a restart (or overtaken by the user) is DROPPED, not passed."""
+    record = WakeRecord("w1", OPERATOR, ConversationId("c"), 3, (WakeReason(WakeKind.FREE, step=1),), "d1",
+                        WakeStatus.DROPPED, datetime.now(UTC), datetime.now(UTC), thought="말할까 했다.")
+    view = web.wake_thought_view(record)
+    assert (view["status"], view["thought"], view["sequence"], view["kind"]) == (
+        "dropped", "말할까 했다.", 3, "wake_thought")

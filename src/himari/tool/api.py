@@ -129,6 +129,9 @@ class ToolContext(DeepFrozen):
     scope: TrustedScope  # an Environment Tool runs only where the Conversation has its kind
     turn: TurnSource | None = None  # V3-P91 §3.4: None when the Driver did not say (a resume after a restart)
     run_id: RunId | None = None  # the Run whose group this call is in (V3-P91 §3.1: one screen per Run)
+    # character-mind §6, §14.7: the persona the turn chose (its life is searched), set by the Driver — never from
+    # model output; None when HIMARI's life is not told (or the Driver did not say)
+    persona_id: int | None = None
 
 
 class SchemaError(ValueError):
@@ -270,8 +273,10 @@ class ToolDispatcher(Protocol):
         read_only: bool = False,
         turn: TurnSource | None = None,
         capabilities: frozenset[str] = frozenset(),
+        persona_id: int | None = None,
     ) -> GroupDispatchResult:
-        """``turn`` (V3-P91 §3.4): where the turn speaks, handed to each call's context.
+        """``turn`` (V3-P91 §3.4): where the turn speaks, handed to each call's context; so is
+        ``persona_id`` (character-mind §14.7: the turn's chosen persona while its life is told).
 
         ``capabilities`` (V3-P91 §3.2): the model capabilities of the turn, as given to the
         catalog. A call of a Tool that ``requires`` one the model lacks is DENIED as an

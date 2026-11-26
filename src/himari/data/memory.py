@@ -72,6 +72,12 @@ from himari.data.api import (
     together_days,
     LifeChange,
     LifeChangeOp,
+    ThoughtChange,
+    ThoughtOp,
+    LifeJob,
+    MAX_EVENTS_PER_DAY,
+    WorldEvent,
+    WorkDraft,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -980,6 +986,8 @@ class InMemoryData:
                 continue
             if entry.kind is LifeKind.BOND and entry.origin is not LifeOrigin.USER:  # character-bond §2: as notes
                 del self._store.life[key]
+            elif entry.kind is LifeKind.THOUGHT:  # character-mind §3.4: the thoughts kept from it go with it
+                del self._store.life[key]
             else:
                 self._store.life[key] = (replace(entry, source_conversation=None, source_sequences=(), source=None),
                                          retired)
@@ -1271,15 +1279,17 @@ class InMemoryData:
         return self._new_life(principal, fact)
 
     async def list_life(self, principal: PrincipalId, persona_id: int, *,
-                        since: str | None = None) -> tuple[LifeEntry, ...]:
+                        since: str | None = None, now: datetime | None = None) -> tuple[LifeEntry, ...]:
         persona_id = rules.check_life_persona(persona_id)
         since = None if since is None else rules.check_life_day(since)
+        at = now or datetime.now(UTC)
         open_arcs = {e.entry_id for (owner, _), (e, retired) in self._store.life.items()
                      if owner == principal and retired is None and e.arc_open}
         return rules.order_life(
             e for (owner, _), (e, retired) in self._store.life.items()
             if owner == principal and retired is None and e.persona_id == persona_id and e.kind is not LifeKind.BOND
-            and (e.kind is LifeKind.FACT or since is None or (e.day or "") >= since
+            and rules.live_thought(e, at)  # character-mind §5.2: until it expires
+            and (e.kind in (LifeKind.FACT, LifeKind.THOUGHT) or since is None or (e.day or "") >= since
                  or (e.kind is LifeKind.ARC and (e.end_day is None or e.end_day >= since))
                  or (e.kind is LifeKind.WORK and e.arc_id in open_arcs)))
 
@@ -1297,6 +1307,7 @@ class InMemoryData:
                         expected_revision: int, title: str | None = None,
                         summary: str | None = None) -> LifeEntry:
         entry = self._live_entry(principal, entry_id)
+        rules.check_editable(entry)
         text = rules.check_life_text(entry.kind, text)
         titled = rules.edited_title(entry, title)
         summed = rules.edited_summary(entry, summary)
@@ -1342,18 +1353,55 @@ class InMemoryData:
             outcomes.append("applied")
         return tuple(outcomes)
 
+    def _live_thoughts(self, principal: PrincipalId, persona_id: int, now: datetime) -> list[LifeEntry]:
+        return [e for (owner, _), (e, retired) in self._store.life.items()
+                if owner == principal and retired is None and e.persona_id == persona_id
+                and e.kind is LifeKind.THOUGHT and rules.live_thought(e, now)]
+
+    async def apply_thought_changes(self, principal: PrincipalId, persona_id: int,
+                                    changes: Sequence[ThoughtChange], *, conversation: ConversationId, source: str,
+                                    now: datetime) -> tuple[str, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        outcomes: list[str] = []
+        for change in changes:
+            thoughts = self._live_thoughts(principal, persona_id, now)
+            outcome = rules.thought_change_outcome(change, thoughts)
+            if outcome is not None:
+                outcomes.append(outcome)
+                continue
+            if change.op is ThoughtOp.SAID:  # character-mind §5.1: said now, so no longer unsaid
+                self._retire_life(principal, next(t for t in thoughts if t.entry_id == change.entry_id), now)
+            else:
+                if (old := rules.thought_room(thoughts)) is not None:
+                    self._retire_life(principal, old, now)
+                self._new_life(principal, rules.kept_thought(persona_id, change, conversation, source, now))
+            outcomes.append("applied")
+        return tuple(outcomes)
+
     async def life_principals(self, active_since: datetime) -> tuple[PrincipalId, ...]:
         return tuple(sorted({conv.owner for conv in self._store._conversations.values() if conv.trashed_at is None
                              and any(e.kind is EventKind.USER_MESSAGE and e.created_at >= active_since
                                      for e in conv.events)}))
 
-    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str) -> int:
+    async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
+                            job: LifeJob = LifeJob.REVIEW) -> int:
         return sum(1 for w in self._store.life_writes.values()
                    if w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
-                   and w.record.plan_id is None)
+                   and w.record.job is job)
 
-    async def work_attempts(self, principal: PrincipalId, plan_id: int) -> int:
-        return sum(1 for w in self._store.life_writes.values() if w.owner == principal and w.record.plan_id == plan_id)
+    async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
+        return sum(1 for w in self._store.life_writes.values()
+                   if w.owner == principal and w.record.plan_id == plan_id and w.record.job is job)
+
+    async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
+        return any(w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
+                   and w.record.job is job and w.record.status is LifeWriteStatus.APPLIED
+                   for w in self._store.life_writes.values())
+
+    async def note_life_thought(self, write_id: str, thought: str) -> None:
+        thought = rules.check_thought_note(thought)
+        row = self._life_write(write_id)
+        row.record = replace(row.record, thought=thought)
 
     async def life_usage(self, principal: PrincipalId, since: datetime) -> int:
         return sum(w.record.charged_tokens for w in self._store.life_writes.values()
@@ -1370,11 +1418,12 @@ class InMemoryData:
                 or not rules.check_plan_ref(start.plan_id)):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life write")
         persona_id, day = rules.check_life_persona(start.persona_id), rules.check_life_day(start.day)
+        job = rules.write_job(start)
         write_id = self._store.new_id("lwrite")
         self._store.life_writes[write_id] = _LifeWrite(principal, LifeWrite(
             write_id, persona_id, day, LifeWriteStatus.PREPARED, start.provider_key, start.model_id,
-            start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None, start.plan_id),
-            start.body)
+            start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None, start.plan_id,
+            job, start.model_reason), start.body)
         return write_id
 
     async def mark_life_write_dispatched(self, write_id: str) -> None:
@@ -1411,10 +1460,15 @@ class InMemoryData:
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
-        if row.record.plan_id is not None:
-            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is a worker's call")
+        if row.record.job is not LifeJob.REVIEW:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a review")
         principal, persona_id, day = row.owner, row.record.persona_id, row.record.day
         written: list[LifeEntry] = []
+        # character-mind §5.2: the kept thoughts the review read that have expired retire now
+        for old in rules.expired_thoughts((e for (owner, _), (e, retired) in self._store.life.items()
+                                           if owner == principal and retired is None and e.persona_id == persona_id),
+                                          now):
+            self._retire_life(principal, old, now)
         before = next((e for (owner, _), (e, retired) in self._store.life.items()
                        if owner == principal and retired is None and e.persona_id == persona_id
                        and e.kind is LifeKind.DIARY and e.day == day), None)
@@ -1446,6 +1500,39 @@ class InMemoryData:
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return tuple(written)
 
+    async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
+        checked = [rules.check_world_event(event) for event in events]
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.WORLD:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not the world's")
+        principal, persona_id, day = row.owner, row.record.persona_id, row.record.day
+        room = MAX_EVENTS_PER_DAY - sum(1 for (owner, _), (e, retired) in self._store.life.items()
+                                        if owner == principal and retired is None and e.persona_id == persona_id
+                                        and e.kind is LifeKind.EVENT and e.day == day)
+        kept = tuple(self._new_life(principal, rules.world_entry(persona_id, day, event, write_id, now))
+                     for event in checked[:max(0, room)])
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return kept
+
+    async def apply_settle_write(self, write_id: str, facts: Sequence[str], *,
+                                 now: datetime) -> tuple[LifeEntry, ...]:
+        texts = [rules.check_life_text(LifeKind.FACT, text) for text in facts]
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.SETTLE:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} does not settle facts")
+        kept: list[LifeEntry] = []
+        for text in texts:
+            added = self._add_fact(row.owner, LifeEntry(0, row.record.persona_id, LifeKind.FACT, None, text,
+                                                        LifeOrigin.WRITER, 1, now, now, source=write_id), dedupe=True)
+            if isinstance(added, LifeEntry):
+                kept.append(added)
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return tuple(kept)
+
     def _move_arc(self, principal: PrincipalId, persona_id: int, day: str, move: ArcMove, write_id: str,
                   now: datetime) -> tuple[int | None, LifeEntry | None]:
         """character-world §4: as SqliteData._move_arc."""
@@ -1470,11 +1557,14 @@ class InMemoryData:
         return [e for (owner, _), (e, retired) in self._store.life.items()
                 if owner == principal and retired is None and e.persona_id == persona_id and e.arc_open]
 
-    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime) -> tuple[LifeEntry, ...]:
+    async def apply_work_write(self, write_id: str, piece: WorkPiece, *, now: datetime,
+                               draft_read: tuple[int, int] | None = None) -> tuple[LifeEntry, ...]:
         piece = rules.check_work_piece(piece)
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.WORK_END:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a work's end")
         principal, persona_id, plan_id = row.owner, row.record.persona_id, row.record.plan_id
         found = None if plan_id is None else self._store.life.get((principal, plan_id))
         plan = None if found is None or found[1] is not None else found[0]
@@ -1483,10 +1573,34 @@ class InMemoryData:
                                           and e.plan_id == plan.entry_id]
         project = rules.work_project(plan, persona_id, self._open_arcs(principal, persona_id), pieces)
         assert plan is not None
-        made = self._new_life(principal, rules.work_entry(plan, project, piece, write_id, now))
+        draft = next((p for p in pieces if p.draft), None)  # character-mind §4.4: the start step's
+        rules.check_draft_read(draft, draft_read)  # review P0-3: never over the user's newer edit
+        made = (self._new_life(principal, rules.work_entry(plan, project, piece, write_id, now)) if draft is None
+                else self._put_life(principal, rules.finished(draft, piece, write_id, now)))
         moved = self._put_life(principal, rules.worked_on(project, plan, piece, now))
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return made, moved
+
+    async def apply_work_start(self, write_id: str, draft: WorkDraft, *, now: datetime) -> LifeEntry:
+        draft = rules.check_work_draft(draft)
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.WORK_START:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not a work's start")
+        principal, persona_id, plan_id = row.owner, row.record.persona_id, row.record.plan_id
+        found = None if plan_id is None else self._store.life.get((principal, plan_id))
+        plan = None if found is None or found[1] is not None else found[0]
+        pieces = [] if plan is None else [e for (owner, _), (e, retired) in self._store.life.items()
+                                          if owner == principal and retired is None and e.kind is LifeKind.WORK
+                                          and e.plan_id == plan.entry_id]
+        if pieces:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "the plan has a piece already")
+        project = rules.work_project(plan, persona_id, self._open_arcs(principal, persona_id), pieces)
+        assert plan is not None
+        made = self._new_life(principal, rules.draft_entry(plan, project, draft, write_id, now))
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return made
 
     @staticmethod
     def _end_write(row: _LifeWrite, status: LifeWriteStatus, error: str) -> None:
@@ -1789,7 +1903,8 @@ class InMemoryData:
         self._store.wakes[wake_id] = replace(record, status=WakeStatus.SPEAKING)
         return True
 
-    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus, *,
+                                  thought: str | None = None) -> None:
         if status not in (WakeStatus.PASSED, WakeStatus.DROPPED):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a hidden wake ends passed or dropped")
         conv = self._conv(scope)
@@ -1798,7 +1913,17 @@ class InMemoryData:
         if run.record.status is RunStatus.RECEIVED:  # one step, as the transaction: nothing above wrote
             run.record = replace(run.record, status=RunStatus.PROJECTED)
         if record.status is WakeStatus.OPENED:
-            self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC))
+            self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC), thought=thought)
+
+    async def wake_thoughts(self, scope: TrustedScope, *, after: int = 0, through: int | None = None,
+                            limit: int | None = None) -> tuple[WakeRecord, ...]:
+        self._conv(scope)
+        found = sorted((w for w in self._store.wakes.values()
+                        if w.conversation_id == scope.conversation_id and w.event_sequence > after
+                        and (through is None or w.event_sequence <= through)
+                        and w.thought is not None and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)),
+                       key=lambda w: w.event_sequence)
+        return tuple(found if limit is None else found[:max(0, limit)])
 
     async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
         self._run(self._conv(scope), run_id)

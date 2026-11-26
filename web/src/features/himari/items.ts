@@ -52,7 +52,8 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
         break;
       case "assistant_final":
         closeWork();
-        items.push({ kind: "answer", key, text: shown(event), model: event.model ?? null });
+        items.push({ kind: "answer", key, text: shown(event), model: event.model ?? null,
+          ...(event.thought ? { thought: event.thought } : {}) });
         break;
       case "assistant_tool_calls": {
         if (work === null) {
@@ -60,6 +61,8 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
           items.push(work);
         }
         const block: Extract<Item, { kind: "work" }> = work;
+        // character-mind §3.3 (review P1-6): a first Run that thought, then called a Tool, keeps its foldout
+        if (event.thought) block.thoughts = [...(block.thoughts ?? []), event.thought];
         if (shown(event).trim()) block.notes.push(shown(event));
         for (const call of event.calls ?? []) {
           const step: ToolStep = {
@@ -91,6 +94,11 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
       case "wake":
         closeWork();
         items.push({ kind: "notice", key, text: event.text ?? "" });
+        break;
+      case "wake_thought": // character-mind §3.3: a free wake it let pass (or one dropped unshown), with its thought
+        closeWork();
+        items.push({ kind: "notice", key, text: `${event.status === "dropped" ? "Not said" : "Let pass"}: ${event.text ?? ""}`,
+          ...(event.thought ? { thought: event.thought } : {}) });
         break;
       default:
         break; // a kind this page does not know yet

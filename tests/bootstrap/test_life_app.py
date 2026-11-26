@@ -5,17 +5,17 @@ model."""
 from __future__ import annotations
 
 import asyncio
-from datetime import time
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
 
 from himari.bootstrap.application import Application, LifeChanged, life_settings
 from himari.common import PrincipalId, TextBlock, TrustedScope
-from himari.data.api import NO_PERSONA, LifeKind
-from himari.life.api import LifeSettings
+from himari.data.api import NO_PERSONA, LifeKind, UserMessage
+from himari.life.api import LifeSettings, MindModel
 from himari.prompt.api import LIFE_RULE, state_block
-from himari.provider.api import NormalizedFinal
+from himari.provider.api import NormalizedFinal, ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter
 
 ME = PrincipalId("operator")
@@ -85,6 +85,65 @@ def test_the_web_adds_a_fact_only_to_the_persona_it_showed(tmp_path: Path) -> No
             await app.add_life_fact(ME, lucy.persona_id, "루시의 사실.")
             chosen, entries = await app.life(ME)
             assert chosen == lucy and [(e.kind, e.text) for e in entries] == [(LifeKind.FACT, "루시의 사실.")]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+class _Models(ScriptedAdapter):
+    """A standard model, a companion model checked for free wakes and a memory model."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._models = {
+            "standard-model": ProviderCapabilities("standard-model", speaks_first=True, context_tokens=100_000),
+            "companion-model": ProviderCapabilities("companion-model", image_input=True, screen_points=True,
+                                                    screen_tool=True, speaks_first=True, free_wake=True,
+                                                    companion=True, context_tokens=100_000),
+            "memory-model": ProviderCapabilities("memory-model", memory_passes=True, context_tokens=100_000),
+        }
+
+    def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
+        return self._models.get(model_id) or super().describe_capabilities(model_id)
+
+
+def test_a_self_run_uses_the_latest_companion_conversations_model_else_the_memory_model(tmp_path: Path) -> None:
+    """character-mind §4.1: the model of the conversation a wake would go to, when it is checked for free
+    wakes; else the memory model, with why."""
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "data", _Models(), model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)),
+                                     memory_model="memory-model", sandbox=False, cleanup_seconds=None)
+        try:
+            assert app.life_writer is not None
+            assert await app.mind_model(ME) == MindModel(None, reason="the memory model (no companion conversation)")
+            assert (await app.life_writer.mind_model(ME)).model_id == "memory-model"
+            scope = TrustedScope(ME, await app.create_conversation(ME, initial_model="companion-model"))
+            await app.data.append_event(scope, UserMessage((TextBlock("안녕"),)))
+            assert await app.mind_model(ME) == MindModel("companion-model", None, "the latest conversation's model")
+            assert (await app.life_writer.mind_model(ME)).model_id == "companion-model"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_remarks_are_the_users_words_in_the_latest_companion_conversation_meanwhile(tmp_path: Path) -> None:
+    """character-mind §4.4: what the user said while HIMARI worked, as text, oldest first."""
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "data", _Models(), model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)),
+                                     memory_model="memory-model", sandbox=False, cleanup_seconds=None)
+        try:
+            assert await app.remarks(ME, datetime.now(UTC) - timedelta(hours=1), datetime.now(UTC)) == ()
+            scope = TrustedScope(ME, await app.create_conversation(ME, initial_model="companion-model"))
+            before = datetime.now(UTC)
+            for said in ("방열판 세 겹은 과하지 않아?", "두 겹이 좋겠어"):
+                await app.data.append_event(scope, UserMessage((TextBlock(said),)))
+            assert await app.remarks(ME, before, datetime.now(UTC)) == ("방열판 세 겹은 과하지 않아?", "두 겹이 좋겠어")
+            assert await app.remarks(ME, datetime.now(UTC) + timedelta(seconds=1),
+                                     datetime.now(UTC) + timedelta(hours=1)) == ()
         finally:
             await app.close()
 

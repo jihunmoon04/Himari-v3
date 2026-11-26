@@ -7,9 +7,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from testkit import SCOPE, data_for, new_store, restart, user
+from testkit import SCOPE, data_for, final, new_store, restart, runtime, user
 
 from himari.bootstrap import Store
+from himari.control.runner import BackgroundRunner
 from himari.data.api import (
     REMINDER_ATTEMPTS,
     DataError,
@@ -412,3 +413,25 @@ def test_a_users_run_beside_an_older_free_wakes_group_is_no_wakes() -> None:
     assert asyncio.run(data.wake_of_run(SCOPE, users)) is None  # type: ignore[arg-type]
     after_tools = run(CompletedGroupRef(users))  # type: ignore[arg-type]
     assert asyncio.run(data.wake_of_run(SCOPE, after_tools)) is None  # type: ignore[arg-type]  # still the user's
+
+
+def test_wake_thoughts_are_read_only_within_the_page_range() -> None:
+    """Review 2: ``through`` and ``limit`` bound what is loaded, not only what is shown."""
+    rt = runtime([final("[[think]]하나.[[/think]][[pass]]"), final("[[think]]둘.[[/think]][[pass]]"),
+                  final("[[think]]셋.[[/think]][[pass]]")])[0]
+
+
+    runner = BackgroundRunner(rt.driver)
+
+    async def scenario() -> None:
+        for step in (1, 2, 3):
+            await runner.submit_wake(SCOPE, (WakeReason(WakeKind.FREE, step=step),), "d1", free=True)
+            await runner.wait(SCOPE)
+        every = await rt.data.wake_thoughts(SCOPE)
+        assert [w.thought for w in every] == ["하나.", "둘.", "셋."]
+        first, second, third = (w.event_sequence for w in every)
+        assert [w.thought for w in await rt.data.wake_thoughts(SCOPE, after=first, through=second)] == ["둘."]
+        assert [w.thought for w in await rt.data.wake_thoughts(SCOPE, limit=2)] == ["하나.", "둘."]
+        assert await rt.data.wake_thoughts(SCOPE, after=third) == ()
+
+    asyncio.run(scenario())

@@ -320,6 +320,88 @@ _MARK_PREFIX = re.compile(
 _MARK_SPECIAL = re.compile(r"[\[`\n]")
 INLINE_CODE_CHARS = 200
 
+# character-mind §3: HIMARI's thought before what it says, ``[[think]]…[[/think]]``
+# at the very start of an answer (after white space only). It is never shown:
+# ``scan_marks`` leaves it out. Its close must come within ``THINK_CHARS`` of
+# its open, else the thought is cut there (the same live and complete, so a
+# growing answer never waits for ever and shows what the whole one shows).
+THINK_OPEN = "[[think]]"
+THINK_CLOSE = "[[/think]]"
+THINK_CHARS = 600  # §3.1: a turn's or a wake's
+SELF_THINK_CHARS = 1_200  # §3.1: the day's review's and the work's
+
+
+def thought_end(text: str, *, complete: bool, limit: int = THINK_CHARS) -> tuple[int, int, int] | None:
+    """§3.2: where a leading thought lies in ``text`` — ``(start, end, after)``: its
+    words are ``text[start:end]`` and what is said starts at ``after`` (white space
+    after it skipped); ``(0, 0, 0)`` without one; None while a growing ``text``
+    cannot tell yet (only white space, part of the open, or a thought not closed
+    and within ``limit``)."""
+    n = len(text)
+    j = 0
+    # any Unicode white space (review P0-2: U+3000 too) and an invisible U+FEFF (review 2: a BOM), before the open only
+    while j < n and (text[j].isspace() or text[j] == "﻿"):
+        j += 1
+    if j == n:
+        return None if not complete else (0, 0, 0)
+    if not text.startswith(THINK_OPEN, j):
+        if not complete and THINK_OPEN.startswith(text[j:]):
+            return None
+        return (0, 0, 0)
+    start = j + len(THINK_OPEN)
+    close = text.find(THINK_CLOSE, start, start + limit + len(THINK_CLOSE))
+    if close != -1:
+        after = close + len(THINK_CLOSE)
+    elif n - start > limit + len(THINK_CLOSE) or complete:
+        if n - start <= limit + len(THINK_CLOSE):
+            return (start, n, n)  # never closed: all of it was thought
+        close = after = start + limit  # cut where it should have closed
+    else:
+        return None
+    k = after
+    while k < n and text[k].isspace():
+        k += 1
+    if k == n and not complete:
+        return None  # what follows may still be white space
+    return (start, close, k)
+
+
+def split_thought(text: str, *, limit: int = THINK_CHARS) -> tuple[str | None, str]:
+    """§3: a complete answer's leading thought (trimmed; None without one) and the
+    rest of it, raw (its other marks kept)."""
+    start, end, after = thought_end(text, complete=True, limit=limit) or (0, 0, 0)
+    if after == 0:
+        return None, text
+    return text[start:end].strip() or None, text[after:]
+
+
+def _first_text(blocks: tuple[ContentBlock, ...]) -> int | None:
+    return next((k for k, b in enumerate(blocks) if isinstance(b, TextBlock)), None)
+
+
+def thought_of(blocks: tuple[ContentBlock, ...]) -> str | None:
+    """§3.4: the thought an answer's blocks start with (in its first text block), or None."""
+    k = _first_text(blocks)
+    if k is None:
+        return None
+    block = blocks[k]
+    assert isinstance(block, TextBlock)
+    return split_thought(block.text)[0]
+
+
+def drop_thought(blocks: tuple[ContentBlock, ...]) -> tuple[ContentBlock, ...]:
+    """§3.4: an answer's blocks without the thought they start with (what the model sees again
+    in the history, and what is read of it). The same blocks when there is none."""
+    k = _first_text(blocks)
+    if k is None:
+        return blocks
+    block = blocks[k]
+    assert isinstance(block, TextBlock)
+    thought, rest = split_thought(block.text)
+    if rest is block.text:
+        return blocks
+    return (*blocks[:k], TextBlock(rest), *blocks[k + 1:])
+
 type Moods = tuple[tuple[int, str], ...]  # (at, mood)
 type Moves = tuple[tuple[int, int, int], ...]  # (at, x, y)
 
@@ -353,13 +435,19 @@ def scan_marks(rest: str, state: MarkScan, *, complete: bool) -> tuple[str, Mood
     """``split_marks`` from ``state`` on: ``rest`` is the raw text from
     ``state.raw``. The ``at`` of a mark counts from the start of the whole
     plain text. Returns the newly confirmed plain text, its moods and moves
-    and the state after it."""
+    and the state after it. A leading thought (character-mind §3) is left out:
+    from the start of the text, nothing is confirmed until it is known."""
     out: list[str] = []
     moods: list[tuple[int, str]] = []
     moves: list[tuple[int, int, int]] = []
     plain = state.plain
     fence, line_start = state.fence, state.line_start
     i, n = 0, len(rest)
+    if state.raw == 0:
+        thought = thought_end(rest, complete=complete)
+        if thought is None:
+            return "", (), (), state
+        i = thought[2]
 
     def emit(piece: str) -> None:
         nonlocal plain

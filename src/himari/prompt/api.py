@@ -45,9 +45,12 @@ from himari.common import (
     ToolCall,
     TrustedScope,
     thaw,
+    thought_of,
 )
 from himari.data.api import (
     MAX_IMAGE_BYTES_PER_REQUEST,
+    AssistantFinal,
+    AssistantToolCalls,
     MAX_IMAGES_PER_REQUEST,
     BOND_STAGES,
     BondSnapshot,
@@ -242,6 +245,9 @@ class CurrentStateProjection(DeepFrozen):
     # character-world §2: today's weather where the user is, one line, read with the life; None: not
     # told (no location, none read, or the life is off) — no world entry.
     weather: str | None = None
+    # character-mind §6: the thoughts of this conversation's last answers, newest first, told with the
+    # life (the kept ones are in ``life``); none and none kept: no himari_mind entry.
+    recent_thoughts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -252,6 +258,11 @@ class HimariNow(DeepFrozen):
     asleep: bool = False
     doing: str | None = None  # the plan's text
     since: str | None = None  # HH:MM: when it started
+    # character-mind §4.4: the draft the work plan's start step left (its title, concept and first DRAFT_SHOWN
+    # characters); None: not a work plan, or none begun
+    draft_title: str | None = None
+    concept: str | None = None
+    draft: str | None = None
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -466,6 +477,15 @@ class PromptComposer(Protocol):
     Raises PromptError(INCOMPLETE_HISTORY) rather than inventing results."""
 
     def compose(self, inputs: PromptInputs) -> ModelInput: ...
+
+
+class SelfComposer(Protocol):
+    """character-mind §4.1, §14.4: a self run — HIMARI alone, not a conversation's Run. Pure."""
+
+    def self_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
+        """The system text and the runtime state a turn composed from ``inputs`` has (its history and
+        Tools left out), with one user turn: the task's fixed text, then ``data`` as escaped JSON."""
+        ...
 
 
 class CompactionPlanner(Protocol):
@@ -750,7 +770,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         arcs.append({"title": entry.title, "goal": entry.text, **({"so_far": entry.so_far} if entry.so_far else {})})
         room -= size
     titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
-    pieces = sorted((e for e in entries if e.kind is LifeKind.WORK
+    pieces = sorted((e for e in entries if e.kind is LifeKind.WORK and not e.draft  # a draft is himari_now's
                      and (now is None or timedelta(0) <= now - e.created_at < timedelta(hours=WORK_HOURS))),
                     key=lambda e: (e.created_at, e.entry_id), reverse=True)[:WORK_SHOWN]
     work: list[dict[str, object]] = []
@@ -764,7 +784,13 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         if index == 0:
             item["text"] = entry.text if len(entry.text) <= WORK_TEXT_CHARS else entry.text[:WORK_TEXT_CHARS] + "…"
         work.append(item)
-    if not facts and not days and not plans and not arcs and not work:
+    # character-mind §7: what happened to HIMARI today whose time has passed (``now``'s date and clock)
+    events = [] if now is None else [
+        {"time": e.time_of_day, "text": e.text}
+        for e in sorted((e for e in entries if e.kind is LifeKind.EVENT and e.day == today
+                         and (e.time_of_day or "00:00") <= now.strftime("%H:%M")),
+                        key=lambda e: (e.time_of_day or "", e.entry_id))]
+    if not facts and not days and not plans and not arcs and not work and not events:
         return None
     data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
     if days:
@@ -775,6 +801,66 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         data["arcs"] = arcs
     if work:
         data["work"] = work
+    if events:
+        data["events"] = events
+    return data
+
+
+# character-mind §6: HIMARI's own thoughts in the runtime state, with the companion and life on: the thoughts of this
+# conversation's last answers (each history leaves them out) and the kept ones; LIFE_RULE says the user never knew them.
+MIND_ABOUT = "What you thought and left unsaid; the user does not know any of it."
+MIND_RECENT = 2  # §6: the thoughts of this conversation's last answers
+MIND_RECENT_CHARS = 800
+MIND_KEPT = 5  # §6: the kept thoughts, newest first
+MIND_KEPT_CHARS = 600
+
+
+def recent_thoughts(events: Sequence[ConversationEvent]) -> tuple[str, ...]:
+    """§3.4, §6: the thoughts the last MIND_RECENT answers with one began with, newest first."""
+    found: list[str] = []
+    for event in sorted(events, key=lambda e: e.sequence, reverse=True):
+        payload = event.payload
+        blocks = (payload.blocks if isinstance(payload, AssistantFinal)
+                  else payload.commentary if isinstance(payload, AssistantToolCalls) else None)
+        thought = None if blocks is None else thought_of(blocks)
+        if thought is not None:
+            found.append(thought)
+            if len(found) == MIND_RECENT:
+                break
+    return tuple(found)
+
+
+def himari_mind_data(recent: Sequence[str], entries: Sequence[LifeEntry],
+                     now: datetime | None = None) -> dict[str, object] | None:
+    """§6: ``recent`` (newest first) within MIND_RECENT_CHARS together — one past the room left is
+    cut with "…" — and the newest MIND_KEPT kept thoughts among ``entries`` that fit MIND_KEPT_CHARS,
+    each with what it is about and how many hours ago it was kept. None when both are empty."""
+    shown: list[str] = []
+    room = MIND_RECENT_CHARS
+    for thought in recent[:MIND_RECENT]:
+        if room <= 1:
+            break
+        shown.append(thought if len(thought) <= room else thought[:room - 1] + "…")
+        room -= len(shown[-1])
+    kept: list[dict[str, object]] = []
+    room = MIND_KEPT_CHARS
+    thoughts = sorted((e for e in entries if e.kind is LifeKind.THOUGHT), key=lambda e: (e.created_at, e.entry_id),
+                      reverse=True)
+    for entry in thoughts[:MIND_KEPT]:
+        if len(entry.text) > room:
+            continue
+        item: dict[str, object] = {"text": entry.text, "about": None if entry.about is None else entry.about.value}
+        if now is not None:
+            item["hours_ago"] = max(0, int((now - entry.created_at).total_seconds() // 3600))
+        kept.append(item)
+        room -= len(entry.text)
+    if not shown and not kept:
+        return None
+    data: dict[str, object] = {"about": MIND_ABOUT}
+    if shown:
+        data["recent"] = shown
+    if kept:
+        data["kept"] = kept
     return data
 
 
@@ -862,6 +948,7 @@ def himari_mood_data(mood: HimariMood, now: datetime | None = None) -> dict[str,
 # character-state §3: what HIMARI is doing now in the runtime state; LIFE_RULE says what to make of it.
 NOW_ABOUT = "What you are doing right now in your own life."
 NOW_MINUTES = 90  # S3: a timed plan is what HIMARI is doing this long after it starts
+DRAFT_SHOWN = 400  # character-mind §4.4: the start of the draft under way a turn is told
 
 
 def in_quiet(moment: time, start: time, end: time) -> bool:
@@ -888,7 +975,13 @@ def doing_now(entries: Sequence[LifeEntry], now: datetime, quiet: tuple[time, ti
             started.append((at, entry.entry_id, entry))
     if started:
         entry = max(started, key=lambda found: (found[0], found[1]))[2]
-        return HimariNow(doing=entry.text, since=entry.time_of_day)
+        # character-mind §4.4: the draft its start step left, while the work is under way
+        draft = next((e for e in entries if e.kind is LifeKind.WORK and e.draft and e.plan_id == entry.entry_id), None)
+        if draft is None:
+            return HimariNow(doing=entry.text, since=entry.time_of_day)
+        shown = draft.text if len(draft.text) <= DRAFT_SHOWN else draft.text[:DRAFT_SHOWN] + "…"
+        return HimariNow(doing=entry.text, since=entry.time_of_day, draft_title=draft.title, concept=draft.summary,
+                         draft=shown)
     if quiet is not None and in_quiet(now.time(), *quiet):
         return HimariNow(asleep=True)
     return None
@@ -901,6 +994,8 @@ def himari_now_data(now: HimariNow) -> dict[str, object]:
         data["doing"] = now.doing
         if now.since is not None:
             data["since"] = now.since
+        if now.draft is not None:  # character-mind §4.4: the piece under way
+            data["draft"] = {"title": now.draft_title, "concept": now.concept, "text": now.draft}
     elif now.asleep:
         data["asleep"] = True
     return data
@@ -984,11 +1079,26 @@ PERSONA_RULE = (
     "allows. When there is none, speak warmly and plainly, like a friend who knows them well, not like a service "
     "introducing itself."
 )
+# character-mind §3.1 (M2): right after PERSONA_RULE. A turn's first Run (and a wake's) thinks first, as a
+# flow of reactions rather than an analysis; the thought is never shown (common.scan_marks) nor seen again.
+THINK_RULE = (
+    "- Thinking first: begin your reply to a user message or a <wake> with your thought, [[think]]…[[/think]], "
+    "before anything else (before [[pass]] or a tool call too). It is your own inner flow, in your voice and in the "
+    "first person, two to four short sentences: what you notice, how you feel about it (a hesitation too), what "
+    "it brings to mind from what you know of them and of your own life, and what you mean to do. It is not an "
+    "analysis or a plan of the answer. No one sees it, the user included: never say it to them or repeat it in "
+    "your reply, and you may change your mind after it. After a tool result, do not think again: go on."
+)
 # Persona rules (2026-11-25, companion-persona §14): how long a reply is on every interface; SPEAKING_RULE
 # narrows it for the character's voice.
 TALKING_RULE = (
     "- Talking: reply the way a friend talks — a few sentences by default. Go longer, with lists or code, only "
     "when the user asks for detail or the task needs it. Introducing yourself and small talk stay short."
+)
+# character-mind §4.4: added to TALKING_RULE when HIMARI's life is told.
+WORK_TALK_NOTE = (
+    "When runtime_state.himari_now shows you at your own work and they talk to you, put it down and answer them; "
+    "you may mention what you were working on, naturally."
 )
 # V3-P108 §3.4: how a file is handed over lives in INTERFACE_RULE only.
 SPEAKING_RULE = (
@@ -1036,13 +1146,18 @@ LIFE_RULE = (
     "own day, plans and likes freely when it fits: in a greeting, when you speak first, or when it connects to "
     "what they said. Not in every reply, though: when they are talking about their own matters, stay with those. "
     "himari_life.work is what you made lately in your projects: you may share it or show it off, but do not read "
-    "it out at length unless they ask. "
+    "it out at length unless they ask. himari_life.events is what happened to you today so far, whether you wanted "
+    "it or not. "
     "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
     "what you are doing right now: when it says you are asleep and the user talks to you, you may answer briefly, "
-    "as if just woken; say what you are doing when they ask."
+    "as if just woken; say what you are doing when they ask. runtime_state.himari_mind is what you thought "
+    "inwardly and never said: the user does not know it. Never speak as if they did (\"as I said\"); to bring it "
+    "up, say it as if for the first time."
 )
 # character-life §5: added to FREE_RULE when HIMARI's life is told (no daily limit, owner 2026-11-25).
-FREE_LIFE_NOTE = "Instead of their task, you may also talk about your own day or plans from himari_life."
+# character-mind §4.2: a thought kept as something HIMARI wanted to say may be what a free wake brings up.
+FREE_LIFE_NOTE = ("Instead of their task, you may also talk about your own day or plans from himari_life, or bring "
+                  "up something you meant to say (a kept thought about intent in himari_mind).")
 # character-bond §5: right after LIFE_RULE (the bond is told with HIMARI's life). A relationship the persona
 # sets wins over the stage; days are marked once; nothing shared is made up.
 BOND_RULE = (
@@ -1410,6 +1525,9 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
     life = None if state.life is None else himari_life_data(state.life, state.now)
     if life is not None:
         data["himari_life"] = life
+    mind = None if state.life is None else himari_mind_data(state.recent_thoughts, state.life, state.now)
+    if mind is not None:  # character-mind §6
+        data["himari_mind"] = mind
     if state.bond is not None:
         data["bond"] = himari_bond_data(state.bond)
     if state.mood is not None:
