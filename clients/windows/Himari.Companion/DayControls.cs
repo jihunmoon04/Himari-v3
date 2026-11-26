@@ -13,19 +13,23 @@ public partial class MainWindow
     private bool serverDaySession;  // GET /api/device or hello said features.day_session = 1
     private string? himariSleep;  // the server's: awake, drowsy, asleep, half_asleep (null: not told)
     private readonly HashSet<string> closedDays = new();  // day sessions known closed (read only, §3.2)
+    // third review P1: a 409 day_closed may be the server's fence while a day closes, which it can also lift (a persona
+    // change): such a day is held off only for FenceHold; only the list or the day_session event close it for good
+    private readonly Dictionary<string, DateTime> fencedDays = new();
+    private static readonly TimeSpan FenceHold = TimeSpan.FromMinutes(1);
 
     /// <summary>What GET /api/device and hello say of the day: whether the server keeps it, and HIMARI's sleep now.</summary>
     private void DayFeature(JsonElement info)
     {
         serverDaySession = DaySession.Announced(info);
         himariSleep = serverDaySession ? DaySession.Sleep(Prop(Prop(info, "himari"), "sleep")) : null;
-        if (!serverDaySession) closedDays.Clear();
+        if (!serverDaySession) { closedDays.Clear(); fencedDays.Clear(); }
         ApplyDayControls();
     }
 
     private void ForgetDay()
     {
-        serverDaySession = false; himariSleep = null; closedDays.Clear();  // learnt again from the new server
+        serverDaySession = false; himariSleep = null; closedDays.Clear(); fencedDays.Clear();  // learnt again from the new server
         ApplyDayControls();
     }
 
@@ -58,10 +62,10 @@ public partial class MainWindow
     {
         if (!serverDaySession || Str(data, "conversation") is not { } id) return;
         if (Prop(data, "closed").ValueKind == JsonValueKind.True) { closedDays.Add(id); UpdateUnsentBubbles(); return; }
-        if (closedDays.Contains(id)) return;  // second review P2 5: a day known closed is never today's again
+        if (ClosedDay(id)) return;  // second review P2 5: a day known closed is never today's again
         RebindClosedUnsent(id);  // today's: what a closed day did not take goes there
         string? before = currentConversation;
-        bool follow = DaySession.Follow(before, id, before is not null && closedDays.Contains(before), targetNew: true, Input.Text);
+        bool follow = DaySession.Follow(before, id, ClosedDay(before), targetNew: true, Input.Text);
         var list = await LoadConversations(local, ct);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
         if (currentConversation != before) follow = false;  // the user picked another meanwhile
@@ -73,14 +77,15 @@ public partial class MainWindow
     /// the app has not listed yet (it opened while the app was away).</summary>
     private bool FollowDayOnHello(string? recent)
     {
-        if (!serverDaySession || recent is null || closedDays.Contains(recent)) return false;  // a closing day: wait (P2 5)
+        if (!serverDaySession || recent is null || ClosedDay(recent)) return false;  // a closing day: wait (P2 5)
         bool listed = (Conversations.ItemsSource as IEnumerable<Conversation>)?.Any(x => x.Id == recent) == true;
         string? current = currentConversation;
-        return DaySession.Follow(current, recent, current is not null && closedDays.Contains(current), targetNew: !listed, Input.Text);
+        return DaySession.Follow(current, recent, ClosedDay(current), targetNew: !listed, Input.Text);
     }
 
     /// <summary>Whether <paramref name="id"/> is a day known closed (a message cannot go there).</summary>
-    private bool ClosedDay(string? id) => serverDaySession && id is not null && closedDays.Contains(id);
+    private bool ClosedDay(string? id) => serverDaySession && id is not null
+        && (closedDays.Contains(id) || (fencedDays.TryGetValue(id, out var at) && DateTime.UtcNow - at < FenceHold));
 
     /// <summary>§3.2: the day shown closed. Today's session opens at its first need — GET /api/device opens it and names
     /// it (recent_conversation) — and the app goes there; the draft stays in the editor, and the unsent bubbles of closed
@@ -124,12 +129,12 @@ public partial class MainWindow
 
     /// <summary>§3.2, §18.11: a closed day refused this send — its message, or the screen uploaded for it (409
     /// <c>day_closed</c>, second review P2 8) — and recorded nothing. A screen taken for that day is dropped, the day is
-    /// marked closed for good (its unsent bubbles move to today's once known), and the app goes to today's when the server
+    /// held off as closed for FenceHold (for good once the list or the event says closed; its unsent bubbles move to today's once known), and the app goes to today's when the server
     /// names a different open session. The caller keeps the draft: the text (SendMessageCore's finally), the screen button.</summary>
     private void ClosedDayRefused(SendContext context, ServerClient local, LocalScreen? screen)
     {
         if (screen is not null) { unresolvedScreen = null; localScreens.Remove(screen.FileId); submittedScreen = null; submittedConversation = null; }
-        closedDays.Add(context.ConversationId);
+        fencedDays[context.ConversationId] = DateTime.UtcNow;  // closed for good only when the list or the event says so
         UpdateUnsentBubbles();
         if (context.IsCurrent(client, currentConversation, connected)) Status.Text = DaySession.ClosedNotice;
         _ = FollowToday(local);

@@ -1775,8 +1775,9 @@ class Application:
         if not name or len(name.encode("utf-8", "surrogatepass")) > MAX_RAW_NAME_BYTES:
             raise FileNameRefused(name[:40])
         cleaned = clean_file_name(name)
+        # character-day §3.2 (§19.1 item 38, third review): a closed day says so first, before any byte is read
+        await self.check_day_open(scope)
         await self._check_folder(scope)  # authorizes; FilesUnavailable without a place for uploads
-        await self.check_day_open(scope)  # character-day §3.2: before any byte is read
         if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         blob = await self.data.blobs.put(scope.principal_id, chunks, self.file_max_bytes)
