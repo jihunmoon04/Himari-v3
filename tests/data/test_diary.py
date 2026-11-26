@@ -229,3 +229,30 @@ def test_a_diarys_write_keeps_what_its_request_was_made_of() -> None:
         assert (found[bare].basis_sequence, found[bare].basis_at) == (None, None)
 
     asyncio.run(scenario())
+
+
+
+def test_a_skipped_write_is_final_and_tries_are_counted_from_a_moment() -> None:
+    """character-diary §5 (review 2, 1, 2, 5): a write never sent may be SKIPPED with why — final as APPLIED, charged
+    nothing; the tries of a job and date may be counted from a moment (``basis_at``)."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        at = datetime(2026, 11, 25, 18, 30, tzinfo=UTC)
+        write = await data.begin_life_write(ALICE, LifeWriteStart(
+            1, "2026-11-25", "p", "", b"", "", 0, job=LifeJob.AMEND, basis_at=at))
+        assert not await data.life_done(ALICE, 1, "2026-11-25", LifeJob.AMEND)
+        await data.skip_life_write(write, "nothing new after it")
+        (record,) = await data.list_life_writes(ALICE)
+        assert (record.status, record.error, record.charged_tokens) == (
+            LifeWriteStatus.SKIPPED, "skipped: nothing new after it", 0)
+        assert record.finished_at is not None and await data.life_done(ALICE, 1, "2026-11-25", LifeJob.AMEND)
+        with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.INVALID_STATE_TRANSITION):
+            await data.skip_life_write(write, "again")
+        for basis in (at - timedelta(hours=1), at + timedelta(hours=1), None):
+            await data.begin_life_write(ALICE, LifeWriteStart(1, "2026-11-25", "p", "m", b"{}", "j", 0,
+                                                              basis_at=basis))
+        assert await data.life_attempts(ALICE, 1, "2026-11-25") == 3
+        assert await data.life_attempts(ALICE, 1, "2026-11-25", since=at) == 1
+        assert await data.life_attempts(ALICE, 1, "2026-11-25", job=LifeJob.AMEND, since=at) == 1
+
+    asyncio.run(scenario())

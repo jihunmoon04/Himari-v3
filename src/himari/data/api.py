@@ -2277,6 +2277,9 @@ class LifeWriteStatus(Enum):
     APPLIED = "applied"
     FAILED = "failed"  # no usable answer (``error`` says why)
     INTERRUPTED = "interrupted"  # the process ended before it was done
+    # character-diary §5, §6: decided without a call, for good (``error`` says why: an amend with nothing new, of the
+    # user's diary, of a session in the Trash, given up…) — as final as APPLIED
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -2314,8 +2317,10 @@ class LifeWriteLog(Protocol):
         ...
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
-                            job: LifeJob = LifeJob.REVIEW) -> int:
-        """The writes of ``job`` made for this persona and date, whatever came of them (character-mind §14.2)."""
+                            job: LifeJob = LifeJob.REVIEW, since: datetime | None = None) -> int:
+        """The writes of ``job`` made for this persona and date, whatever came of them (character-mind §14.2);
+        character-diary §5: with ``since``, only those whose request was made of data read from then on
+        (``basis_at``)."""
         ...
 
     async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
@@ -2323,7 +2328,8 @@ class LifeWriteLog(Protocol):
         ...
 
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
-        """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED."""
+        """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED (character-diary
+        §5: or SKIPPED — decided for good without a call)."""
         ...
 
     async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
@@ -2423,6 +2429,11 @@ class LifeWriteLog(Protocol):
 
     async def fail_life_write(self, write_id: str, error: str) -> None:
         """A write not yet APPLIED, FAILED or INTERRUPTED becomes FAILED with why."""
+        ...
+
+    async def skip_life_write(self, write_id: str, reason: str) -> None:
+        """character-diary §5, §6: a PREPARED write (never sent) becomes SKIPPED with why, charged nothing — its job is
+        decided for that date for good. INVALID_STATE_TRANSITION unless PREPARED."""
         ...
 
     async def interrupt_life_writes(self) -> int:

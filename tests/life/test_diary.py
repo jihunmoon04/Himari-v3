@@ -16,6 +16,7 @@ import pytest
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -274,16 +275,33 @@ async def slept_last_night(data: InMemoryData) -> None:
     await data.end_sleep(ME, sleep.sleep_id, at=seoul(25, 8, 0), how=WokeBy.SCHEDULE)
 
 
+def session_closed(data: InMemoryData, at: datetime | None) -> None:
+    """The day session CONV as Data reads it: closed at ``at`` (None: still open)."""
+    original = getattr(data, "_unpatched_read", data.read_conversation)
+    data._unpatched_read = original  # type: ignore[attr-defined]
+
+    async def read_conversation(scope: TrustedScope) -> Any:
+        if scope.conversation_id != CONV:
+            return await original(scope)
+        return SimpleNamespace(conversation_id=CONV, day_session="2026-11-25", closed_at=at)
+
+    data.read_conversation = read_conversation  # type: ignore[method-assign]
+
+
 async def closed_the_day(data: InMemoryData, *, session: bool = True) -> None:
     """HIMARI fell asleep at 00:30 and the day closed at 03:30 in that sleep (the session CONV, when it had one)."""
     sleep = await data.open_sleep(ME, NO_PERSONA, at=seoul(26, 0, 30), how=FellBy.SCHEDULE)
     before = DayBefore("2026-11-25", fell_at=seoul(26, 0, 30), conversation_id=CONV if session else None)
     await data.note_closing(ME, NO_PERSONA, sleep.sleep_id, at=seoul(26, 3, 30), before=before if session else None)
+    if session:
+        session_closed(data, seoul(26, 3, 30))
 
 
 def kept(*script: object, **more: Any) -> tuple[InMemoryData, ScriptedAdapter, LifeWriter, list[object]]:
-    """``setup`` with the day keeper on (character-diary §6)."""
-    return setup(*script, settings=KEPT, **more)
+    """``setup`` with the day keeper on (character-diary §6), its day session CONV open."""
+    found = setup(*script, settings=KEPT, **more)
+    session_closed(found[0], None)
+    return found
 
 
 def said_events(data: InMemoryData, *moments: datetime, held_until: datetime | None = None) -> None:
@@ -469,7 +487,10 @@ def test_after_its_tries_the_amend_gives_up_and_the_facts_settle() -> None:
         for _ in range(3):
             assert await writer.amend(ME) is WriteOutcome.FAILED
             clock.now += timedelta(minutes=10)
-        assert await writer.amend(ME) is WriteOutcome.GAVE_UP
+        assert await writer.amend(ME) is WriteOutcome.NOTHING  # its tries spent: skipped, kept for good
+        skipped = (await data.list_life_writes(ME))[0]
+        assert (skipped.job, skipped.status, skipped.error) == (LifeJob.AMEND, LifeWriteStatus.SKIPPED,
+                                                                "skipped: given up after its tries")
         assert await writer.settle(ME) is WriteOutcome.WRITTEN
 
     asyncio.run(scenario())
@@ -522,6 +543,7 @@ def test_review_p1_2_a_session_over_two_nights_settles_both_diaries() -> None:
         sleep = await data.open_sleep(ME, NO_PERSONA, at=seoul(27, 0, 30), how=FellBy.SCHEDULE)
         await data.note_closing(ME, NO_PERSONA, sleep.sleep_id, at=seoul(27, 3, 30),
                                 before=DayBefore("2026-11-25", fell_at=seoul(27, 0, 30), conversation_id=CONV))
+        session_closed(data, seoul(27, 3, 30))
         said_events(data, seoul(25, 22, 0), held_until=seoul(26, 23, 0))
         clock.now = seoul(27, 3, 31)
         assert await writer.amend(ME) is WriteOutcome.NOTHING  # nothing came after the 26th's
@@ -616,8 +638,9 @@ def test_review_p1_4_two_events_in_one_minute_are_amended_and_a_request_never_co
         monkeypatch.setattr(review, "amend_data", cannot)
         for _ in range(3):
             assert await writer.amend(ME) is WriteOutcome.FAILED
-        assert await writer.amend(ME) is WriteOutcome.GAVE_UP
-        failed = [w for w in await data.list_life_writes(ME) if w.job is LifeJob.AMEND]
+        assert await writer.amend(ME) is WriteOutcome.NOTHING  # its tries spent: skipped for good
+        failed = [w for w in await data.list_life_writes(ME) if w.job is LifeJob.AMEND
+                  and w.status is LifeWriteStatus.FAILED]
         assert len(failed) == 3 and all(w.error is not None and "not composed" in w.error for w in failed)
         assert all(w.charged_tokens == 0 for w in failed)
         assert await writer.settle(ME) is WriteOutcome.WRITTEN  # never waiting for ever
@@ -708,5 +731,128 @@ def test_review_p2_11_a_diary_and_an_amend_applied_in_a_session_are_told_for_the
         await closed_the_day(data)
         assert await writer.amend(ME) is WriteOutcome.WRITTEN
         assert told_of == [(ME, CONV), (ME, CONV)]
+
+    asyncio.run(scenario())
+
+
+
+# --- the second review of H-86 (Codex, 2026-11-27): one regression each -----------------------------
+
+
+def trashed(data: InMemoryData) -> None:
+    """The day session CONV in the Trash: Data never reads it."""
+    async def read_conversation(scope: TrustedScope) -> Any:
+        raise DataError(DataErrorCode.NOT_FOUND, scope.conversation_id)
+
+    data.read_conversation = read_conversation  # type: ignore[method-assign]
+
+
+def test_review2_1_a_later_closing_never_forgets_a_delayed_amend() -> None:
+    """The 25th's amend waits (its round did not come); the next night's closing has no session and replaces the
+    handoff — the 25th's diary still gets its amend, and only then its facts."""
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, _, writer, _ = kept(day_answer(), amend_answer(), final('{"facts": []}'),
+                                  link=Link(session(), closed=session()), clock=clock)
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        said_events(data, seoul(25, 23, 10))
+        await closed_the_day(data)  # the 25th's session closed at 26 03:30 — no amend round yet
+        night = await data.current_sleep(ME, NO_PERSONA)
+        assert night is not None
+        await data.end_sleep(ME, night.sleep_id, at=seoul(26, 8, 10), how=WokeBy.SCHEDULE)
+        sleep = await data.open_sleep(ME, NO_PERSONA, at=seoul(27, 0, 30), how=FellBy.SCHEDULE)
+        await data.note_closing(ME, NO_PERSONA, sleep.sleep_id, at=seoul(27, 3, 30), before=None)
+        assert (await data.read_day_state(ME, NO_PERSONA)).before is None
+        clock.now = seoul(27, 3, 31)
+        assert await writer.settle(ME) is WriteOutcome.NOTHING  # its amend is not decided
+        assert await writer.amend(ME) is WriteOutcome.WRITTEN
+        assert await writer.settle(ME) is WriteOutcome.WRITTEN
+        assert jobs(await data.list_life_writes(ME)) == ["review", "amend", "settle"]
+
+    asyncio.run(scenario())
+
+
+def test_review2_2_a_session_restored_from_the_trash_never_reopens_its_amend() -> None:
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, provider, writer, _ = kept(day_answer(), final('{"facts": []}'), amend_answer(),
+                                         link=Link(session(), closed=session()), clock=clock)
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        said_events(data, seoul(25, 23, 10))
+        clock.now = seoul(26, 3, 31)
+        await closed_the_day(data)
+        trashed(data)
+        assert await writer.amend(ME) is WriteOutcome.NOTHING
+        skipped = (await data.list_life_writes(ME))[0]
+        assert (skipped.job, skipped.status, skipped.error) == (
+            LifeJob.AMEND, LifeWriteStatus.SKIPPED, "skipped: its day session is not readable")
+        assert await writer.settle(ME) is WriteOutcome.WRITTEN
+        session_closed(data, seoul(26, 3, 30))  # restored, closed as it was
+        sent = len(provider.prepared_inputs)
+        assert await writer.amend(ME) is WriteOutcome.NOTHING and len(provider.prepared_inputs) == sent
+        assert jobs(await data.list_life_writes(ME)) == ["review", "settle"]
+
+    asyncio.run(scenario())
+
+
+def test_review2_3_a_diary_the_user_deleted_is_never_written_again() -> None:
+    """The 25th's diary was written (in the session) and the user deleted it: neither the same evening's review nor
+    the closing's recovery the next evening writes it again."""
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, _, writer, _ = kept(day_answer(), day_answer(), link=Link(session(), closed=session()), clock=clock)
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        diary = next(e for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.DIARY)
+        await data.retire_life(ME, diary.entry_id, expected_revision=diary.revision)
+        clock.now = seoul(25, 23, 0)
+        assert await writer.write(ME) is WriteOutcome.NOTHING
+        await closed_the_day(data)
+        clock.now = seoul(26, 22, 30)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN  # the 26th's, never the 25th's again
+        reviews = [w.day for w in reversed(await data.list_life_writes(ME)) if w.job is LifeJob.REVIEW]
+        assert reviews == ["2026-11-25", "2026-11-26"]
+
+    asyncio.run(scenario())
+
+
+def test_review2_4_the_recovery_window_is_measured_from_the_closing() -> None:
+    """Closed at 26 03:30: at 28 02:30 (47 hours on) the 25th's missing diary is still written; past 48 hours it is
+    not."""
+    async def scenario() -> None:
+        for at, recovered in ((seoul(28, 2, 30), True), (seoul(28, 3, 31), False)):
+            clock = Clock(seoul(25, 22, 40))
+            data, _, writer, _ = kept(final("no"), final("no"), final("no"), day_answer(),
+                                      link=Link(session(), closed=session()), clock=clock)
+            await tonight(data)
+            for _ in range(3):
+                assert await writer.write(ME) is WriteOutcome.FAILED
+            await closed_the_day(data)
+            clock.now = at
+            assert await writer.write(ME) is WriteOutcome.WRITTEN
+            assert (await data.list_life_writes(ME))[0].day == ("2026-11-25" if recovered else "2026-11-27")
+
+    asyncio.run(scenario())
+
+
+def test_review2_5_the_recovery_tries_are_counted_by_the_store_whatever_else_was_written() -> None:
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, _, writer, _ = kept(*[final("no")] * 6, day_answer(), link=Link(session(), closed=session()),
+                                  clock=clock)
+        await tonight(data)
+        for _ in range(3):
+            assert await writer.write(ME) is WriteOutcome.FAILED
+        await closed_the_day(data)
+        clock.now = seoul(26, 3, 31)
+        for _ in range(3):
+            assert await writer.write(ME) is WriteOutcome.FAILED
+        for i in range(61):  # other jobs' writes, newer than the tries
+            await data.begin_life_write(ME, LifeWriteStart(NO_PERSONA, "2026-11-20", "p", "m", b"{}", "j", 0,
+                                                           job=LifeJob.WORLD, basis_at=seoul(26, 4, 0)))
+        assert await writer.write(ME) is WriteOutcome.GAVE_UP
+        assert len([w for w in await data.list_life_writes(ME, limit=200) if w.job is LifeJob.REVIEW]) == 6
 
     asyncio.run(scenario())

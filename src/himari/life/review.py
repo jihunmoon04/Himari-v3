@@ -156,21 +156,29 @@ AMEND_TASK = (
 
 def diary_due(now: datetime, zone: tzinfo, write_at: time, plans: Sequence[LifeEntry],
               fell_at: datetime | None = None) -> date:
-    """character-diary §4, §16.1, §16.3: the latest date whose diary is due — tonight's (D, ``current_night``) once
-    its diary slot (among ``plans``) has started, once HIMARI fell asleep after D 18:00 (``fell_at``: its latest
-    sleep), or, with no diary slot that night, from the write time on (``write_at_of``: an early-morning time is
-    that night's end); else yesterday's (D−1: an earlier missed day is not filled in)."""
+    """character-diary §4, §16.1, §16.3: the latest date whose diary is due — tonight's (D, ``current_night``), else
+    the night before's, else the one before that (an earlier missed day is not filled in). A night's diary is due
+    once its diary slot (among ``plans``) has started, once HIMARI fell asleep after its 18:00 (``fell_at``: its
+    latest sleep), or, with no diary slot that night, from its write time (``write_at_of``) — each the real moment,
+    so a write time after 05:00 never makes a date due early at the night's rollover (review 2, 6)."""
     local = now.astimezone(zone)
     night = night_of(local) or local.date()
+    for candidate in (night, night - timedelta(days=1)):
+        if night_due(candidate, local, zone, write_at, plans, fell_at):
+            return candidate
+    return night - timedelta(days=2)
+
+
+def night_due(night: date, now: datetime, zone: tzinfo, write_at: time, plans: Sequence[LifeEntry],
+              fell_at: datetime | None) -> bool:
+    """character-diary §4, §16.1: whether the night of ``night``'s diary is due at ``now`` (see ``diary_due``)."""
     slot = next((s for e in plans if e.diary_slot and (s := plan_span(e, zone)) is not None
                  and diary_night(s[0]) == night), None)
-    if slot is not None and slot[0] <= local:
-        return night
+    if slot is not None and slot[0] <= now:
+        return True
     if fell_at is not None and datetime.combine(night, DIARY_EARLIEST, tzinfo=zone) <= fell_at <= now:
-        return night
-    if slot is None and local >= write_at_of(night, write_at, zone):
-        return night
-    return night - timedelta(days=1)
+        return True
+    return slot is None and now >= write_at_of(night, write_at, zone)
 
 
 def write_at_of(night: date, write_at: time, zone: tzinfo) -> datetime:

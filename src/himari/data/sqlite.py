@@ -2978,10 +2978,15 @@ class SqliteData:
             return tuple(PrincipalId(r["owner"]) for r in rows)
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
-                            job: LifeJob = LifeJob.REVIEW) -> int:
+                            job: LifeJob = LifeJob.REVIEW, since: datetime | None = None) -> int:
         with self._tx() as tx:
-            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?",
-                         principal, persona_id, day, LifeJob(job).value)
+            if since is None:
+                row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?",
+                             principal, persona_id, day, LifeJob(job).value)
+            else:  # character-diary §5: timestamps are fixed-width UTC text, so text order is time order
+                row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?"
+                             " AND basis_at IS NOT NULL AND basis_at >= ?", principal, persona_id, day,
+                             LifeJob(job).value, _timestamp(since))
             assert row is not None
             return int(row["n"])
 
@@ -3006,7 +3011,8 @@ class SqliteData:
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
         with self._tx() as tx:
             return tx.one("SELECT 1 FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?"
-                          " AND status='applied' LIMIT 1", principal, persona_id, day, LifeJob(job).value) is not None
+                          " AND status IN ('applied', 'skipped') LIMIT 1", principal, persona_id, day,
+                          LifeJob(job).value) is not None
 
     async def note_life_thought(self, write_id: str, thought: str) -> None:
         thought = rules.check_thought_note(thought)
@@ -3291,6 +3297,14 @@ class SqliteData:
                        " charged_tokens=CASE WHEN status='prepared' THEN 0 ELSE charged_tokens END"
                        " WHERE write_id=? AND status IN ('prepared', 'dispatched', 'received')",
                        error[:200], _timestamp(datetime.now(UTC)), write_id)
+
+    async def skip_life_write(self, write_id: str, reason: str) -> None:
+        with self._tx() as tx:
+            self._life_write_row(tx, write_id)
+            if tx.execute("UPDATE life_writes SET status='skipped', error=?, finished_at=?, charged_tokens=0"
+                          " WHERE write_id=? AND status='prepared'", f"skipped: {reason}"[:200],
+                          _timestamp(datetime.now(UTC)), write_id).rowcount != 1:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is not prepared")
 
     async def interrupt_life_writes(self) -> int:
         with self._tx() as tx:

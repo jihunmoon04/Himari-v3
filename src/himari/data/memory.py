@@ -1542,10 +1542,11 @@ class InMemoryData:
                                      for e in conv.events)}))
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
-                            job: LifeJob = LifeJob.REVIEW) -> int:
+                            job: LifeJob = LifeJob.REVIEW, since: datetime | None = None) -> int:
         return sum(1 for w in self._store.life_writes.values()
                    if w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
-                   and w.record.job is job)
+                   and w.record.job is job and (since is None or (w.record.basis_at is not None
+                                                                  and w.record.basis_at >= since)))
 
     async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
                               plan_id: int | None = None) -> LifeWrite | None:
@@ -1561,7 +1562,7 @@ class InMemoryData:
 
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
         return any(w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
-                   and w.record.job is job and w.record.status is LifeWriteStatus.APPLIED
+                   and w.record.job is job and w.record.status in (LifeWriteStatus.APPLIED, LifeWriteStatus.SKIPPED)
                    for w in self._store.life_writes.values())
 
     async def note_life_thought(self, write_id: str, thought: str) -> None:
@@ -1810,6 +1811,13 @@ class InMemoryData:
 
     async def fail_life_write(self, write_id: str, error: str) -> None:
         self._end_write(self._life_write(write_id), LifeWriteStatus.FAILED, error)
+
+    async def skip_life_write(self, write_id: str, reason: str) -> None:
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.PREPARED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        row.record = replace(row.record, status=LifeWriteStatus.SKIPPED, error=f"skipped: {reason}"[:200],
+                             charged_tokens=0, finished_at=datetime.now(UTC))
 
     async def interrupt_life_writes(self) -> int:
         open_ = [w for w in self._store.life_writes.values()

@@ -442,3 +442,17 @@ def test_review_p2_8_sleep_fragments_are_never_merged_and_carried_events_are_kep
     found = passed_events(entries, DAY, seoul(25, 22, 0), slept, SEOUL, since=seoul(24, 21, 15))
     assert [(f.entry.entry_id, f.while_asleep) for f in found] == [(1, False), (2, True)]
     assert [f.entry.entry_id for f in passed_events(entries, DAY, seoul(25, 22, 0), slept, SEOUL)] == [2]
+
+
+
+def test_review2_6_a_write_time_after_05_00_never_fires_early_at_the_rollover() -> None:
+    """A write time of 08:00 with no diary slot: the night of the 25th is due at 26 08:00 — at 05:01 the latest due
+    date is still the 24th's."""
+    at = time(8, 0)
+    assert diary_due(seoul(26, 4, 59), SEOUL, at, ()) == date(2026, 11, 24)
+    assert diary_due(seoul(26, 5, 1), SEOUL, at, ()) == date(2026, 11, 24)
+    assert diary_due(seoul(26, 7, 59), SEOUL, at, ()) == date(2026, 11, 24)
+    assert diary_due(seoul(26, 8, 0), SEOUL, at, ()) == DAY
+    assert diary_due(seoul(26, 23, 0), SEOUL, at, ()) == DAY
+    assert diary_due(seoul(27, 8, 0), SEOUL, at, ()) == date(2026, 11, 26)
+    assert diary_due(seoul(26, 5, 1), SEOUL, at, (), seoul(25, 23, 0)) == DAY  # it fell asleep: due then
