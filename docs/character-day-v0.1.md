@@ -541,7 +541,7 @@ In-memory 저장소도 같게 한다.
 | --- | --- |
 | `GET /api/conversations` | 항목에 `day_session`(날짜 또는 null), `closed`(bool) |
 | `POST /api/conversations/{id}/messages` | 닫힌 하루 세션이면 `409 day_closed`. 답 없이 받은 메시지는 `202`에 `{"asleep": "none"}` |
-| 대화 이벤트 | 사용자 메시지에 `while_asleep`(주인 Web만). 하루 세션에는 `diary` 항목(`life_writes`에서, 주인 Web만, 시각 순서로 끼움, 9단계 `wake_thought`와 같은 방식) |
+| 대화 이벤트 | 사용자 메시지에 `while_asleep`(주인 Web만). 하루 세션에는 `diary` 항목(`life_writes`에서, 주인 Web만, 시각 순서로 끼움, 9단계 `wake_thought`와 같은 방식). 쪽은 `{items, last_sequence, more}`(§19.1 36) |
 | `GET /api/life` | 일정 항목에 `minutes`·`plan_kind`·`plan_state`·`reason`. `sleep`: 지금 `SleepView`. `sleeps`: 최근 14번 |
 | `POST /api/life/plans`, `PUT /api/life/plans/{id}` | 일정 쓰기와 고치기(`origin=user`). 한계 거부는 `409 plan_refused`와 그 메시지 |
 | `DELETE /api/life/{id}` | 잠 칸이면 `409 plan_refused` |
@@ -660,6 +660,16 @@ In-memory 저장소도 같게 한다.
 30. **일기 항목의 id와 쪽**(리뷰 9). 대화 이벤트의 `diary`는 `{id, sequence, kind: "diary", created_at, text}`다. `id`는 그 일기를 쓴 삶 기록의 `write_id`(문자열)이고 Web은 이것을 키로 쓴다(일기 여럿이 `sequence`를 같이 가질 수 있음). 일기는 쓴 때 직전 사건 뒤(`sequence`, 사건 전이면 0)에 놓이고, 그 사건이 든 쪽 하나에만 나온다. `limit`에 세지 않아 잘리지 않는다. `last_sequence`(커서)는 그 쪽 마지막 사건(또는 wake 생각 줄)의 순번이다.
 31. **일정표의 시계**(리뷰 10). `himari_schedule`·`himari_sleep`·`himari_day`는 서버 시간대 시계로 쓴다(칸의 날짜가 그 시간대, `CurrentStateProjection.schedule_zone`). 오늘·내일 칸도 그 시계로 고른다. `now`·presence·시각 줄은 기기 시간대 그대로다.
 32. **자는 중 시도해 보기**(리뷰 15). 운영자의 시도(TRY)는 일부러 잠 규칙을 넘는다. 자는 중이면 반쯤 깬 턴(Tool 없음, Run 1번)으로 말하고 잠을 끊지 않는다. 먼저 말 걸기 스케줄러는 그대로 자는 동안 미리 알림만 연다.
+
+2차 리뷰(2026-11-26)로 고친 것이다(33–39). 앞 항목과 다르면 이것을 따른다(29의 "서버 규칙은 그대로", 30의 커서). 2차 리뷰 4·5와 8의 Windows 쪽은 화면 갈래 몫이다.
+
+33. **끝난 칸에서는 잠들지 않는다**(2차 리뷰 1). `go_to_sleep`은 오늘 밤 칸이 이미 끝났으면 거부한다("Tonight's sleep slot is over …; you are up for the day.", 아무것도 쓰지 않음). 받은 요청은 옮긴 칸 id에 묶인다(`DayState.sleep_requested_slot`, `day_state.sleep_requested_slot`, v29가 배포 전이라 v29에 더함). 하루 지기는 그 칸이 살아 있고 아직 끝나지 않았을 때만 그 칸에서 재운다. 늦게 살펴봐도 다음 밤 칸으로 넘어가지 않는다. 묶인 칸이 없는 요청은 아무것도 하지 않는다. 잠들면 둘 다 지운다.
+34. **깨는 때는 잠든 때보다 앞서지 않는다**(2차 리뷰 2). HIMARI가 자고 있는 칸의 끝은 지금이나 그 뒤로만 옮긴다. 더 이르게 고치면 누가 쓰든 거부한다(`409 plan_refused`, "HIMARI is asleep in this slot now; its end can only move to now (HH:MM) or later."). 지금부터 적용하지 않고 거부한다. 두 저장소의 `end_sleep`은 `at < fell_at`이면 `INVALID_ARGUMENT`다. 칸 끝으로 깨우는 시각(`day.wakes_at`)도 잠든 때보다 앞서지 않는다.
+35. **지난 칸 끝은 메시지보다 먼저**(2차 리뷰 3). 메시지나 쿡 찌르기를 세기 전에, 그리고 턴이 잠을 읽기 전에(`DayGate.view` → `ensure_slots`) 하루 지기 잠금 안에서 칸 끝이 지난 열린 잠을 칸 끝에 일어난 것(`schedule`)으로 기록한다. 그 요청은 깨어 있는 HIMARI가 받는다(세지 않음). 정리 여부는 다음 살펴보기가 그 잠(칸 끝까지)으로 본다.
+36. **이벤트 쪽은 읽은 범위로**(2차 리뷰 6). `GET /api/conversations/{id}/events`는 `{"items": [...], "last_sequence": int, "more": bool}`이다(기기도 같음). `last_sequence`는 그 쪽이 읽은 범위의 끝이다: 행이 `limit`을 넘어 잘리면 마지막으로 준 행의 순번, 사건을 `limit`만큼 읽었으면 마지막으로 읽은 사건(보이지 않는 것도), 마지막 쪽이면 읽은 사건과 행 가운데 가장 큰 순번. 아직 보이지 않는 free wake만 든 쪽도 넘어간다. 일기는 기준 사건이 보이지 않아도 그 사건이 든 쪽에 나온다. `more`는 행이 잘렸거나 사건이나 wake 생각 줄을 `limit`만큼 읽었으면 참이다. 클라이언트는 `more`가 참인 동안 `last_sequence`부터 이어 읽고, 보인 행 수로 멈추지 않는다.
+37. **일정 규칙은 공통 검사에서**(2차 리뷰 7). 두 저장소가 같이 쓰는 `rules.check_plan_limits`에서: HIMARI가 아닌 쓰기는 이미 `together`인 칸만 `together`로 쓴다(옮기기는 됨, 다른 칸을 바꾸면 "Only HIMARI makes a together slot…"). 잠 칸 옮기기(`PUT /api/life/plans/{id}`, Tool, 하루 지기)는 시각만 바꾼다. 다른 글을 보내면 거부하지 않고 원래 글을 둔다(HIMARI의 `schedule_write`도 글을 보내야 하므로).
+38. **닫힌 하루에는 올리지 않는다**(2차 리뷰 8). 주인 업로드와 기기 화면 모두 바이트를 읽기 전에 `check_day_open`으로, 붙일 때 다시 하루 지기의 막음(await 없이)과 Data `stage_upload`의 트랜잭션(닫힌 하루면 `DAY_CLOSED`)으로 거부한다. 모두 `409 day_closed`다.
+39. **막힌 하루의 메시지는 wake를 끊지 않는다**(2차 리뷰 9). `BackgroundRunner.submit`은 메시지든 이어 하기든 먼저 프로세스 메모리의 막음(`day_closing`)을 await 없이 보고, 막혔으면 돌고 있는 wake를 취소하기(`_yield_wake`) 전에 `DAY_CLOSED`로 거부한다. Driver 받기의 저장된 검사(`DayGate.admit`, Data)는 그대로 둔다.
 
 ### 19.2 화면 갈래
 
