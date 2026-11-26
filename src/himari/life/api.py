@@ -42,6 +42,9 @@ class LifeSettings(DeepFrozen):
     backup_effort: str | None = None
     default_model_id: str | None = None  # §10: a self run's model with no day session (None: the memory model)
     default_effort: str | None = None
+    # character-diary §6: the day keeper runs (HIMARI sleeps and its days close): a diary's facts are settled once its
+    # day was closed and amended; False (no keeper): right after the diary
+    keeper: bool = False
 
 
 @dataclass(frozen=True)

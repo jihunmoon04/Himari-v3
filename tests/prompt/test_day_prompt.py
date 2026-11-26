@@ -212,10 +212,16 @@ def test_what_happened_while_himari_slept_is_told_once_it_woke_marked_so() -> No
         {"date": "2026-11-26", "time": "23:50", "text": "고양이가 창가에 왔다.", "while_asleep": True},
         {"time": "03:00", "text": "밤새 비가 왔다.", "while_asleep": True},
         {"time": "09:00", "text": "택배가 왔다."}]
-    for state in (SleepState.ASLEEP, SleepState.HALF_ASLEEP):
+    for state in (SleepState.ASLEEP, SleepState.HALF_ASLEEP):  # review P1-5: nothing of the sleep under way
         still = replace(last, woke_at=None, how_woke=None)
         told = state_data(current_state(inputs(now=morning, life=life, sleep=SleepView(state, last=still))))
-        assert all("while_asleep" not in e for e in told["himari_life"]["events"])  # type: ignore[index]
+        assert "himari_life" not in told  # every event of today came after it fell asleep at 23:40
+        early = (life_event(6, "2026-11-27", "07:00", "새벽 택배."),)
+        mumbling = replace(still, fell_at=datetime(2026, 11, 27, 8, 0, tzinfo=SEOUL))
+        told = state_data(current_state(inputs(now=morning, life=(*life, *early),
+                                               sleep=SleepView(state, last=mumbling))))
+        assert [e["text"] for e in told["himari_life"]["events"]] == [  # type: ignore[index]
+            "밤새 비가 왔다.", "새벽 택배."]  # before it fell asleep at 08:00; 09:00 is in the sleep
     outside = state_data(current_state(inputs(day=False, now=morning, life=life)))  # no day session: no sleep
     assert [e["text"] for e in outside["himari_life"]["events"]] == ["밤새 비가 왔다.", "택배가 왔다."]  # type: ignore[index]
     assert "while_asleep" in LIFE_RULE

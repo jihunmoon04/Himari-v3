@@ -211,3 +211,21 @@ def test_an_amend_leaves_the_users_diary_and_mood_alone_and_checks_its_write() -
             await data.apply_life_amend(other, "2026-11-25", "가" * 1_501, now=NOW)
 
     asyncio.run(scenario())
+
+
+
+def test_a_diarys_write_keeps_what_its_request_was_made_of() -> None:
+    """character-diary §5 (review P1-6, v30): the session's last event its request held and the moment its data was
+    read up to, kept with the write (None for a write without them)."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        at = datetime(2026, 11, 25, 13, 40, tzinfo=UTC)
+        write = await data.begin_life_write(ALICE, LifeWriteStart(
+            1, "2026-11-25", "p", "m", b"{}", "application/json", 10, basis_sequence=7, basis_at=at))
+        bare = await data.begin_life_write(ALICE, LifeWriteStart(1, "2026-11-25", "p", "m", b"{}",
+                                                                 "application/json", 10))
+        found = {w.write_id: w for w in await data.list_life_writes(ALICE)}
+        assert (found[write].basis_sequence, found[write].basis_at) == (7, at)
+        assert (found[bare].basis_sequence, found[bare].basis_at) == (None, None)
+
+    asyncio.run(scenario())

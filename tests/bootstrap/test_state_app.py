@@ -65,7 +65,14 @@ def test_an_answers_last_mood_is_kept_for_the_persona_and_told_to_the_next_turn(
     asyncio.run(scenario())
 
 
-def test_what_himari_is_doing_comes_from_a_timed_plan(tmp_path: Path) -> None:
+def test_what_himari_is_doing_comes_from_a_timed_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.life.keeper import DayKeeper
+
+    async def no_diary_slot(*args: object) -> None:
+        return None  # the keeper's clock is held at noon, the plan is now: its diary slot could hold the hour
+
+    monkeypatch.setattr(DayKeeper, "_place_diary", no_diary_slot)
+
     async def scenario() -> None:
         zone = ZoneInfo("Asia/Seoul")
         local = datetime.now(UTC).astimezone(zone)

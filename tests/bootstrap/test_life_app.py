@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from himari.bootstrap.application import Application, LifeChanged, life_settings
-from himari.common import PrincipalId, TextBlock, TrustedScope
+from himari.common import ConversationId, JsonValue, PrincipalId, TextBlock, TrustedScope
 from himari.data.api import NO_PERSONA, LifeKind, UserMessage
 from himari.life.api import LifeSettings, MindModel, WriteOutcome
 from himari.prompt.api import LIFE_RULE, state_block
@@ -188,6 +188,37 @@ def test_a_closed_day_session_is_read_for_the_diary_and_its_closing_wakes_the_am
             await app._day_closed(ME, scope)  # noqa: SLF001
             await asyncio.sleep(0.05)
             assert amended == [ME]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+
+def test_a_diary_applied_in_a_day_session_is_told_on_the_stream(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """character-diary §10 (review P2-11): the writer's diary callback publishes the ``conversation`` event the Web
+    already reads again its open timeline on."""
+    from himari.presence.hub import PresenceHub
+
+    published: list[tuple[str, object]] = []
+    original = PresenceHub.publish
+
+    def publish(self: PresenceHub, principal: PrincipalId, event: str, data: JsonValue) -> None:
+        published.append((event, data))
+        original(self, principal, event, data)
+
+    monkeypatch.setattr(PresenceHub, "publish", publish)
+
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "data", ScriptedAdapter(memory_passes=True, companion=True),
+                                     model_id="scripted-model", sandbox=False, cleanup_seconds=None,
+                                     memory_model="scripted-model", life=True, companion=True)
+        try:
+            assert app.life_writer is not None and app.life_writer.settings.keeper  # the keeper runs
+            assert app.life_writer.on_diary is not None
+            app.life_writer.on_diary(ME, ConversationId("conv_day"))
+            assert ("conversation", {"conversation": "conv_day"}) in published
         finally:
             await app.close()
 

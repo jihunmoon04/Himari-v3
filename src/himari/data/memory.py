@@ -1589,7 +1589,8 @@ class InMemoryData:
         self._store.life_writes[write_id] = _LifeWrite(principal, LifeWrite(
             write_id, persona_id, day, LifeWriteStatus.PREPARED, start.provider_key, start.model_id,
             start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None, start.plan_id,
-            job, start.model_reason, conversation_id=start.conversation_id), start.body)
+            job, start.model_reason, conversation_id=start.conversation_id, basis_sequence=start.basis_sequence,
+            basis_at=start.basis_at), start.body)
         return write_id
 
     async def mark_life_write_dispatched(self, write_id: str) -> None:

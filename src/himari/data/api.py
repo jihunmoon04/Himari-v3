@@ -2264,6 +2264,10 @@ class LifeWriteStart(DeepFrozen):
     model_reason: str | None = None
     # character-day §7: the day session a diary was written in the context of (None: a self run with no history)
     conversation_id: ConversationId | None = None
+    # character-diary §5, §16.4: what a diary's request was made of — the day session's last event sequence it held
+    # and the moment its life data was read up to (what comes after is the amend's)
+    basis_sequence: int | None = None
+    basis_at: datetime | None = None
 
 
 class LifeWriteStatus(Enum):
@@ -2297,6 +2301,8 @@ class LifeWrite(DeepFrozen):
     model_reason: str | None = None  # §4.1: why its model was chosen
     thought: str | None = None  # §4.1: a self run's thought, kept with it (never shown, never told again)
     conversation_id: ConversationId | None = None  # character-day §7: the day session it was written in
+    basis_sequence: int | None = None  # character-diary §5: the session's last event its request held
+    basis_at: datetime | None = None  # and the moment its life data was read up to
 
 
 class LifeWriteLog(Protocol):

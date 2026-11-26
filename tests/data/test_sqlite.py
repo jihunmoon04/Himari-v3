@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from testkit import (FAKE, SCOPE, V15_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, V26_UNDO, V27_UNDO, V28_UNDO, V29_UNDO, FakeEnvironment, RecordingTool, final,
+from testkit import (FAKE, SCOPE, V15_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, V26_UNDO, V27_UNDO, V28_UNDO, V29_UNDO, V30_UNDO, FakeEnvironment, RecordingTool, final,
                      text_result, user)
 
 from himari.bootstrap import build_runtime
@@ -302,7 +302,7 @@ _ADDED_IN = {
     27: V27_UNDO,
     28: V28_UNDO,
     29: V29_UNDO,
-    30: (),  # character-diary §16.2: no table changes
+    30: V30_UNDO,
 }
 
 
@@ -414,7 +414,7 @@ def test_a_v21_database_gains_an_empty_life_and_keeps_its_personas(tmp_path: Pat
     asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
     asyncio.run(data.choose_persona(SCOPE.principal_id, 1, 0))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, "PRAGMA user_version=21")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, "PRAGMA user_version=21")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v21-*.bak"))
@@ -438,7 +438,7 @@ def test_a_v22_database_keeps_its_life_and_gains_the_bond(tmp_path: Path) -> Non
     asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, "PRAGMA user_version=22")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, "PRAGMA user_version=22")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v22-*.bak"))
@@ -464,7 +464,7 @@ def test_a_v23_database_keeps_its_life_and_bond_and_gains_moods(tmp_path: Path) 
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     joke = asyncio.run(data.add_bond(SCOPE.principal_id, 1, BondTag.JOKE, "감자 사건"))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, "PRAGMA user_version=23")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, "PRAGMA user_version=23")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v23-*.bak"))
@@ -489,7 +489,7 @@ def test_a_v24_database_keeps_its_life_and_gains_arcs(tmp_path: Path) -> None:
     asyncio.run(data.create_persona(SCOPE.principal_id, "Friend", "반말로."))
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, "PRAGMA user_version=24")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, "PRAGMA user_version=24")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v24-*.bak"))
@@ -529,7 +529,7 @@ def test_a_v25_database_keeps_its_arcs_and_gains_work(tmp_path: Path) -> None:
         "전자포를 구상했다.", arc=ArcMove(ArcOp.START, title="블랙홀 전자포", goal="설정집 한 권")),
         now=datetime(2026, 11, 24, 13, 0, tzinfo=UTC)))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, "PRAGMA user_version=25")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, "PRAGMA user_version=25")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v25-*.bak"))
@@ -572,7 +572,7 @@ def test_a_v26_database_keeps_its_personas_text_as_the_field_free(tmp_path: Path
     asyncio.run(data.create_persona(SCOPE.principal_id, "Empty", ""))
     asyncio.run(data.choose_persona(SCOPE.principal_id, 1, 0))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, "PRAGMA user_version=26")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, "PRAGMA user_version=26")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v26-*.bak"))
@@ -601,7 +601,7 @@ def test_a_v27_database_names_its_life_writes_jobs_and_keeps_thoughts_after(tmp_
             1, "2026-11-24", "scripted", "m", b"{}", "application/json", 10, plan_id=plan_id)))
     fact = asyncio.run(data.add_life_fact(SCOPE.principal_id, 1, "고양이를 무서워한다."))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, "PRAGMA user_version=27")
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, "PRAGMA user_version=27")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v27-*.bak"))
@@ -634,7 +634,7 @@ def test_a_v28_database_makes_its_plans_hour_slots_and_keeps_its_conversations(t
         "일기", (("2026-11-25", "책 읽기"), ("2026-11-26", "설정집")), times=("20:00", "21:00"),
         arc=ArcMove(ArcOp.START, title="설정집", goal="세계 설정"), plan_arcs=(None, 0)), now=now))
     store.close()
-    tamper(path, *V29_UNDO, "PRAGMA user_version=28")
+    tamper(path, *V30_UNDO, *V29_UNDO, "PRAGMA user_version=28")
     store = SqliteStore(path)
     try:
         assert list(tmp_path.glob("h.db.v28-*.bak"))
@@ -652,8 +652,9 @@ def test_a_v28_database_makes_its_plans_hour_slots_and_keeps_its_conversations(t
 
 
 def test_a_v29_database_is_backed_up_and_takes_diary_slots_and_amends(tmp_path: Path) -> None:
-    """v30 (character-diary §11, §16.2): no table changes — backed up first, the version moved, and a diary slot and
-    an amend write are kept from then on (an older server stops at the version, never at them)."""
+    """v30 (character-diary §11, §16.2): backed up first, the version moved, a diary slot and an amend write are kept
+    from then on (an older server stops at the version, never at them), and a write keeps what its request was made
+    of (review P1-6: its basis, empty for the writes from before)."""
     path = tmp_path / "h.db"
     old_database(path, 29)
     store = SqliteStore(path)
@@ -670,7 +671,8 @@ def test_a_v29_database_is_backed_up_and_takes_diary_slots_and_amends(tmp_path: 
         assert slot.plan_kind is PlanKind.DIARY and slot.diary_slot
         write = await_(data.begin_life_write(SCOPE.principal_id, LifeWriteStart(
             0, "2026-11-26", "scripted", "m", b"{}", "application/json", 10, job=LifeJob.AMEND)))
-        assert (await_(data.list_life_writes(SCOPE.principal_id))[0]).job is LifeJob.AMEND and write
+        latest = await_(data.list_life_writes(SCOPE.principal_id))[0]
+        assert latest.job is LifeJob.AMEND and write and (latest.basis_sequence, latest.basis_at) == (None, None)
     finally:
         store.close()
 
@@ -712,7 +714,7 @@ def test_a_v20_conversation_keeps_its_environments_and_loses_the_rest(tmp_path: 
         store.create_conversation(scope)
         asyncio.run(SqliteData(store).append_event(scope, user(f"in {scope.conversation_id}")))
     store.close()
-    tamper(path, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO,
+    tamper(path, *V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO,
            "INSERT INTO activations (conversation_id, environment_instance_id, environment_kind, default_binding_id)"
            " VALUES ('conv_1', 'env_a', 'machine', 'bind_a'), ('conv_1', 'env_b', 'machine', NULL),"
            " ('conv_2', 'env_c', 'inside', 'bind_c')",

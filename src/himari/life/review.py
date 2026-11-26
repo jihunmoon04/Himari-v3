@@ -60,6 +60,7 @@ from himari.data.api import (
 )
 from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions, UserTurn, json_data
 
+NOON = time(12, 0)  # character-diary §16.1: a write time before it is the night's end (the morning after)
 REVIEW_MAX_OUTPUT_TOKENS = 4_000  # §4.3: a thought of up to 1,200 characters, then the day's JSON
 AMEND_MAX_OUTPUT_TOKENS = 4_000  # character-diary §5: a thought, then the whole diary again
 BYTES_PER_TOKEN = 3  # as compaction estimates
@@ -157,8 +158,8 @@ def diary_due(now: datetime, zone: tzinfo, write_at: time, plans: Sequence[LifeE
               fell_at: datetime | None = None) -> date:
     """character-diary §4, §16.1, §16.3: the latest date whose diary is due — tonight's (D, ``current_night``) once
     its diary slot (among ``plans``) has started, once HIMARI fell asleep after D 18:00 (``fell_at``: its latest
-    sleep), or, with no diary slot that night, from the write time (D ``write_at``) on; else yesterday's (D−1: an
-    earlier missed day is not filled in)."""
+    sleep), or, with no diary slot that night, from the write time on (``write_at_of``: an early-morning time is
+    that night's end); else yesterday's (D−1: an earlier missed day is not filled in)."""
     local = now.astimezone(zone)
     night = night_of(local) or local.date()
     slot = next((s for e in plans if e.diary_slot and (s := plan_span(e, zone)) is not None
@@ -167,9 +168,16 @@ def diary_due(now: datetime, zone: tzinfo, write_at: time, plans: Sequence[LifeE
         return night
     if fell_at is not None and datetime.combine(night, DIARY_EARLIEST, tzinfo=zone) <= fell_at <= now:
         return night
-    if slot is None and local >= datetime.combine(night, write_at, tzinfo=zone):
+    if slot is None and local >= write_at_of(night, write_at, zone):
         return night
     return night - timedelta(days=1)
+
+
+def write_at_of(night: date, write_at: time, zone: tzinfo) -> datetime:
+    """character-diary §16.1: when the night of ``night``'s diary is due with no diary slot — ``write_at`` on that
+    date, or, a time before noon (03:00), the morning after: the night's own end, never the next night's (review
+    P2-9: one date due at a time across the 05:00 rollover)."""
+    return datetime.combine(night + timedelta(days=1) if write_at < NOON else night, write_at, tzinfo=zone)
 
 
 def diary_of(moment: datetime, zone: tzinfo) -> date:
@@ -196,29 +204,42 @@ def event_moment(entry: LifeEntry, zone: tzinfo) -> datetime | None:
         return None
 
 
-def passed_events(entries: Sequence[LifeEntry], day: date, now: datetime, slept: tuple[datetime, datetime] | None,
-                  zone: tzinfo) -> list[PassedEvent]:
-    """character-diary §4, §7, §16.3: the diary's events — ``day``'s whose time has passed at ``now``, and those in
-    the last sleep (``slept``: from falling asleep to waking) marked ``while_asleep``; earliest first, each once."""
+def passed_events(entries: Sequence[LifeEntry], day: date, now: datetime,
+                  slept: Sequence[tuple[datetime, datetime]], zone: tzinfo,
+                  since: datetime | None = None) -> list[PassedEvent]:
+    """character-diary §4, §7, §16.3: the diary's events whose time has passed at ``now`` — ``day``'s, those carried
+    over from the day before (after ``since``: when HIMARI fell asleep that night, its diary had them up to there)
+    and those in the last night's sleeps (``slept``: each [fell, woke)); only those inside a sleep are marked
+    ``while_asleep`` (review P2-8: an awake gap between two sleeps is not). Earliest first, each once."""
     found: list[PassedEvent] = []
     for entry in entries:
         moment = event_moment(entry, zone)
         if moment is None or moment > now:
             continue
-        asleep = slept is not None and slept[0] <= moment < slept[1]
-        if asleep or entry.day == day.isoformat():
+        asleep = any(start <= moment < end for start, end in slept)
+        if asleep or entry.day == day.isoformat() or (since is not None and moment > since):
             found.append(PassedEvent(entry, asleep))
     return sorted(found, key=lambda f: (f.entry.day or "", f.entry.time_of_day or "", f.entry.entry_id))
 
 
+def said_after(event: ConversationEvent, since: datetime, until: datetime, after_sequence: int | None = None) -> bool:
+    """character-diary §5: a user message or an answer of HIMARI's the diary's request did not hold — past the
+    session's last event it held (``after_sequence``; review P1-6: one that came while the diary was being written
+    too), else after ``since`` — before HIMARI fell asleep (``until``)."""
+    if not isinstance(event.payload, (UserMessage, AssistantFinal)) or event.created_at > until:
+        return False
+    return event.sequence > after_sequence if after_sequence is not None else event.created_at > since
+
+
 def amend_due(events: Sequence[ConversationEvent], entries: Sequence[LifeEntry], since: datetime, until: datetime,
-              zone: tzinfo) -> bool:
-    """character-diary §5, §16.3: whether anything new came between the diary's writing (``since``) and HIMARI
-    falling asleep (``until``): a user message or an answer of HIMARI's in the session (``events``), an event of
-    that time, or a piece of work finished then (``entries``). None: no call."""
+              zone: tzinfo, after_sequence: int | None = None) -> bool:
+    """character-diary §5, §16.3: whether anything new came between what the diary's request was made of
+    (``since``: when its data was read; ``after_sequence``: the session's last event it held) and HIMARI falling
+    asleep (``until``): a user message or an answer of HIMARI's in the session (``events``, ``said_after``), an
+    event of that time, or a piece of work finished then (``entries``). None: no call."""
     if until <= since:
         return False
-    if any(since < e.created_at <= until and isinstance(e.payload, (UserMessage, AssistantFinal)) for e in events):
+    if any(said_after(e, since, until, after_sequence) for e in events):
         return True
     for entry in entries:
         moment = event_moment(entry, zone)
@@ -235,7 +256,8 @@ def amend_data(diary: LifeEntry, entries: Sequence[LifeEntry], *, since: datetim
     fell asleep, the events and the pieces of work of that time and, when the conversation is not given, what was
     said meanwhile (``said``: {at, who, text})."""
     day = date.fromisoformat(diary.day or since.astimezone(zone).date().isoformat())
-    events = sorted((m, e) for e in entries if (m := event_moment(e, zone)) is not None and since < m <= until)
+    events = sorted(((m, e) for e in entries if (m := event_moment(e, zone)) is not None and since < m <= until),
+                    key=lambda found: (found[0], found[1].entry_id))  # review P1-4: never two entries compared
     titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
     work = [{"title": e.title, "summary": e.summary, **({"project": t} if (t := titles.get(e.arc_id or 0)) else {})}
             for e in sorted((e for e in entries if e.kind is LifeKind.WORK and not e.draft
@@ -337,6 +359,17 @@ def _event_line(found: LifeEntry | PassedEvent, day: str) -> dict[str, JsonValue
             **({"while_asleep": True} if asleep else {})}
 
 
+def _of_day(entry: LifeEntry, day: date, zone: tzinfo) -> bool:
+    """character-day §7: a slot of ``day``'s schedule — dated that day; character-diary §3 (review P2-10): a diary
+    slot by its night, also when moved past midnight (and not the night before's, dated that day)."""
+    if entry.kind is not LifeKind.PLAN:
+        return False
+    span = plan_span(entry, zone) if entry.plan_kind is PlanKind.DIARY else None
+    if span is not None:
+        return diary_night(span[0]) == day
+    return entry.day == day.isoformat()
+
+
 def _event_order(found: LifeEntry | PassedEvent) -> tuple[str, str, int]:
     entry = found.entry if isinstance(found, PassedEvent) else found
     return entry.day or "", entry.time_of_day or "", entry.entry_id
@@ -354,8 +387,8 @@ def request_data(entries: Sequence[LifeEntry], episodes: Sequence[RecentEpisode]
     written = day.isoformat()
     plans = sorted((e for e in entries if e.live_plan and plan_kind_of(e) not in (PlanKind.SLEEP, PlanKind.DIARY)
                     and (e.day or "") > written), key=lambda e: (e.day or "", e.entry_id))
-    schedule = [slot_line(e, zone) for e in sorted((e for e in entries if e.kind is LifeKind.PLAN and e.day == written),
-                                                   key=lambda e: (e.time_of_day or "", e.entry_id))]
+    schedule = [slot_line(e, zone) for e in sorted((e for e in entries if _of_day(e, day, zone)),
+                                                   key=lambda e: (e.day or "", e.time_of_day or "", e.entry_id))]
     sleep = sleep_slot_text(entries, day, zone)
     titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
     work = [{**({"time": e.time_of_day} if e.time_of_day else {}), "project": titles.get(e.arc_id or 0),

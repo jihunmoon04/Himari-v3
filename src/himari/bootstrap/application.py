@@ -1065,10 +1065,16 @@ class Application:
             # character-mind §4.1: a self run has a turn's system text (as build_runtime fills it in) and
             # chooses its model through the application (the conversation a wake would go to)
             # character-day §13: no quiet hours: the day's sleep (its slots) is what the work and the world keep out of
-            application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics,
+            # character-diary §6: with the day keeper, the facts wait for the day's closing and its amend
+            application.life_writer = LifeWriter(runtime.data, provider,
+                                                 replace(writing, keeper=application.keeper is not None),
+                                                 weather=weather, topics=topics,
                                                  composer=Composer(), instructions=base, link=application,
                                                  system=replace(system, memory=memory, turn_guidance=True,
                                                                 life=True))
+            # character-diary §10 (review P2-11): a diary or its amend applied — the open timeline reads it again
+            application.life_writer.on_diary = lambda principal, conversation: hub.publish(
+                principal, "conversation", {"conversation": conversation})
             await application.life_writer.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:

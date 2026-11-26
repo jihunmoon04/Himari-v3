@@ -877,9 +877,12 @@ CREATE TABLE day_state (
 ALTER TABLE life_writes ADD COLUMN conversation_id TEXT;
 """
 # v30 (character-diary v0.1 §11, §16.2): a plan may be the night's diary slot (plan_kind 'diary') and a life write
-# the diary's amend (job 'amend'). No table changes (both columns are free text): the version keeps an older server
-# from reading them.
-_V30_ADDITIONS = ""
+# the diary's amend (job 'amend') — both free text, the version keeps an older server from reading them; a diary's
+# write keeps what its request was made of (the session's last event, the moment its data was read up to, §5).
+_V30_ADDITIONS = """
+ALTER TABLE life_writes ADD COLUMN basis_sequence INTEGER;
+ALTER TABLE life_writes ADD COLUMN basis_at TEXT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
@@ -1400,7 +1403,8 @@ def _life_write(row: sqlite3.Row) -> LifeWrite:
                      None if usage is None else usage[0], None if usage is None else usage[1], row["error"],
                      datetime.fromisoformat(row["created_at"]), _moment(row["finished_at"]), row["plan_id"],
                      LifeJob(row["job"]), row["model_reason"], row["thought"],
-                     None if row["conversation_id"] is None else ConversationId(row["conversation_id"]))
+                     None if row["conversation_id"] is None else ConversationId(row["conversation_id"]),
+                     row["basis_sequence"], _moment(row["basis_at"]))
 
 
 def _memory(row: sqlite3.Row) -> Memory:
@@ -3036,12 +3040,15 @@ class SqliteData:
                 write_id = tx.new_id("lwrite")
                 tx.execute("INSERT INTO life_writes (write_id, owner, persona_id, day, status, provider_key, model_id,"
                            " reserved_tokens, charged_tokens, usage, raw_request_body, raw_request_content_type,"
-                           " error, created_at, finished_at, plan_id, job, model_reason, thought, conversation_id)"
-                           " VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL, ?)",
+                           " error, created_at, finished_at, plan_id, job, model_reason, thought, conversation_id,"
+                           " basis_sequence, basis_at)"
+                           " VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL, ?,"
+                           " ?, ?)",
                            write_id, principal, persona_id, day, start.provider_key, start.model_id,
                            start.reserved_tokens, start.reserved_tokens, start.body, start.content_type,
                            _timestamp(datetime.now(UTC)), start.plan_id, job.value, start.model_reason,
-                           start.conversation_id)
+                           start.conversation_id, start.basis_sequence,
+                           None if start.basis_at is None else _timestamp(start.basis_at))
                 return write_id
         except sqlite3.Error as error:
             raise DataError(DataErrorCode.RAW_PERSISTENCE_UNAVAILABLE, type(error).__name__) from error

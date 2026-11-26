@@ -121,10 +121,10 @@ def test_the_diary_is_told_the_events_passed_and_those_of_last_nights_sleep() ->
     entries = (event(1, "2026-11-25", "03:00", "밤새 비가 왔다."), event(2, "2026-11-25", "15:00", "택배가 왔다."),
                event(3, "2026-11-25", "23:30", "친구가 쪽지를 두고 갔다."), event(4, "2026-11-24", "23:50", "고양이가 왔다."),
                event(5, "2026-11-23", "15:00", "오래전 일."))
-    slept = (seoul(24, 23, 40), seoul(25, 8, 0))
+    slept = [(seoul(24, 23, 40), seoul(25, 8, 0))]
     found = passed_events(entries, DAY, seoul(25, 22, 0), slept, SEOUL)
     assert [(f.entry.entry_id, f.while_asleep) for f in found] == [(4, True), (1, True), (2, False)]
-    assert [f.entry.entry_id for f in passed_events(entries, DAY, seoul(25, 22, 0), None, SEOUL)] == [1, 2]
+    assert [f.entry.entry_id for f in passed_events(entries, DAY, seoul(25, 22, 0), [], SEOUL)] == [1, 2]
     data = request_data((), (), day=DAY, now=NOW, zone=SEOUL, events=found)
     assert data["events"] == [{"date": "2026-11-24", "time": "23:50", "text": "고양이가 왔다.", "while_asleep": True},
                               {"time": "03:00", "text": "밤새 비가 왔다.", "while_asleep": True},
@@ -411,3 +411,34 @@ def test_a_non_ascii_digit_is_never_a_time_or_an_id() -> None:
         {"date": "2026-11-26", "time": "²0:00", "text": "a", "arc": "²"}],
         "arc": {"move": "advance", "id": "²"}}, ensure_ascii=False), DAY)
     assert told.times == () and told.plan_arcs == () and told.arc is None
+
+
+
+def test_review_p2_9_an_early_morning_write_time_is_the_nights_end_one_date_at_a_time() -> None:
+    """A write time of 03:00 with no diary slot: the night of the 25th is due from 26 03:00; across the 05:00
+    rollover it stays the 25th's (never the 26th's at 05:01); the 26th's comes at 27 03:00."""
+    at = time(3, 0)
+    assert diary_due(seoul(26, 2, 59), SEOUL, at, ()) == date(2026, 11, 24)
+    assert diary_due(seoul(26, 3, 0), SEOUL, at, ()) == DAY
+    assert diary_due(seoul(26, 4, 59), SEOUL, at, ()) == DAY
+    assert diary_due(seoul(26, 5, 1), SEOUL, at, ()) == DAY
+    assert diary_due(seoul(26, 23, 0), SEOUL, at, ()) == DAY
+    assert diary_due(seoul(27, 3, 0), SEOUL, at, ()) == date(2026, 11, 26)
+    assert diary_due(seoul(25, 22, 0), SEOUL, time(22, 0), ()) == DAY  # an evening time: that date's
+
+
+def test_review_p2_10_a_diary_slot_moved_past_midnight_is_in_its_nights_schedule() -> None:
+    moved = slot(1, PlanKind.DIARY, "2026-11-26", "00:10", 30)  # the night of the 25th
+    earlier = slot(2, PlanKind.DIARY, "2026-11-25", "00:20", 30)  # the night of the 24th, dated the 25th
+    walk = slot(3, PlanKind.OWN, "2026-11-25", "15:00", 60)
+    data = request_data((moved, earlier, walk), (), day=DAY, now=NOW, zone=SEOUL)
+    assert data["schedule"] == [{"time": "15:00-16:00", "kind": "own", "text": "own"},
+                                {"time": "00:10-00:40", "kind": "diary", "text": "diary"}]
+
+
+def test_review_p2_8_sleep_fragments_are_never_merged_and_carried_events_are_kept() -> None:
+    entries = (event(1, "2026-11-24", "23:00", "깨어 있던 사이."), event(2, "2026-11-25", "03:00", "자는 사이."))
+    slept = [(seoul(24, 21, 15), seoul(24, 22, 0)), (seoul(25, 1, 0), seoul(25, 8, 0))]
+    found = passed_events(entries, DAY, seoul(25, 22, 0), slept, SEOUL, since=seoul(24, 21, 15))
+    assert [(f.entry.entry_id, f.while_asleep) for f in found] == [(1, False), (2, True)]
+    assert [f.entry.entry_id for f in passed_events(entries, DAY, seoul(25, 22, 0), slept, SEOUL)] == [2]

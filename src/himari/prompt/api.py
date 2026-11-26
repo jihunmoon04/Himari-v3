@@ -762,7 +762,7 @@ LIFE_READ_DAYS = timedelta(days=14)  # how far back a turn reads diaries and pla
 
 def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None,
                      slept: tuple[datetime, datetime] | None = None,
-                     zone: tzinfo | None = None) -> dict[str, object] | None:
+                     zone: tzinfo | None = None, asleep_since: datetime | None = None) -> dict[str, object] | None:
     """§5: the facts in the store's order (the user's, then the newest) that
     fit in LIFE_FACTS_CHARS; of the newest LIFE_DAYS diaries those that fit in
     LIFE_DAYS_CHARS (newest first); the plans dated today (``now``'s date) or
@@ -773,7 +773,8 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None,
     only when the text is cut, character-work §6). One too long for the room left is
     skipped, not the end of the list. None when none is shown. character-mind §7: today's events whose time has
     passed; character-diary §7, §16.5: with those of the last sleep (``slept``: from falling asleep to waking — never
-    given while asleep; read in ``zone``, else ``now``'s), marked ``while_asleep``."""
+    given while asleep; read in ``zone``, else ``now``'s), marked ``while_asleep``. While HIMARI sleeps (a mumble's
+    turn too: ``asleep_since``, when it fell asleep), nothing that happened since is told (review P1-5)."""
     today = None if now is None else now.date().isoformat()
     facts: list[str] = []
     room = LIFE_FACTS_CHARS
@@ -829,7 +830,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None,
         work.append(item)
     # character-mind §7: what happened to HIMARI today whose time has passed (``now``'s date and clock);
     # character-diary §7: and what happened while it slept last, found as it woke
-    events = [] if now is None else _life_events(entries, now, slept, zone or now.tzinfo)
+    events = [] if now is None else _life_events(entries, now, slept, zone or now.tzinfo, asleep_since)
     if not facts and not days and not plans and not arcs and not work and not events:
         return None
     data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
@@ -847,22 +848,24 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None,
 
 
 def _life_events(entries: Sequence[LifeEntry], now: datetime, slept: tuple[datetime, datetime] | None,
-                 zone: tzinfo | None) -> list[dict[str, object]]:
+                 zone: tzinfo | None, asleep_since: datetime | None = None) -> list[dict[str, object]]:
     """character-mind §7, character-diary §7: today's passed events and the last sleep's (``while_asleep``), each
-    once, earliest first."""
+    once, earliest first — none from the sleep under way (``asleep_since``)."""
     today, clock = now.date().isoformat(), now.strftime("%H:%M")
     found: list[tuple[str, str, int, dict[str, object]]] = []
     for entry in entries:
         if entry.kind is not LifeKind.EVENT:
             continue
-        asleep = False
-        if slept is not None and zone is not None and entry.day and entry.time_of_day:
+        moment = None
+        if zone is not None and entry.day and entry.time_of_day:
             try:
                 moment = datetime.combine(date.fromisoformat(entry.day), time.fromisoformat(entry.time_of_day),
                                           tzinfo=zone)
             except ValueError:
                 moment = None
-            asleep = moment is not None and slept[0] <= moment < slept[1]
+        if asleep_since is not None and moment is not None and moment >= asleep_since:
+            continue  # it happened while HIMARI sleeps now: found only once it wakes
+        asleep = slept is not None and moment is not None and slept[0] <= moment < slept[1]
         if not asleep and not (entry.day == today and (entry.time_of_day or "00:00") <= clock):
             continue
         item: dict[str, object] = {**({"date": entry.day} if entry.day != today else {}),
@@ -1708,13 +1711,15 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                                                                   state.episode_count, state.now)
     if memory is not None:
         data["user_memory"] = memory
-    # character-diary §7, §16.5: the day session's last sleep, once HIMARI woke from it (never while it sleeps)
-    last = None if state.sleep is None or state.sleep.state in (SleepState.ASLEEP, SleepState.HALF_ASLEEP) \
-        else state.sleep.last
-    slept = None if last is None or last.woke_at is None else (last.fell_at, last.woke_at)
+    # character-diary §7, §16.5: the day session's last sleep, once HIMARI woke from it; while it sleeps (a mumble
+    # too), nothing since it fell asleep (review P1-5)
+    sleeping = state.sleep is not None and state.sleep.state in (SleepState.ASLEEP, SleepState.HALF_ASLEEP)
+    last = None if state.sleep is None else state.sleep.last
+    slept = None if sleeping or last is None or last.woke_at is None else (last.fell_at, last.woke_at)
+    asleep_since = last.fell_at if sleeping and last is not None and last.woke_at is None else None
     clock = None if state.now is None else schedule_clock(state.now, state.schedule_zone)
     life = None if state.life is None else himari_life_data(state.life, state.now, slept,
-                                                            None if clock is None else clock.tzinfo)
+                                                            None if clock is None else clock.tzinfo, asleep_since)
     if life is not None:
         data["himari_life"] = life
     mind = None if state.life is None else himari_mind_data(state.recent_thoughts, state.life, state.now)
