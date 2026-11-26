@@ -140,6 +140,7 @@ public partial class MainWindow
         client = local;
         serverTakesSignals = false; quietUntil = null; UpdateQuietMenu();  // learnt again from the new server
         ForgetPersonas();
+        ForgetDay();
         var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); connection = cts;
         PairPanel.Visibility = Visibility.Collapsed;
         SetConnected(false, "기기 확인 중…");
@@ -186,7 +187,8 @@ public partial class MainWindow
     {
         if (ex is OperationCanceledException) { Status.Text = "연결 시간이 초과되었거나 취소되었습니다."; return; }
         Status.Text = ex is ApiException api ? api.Code switch {
-            "busy" => "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다.",
+            "busy" => serverDaySession ? DaySession.BusyNotice : "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다.",
+            "day_closed" => DaySession.ClosedNotice,
             "companion_off" => "서버에서 반려 기능이 꺼져 있습니다.",
             "device_scope" => "앱 권한 오류가 발생했습니다.",
             "pairing_used" => "이미 사용된 코드입니다. Web에서 새 코드를 발급해 주세요.",
@@ -210,6 +212,9 @@ public partial class MainWindow
         while (true)
         {
             var data = await local.SendAsync(HttpMethod.Get, $"/api/conversations?limit=50&offset={offset}", null, ct);
+            // character-day §3.2: a closed day session is read only; the app sends nothing there
+            foreach (var item in Items(Prop(data, "items")))
+                if (Prop(item, "closed").ValueKind == JsonValueKind.True && Str(item, "id") is { } closedId) closedDays.Add(closedId);
             list.AddRange(Items(Prop(data, "items")).Select(x => new Conversation(Str(x, "id") ?? "", Str(x, "title") ?? "새 대화")).Where(x => x.Id.Length > 0));
             var nextValue = Prop(data, "next_offset");
             if (nextValue.ValueKind != JsonValueKind.Number || !nextValue.TryGetInt32(out var next) || next <= offset) break;
@@ -268,7 +273,7 @@ public partial class MainWindow
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
         if (!ConversationView.IsRunning(detail)) EndReplyProgress(closeEmpty: true);
         if (connected) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation,
-            ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
+            ConversationView.IsRunning(detail) ? serverDaySession ? DaySession.BusyNotice : "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
         if (liveStreams.ContainsKey(id) && liveDisplays.TryGetValue(id, out var live) && live.Job == detailJob)
@@ -393,7 +398,7 @@ public partial class MainWindow
     }
     private async void NewConversationClick(object sender, RoutedEventArgs e)
     {
-        if (!connected || client is null || connection is null) return;
+        if (!connected || client is null || connection is null || serverDaySession) return;  // character-day §11: none
         FocusComposerIfOpen();
         try { var created = await client.SendAsync(HttpMethod.Post, "/api/conversations", new { }, connection.Token); await RefreshConversations(Str(created, "id"), connection.Token); }
         catch (Exception ex) { ShowError(ex); }
@@ -449,6 +454,14 @@ public partial class MainWindow
     {
         if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
+        // character-day §3.2: the day shown is closed — today's session opens and the message (still in the editor) goes there
+        if (unsent is null && ShownDayClosed)
+        {
+            try { await OpenTodaySession(client, connection.Token); }
+            catch (Exception ex) { ShowError(ex); return; }
+            if (!connected || client is null || connection is null || currentConversation is null) return;
+            if (ShownDayClosed) { Status.Text = DaySession.NoTodayNotice; return; }
+        }
         string text = unsent?.Text ?? Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         bool wantsScreen = WantsScreen;
         if (length > 32000 || (length == 0 && !wantsScreen && unresolvedScreen is null)) { Status.Text = "메시지를 입력하거나 화면 첨부를 선택해 주세요 (최대 32,000자)."; return; }
@@ -530,6 +543,17 @@ public partial class MainWindow
                 taken = true;
                 unresolvedScreen = null;
                 if (screen is { Ready: true }) previousScreenIds[context.ConversationId] = screen.FileId;
+            }
+            catch (ApiException ex) when (ex.Code == "day_closed")
+            {
+                // character-day §3.2, §18.11: the day closed before the message came, and nothing was recorded. The text
+                // returns to the editor (below), a screen taken for that day is dropped, and the app goes to today's.
+                if (recoveryOwner?.SameDevice(local) != true) return;
+                if (screen is not null) { unresolvedScreen = null; localScreens.Remove(screen.FileId); submittedScreen = null; submittedConversation = null; }
+                closedDays.Add(context.ConversationId);
+                if (context.IsCurrent(client, currentConversation, connected)) Status.Text = DaySession.ClosedNotice;
+                _ = FollowToday(local);
+                return;
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
             {
@@ -676,6 +700,7 @@ public partial class MainWindow
         if (looks) ScreenSharingOffOnce();  // V3-P91 §7.3, §14 Q9
         QuietFromServer(info, "quiet_until");
         PersonaFeature(info);  // character-state §4
+        DayFeature(info);  // character-day §18.13
     }
     private async Task PresenceLoop(ServerClient local, CancellationToken ct)
     {

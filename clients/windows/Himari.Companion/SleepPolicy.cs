@@ -2,6 +2,8 @@ namespace Himari.Companion;
 
 /// <summary>
 /// V3-P90 §2: when the character sleeps and wakes. The app decides it and tells the server (<c>sleep</c>).
+/// character-day §11: with a server that announces <c>features.day_session</c>, it means only that the user is away
+/// (no input, locked, the screen off) and is still sent as <c>sleep</c>; the character's sleep is then the server's.
 /// Pure: the caller passes the time and what it read, so tests drive it without Windows.
 /// <list type="bullet">
 /// <item>Asleep after <see cref="IdleSeconds"/> without input — unless something quiet goes on (media playing,
