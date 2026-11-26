@@ -402,6 +402,7 @@ class Driver:
         if self._wakes is None:
             raise ControlError(ControlErrorCode.NOT_SETTLED, "this server keeps no wakes")
         async with self._exclusive(scope):
+            await self._admit(scope)  # character-day §3.2, §6: never into a day closed or closing
             if not self._wake_model_ok(self._provider.describe_capabilities(self._turn_model(scope).model_id)):
                 # V3-P87 §13, V3-P92: reject before wake/key/reminder persistence, just as at execution.
                 raise ControlError(ControlErrorCode.MODEL_UNCHECKED, self._turn_model(scope).model_id)
@@ -542,11 +543,18 @@ class Driver:
         interface may report acceptance only once the input is committed).
         character-day §18.4: a sleeping HIMARI's answer is recorded with it."""
         async with self._exclusive(scope):
+            await self._admit(scope)  # character-day §3.2, §6: before anything is written (the group closed too)
             await self._prepare(scope)  # a stop is reported by the following resume
             message = await self._capture_interface(scope, message)
             await self._close_latest_group(scope, REDIRECTED_RESULT)  # blocked calls: resume reports them
             message = await self._asleep(scope, message)
             return await self._log.append_event(scope, message)  # T1
+
+    async def _admit(self, scope: TrustedScope) -> None:
+        """character-day §3.2, §6: new work (a message, a wake) is taken only into a day session neither closed nor
+        fenced for its closing (DataError DAY_CLOSED); Data refuses the write itself as well."""
+        if self._day is not None:
+            await self._day.admit(scope)
 
     async def _asleep(self, scope: TrustedScope, message: UserMessage) -> UserMessage:
         """character-day §5.5, §18.4: how a sleeping HIMARI meets the message (the keeper counts it); never what a
@@ -826,6 +834,7 @@ class Driver:
         raise _Cancelled()
 
     async def _drive_locked(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
+        await self._admit(scope)
         recovery, stop = await self._prepare(scope)
         message = await self._capture_interface(scope, message)
         group = await self._close_latest_group(scope, REDIRECTED_RESULT) if stop is None else None
@@ -1168,7 +1177,9 @@ class Driver:
                                 backup.model_id)
                 self._turn_models[scope.conversation_id] = backup
                 self._backups.add(scope.conversation_id)
-                turn.max_runs += 1  # the failed Run does not use up the turn's last step
+                # the failed Run does not use up the turn's last step — a mumble's one Run too (§19.1: the backup's
+                # Run after a primary that answered nothing is the one exception to it)
+                turn.max_runs += 1
                 continue
             if isinstance(outcome, NativeUncertain):
                 return result(DriveState.OUTCOME_UNKNOWN, detail=outcome.error_code)

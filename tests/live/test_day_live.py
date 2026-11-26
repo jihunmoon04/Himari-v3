@@ -90,6 +90,9 @@ class Gate:
     async def before(self, scope: object) -> DayBefore | None:
         return None
 
+    async def admit(self, scope: object) -> None:
+        return None
+
 
 def today() -> date:
     return datetime.now(SEOUL).date()

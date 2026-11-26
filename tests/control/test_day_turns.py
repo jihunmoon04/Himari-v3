@@ -16,9 +16,15 @@ from testkit import SCOPE, calls, final, new_store
 from himari.bootstrap import build_runtime
 from himari.common import TextBlock
 from himari.control.api import DriveState, ModelCatalog, ModelOffer
+from himari.control.runner import BackgroundRunner
+from himari.data.api import night_of
 from himari.data.api import (
     AsleepAnswer,
+    DataError,
+    DataErrorCode,
     DayBefore,
+    WakeKind,
+    WakeReason,
     LifeKind,
     LifeOrigin,
     MessageOrigin,
@@ -39,11 +45,12 @@ WEB = MessageOrigin(OriginKind.WEB)
 
 
 class Gate:
-    """A day keeper as the Driver sees it: this Conversation is the day session (or not), asleep or not."""
+    """A day keeper as the Driver sees it: this Conversation is the day session (or not), asleep or not, closed (or
+    fenced for its closing) or not."""
 
     def __init__(self, answer: AsleepAnswer | None = None, state: SleepState = SleepState.AWAKE, *,
-                 day: bool = True) -> None:
-        self.reply, self.state, self.day = answer, state, day
+                 day: bool = True, closed: bool = False) -> None:
+        self.reply, self.state, self.day, self.closed = answer, state, day, closed
         self.asked: list[MessageOrigin | None] = []
 
     async def answer(self, scope: object, origin: MessageOrigin | None) -> AsleepAnswer | None:
@@ -58,6 +65,10 @@ class Gate:
 
     async def before(self, scope: object) -> DayBefore | None:
         return None
+
+    async def admit(self, scope: object) -> None:
+        if self.closed:
+            raise DataError(DataErrorCode.DAY_CLOSED, "closed")
 
 
 def day_runtime(gate: Gate, script: list[object], *, models: ModelCatalog | None = None,
@@ -157,6 +168,11 @@ def test_a_schedule_write_is_kept_with_its_result_and_a_refusal_is_said_to_the_m
 def test_go_to_sleep_is_refused_by_day_with_its_reason() -> None:
     async def scenario() -> None:
         rt, adapter = day_runtime(Gate(), [calls((GO_TO_SLEEP, {"reason": "잘 자"})), final("잘 자~")])
+        night = night_of(datetime.now(ZoneInfo(ZONE)))
+        if night is not None:  # tonight's slot, as the keeper places it on first need (the Tool only moves it)
+            await rt.data.write_plan(SCOPE.principal_id, 0, PlanWrite(  # type: ignore[attr-defined]
+                night.isoformat(), "21:00", 600, PlanKind.SLEEP, "잠"), origin=LifeOrigin.WRITER, zone=ZONE,
+                now=datetime.now(ZoneInfo(ZONE)))
         result = await rt.driver.drive(SCOPE, said("잘 자"))  # type: ignore[attr-defined]
         (record,) = await rt.data.read_tool_executions(SCOPE, result.run_ids[0])  # type: ignore[attr-defined]
         local = datetime.now(ZoneInfo(ZONE)).time()
@@ -198,7 +214,56 @@ def test_a_run_with_no_answer_at_all_goes_on_once_on_the_backup_model() -> None:
 
 @pytest.mark.parametrize(("code", "falls_back"), [
     ("connect_failed:ConnectError", True), ("http_408", True), ("http_429", True), ("http_500", True),
-    ("http_503", True), ("provider_error_502", True), ("http_400", False), ("http_401", False), ("http_402", False),
-    ("http_403", False), ("image_missing", False), ("", False), ("http_5xx", False)])
+    ("http_503", True), ("provider_error_502", True), ("provider_error_429", True), ("provider_error_None", True),
+    ("http_400", False), ("http_401", False), ("http_402", False), ("http_403", False),
+    # review 12: the account's and ours in a stream's or body's error too
+    ("provider_error_400", False), ("provider_error_401", False), ("provider_error_402", False),
+    ("provider_error_403", False), ("image_missing", False), ("", False), ("http_5xx", False)])
 def test_a_retryable_failure_is_one_another_model_may_not_share(code: str, falls_back: bool) -> None:
     assert retryable(code) is falls_back
+
+
+def test_a_mumble_with_no_answer_goes_on_the_backup_model_its_one_exception_to_one_run() -> None:
+    """§5.5, §10 (review 12): a mumble is one Run — but a primary that answered nothing at all leaves the turn's one
+    Run to the backup model (the failed Run stays recorded): two Runs, the second answering, never a third."""
+    models = ModelCatalog((ModelOffer("main"), ModelOffer("backup")), "main")
+
+    async def scenario() -> None:
+        rt, adapter = day_runtime(Gate(AsleepAnswer.MUMBLE, SleepState.ASLEEP),
+                                  [NativeNoResponse("http_503"), final("음냐…")], models=models, backup="backup")
+        await rt.driver.accept(SCOPE, said("자?"))  # type: ignore[attr-defined]
+        result = await rt.driver.resume(SCOPE)  # type: ignore[attr-defined]
+        assert result.state is DriveState.COMPLETED and len(result.run_ids) == 2
+        runs = [await rt.data.read_run(SCOPE, r) for r in result.run_ids]  # type: ignore[attr-defined]
+        assert [(r.model_id, r.status.value) for r in runs][0] == ("main", "failed_no_response")
+        assert runs[1].model_id == "backup" and adapter.prepared_inputs[1].request_options.half_asleep
+        rt, adapter = day_runtime(Gate(AsleepAnswer.MUMBLE, SleepState.ASLEEP),
+                                  [NativeNoResponse("http_503"), calls(("schedule_read", {"days": 2}))],
+                                  models=models, backup="backup")
+        await rt.driver.accept(SCOPE, said("자?"))  # type: ignore[attr-defined]
+        result = await rt.driver.resume(SCOPE)  # type: ignore[attr-defined]
+        assert result.state is DriveState.RUN_LIMIT_REACHED and len(adapter.sent) == 2  # the backup's one Run only
+
+    asyncio.run(scenario())
+
+
+def test_a_closed_or_closing_day_takes_no_message_wake_resume_or_compaction() -> None:
+    """§3.2, §6 (review 2, 3): the Driver asks the keeper before anything of a message or a wake is written; the Runner
+    refuses a resume or a compaction at once in a day closing or closed (DAY_CLOSED)."""
+    async def scenario() -> None:
+        gate = Gate(closed=True)
+        rt, adapter = day_runtime(gate, [])
+        for refused in (lambda: rt.driver.accept(SCOPE, said("늦었다")),  # type: ignore[attr-defined]
+                        lambda: rt.driver.drive(SCOPE, said("늦었다")),  # type: ignore[attr-defined]
+                        lambda: rt.driver.accept_wake(SCOPE, (WakeReason(WakeKind.TRY),), "d1")):  # type: ignore[attr-defined]
+            with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
+                await refused()
+        assert await rt.data.read_events(SCOPE) == () and gate.asked == []  # type: ignore[attr-defined]
+        runner = BackgroundRunner(rt.driver)  # type: ignore[attr-defined]
+        runner.day_closing = lambda scope: True
+        for submitted in (lambda: runner.submit(SCOPE, None), lambda: runner.submit_compaction(SCOPE)):
+            with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
+                await submitted()
+        assert not runner.status(SCOPE).running and adapter.sent == []
+
+    asyncio.run(scenario())

@@ -1416,8 +1416,15 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def api_error(request: Request, error: ApiError) -> JSONResponse:
         return JSONResponse({"error": {"code": error.code, "message": error.message}}, status_code=error.status)
 
+    def day_closed_response() -> JSONResponse:
+        """character-day §3.2: a closed day session (or one closing) is only read; nothing was recorded."""
+        return JSONResponse({"error": {"code": "day_closed", "message": "This day is over: talk in today's day "
+                                                                        "session."}}, status_code=409)
+
     @app.exception_handler(DataError)
     async def data_error(request: Request, error: DataError) -> JSONResponse:
+        if error.code is DataErrorCode.DAY_CLOSED:  # refused where it was written (after a wait, or a race)
+            return day_closed_response()
         if error.code in (DataErrorCode.NOT_AUTHORIZED, DataErrorCode.NOT_FOUND):
             return JSONResponse({"error": {"code": "not_found", "message": "No such conversation."}}, status_code=404)
         if error.code is DataErrorCode.INVALID_ARGUMENT:
@@ -1446,9 +1453,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.exception_handler(DayClosed)
     async def day_closed(request: Request, error: DayClosed) -> JSONResponse:
-        """character-day §3.2: a closed day session is only read; nothing was recorded."""
-        return JSONResponse({"error": {"code": "day_closed", "message": "This day is over: talk in today's day "
-                                                                        "session."}}, status_code=409)
+        return day_closed_response()
 
     @app.exception_handler(ConversationStillStopping)
     async def still_stopping(request: Request, error: ConversationStillStopping) -> JSONResponse:
@@ -1634,7 +1639,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                        and not _legacy_question(last[-1])
                        # character-day §5.5: a message a sleeping HIMARI met with no answer waits for none
                        and not (isinstance(last[-1].payload, UserMessage)
-                                and last[-1].payload.while_asleep is AsleepAnswer.NONE))
+                                and last[-1].payload.while_asleep is AsleepAnswer.NONE)
+                       # §3.2: a closed day (or one closing) is only read: nothing to continue there
+                       and not (summary.day_session is not None
+                                and (summary.closed_at is not None or application.day_closing(scope))))
         return {"conversation": summary_view(summary), "job": job_view(job), "continuable": continuable}
 
     @app.get("/api/conversations/{conversation_id}")
@@ -2443,7 +2451,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     @app.post("/api/conversations/{conversation_id}/resume", status_code=202)
     async def resume(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         application, scope = himari(request), scope_of(conversation_id, by.principal)
-        await application.data.read_conversation(scope)
+        await application.check_day_open(scope)  # character-day §3.2: 409 day_closed for a closed day
         return job_view(await application.runner.submit(scope, None))
 
     @app.post("/api/conversations/{conversation_id}/cancel", status_code=202)
@@ -2455,9 +2463,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.post("/api/conversations/{conversation_id}/compact", status_code=202)
     async def compact(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Summarize the older history now, whatever its size (no Run)."""
+        """Summarize the older history now, whatever its size (no Run); a closed day is not (409 day_closed)."""
         application, scope = himari(request), scope_of(conversation_id, who)
-        await application.data.read_conversation(scope)
+        await application.check_day_open(scope)
         return job_view(await application.runner.submit_compaction(scope))
 
     # -- devices (V3-P83 §4) -------------------------------------------------------------------

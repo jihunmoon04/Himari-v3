@@ -224,15 +224,21 @@ class ProviderAdapter(Protocol):
         ...
 
 
+ACCOUNT_STATUSES = frozenset({"400", "401", "402", "403"})  # §10: ours or the account's — the backup shares the key
+
+
 def retryable(error_code: str | None) -> bool:
     """character-day §10, §18.4: a failure with no answer at all that another model may well not share — the
     connection never made (``connect_failed:*``), HTTP 408, 429 or 5xx, a provider's error before any byte
-    (``provider_error_*``). Not 400, 401, 402, 403 (ours or the account's: the backup uses the same key), not an
-    answer cut short or out of shape (those are never NativeNoResponse, or are ours to fix)."""
+    (``provider_error_<its code>``). Not 400, 401, 402, 403 in either encoding (``http_401`` as a status,
+    ``provider_error_401`` as a stream's or body's error: ours or the account's, and the backup uses the same key),
+    not an answer cut short or out of shape (those are never NativeNoResponse, or are ours to fix)."""
     if not error_code:
         return False
-    if error_code.startswith(("connect_failed:", "provider_error_")):
+    if error_code.startswith("connect_failed:"):
         return True
+    if error_code.startswith("provider_error_"):
+        return error_code.removeprefix("provider_error_") not in ACCOUNT_STATUSES
     if error_code.startswith("http_"):
         status = error_code.removeprefix("http_")
         return status in ("408", "429") or (len(status) == 3 and status.startswith("5") and status.isdigit())

@@ -411,6 +411,12 @@ class DayGate(Protocol):
         """§3.3: what the day before handed this session, on its first day only; None otherwise."""
         ...
 
+    async def admit(self, scope: TrustedScope) -> None:
+        """§3.2, §6: before new work is taken into a Conversation (a message, a wake) — DataError DAY_CLOSED when
+        it is a day session that is closed, or fenced for its closing (its running job settles first). Any other
+        Conversation is admitted."""
+        ...
+
 
 class ContextInspector(Protocol):
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:

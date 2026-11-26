@@ -25,10 +25,11 @@ from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
-from himari.common import ConversationId, thaw  # noqa: E402
+from himari.common import ConversationId, TextBlock, TrustedScope, thaw  # noqa: E402
 from himari.data.api import (  # noqa: E402
     NO_PERSONA,
     FellBy,
+    UserMessage,
     LifeJob,
     LifeOrigin,
     LifePlan,
@@ -187,14 +188,55 @@ def test_a_closed_day_session_refuses_a_message_records_nothing_and_a_new_one_op
     assert server.day() != cid  # a new day session opens
 
 
+def test_a_closed_day_is_never_continued_resumed_or_compacted(server: Server) -> None:
+    """§3.2 (review 2): a day closed with a message still unanswered — nothing to continue; Continue and compaction
+    are 409 ``day_closed``, as a message is, and nothing is written."""
+    cid = server.day()
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+    server.call(lambda: server.app.data.append_event(scope, UserMessage((TextBlock("남은 말"),))))
+    assert server.client.get(f"/api/conversations/{cid}").json()["continuable"] is True
+    server.call(lambda: server.app.data.close_day_session(OPERATOR, ConversationId(cid), datetime.now(UTC)))
+    assert server.client.get(f"/api/conversations/{cid}").json()["continuable"] is False
+    for path in ("resume", "compact"):
+        refused = server.client.post(f"/api/conversations/{cid}/{path}", headers=SEND)
+        assert (refused.status_code, error_code(refused)) == (409, "day_closed"), path
+    assert len(server.client.get(f"/api/conversations/{cid}/events").json()["items"]) == 1
+    assert not server.client.get(f"/api/conversations/{cid}").json()["job"]["running"]
+
+
+def test_a_day_fenced_for_its_closing_takes_no_new_message(server: Server) -> None:
+    """§6 (review 3): while its last job settles, the day session is fenced — a message is 409 ``day_closed``
+    (nothing recorded), Continue too; another conversation is not."""
+    cid = server.day()
+    keeper = server.app.keeper
+    assert keeper is not None
+    keeper._fenced[OPERATOR] = ConversationId(cid)  # noqa: SLF001 — as the keeper fences it at the closing hour
+    keeper.busy = lambda scope: True  # its job still runs: the keeper's own looks leave the fence in place
+    refused = server.post(f"/api/conversations/{cid}/messages", {"text": "아직 안 자?"})
+    assert (refused.status_code, error_code(refused)) == (409, "day_closed")
+    assert server.client.get(f"/api/conversations/{cid}/events").json()["items"] == []
+    resumed = server.client.post(f"/api/conversations/{cid}/resume", headers=SEND)
+    assert (resumed.status_code, error_code(resumed)) == (409, "day_closed")
+    assert server.client.get(f"/api/conversations/{cid}").json()["continuable"] is False
+    other = server.post("/api/conversations", {}).json()["id"]
+    server.provider.extend([final("응")])
+    assert server.post(f"/api/conversations/{other}/messages", {"text": "여기는?"}).status_code == 202
+
+
 def test_a_sleeping_himari_meets_messages_with_nothing_then_a_mumble_then_waking(server: Server) -> None:
     """§5.5: deep sleep — the first message is only recorded (202 ``asleep: none``, no job, nothing to continue),
     the second gets a half-asleep turn with no Tools, the third wakes it; the events say how each was met."""
     cid = server.day()
+    server.provider.extend([final("응, 놀자!")])  # an earlier job, while awake
+    assert server.post(f"/api/conversations/{cid}/messages", {"text": "놀자"}).json()["asleep"] is None
+    server.wait(cid)
     server.asleep()
-    assert server.client.get("/api/life").json()["sleep"] == {"state": "asleep", "deep": True}
+    shown = server.client.get("/api/life").json()["sleep"]
+    assert (shown["state"], shown["deep"]) == ("asleep", True)  # (tonight's slot, placed as the turn began)
     first = server.post(f"/api/conversations/{cid}/messages", {"text": "자?"})
     assert first.status_code == 202 and first.json()["asleep"] == "none" and first.json()["running"] is False
+    # review 6: a receipt of its own — no job, never the earlier job's id or result
+    assert (first.json()["job_id"], first.json()["state"], first.json()["started_at"]) == (None, None, None)
     detail = server.client.get(f"/api/conversations/{cid}").json()
     assert detail["continuable"] is False and detail["job"]["running"] is False
     server.provider.extend([final("음냐… 오늘 재밌었…")])
@@ -209,8 +251,9 @@ def test_a_sleeping_himari_meets_messages_with_nothing_then_a_mumble_then_waking
     server.wait(cid)
     items = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
     said = [(i["text"], i["while_asleep"]) for i in items if i["kind"] == "user_message"]
-    assert said == [("자?", "none"), ("자는구나", "mumble"), ("일어나!", "wake")]
-    assert [i["text"] for i in items if i["kind"] == "assistant_final"] == ["음냐… 오늘 재밌었…", "으, 왜… 깼잖아."]
+    assert said == [("놀자", None), ("자?", "none"), ("자는구나", "mumble"), ("일어나!", "wake")]
+    assert [i["text"] for i in items if i["kind"] == "assistant_final"] == [
+        "응, 놀자!", "음냐… 오늘 재밌었…", "으, 왜… 깼잖아."]
     life = server.client.get("/api/life").json()
     assert life["sleep"]["state"] == "awake"
     if "tonight" in life["sleep"]:  # placed by the keeper as a job ended: the slot's date, start and length
@@ -287,6 +330,8 @@ def test_the_schedule_is_written_moved_and_refused_with_the_schedules_own_senten
     sleep_id = server.call(placed)
     kept = server.client.delete(f"/api/life/{sleep_id}?revision=1", headers=SEND)
     assert (kept.status_code, error_code(kept)) == (409, "plan_refused")
+    edited = server.client.put(f"/api/life/{sleep_id}", headers=SEND, json={"text": "밤샘", "revision": 1})
+    assert (edited.status_code, error_code(edited)) == (409, "plan_refused")  # review 13: only moved, as a slot
     over = server.post("/api/life/plans", {"day": tomorrow, "time": "01:00", "minutes": 60, "plan_kind": "own",
                                            "text": "야식", "persona_id": None})
     assert (over.status_code, error_code(over)) == (409, "plan_refused")

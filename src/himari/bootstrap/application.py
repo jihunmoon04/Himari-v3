@@ -1014,7 +1014,10 @@ class Application:
         application._wake_events = wake_events
         application.backup_model = backup_model
         if keeper is not None:  # character-day §18.10: the keeper, told of every job's end
-            keeper.busy = lambda scope: scope.conversation_id in runner.running(scope.principal_id)
+            # §6: never asleep mid-answer nor closed under a job or an input being taken; a resume or a compaction
+            # is refused at once in a day closing or closed
+            keeper.busy = runner.working
+            runner.day_closing = keeper.closing
             keeper.on_sleep = lambda principal, state: hub.publish(principal, "himari_sleep", {"sleep": state.value})
             keeper.on_session = application._tell_session
             keeper.on_closed = application._day_closed
@@ -1159,6 +1162,18 @@ class Application:
         if self.keeper is None:
             return await self.recent_companion_conversation(principal)
         return await self.day_session(principal)
+
+    def day_closing(self, scope: TrustedScope) -> bool:
+        """§3.2, §6: the day session is fenced for its closing (or this process closed it) — takes no new work."""
+        return self.keeper is not None and self.keeper.closing(scope)
+
+    async def check_day_open(self, scope: TrustedScope) -> ConversationSummary:
+        """§3.2: the Conversation (authorized like any read), unless it is a day session closed or closing: then
+        DayClosed (409 ``day_closed``), nothing written. The message, resume and compact entry points ask first."""
+        summary = await self.data.read_conversation(scope)
+        if summary.day_session is not None and (summary.closed_at is not None or self.day_closing(scope)):
+            raise DayClosed(scope.conversation_id)
+        return summary
 
     def _tell_session(self, principal: PrincipalId, summary: ConversationSummary, closed: bool) -> None:
         """§18.10: the stream's ``day_session`` (the Web and the devices follow it)."""
@@ -1819,9 +1834,9 @@ class Application:
             if connection_generation is not None and not self.presence.valid_generation(
                     scope.principal_id, origin.device_id or "", connection_generation):
                 raise StaleConnectionGeneration
-        summary = await self.data.read_conversation(scope)  # 404 before a job is started (or a file read)
-        if summary.day_session is not None and summary.closed_at is not None:
-            raise DayClosed(scope.conversation_id)  # character-day §3.2: a closed day is only read
+        # 404 before a job is started (or a file read); character-day §3.2: a closed day is only read (the Driver and
+        # Data refuse again when the message is written, after any wait here)
+        await self.check_day_open(scope)
         if origin is not None and origin.kind is OriginKind.DEVICE:
             await self.require_companion_model(scope)
         with device_input_negotiation(connection_generation, client_file_download):
