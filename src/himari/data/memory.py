@@ -1536,6 +1536,14 @@ class InMemoryData:
                    if w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
                    and w.record.job is job)
 
+    async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
+                              plan_id: int | None = None) -> LifeWrite | None:
+        found = [w.record for w in self._store.life_writes.values()
+                 if w.owner == principal and w.record.job is job
+                 and (w.record.plan_id == plan_id if plan_id is not None
+                      else w.record.persona_id == persona_id and w.record.day == day)]
+        return found[-1] if found else None
+
     async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
         return sum(1 for w in self._store.life_writes.values()
                    if w.owner == principal and w.record.plan_id == plan_id and w.record.job is job)

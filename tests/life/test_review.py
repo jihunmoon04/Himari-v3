@@ -21,6 +21,8 @@ from himari.data.api import (
     LifeOrigin,
     LifePlan,
     MemoryOrigin,
+    PlanKind,
+    PlanState,
     RecentEpisode,
     ThoughtAbout,
 )
@@ -46,6 +48,16 @@ DAY = date(2026, 11, 25)
 def entry(entry_id: int, kind: LifeKind, text: str, day: str | None = None,
           origin: LifeOrigin = LifeOrigin.WRITER) -> LifeEntry:
     return LifeEntry(entry_id, 1, kind, day, text, origin, 1, NOW, NOW)
+
+
+def test_the_date_written_is_today_once_himari_fell_asleep_from_21_00() -> None:
+    """character-day §7: asleep before 22:00 (from 21:00 that date), the diary is today's as it falls asleep."""
+    at = time(22, 0)
+    now = datetime(2026, 11, 25, 12, 40, tzinfo=UTC)  # 21:40 in Seoul
+    assert target_day(now, SEOUL, at, datetime(2026, 11, 25, 12, 30, tzinfo=UTC)) == DAY  # asleep at 21:30
+    assert target_day(now, SEOUL, at, datetime(2026, 11, 25, 11, 30, tzinfo=UTC)) == date(2026, 11, 24)  # 20:30
+    assert target_day(now, SEOUL, at, datetime(2026, 11, 24, 12, 30, tzinfo=UTC)) == date(2026, 11, 24)  # yesterday
+    assert target_day(now, SEOUL, at, None) == date(2026, 11, 24)
 
 
 def test_the_date_written_is_the_latest_whose_time_has_come() -> None:
@@ -195,49 +207,69 @@ def test_an_answer_out_of_shape_is_thrown_away_whole(bad: str) -> None:
 
 # --- character-work v0.1 §4, §5 (K7) ----------------------------------------------------------
 
-def test_the_input_holds_each_projects_so_far_the_plans_projects_the_days_work_and_the_quiet_hours() -> None:
+def test_the_input_holds_each_projects_so_far_the_plans_projects_the_days_work_and_tonights_sleep() -> None:
+    """character-day §7, §18.7: the day's schedule (what was cancelled too, and why), the plans ahead with their
+    lengths (never a sleep slot) and tonight's sleep slot in place of the quiet hours."""
     arc = replace(entry(5, LifeKind.ARC, "설정집 한 권", "2026-11-20"), title="블랙홀 전자포", so_far="포신까지.")
-    plan = replace(entry(6, LifeKind.PLAN, "냉각부 도면 그려야지.", "2026-11-26"), time_of_day="20:00", arc_id=5)
+    plan = replace(entry(6, LifeKind.PLAN, "냉각부 도면 그려야지.", "2026-11-26"), time_of_day="20:00", arc_id=5,
+                   minutes=90, plan_kind=PlanKind.WORK)
     piece = replace(entry(7, LifeKind.WORK, "조각 본문", "2026-11-25"), time_of_day="20:00", title="포신",
                     summary="포신 다 그렸어.", arc_id=5, plan_id=4)
     old = replace(piece, entry_id=8, day="2026-11-24", title="어제 것")
-    data = request_data((arc, plan, piece, old), (), day=DAY, now=NOW, zone=SEOUL,
-                        quiet=(time(23, 0), time(8, 0)))
+    walk = replace(entry(10, LifeKind.PLAN, "산책", "2026-11-25"), time_of_day="15:00", plan_kind=PlanKind.OWN,
+                   plan_state=PlanState.CANCELLED, reason="비가 와서")
+    sleep = replace(entry(11, LifeKind.PLAN, "잠", "2026-11-26"), time_of_day="00:30", minutes=480,
+                    plan_kind=PlanKind.SLEEP)
+    data = request_data((arc, plan, piece, old, walk, sleep), (), day=DAY, now=NOW, zone=SEOUL)
     assert data["arcs"] == [{"id": 5, "title": "블랙홀 전자포", "goal": "설정집 한 권", "started": "2026-11-20",
                              "so_far": "포신까지.", "moved_on": []}]
-    assert data["plans"] == [{"date": "2026-11-26", "time": "20:00", "text": "냉각부 도면 그려야지.", "arc": 5}]
+    assert data["plans"] == [{"date": "2026-11-26", "time": "20:00", "text": "냉각부 도면 그려야지.", "minutes": 90,
+                              "arc": 5}]
     assert data["work"] == [{"time": "20:00", "project": "블랙홀 전자포", "title": "포신", "summary": "포신 다 그렸어."}]
-    assert data["quiet_hours"] == "23:00-08:00"
+    assert data["schedule"] == [{"time": "15:00-16:00", "kind": "own", "text": "산책", "state": "cancelled",
+                                 "reason": "비가 와서"}]
+    assert data["sleep"] == "00:30-08:30" and "quiet_hours" not in data
     bare = request_data((), (), day=DAY, now=NOW, zone=SEOUL)
-    assert "work" not in bare and "quiet_hours" not in bare and "persona_makes" not in bare
+    assert "work" not in bare and "sleep" not in bare and "schedule" not in bare and "persona_makes" not in bare
     # character-persona-fields §4: the persona's field makes, apart, when filled; projects start out of it
     assert request_data((), (), day=DAY, now=NOW, zone=SEOUL, makes="작곡")["persona_makes"] == "작곡"
     assert "persona_makes" not in request_data((), (), day=DAY, now=NOW, zone=SEOUL, makes="  ")
     assert "when persona_makes is given, start them out of it" in WRITER_INSTRUCTIONS
     # K7: HIMARI's own memo, projects out of itself and never the user's conversations, a day of its own
     for words in ("memo", "never the project's goal again", "never out of the user's conversations",
-                  "when no arc is open, start one today", "a sentence or two at most", "outside quiet_hours",
+                  "when no arc is open, start one today", "a sentence or two at most", "never within your sleep",
                   "Starting and ending them is yours"):
         assert words in WRITER_INSTRUCTIONS, words
 
 
-def test_a_plans_project_comes_with_a_time_outside_the_quiet_hours_and_a_bad_one_is_only_left_out() -> None:
+def test_a_plans_project_comes_with_a_time_and_a_plan_over_the_sleep_is_left_out_alone() -> None:
+    """character-day §18.7: a timed plan over a sleep slot (its length counted) is dropped and recorded — the rest of
+    the answer stays; a bad project is only left out."""
     def plans(*raw: dict[str, object]) -> str:
         return json.dumps({"diary": "하루.", "plans": list(raw)}, ensure_ascii=False)
 
-    quiet = (time(23, 0), time(8, 0))
-    told = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "a", "arc": 5},
+    sleeps = [(datetime(2026, 11, 26, 0, 30, tzinfo=SEOUL), datetime(2026, 11, 26, 8, 30, tzinfo=SEOUL)),
+              (datetime(2026, 11, 27, 0, 30, tzinfo=SEOUL), datetime(2026, 11, 27, 8, 30, tzinfo=SEOUL))]
+    told = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "a", "arc": 5, "minutes": 90},
                               {"date": "2026-11-26", "time": "21:00", "text": "b", "arc": "new"},
-                              {"date": "2026-11-27", "time": "21:00", "text": "c", "arc": "7"}), DAY, quiet)
-    assert told.plan_arcs == (5, 0, 7)
-    dropped = parse_answer(plans({"date": "2026-11-26", "text": "no time", "arc": 5},
-                                 {"date": "2026-11-26", "time": "02:00", "text": "asleep", "arc": 5},
-                                 {"date": "2026-11-27", "time": "21:00", "text": "bad", "arc": [5]}), DAY, quiet)
-    assert len(dropped.plans) == 3 and dropped.plan_arcs == ()
+                              {"date": "2026-11-27", "time": "21:00", "text": "c", "arc": "7"}), DAY, sleeps, SEOUL)
+    assert told.plan_arcs == (5, 0, 7) and told.plan_minutes == (90, None, None)
+    dropped: list[str] = []
+    kept = parse_answer(plans({"date": "2026-11-26", "text": "no time", "arc": 5},
+                              {"date": "2026-11-26", "time": "02:00", "text": "asleep", "arc": 5},
+                              {"date": "2026-11-26", "time": "23:50", "text": "into the sleep", "minutes": 60},
+                              ), DAY, sleeps, SEOUL, dropped)
+    assert kept.plans == (("2026-11-26", "no time"),) and kept.plan_arcs == () and kept.diary == "하루."
+    assert dropped == ["asleep", "into the sleep"]
+    bad = parse_answer(plans({"date": "2026-11-27", "time": "21:00", "text": "bad", "arc": [5]}), DAY, sleeps, SEOUL)
+    assert len(bad.plans) == 1 and bad.plan_arcs == ()
     assert parse_answer(plans({"date": "2026-11-26", "time": "02:00", "text": "x", "arc": 5}), DAY).plan_arcs == (5,)
     assert parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x", "arc": True}), DAY).plan_arcs == ()
-    old = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x"}), DAY, quiet)  # the old shape
-    assert old.plan_arcs == () and old.times == ("20:00",)
+    old = parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x"}), DAY, sleeps, SEOUL)  # old shape
+    assert old.plan_arcs == () and old.times == ("20:00",) and old.plan_minutes == ()
+    for length in (4, 721, "x", True):  # out of shape: the default length (only left out)
+        assert parse_answer(plans({"date": "2026-11-26", "time": "20:00", "text": "x", "minutes": length}),
+                            DAY).plan_minutes == ()
 
 
 # --- character-mind v0.1 §5.3: the facts settled from the diary -----------------------------

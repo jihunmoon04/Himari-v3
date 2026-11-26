@@ -2961,6 +2961,17 @@ class SqliteData:
             assert row is not None
             return int(row["n"])
 
+    async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
+                              plan_id: int | None = None) -> LifeWrite | None:
+        with self._tx() as tx:
+            if plan_id is not None:
+                row = tx.one("SELECT * FROM life_writes WHERE owner=? AND plan_id=? AND job=? ORDER BY seq DESC LIMIT 1",
+                             principal, plan_id, LifeJob(job).value)
+            else:
+                row = tx.one("SELECT * FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?"
+                             " ORDER BY seq DESC LIMIT 1", principal, persona_id, day, LifeJob(job).value)
+            return None if row is None else _life_write(row)
+
     async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
         with self._tx() as tx:
             row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND plan_id=? AND job=?", principal,

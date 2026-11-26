@@ -71,6 +71,9 @@ class Link:
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
         return ()
 
+    async def session_input(self, principal: PrincipalId) -> None:
+        return None  # character-day §7: no day session
+
 
 def setup(*script: object, settings: LifeSettings = SETTINGS, clock: object = None,
           weather: WeatherSource | None = None, topics: TopicSource | None = None,

@@ -2286,6 +2286,12 @@ class LifeWriteLog(Protocol):
         """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED."""
         ...
 
+    async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
+                              plan_id: int | None = None) -> LifeWrite | None:
+        """character-day §10, §18.7: the latest write of ``job`` for this persona and date (with ``plan_id``: for that
+        work plan) — whether it ended with no answer decides the backup model; None: none yet."""
+        ...
+
     async def note_life_thought(self, write_id: str, thought: str) -> None:
         """§4.1: the thought a self run's answer began with, kept with its write (its raw response
         holds it too). NOT_FOUND for no such write."""

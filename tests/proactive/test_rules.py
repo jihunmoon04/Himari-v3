@@ -583,3 +583,52 @@ def test_an_anniversary_goes_before_a_free_wake_and_right_after_a_reminder() -> 
     merged = decide(situation(**days, loops=DUE))
     assert [r.kind for r in merged.reasons] == [WakeKind.ANNIVERSARY, WakeKind.LOOP_DUE]
     assert not free_wake(merged.reasons)  # with a loop it is an ordinary wake
+
+
+# --- character-day v0.1 §9, §18.9: HIMARI's own sleep and a time set together ----------------
+
+def promise(entry_id: int, start: datetime) -> tuple[LifeEntry, datetime]:
+    entry = LifeEntry(entry_id, 1, LifeKind.PLAN, "2026-11-04", "방송 같이 보기", LifeOrigin.HIMARI, 1, NOW, NOW,
+                      time_of_day="16:00", minutes=120)
+    return entry, start
+
+
+def test_himaris_sleep_holds_every_wake_but_a_reminder_which_it_speaks_half_asleep() -> None:
+    days = {"anniversaries": (HUNDRED,), "bond_day": "2026-11-04", "free_ok": True}
+    held = decide(situation(**days, loops=DUE, himari_asleep=True))
+    assert held.reasons == () and held.blocked == "himari_asleep"
+    note = reminding(7, NOW - timedelta(minutes=1))
+    told = decide(situation(loops=(note, *DUE), himari_asleep=True))
+    assert told.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7),) and told.blocked == "himari_asleep"
+    assert decide(situation(loops=DUE, himari_asleep=False)).reasons  # awake: the usual rules
+    # its life on, the quiet hours no longer stand in for its sleep: awake at 03:00, it may speak
+    hours = replace(ON, quiet_start=time(23, 0), quiet_end=time(8, 0))
+    night = datetime(2026, 11, 3, 18, 0, tzinfo=UTC)  # 03:00 in Seoul
+    late = (loop(1, "2026-11-04T01:00+09:00"),)
+    assert decide(situation(settings=hours, now=night, loops=late, himari_asleep=False)).reasons
+    assert decide(situation(settings=hours, now=night, loops=late)).blocked == "quiet_hours"  # its life off
+
+
+def test_a_together_slot_opens_its_wake_once_within_ten_minutes_of_its_start() -> None:
+    start = NOW - timedelta(minutes=3)
+    decided = decide(situation(together=(promise(9, start),)))
+    assert decided.reasons == (WakeReason(WakeKind.TOGETHER, entry_id=9),) and decided.keys == ("together:9",)
+    assert decide(situation(together=(promise(9, start),)), frozenset(decided.keys)).reasons == ()  # once
+    assert decide(situation(together=(promise(9, NOW + timedelta(minutes=1)),))).reasons == ()  # not yet
+    assert decide(situation(together=(promise(9, NOW - timedelta(minutes=10)),))).reasons == ()  # too late
+
+
+def test_a_together_wake_passes_the_gap_the_day_and_an_unanswered_wake_but_not_the_users_quiet() -> None:
+    start = NOW - timedelta(minutes=1)
+    soft = dict(unanswered_wake=True, free_ok=True, wakes=tuple(wake(NOW - timedelta(minutes=m), WakeKind.FREE)
+                                                                for m in (5, 60, 120, 180)))
+    assert decide(situation(together=(promise(9, start),), **soft)).reasons == (
+        WakeReason(WakeKind.TOGETHER, entry_id=9),)
+    for changes, blocked in (({"quiet_until": NOW + timedelta(hours=1)}, "quiet"),
+                             ({"last_user_message_at": NOW - timedelta(seconds=30)}, "talking"),
+                             ({"device_id": None, "device": None}, "no_device"),
+                             ({"working": True}, "working"),
+                             ({"device": device(sleeps=True, sleep="idle")}, "asleep"),
+                             ({"himari_asleep": True}, "himari_asleep")):
+        decided = decide(situation(together=(promise(9, start),), **changes))
+        assert decided.reasons == () and decided.blocked == blocked, changes

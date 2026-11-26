@@ -1026,6 +1026,10 @@ class Application:
         settings, application.auto_memory = memory_pass_settings(
             provider, memory=memory, auto=memory_auto, model_id=memory_model, idle_minutes=memory_idle_minutes,
             daily_tokens=memory_daily_tokens, time_zone=time_zone)
+        if settings is not None and backup_model is not None:  # character-day §10, §18.8: the passes' backup too
+            spare = catalog.offer(backup_model)
+            if spare is not None:
+                settings = replace(settings, backup_model_id=spare.model_id, backup_effort=spare.default_effort)
         if settings is not None:
             async def zone_for(scope: TrustedScope, origin: MessageOrigin | None) -> str:
                 """V3-P85 §4.2: the zone of the device the part's last message came from, else the server's."""
@@ -1117,7 +1121,8 @@ class Application:
         scope = TrustedScope(principal, session.conversation_id)
         inputs = await self.runtime.driver.turn_inputs(scope)
         budget = self.runtime.models.resolve(await self.data.read_model_setting(scope)).offer.budget
-        return SessionInput(session.conversation_id, inputs, None if budget is None else budget.ceiling_tokens)
+        return SessionInput(session.conversation_id, session.day_session or "", inputs,
+                            None if budget is None else budget.ceiling_tokens)
 
     # --- the day session (character-day v0.1 §3, §18.10) ------------------------------------------
 

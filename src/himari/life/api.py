@@ -44,10 +44,11 @@ class LifeSettings(DeepFrozen):
 
 @dataclass(frozen=True)
 class SessionInput(DeepFrozen):
-    """character-day §7, §18.7: the day session a diary is written in the context of — its next turn's inputs and
-    the most its model's request may hold (tokens; None: no limit known)."""
+    """character-day §7, §18.7: the day session a diary is written in the context of — its date (the day it was
+    opened), its next turn's inputs and the most its model's request may hold (tokens; None: no limit known)."""
 
     conversation_id: ConversationId
+    day: str
     inputs: PromptInputs
     limit_tokens: int | None = None
 

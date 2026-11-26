@@ -321,9 +321,8 @@ def anniversary_candidates(s: Situation) -> list[Candidate]:
 
 def together_candidates(s: Situation) -> list[Candidate]:
     """character-day §9, §18.9: each ``together`` slot that started less than TOGETHER_WINDOW ago, once (its key
-    names the slot), on the current device."""
-    if s.device_id is None:
-        return []
+    names the slot); with no current device it is held (``no_device``) and, past its window, left to the keeper
+    (§5.4: a promise missed)."""
     return [Candidate(WakeReason(WakeKind.TOGETHER, entry_id=entry.entry_id), f"together:{entry.entry_id}", start)
             for entry, start in s.together if start <= s.now < start + TOGETHER_WINDOW]
 
