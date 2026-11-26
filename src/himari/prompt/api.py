@@ -1082,8 +1082,9 @@ PERSONA_RULE = (
 # character-mind §3.1 (M2): right after PERSONA_RULE. A turn's first Run (and a wake's) thinks first, as a
 # flow of reactions rather than an analysis; the thought is never shown (common.scan_marks) nor seen again.
 THINK_RULE = (
-    "- Thinking first: begin your reply to a user message or a <wake> with your thought, [[think]]…[[/think]], "
-    "before anything else (before [[pass]] or a tool call too). It is your own inner flow, in your voice and in the "
+    "- Thinking first: begin your reply to a user message or a <wake> with your thought, [[think]]…[[/think]] on "
+    "one line and always closed, before anything else (before [[pass]] or a tool call too). It is your own inner "
+    "flow, in your voice and in the "
     "first person, two to four short sentences: what you notice, how you feel about it (a hesitation too), what "
     "it brings to mind from what you know of them and of your own life, and what you mean to do. It is not an "
     "analysis or a plan of the answer. No one sees it, the user included: never say it to them or repeat it in "
