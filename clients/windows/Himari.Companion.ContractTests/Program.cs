@@ -382,6 +382,20 @@ var pageTwo = JsonSerializer.SerializeToElement(new { items = new[] { new { sequ
 var requestedPages = new List<int>();
 string historyText = await HistoryReader.ReadAsync((after, ct) => { requestedPages.Add(after); return Task.FromResult(after == 0 ? pageOne : pageTwo); }, null, CancellationToken.None);
 Check(requestedPages.SequenceEqual(new[] { 0, 100 }) && historyText.Contains("<hello>") && historyText.Contains("안녕하세요") && !historyText.Contains("private tool result") && !historyText.Contains("[[mood:"), "history pages and display text");
+// character-day second review P2 6: pages go by what the server says of them (more, last_sequence), never by their rows
+var hiddenPage = JsonSerializer.SerializeToElement(new { items = Enumerable.Range(1, 99).Select(n => new { sequence = n, kind = "tool_result" }), last_sequence = 100, more = true });
+var afterHidden = JsonSerializer.SerializeToElement(new { items = new[] { new { sequence = 101, kind = "user_message", text = "다음 쪽" } }, last_sequence = 101, more = false });
+var hiddenPages = new List<int>();
+string hiddenText = await HistoryReader.ReadAsync((after, ct) => { hiddenPages.Add(after); return Task.FromResult(after == 0 ? hiddenPage : afterHidden); }, null, CancellationToken.None);
+Check(hiddenPages.SequenceEqual(new[] { 0, 100 }) && hiddenText.Contains("다음 쪽"), "a page a hidden wake made short still goes on, from the server's cursor");
+var emptyMore = JsonSerializer.SerializeToElement(new { items = Array.Empty<object>(), last_sequence = 7, more = true });
+var fullDone = JsonSerializer.SerializeToElement(new { items = Enumerable.Range(1, 100).Select(n => new { sequence = n }), last_sequence = 100, more = false });
+var olderFull = JsonSerializer.SerializeToElement(new { items = Enumerable.Range(1, 100).Select(n => new { sequence = n }), last_sequence = 100 });
+var olderShort = JsonSerializer.SerializeToElement(new { items = new[] { new { sequence = 1 } }, last_sequence = 1 });
+Check(EventPages.Next(emptyMore, 0, 3, 100) == 7 && EventPages.Next(fullDone, 100, 100, 100) is null,
+    "more: from last_sequence even past a page showing nothing; no more: the last page, however full");
+Check(EventPages.Next(olderFull, 100, 100, 100) == 100 && EventPages.Next(olderShort, 1, 1, 100) is null,
+    "an older server (no more): a full page may have more after its last row, a short one was the last");
 // V3-P87 §9, §10: a wake in the history, and whose a job is
 var wakeHistory = JsonSerializer.SerializeToElement(new { items = new object[] {
     new { sequence = 1, kind = "wake", text = "HIMARI reached out · a try" },
@@ -761,6 +775,21 @@ Check(DaySession.CanRetry("d1", "d1", false) && !DaySession.CanRetry("d1", "w1",
     "a closed day's unsent bubble is retried from anywhere (to today's); another only where it was written");
 Check(DaySession.Rebind("d1", true, "d2") == "d2" && DaySession.Rebind("w1", false, "d2") == "w1" && DaySession.Rebind(null, true, "d2") is null,
     "once today's is known, a closed day's unsent message belongs to it; others keep their conversation");
+// second review P2 5: a day fenced for its closing is still named as today's while it closes — it stays closed, and the
+// send waits for a different open session
+Check(DaySession.Today("d2", false) == "d2" && DaySession.Today("d1", true) is null && DaySession.Today(null, false) is null,
+    "the server's today is taken unless it is a day known closed (one closing): then the rollover is waited for");
+// second review P1 4: a send leaving a closed day goes on only to the session it resolved, still shown, on the same
+// client and connection
+var rolloverClient = new object(); var rolloverLine = new object();
+Check(DaySession.Verified("d2", "d2", rolloverClient, rolloverClient, rolloverLine, rolloverLine),
+    "today's resolved, still shown, the same client and connection: the send goes there");
+Check(!DaySession.Verified("d2", "w1", rolloverClient, rolloverClient, rolloverLine, rolloverLine)
+    && !DaySession.Verified(null, "d2", rolloverClient, rolloverClient, rolloverLine, rolloverLine)
+    && !DaySession.Verified("d2", "d2", rolloverClient, new object(), rolloverLine, rolloverLine)
+    && !DaySession.Verified("d2", "d2", rolloverClient, rolloverClient, rolloverLine, new object())
+    && !DaySession.Verified("d2", "d2", rolloverClient, null, rolloverLine, rolloverLine),
+    "another conversation picked meanwhile, none resolved, or a reconnect: nothing is sent, the draft stays");
 
 // V3-P90 §6.1, §5.3: the main task, and the games and videos that clearly end
 TaskTracker Run(TaskTracker tracker, DateTime from, int seconds, Func<int, string?> category, bool gameAlive = true,

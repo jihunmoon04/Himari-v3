@@ -115,8 +115,12 @@ export interface EventView {
 
 export interface EventsPage {
   items: EventView[];
-  last_sequence: number;
+  last_sequence: number; // where the next page starts: past the events the page read, shown or not (review P2 6)
+  more?: boolean; // the server's page stopped at its limit, so more may follow (an older server does not say)
 }
+
+/** The rows asked of an events page (the server's own limit: what it reads, not what it shows). */
+export const EVENTS_PAGE = 500;
 
 export const readSession = () => get<Session>("/api/session");
 export const signIn = (token: string) => post<void>("/api/session", { token });
@@ -128,7 +132,7 @@ export const listConversations = (limit = 50, offset = 0) =>
 export const conversationActivity = () => get<{ working: string[] }>("/api/conversations/activity");
 export const createConversation = () => post<ConversationSummary>("/api/conversations", {});
 export const readConversation = (id: string) => get<ConversationDetail>(`/api/conversations/${enc(id)}`);
-export const readEvents = (id: string, after: number, limit = 500) =>
+export const readEvents = (id: string, after: number, limit = EVENTS_PAGE) =>
   get<EventsPage>(`/api/conversations/${enc(id)}/events?after=${after}&limit=${limit}`);
 /** character-day §18.11: a message HIMARI got asleep and does not answer comes back as ``{"asleep": "none"}`` (202,
  *  no job); one sent to a closed day session is refused (409 ``day_closed``). */
@@ -142,14 +146,18 @@ export const renameConversation = (id: string, title: string | null) =>
 export const setModel = (id: string, model: string | null, effort: string | null) =>
   put<unknown>(`/api/conversations/${enc(id)}/model`, { model, effort });
 
-/** Every event after ``after``, page by page. */
+/** Every event after ``after``, page by page. character-day review P2 6: the server says whether its page stopped at
+ *  its limit (``more``), and its cursor passes the events it read but left out (a wake not shown yet), so a page is
+ *  never judged by the rows it shows — a diary or a wake's line may add rows, a hidden event take one away. An older
+ *  server says nothing: then a page short of the limit was the last. A cursor that does not move ends it. */
 export async function readAllEvents(id: string, after = 0): Promise<EventsPage> {
   const items: EventView[] = [];
   let cursor = after;
   for (;;) {
     const page = await readEvents(id, cursor);
     items.push(...page.items);
-    if (page.items.length < 500 || page.last_sequence <= cursor) return { items, last_sequence: page.last_sequence };
+    const more = page.more ?? page.items.length >= EVENTS_PAGE;
+    if (!more || page.last_sequence <= cursor) return { items, last_sequence: page.last_sequence };
     cursor = page.last_sequence;
   }
 }
