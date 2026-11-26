@@ -166,3 +166,61 @@
 | E5 | 세계 | 하루 중 언제든. 자는 사이엔 HIMARI 없이 일어나는 일, 깨어나서 안다. 시간 제한(21:00 같은)은 두지 않는다 |
 | E6 | 가짜 일기 | 두지 않는다. 일기 칸에 쓰는 것이 진짜 일기이고 보완이 완성이다 |
 | E7 | 10분 기억 정리 | 그대로 둔다. 그날 안의 약속(`loop`)과 다른 대화, 압축이 쓴다 |
+
+## 16. 구현 계약 (구현 전에 정한 것, 2026-11-27)
+
+### 16.1 줄인 것(설계에서 바꿈)
+
+- **세션 없이 쓴 일기는 보완하지 않는다**(§5의 "사건이나 작업물이 있을 때 혼자 하는 호출"을 뺀다). 그 사건은 다음 날 일기의 자료가 된다(§7).
+- **일기 칸이 없는 밤**(자리가 없었음)은 `HIMARI_LIFE_WRITE_AT`(22:00)과 잠드는 때 가운데 먼저 오는 때에 쓴다. §4의 "삶이 꺼졌을 때"는 없다(삶이 꺼지면 삶 작업도 없다). 잠 기록과 일정이 하나도 없으면(테스트, 하루 지기 없이 쓰는 작업) 지금처럼 22:00에 쓰고 정사 추리기도 바로 뒤에 돈다.
+
+### 16.2 Data (스키마 v30)
+
+- `SCHEMA_VERSION = 30`. 표는 바뀌지 않는다. 올리기 전 백업은 지금 규칙대로 만든다.
+- `PlanKind.DIARY = "diary"`, `LifeJob.AMEND = "amend"`(날짜 단위 작업, `WORK_JOBS`에 들지 않는다).
+- `DIARY_TEXT = "일기 쓰기"`, `DIARY_MINUTES = 30`, 일기 칸 길이 한계 10–60분, `DIARY_EARLIEST = time(18, 0)`.
+- **일기 칸 규칙**(`rules`, `write_plan`·`cancel_plan`이 쓴다. Tool과 Web이 같은 규칙을 탄다):
+  - 새로 만들 수 있는 것은 origin `writer`(하루 지기)뿐이다. `himari`(Tool)와 `user`(Web)는 기존 칸 옮기기만 한다. 종류를 `diary`로 바꾸거나 `diary`에서 바꿀 수 없다.
+  - 취소(`cancel_plan`)와 지우기(Web)를 거부한다.
+  - 날짜 D의 일기 칸은 D 18:00 이후 시작하고, 날짜 D 밤의 잠 칸 시작 전에 끝난다. 밤마다 하나다.
+  - 잠과의 겹침 검사(§4.4)는 **일기 칸을 쓸 때만** 한다. 잠 칸을 옮겨 일기 칸을 덮는 것은 막지 않는다(겹침 검사에서 일기 칸을 뺀다).
+- **일기 보완 적용:** `apply_life_amend(write_id, day, text | None, mood, now)`. 한 트랜잭션에서 그날 일기를 다시 읽어 origin이 `user`면 글을 건드리지 않고(기분도 쓰지 않는다) 기록을 `applied`로 끝낸다. 아니면 글을 바꾸고(origin `writer`, revision+1, source=write_id), 기분이 있으면 쓴다.
+
+### 16.3 순수 규칙
+
+- `life/day.py`: `place_diary(night, sleep_start, rng, zone, now) -> PlacedSlot | None`. §3의 범위(21:00부터 잠 칸 시작 40분 전, 10분 단위, 비면 잠 칸 시작 40분 전, 18:00보다 이르지 않게, `now` 뒤로 10분 단위 올림). 끝이 잠 칸 시작을 넘으면 None. `diary_of_night(plans, night, zone)`.
+- `life/review.py`:
+  - `diary_due(now, zone, write_at, plans, fell_at) -> date`: 오늘 밤(`current_night`) D의 일기 칸이 시작되었거나, D 18:00 뒤에 잠들었거나, D에 일기 칸이 없고 `write_at`이 지났으면 D. 아니면 D−1(지금처럼 채우지 않은 어제만 쓴다).
+  - `passed_events(entries, day, now, slept)`: 그날 시각이 지난 사건과, 마지막 잠(`slept = (fell_at, woke_at)`) 동안의 사건(`while_asleep`).
+  - `amend_due(...)`: 일기를 쓴 때(기록의 `finished_at`)부터 잠든 때까지 새로 생긴 것이 있는가(세션의 사용자 메시지·HIMARI 최종 답, 그 사이 시각의 사건, 그 사이 만든 작업물).
+  - `AMEND_TASK`, `AMEND_MAX_OUTPUT_TOKENS`, `parse_amend(text) -> AmendPlan(diary: str | None, mood)`. `diary`는 `MAX_DIARY_CHARS` 안.
+- `life/world.py`: `due_day` 끝 = 그날 끝(자정). `parse_events`의 잠 시간 거부를 뺀다. 지시문을 §7로 고친다.
+
+### 16.4 Life
+
+- 하루 지기(`keeper.py`): `ensure_slots`와 `Step.PLACE`가 잠 칸 뒤에 그 밤의 일기 칸을 놓는다(없을 때, origin `writer`). 오늘 밤 일기 칸은 지금부터 놓을 수 있을 때만.
+- 삶 작업(`worker.py`):
+  - `_review`의 날짜를 `diary_due`로 정한다. 일기 칸 시작은 그 뒤 첫 회차(10분), 잠듦은 지금 `on_asleep`.
+  - 새 작업 `amend(principal)`: 마지막 닫힘(`DayState.last_closing_at`)의 세션에서 쓴 마지막 일기(`life_writes`의 `job=review`, `conversation_id`)를 보완한다. 조건(§5)을 보고, 닫힌 세션의 입력(`MindLink.session_input(principal, conversation_id)`, 닫힌 세션도 읽는다)에 `AMEND_TASK`를 붙여 부른다. 회차 순서: world, work_start, work_end, review, **amend**, settle.
+  - 닫힌 세션에 그날 일기가 없으면 `_review`가 닫힌 세션으로 쓴다(그 날짜, §5).
+  - `settle`: 그날 일기가 쓰인 뒤 닫힘이 있었고 보완이 끝났을 때(적용, 필요 없음, 사용자 글, 포기). 잠 기록이 없으면 지금처럼 바로.
+- 잠 정리 콜백(`bootstrap._day_closed`): 기억 정리, 세계에 더해 `life_writer.amend(principal)`을 띄운다.
+
+### 16.5 Prompt
+
+- `himari_life_data(entries, now, slept=None)`: 사건에 마지막 잠 동안의 것을 `while_asleep: true`로 더한다(자는 동안에는 더하지 않는다).
+- `LIFE_ABOUT`, `LIFE_RULE`: §8. `SCHEDULE_RULE`: `diary` 한 문장. `REVIEW_TASK`: §8.
+
+### 16.6 먼저 말 걸기와 설정
+
+- §9 그대로. `WebConfig`가 `HIMARI_PROACTIVE_QUIET`를 읽지 않고, 있으면 `startup_warnings`에 한 줄(지금 경고 방식).
+
+### 16.7 Web API와 화면
+
+- 일정표 칸의 `kind`에 `diary`. Settings → HIMARI 일정표: `Diary`, 옮기기만(시각·길이), 지우기·새로 만들기·종류 바꾸기 없음.
+- 하루 세션 타임라인의 `diary` 항목에 `step: "write" | "amend"`를 더한다. `write`는 지금처럼 글을 보이고, `amend`는 "Added to the diary" 한 줄(글은 `write` 항목이 지금 글로 보인다).
+
+### 16.8 확인
+
+- 단위: §14. 엄격 mypy(`src`, `tests`), `scripts/check_imports.py`, Web의 tsc·lint·vitest.
+- 라이브: 일기 칸 일기와 보완 한 장면씩(`tests/live`).
