@@ -18,6 +18,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+/** character-day §3.1: a day session's mark beside its date title (dimmer once the day closed, §3.2). */
+export function DayMark({ closed }: { closed?: boolean }) {
+  return (
+    <span className={cn("shrink-0 rounded border border-line px-1 text-[0.7rem] leading-4",
+      closed ? "text-faint" : "text-muted")} title={closed ? "A closed day: read only" : "Today's day session"}>
+      Day
+    </span>
+  );
+}
+
 function ConversationList() {
   const { data, isLoading, error, hasNextPage, fetchNextPage, isFetching, isFetchingNextPage } = useConversations();
   const activity = useActivity().data;
@@ -45,6 +55,7 @@ function ConversationList() {
               }
             >
               <span className="min-w-0 flex-1 truncate">{item.title || item.preview || "New conversation"}</span>
+              {item.day_session && <DayMark closed={item.closed} />}
               {working && <span className="pulse size-1.5 shrink-0 rounded-full bg-accent" aria-label="Working" />}
             </NavLink>
           </li>

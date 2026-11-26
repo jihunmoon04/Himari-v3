@@ -25,7 +25,13 @@ public partial class MainWindow
                         if (generationState.OnHello(Str(data, "connection_generation"))) signalSchedule.Urgent();
                         bool returned = UpdateCurrent(Str(data, "current_device"));
                         await HelloReconciliation.ApplyAsync(
-                            async () => { if (currentConversation is null || (returned && string.IsNullOrWhiteSpace(Input.Text))) await RefreshConversations(Str(Prop(data, "recent_conversation"), "id"), ct); },
+                            async () =>
+                            {
+                                // character-day §18.13: also to today's day session from a closed day, or one opened meanwhile
+                                string? recent = Str(Prop(data, "recent_conversation"), "id");
+                                if (currentConversation is null || (returned && string.IsNullOrWhiteSpace(Input.Text)) || FollowDayOnHello(recent))
+                                    await RefreshConversations(recent, ct);
+                            },
                             () => StartOwnJobs(Prop(data, "activity"), local, ct),
                             async () => { if (currentConversation is not null) await ReadConversation(currentConversation, ct); }, ct);
                         if (unknownText is not null) await CheckUnknownText(false, ct);
@@ -33,6 +39,8 @@ public partial class MainWindow
                     }
                     else if (type == "mood") StartingMood(Str(data, "mood"));  // character-state §2: once, after hello
                     else if (type == "persona") _ = RefreshPersonas(local, ct);  // §4: changed here, elsewhere or on the Web
+                    else if (type == "himari_sleep") HimariSleepChanged(Prop(data, "sleep"));  // character-day §11: HIMARI's own sleep
+                    else if (type == "day_session") await DaySessionChanged(data, local, ct);  // §11: a day closed or today's opened
                     else if (type == "activity")
                     {
                         StartOwnJobs(data, local, ct);

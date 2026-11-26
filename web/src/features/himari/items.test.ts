@@ -125,6 +125,27 @@ describe("HIMARI's thoughts (character-mind §3.2, §3.3)", () => {
   });
 });
 
+describe("a day session (character-day §5.6, §7)", () => {
+  it("marks a message HIMARI got asleep with how it took it, and leaves the others plain", () => {
+    const items = toItems([
+      event(1, "user_message", { text: "자?", while_asleep: "none" }),
+      event(2, "user_message", { text: "자냐고", while_asleep: "mumble" }),
+      event(3, "user_message", { text: "일어나!", while_asleep: "wake" }),
+      event(4, "user_message", { text: "안녕", while_asleep: null }),
+    ]);
+    expect(items.map((item) => (item.kind === "user" ? item.asleep ?? "-" : item.kind))).toEqual(["none", "mumble", "wake", "-"]);
+  });
+
+  it("shows the diary written from the session as its own folded line, after the turn it follows", () => {
+    const items = toItems([
+      event(5, "assistant_tool_calls", { run_id: "r", calls: [{ call_id: "c", tool_id: "schedule_read", arguments: {} }] }),
+      event(5, "diary", { created_at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["work", "diary"]);
+    expect(items[1]).toEqual({ kind: "diary", key: "5:diary", at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." });
+  });
+});
+
 describe("a wake dropped unshown (review 2)", () => {
   it("is worded as not said, not as one the model let pass", () => {
     const items = toItems([event(5, "wake_thought", { text: "spoke on its own", thought: "말할까 했다.", status: "dropped" })]);

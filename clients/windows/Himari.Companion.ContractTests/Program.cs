@@ -437,6 +437,21 @@ var toldAwake = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
 toldAwake.SetSleeping(true, Ms(1000));
 toldAwake.SetSleeping(false, Ms(9000), stretch: false);
 Check(toldAwake.Pose(Ms(9010)).Clip == "idle", "woken only to say a wake's words, it does not stretch (V3-P90 §2.4)");
+// character-day §18.13: drowsy, the idle extras are yawns; §5.5: poked asleep and not woken, it only stirs
+var drowsy = new CharacterAnimator(shipped, 7, TimeSpan.Zero) { Drowsy = true };
+var drowsyClips = new HashSet<string>();
+for (double t = 0; t <= 300_000; t += 50) drowsyClips.Add(drowsy.Pose(Ms(t)).Clip);
+Check(drowsyClips.SetEquals(["idle", "yawn"]), "drowsy, it yawns now and then instead of the other extras");
+var stirring = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
+stirring.Stir(Ms(100));
+Check(stirring.Pose(Ms(110)).Clip == "idle", "awake, a poke does not stir it");
+stirring.SetSleeping(true, Ms(1000));
+stirring.Stir(Ms(1100));
+Check(stirring.Pose(Ms(1110)).Clip == "yawn", "still yawning into its sleep, a poke changes nothing");
+Check(stirring.Pose(Ms(60_000)) is { Clip: "sleep", Frame: > 0 }, "deep in its sleep, the breathing loop");
+stirring.Stir(Ms(60_000));
+Check(stirring.Pose(Ms(60_010)) is { Clip: "sleep", Frame: 0 } && stirring.Pose(Ms(60_000 + shippedSleep.IntroMs + 10)) is { Clip: "sleep", Frame: > 0 },
+    "poked and not woken, it stirs: the sleep starts over from its nod-off, and sleeps on");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
@@ -703,6 +718,30 @@ Check(lockedPolicy.WakeNow() && !lockedPolicy.Asleep && !lockedPolicy.Locked, "t
 var afterSuspend = new SleepPolicy(); afterSuspend.WakeNow();
 Check(afterSuspend.FallAsleep() && afterSuspend.Asleep && !afterSuspend.FallAsleep(), "after the computer's sleep it goes on asleep");
 Check(afterSuspend.WakeNow() && !afterSuspend.WakeNow(), "a key or a click wakes it once");
+
+// character-day §11, §18.13: a server that keeps HIMARI's day — its sleep, today's day session, a closed day
+using (var dayInfo = JsonDocument.Parse("{\"features\":{\"persona_choice\":1,\"day_session\":1},\"himari\":{\"sleep\":\"half_asleep\"}}"))
+    Check(DaySession.Announced(dayInfo.RootElement) && DaySession.Sleep(dayInfo.RootElement.GetProperty("himari").GetProperty("sleep")) == "half_asleep",
+        "a day server says so in its features, with HIMARI's sleep");
+using (var olderInfo = JsonDocument.Parse("{\"features\":{\"persona_choice\":1,\"sleep_signals\":1}}"))
+    Check(!DaySession.Announced(olderInfo.RootElement) && !DaySession.Announced(default), "an older server keeps the old behaviour");
+using (var sleeps = JsonDocument.Parse("[\"asleep\",{\"state\":\"drowsy\"},\"dreaming\",null,3]"))
+{
+    var told = sleeps.RootElement;
+    Check(DaySession.Sleep(told[0]) == "asleep" && DaySession.Sleep(told[1]) == "drowsy" && DaySession.Sleep(told[2]) is null
+        && DaySession.Sleep(told[3]) is null && DaySession.Sleep(told[4]) is null && DaySession.Sleep(default) is null,
+        "the sleep comes as a string or an object's state; anything else is not told");
+}
+Check(DaySession.Sleeping("asleep") && DaySession.Sleeping("half_asleep") && !DaySession.Sleeping("drowsy") && !DaySession.Sleeping("awake") && !DaySession.Sleeping(null),
+    "the character sleeps asleep and half asleep (a mumble is said in its sleep)");
+Check(DaySession.Drowsy("drowsy") && !DaySession.Drowsy("asleep") && !DaySession.Drowsy(null), "drowsy is told apart");
+Check(DaySession.Follow(null, "d2", false, false, "") && DaySession.Follow("d1", "d2", true, false, "쓰는 중") && !DaySession.Follow("d2", "d2", true, true, "")
+    && !DaySession.Follow("d1", null, true, true, ""), "from none or a closed day it goes to today's, the draft along; not when shown or none named");
+Check(DaySession.Follow("w1", "d2", false, true, "") && !DaySession.Follow("w1", "d2", false, true, "쓰는 중") && !DaySession.Follow("w1", "d2", false, false, ""),
+    "from a conversation the user picked: only to a day just opened, and not while typing");
+var dayClosed = new ApiException(HttpStatusCode.Conflict, "day_closed");
+Check(MessageFailures.Classify(dayClosed) == MessageFailure.Rejected && !MessageFailures.ReuseScreen(dayClosed),
+    "a message to a closed day is refused unrecorded, and its screen is not sent again elsewhere");
 
 // V3-P90 §6.1, §5.3: the main task, and the games and videos that clearly end
 TaskTracker Run(TaskTracker tracker, DateTime from, int seconds, Func<int, string?> category, bool gameAlive = true,

@@ -48,6 +48,7 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
           kind: "user", key, text: event.text ?? "",
           ...(event.attachments?.length ? { files: event.attachments.map((f) => shownFile(f, conversation)) } : {}),
           ...(event.references?.length ? { references: event.references.map(referenceLabel) } : {}),
+          ...(event.while_asleep ? { asleep: event.while_asleep } : {}),
         });
         break;
       case "assistant_final":
@@ -99,6 +100,10 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
         closeWork();
         items.push({ kind: "notice", key, text: `${event.status === "dropped" ? "Not said" : "Let pass"}: ${event.text ?? ""}`,
           ...(event.thought ? { thought: event.thought } : {}) });
+        break;
+      case "diary": // character-day §7: written in this session's context, kept out of it; the owner's
+        closeWork();
+        items.push({ kind: "diary", key: `${key}:diary`, at: event.created_at, text: event.text ?? "" });
         break;
       default:
         break; // a kind this page does not know yet

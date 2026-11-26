@@ -69,12 +69,20 @@ export function usePrincipalEvents(enabled: boolean) {
         void client.invalidateQueries({ queryKey: keys.detail(conversation) });
       }
     };
-    return openStream("/api/events", ["hello", "activity", "job", "conversation", "persona"], ({ event, data }) => {
+    const events = ["hello", "activity", "job", "conversation", "persona", "himari_sleep", "day_session"];
+    return openStream("/api/events", events, ({ event, data }) => {
       if (event === "persona") {
         // character-state §4: the persona changed (in an app, another tab): what depends on it is read again
         for (const part of ["personas", "life", "bond"]) void client.invalidateQueries({ queryKey: ["settings", part] });
         return;
       }
+      if (event === "himari_sleep") { // character-day §18.12: HIMARI fell asleep, woke, got drowsy
+        void client.invalidateQueries({ queryKey: ["settings", "life"] });
+        return;
+      }
+      // day_session (character-day §18.12): a day session opened or closed — the list, that conversation (its
+      // composer closes with it) and the sleep log are read again
+      if (event === "day_session") void client.invalidateQueries({ queryKey: ["settings", "life"] });
       if (event === "hello") {
         // (re)connected: nothing is replayed, so whatever is open is read again
         refresh(null);

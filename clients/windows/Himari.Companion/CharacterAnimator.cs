@@ -59,6 +59,10 @@ internal sealed class CharacterAnimator
 
     internal string Mood { get => mood; set => mood = value is not null && manifest.Faces.ContainsKey(value) ? value : "neutral"; }
 
+    // character-day §18.13: HIMARI is drowsy (its sleep slot is near): the idle extras become a yawn, when there is
+    // yawn art, so it yawns now and then.
+    internal bool Drowsy { get; set; }
+
     internal AnimationRequest Request(string clip, AnimationLayer layer, TimeSpan now, TimeSpan? duration = null)
     {
         if (!manifest.Clips.TryGetValue(clip, out var c)) throw new ArgumentException($"unknown clip {clip}", nameof(clip));
@@ -103,6 +107,16 @@ internal sealed class CharacterAnimator
         foreach (var r in new[] { yawn, sleep }) if (r is not null) Release(r, now);
         yawn = sleep = null;
         if (stretch && manifest.Clips.ContainsKey("stretch")) Request("stretch", AnimationLayer.Ambient, now);
+    }
+
+    // character-day §5.5: poked asleep and not woken, it only stirs — the sleep clip starts over, nodding off again
+    // from the rest pose. Nothing while it is awake or still yawning into its sleep.
+    internal void Stir(TimeSpan now)
+    {
+        if (!sleeping || sleep is not { } asleep || asleep.Start > now) return;
+        Release(asleep, now);
+        sleep = new AnimationRequest("sleep", AnimationLayer.Ambient, now, null, order++);
+        requests.Add(sleep);
     }
 
     internal CharacterPose Pose(TimeSpan now)
@@ -174,6 +188,13 @@ internal sealed class CharacterAnimator
     {
         ScheduleExtra(now);
         bool idleShown = !requests.Any(r => r.Start <= now && (r.End is null || r.End > now));
+        if (Drowsy && manifest.Clips.ContainsKey("yawn"))
+        {
+            if (!idleShown || sleeping || Talking(now)) return;
+            lastExtra = "yawn";
+            Request("yawn", AnimationLayer.Ambient, now);
+            return;
+        }
         var eyes = manifest.Faces[Mood].Eyes;
         var choices = Extras.Where(c => c != lastExtra && manifest.Clips.TryGetValue(c, out var clip)
             && clip.Frames.All(f => f.Eyes is null || eyes?.ContainsKey(f.Eyes) == true)).ToList();

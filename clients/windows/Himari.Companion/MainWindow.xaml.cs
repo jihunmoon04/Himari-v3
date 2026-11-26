@@ -119,11 +119,12 @@ public partial class MainWindow : Window
     private void CharacterMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (Character.IsMouseCaptured) Character.ReleaseMouseCapture();
-        if (!dragInProgress) OpenChat(); e.Handled = true;
+        if (!dragInProgress) { PokeIfAsleep(); OpenChat(); }  // character-day §18.13: a click on HIMARI asleep pokes it
+        e.Handled = true;
     }
     private void OpenChat()
     {
-        WakeFromUser();  // V3-P90 §2.3: clicking HIMARI wakes it at once
+        WakeFromUser();  // V3-P90 §2.3: clicking HIMARI wakes it at once (character-day: the user's being away ends)
         int version = ++chatFocusVersion;
         OpenComposer();
         if (dialogueHost is not null && IsVisible) dialogueHost.Activate();
@@ -190,8 +191,11 @@ public partial class MainWindow : Window
         var now = AnimationNow();
         animator.Mood = mood;
         animator.SetTalking(talking || settings.TalkPreview.IsChecked == true, now);
-        // A wake while asleep wakes it for its words only: no stretch, asleep again after (§2.4).
-        animator.SetSleeping(settings.SleepPreview.IsChecked == true || asleep && !wakeAwake, now, stretch: !asleep);
+        // character-day §18.13: with a server that keeps HIMARI's day, the character sleeps by HIMARI's own sleep and
+        // yawns now and then while drowsy; the input policy is only the user's being away. An older server: a wake
+        // while asleep wakes it for its words only, no stretch, asleep again after (V3-P90 §2.4).
+        animator.Drowsy = serverDaySession && DaySession.Drowsy(himariSleep);
+        animator.SetSleeping(settings.SleepPreview.IsChecked == true || CharacterAsleep(asleep), now, stretch: serverDaySession || !asleep);
         character.Render(PreviewPose(animator.Pose(now)));
         // Wake for the next pose, and at least as often as the idle check.
         double wait = settings.PausePreview.IsChecked == true ? 2000 : (animator.NextChange(now) - now).TotalMilliseconds / animationSpeed;

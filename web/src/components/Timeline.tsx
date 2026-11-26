@@ -28,7 +28,16 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function UserBubble({ text, files, references }: { text: string; files?: Shown[]; references?: string[] }) {
+// character-day §5.5, §5.6: how HIMARI, asleep, took the message (the owner's view only)
+const ASLEEP: Record<"none" | "mumble" | "wake", string> = {
+  none: "While asleep · no answer",
+  mumble: "While asleep · mumbled",
+  wake: "While asleep · woke HIMARI",
+};
+
+function UserBubble({ text, files, references, asleep }: {
+  text: string; files?: Shown[]; references?: string[]; asleep?: keyof typeof ASLEEP;
+}) {
   return (
     <div className="flex flex-col items-end gap-1">
       {files && files.length > 0 && <Files files={files} align="end" />}
@@ -40,7 +49,19 @@ function UserBubble({ text, files, references }: { text: string; files?: Shown[]
       >
         {text}
       </div>
+      {asleep && <p className="text-xs text-faint" aria-label="While asleep">{ASLEEP[asleep]}</p>}
     </div>
+  );
+}
+
+/** character-day §7: the diary HIMARI wrote from this day's conversation, folded; the owner opens it. */
+function DiaryLine({ at, text }: { at: string; text: string }) {
+  const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return (
+    <details className="text-center text-xs text-faint" aria-label="Diary">
+      <summary className="cursor-pointer select-none">Wrote the diary · {time}</summary>
+      {text && <p className="mx-auto mt-1 max-w-[85%] whitespace-pre-wrap text-left">{text}</p>}
+    </details>
   );
 }
 
@@ -148,7 +169,10 @@ export function Timeline({ items, live, running, conversation }: {
       {items.map((item) => {
         switch (item.kind) {
           case "user":
-            return <UserBubble key={item.key} text={item.text} files={item.files} references={item.references} />;
+            return <UserBubble key={item.key} text={item.text} files={item.files} references={item.references}
+              asleep={item.asleep} />;
+          case "diary":
+            return <DiaryLine key={item.key} at={item.at} text={item.text} />;
           case "answer":
             return (
               <div key={item.key} className="group">
