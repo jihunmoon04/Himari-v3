@@ -7,6 +7,8 @@ namespace Himari.Companion;
 // V3-P90 §2, §9: reading Windows for the sleep rules (SleepPolicy.cs) — the screen's power state, a key
 // pressed anywhere (raw input: that one was pressed, never which), what plays, a call, a fullscreen window —
 // and what follows a change: the signal goes at once, waking stretches, a wake while asleep wakes it for its words.
+// character-day §11: with a server that announces features.day_session, this is only the user's being away (still
+// sent as `sleep`); the character's sleep is HIMARI's own, from the server (DayControls.cs).
 public partial class MainWindow
 {
     private readonly SleepPolicy sleepPolicy = new();
@@ -83,7 +85,7 @@ public partial class MainWindow
         signalSchedule.Urgent();
         presenceNudge.TrySetResult();  // the presence loop sends now, not at its next turn
         if (sleepPolicy.Asleep) taskTracker.Reset();  // V3-P90 §6.1: sleep ends the task, and no end is told
-        else
+        else if (!serverDaySession)  // character-day: the user came back; the character did not sleep, so no stretch
         {
             if (character.Manifest.Clips.TryGetValue("stretch", out var stretch))
                 stretchUntil = DateTime.UtcNow + TimeSpan.FromTicks((long)(stretch.Length.Ticks / animationSpeed));

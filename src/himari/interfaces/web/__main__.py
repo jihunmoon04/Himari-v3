@@ -3,6 +3,7 @@
 Configuration comes from the environment (see ``config.py``):
 ``HIMARI_DATA_ROOT`` (required), ``HIMARI_WEB_HOST``/``PORT``,
 ``HIMARI_MODEL`` (the default model), ``HIMARI_MODELS`` (the offered models, ``id[=effort]``),
+``HIMARI_BACKUP_MODEL`` (an offered model a call with no answer at all falls back to once, character-day v0.1),
 ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX``,
 ``HIMARI_CONTEXT_TOKENS`` (request token budget; compaction starts at 80%),
 ``HIMARI_TRASH_DAYS`` (days a deleted Conversation stays in the trash, default 30),
@@ -85,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                                              streaming=config.streaming, companion=config.companion,
                                              companion_default_model=config.companion_default_model,
                                              companion_models_only=config.companion_models_only,
+                                             backup_model=config.backup_model,
                                              time_zone=config.time_zone,
                                              machine_principals=config.machine_principals,
                                              proactive=config.proactive)
@@ -95,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
         for model in application.models:
             effort = f", reasoning {model.default_effort}" if model.default_effort else ""
             print(f"HIMARI web: model {model.model_id}{' (default)' if model.is_default else ''}{effort}",
+                  file=sys.stderr, flush=True)
+        if application.backup_model is not None:  # character-day §10
+            print(f"HIMARI web: backup model {application.backup_model} (when a call gets no answer at all)",
                   file=sys.stderr, flush=True)
         if not application.memory_enabled:  # V3-P71 §9
             print("HIMARI web: memory is off (HIMARI_MEMORY=0): models neither save nor see notes; "

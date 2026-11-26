@@ -18,7 +18,7 @@ import json
 import mimetypes
 import re
 import unicodedata
-from datetime import UTC, date, time
+from datetime import UTC, date, time, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -73,6 +73,10 @@ class DataErrorCode(Enum):
     BLOB_MISSING = "blob_missing"  # the stored bytes are gone (or expired, on a recording path)
     BLOB_EXPIRED = "blob_expired"  # the stored bytes expired (§8.5); the record stays
     ATTACHMENT_REFUSED = "attachment_refused"  # an attachment a message may not carry (§4.2)
+    # character-day §4.4: a schedule change past its limits; the message is one English sentence the model can act on
+    PLAN_REFUSED = "plan_refused"
+    # character-day §3.2: a closed day session is only read — no new message, Run, wake or compaction is written
+    DAY_CLOSED = "day_closed"
 
 
 # DataError.reason of an upload a message names once more (V3-P84 §4.2: a screen is attached once).
@@ -84,6 +88,7 @@ class DataError(Exception):
                  reason: str | None = None) -> None:
         super().__init__(f"{code.value}: {message}" if message else code.value)
         self.code = code
+        self.message = message  # character-day §4.3: a PLAN_REFUSED's sentence, told to the model as it is
         self.file_id = file_id  # ATTACHMENT_REFUSED: the attachment refused
         self.reason = reason  # ATTACHMENT_REFUSED: why, e.g. ALREADY_SENT
 
@@ -160,12 +165,23 @@ def interface_kind(origin: MessageOrigin | None) -> InterfaceKind:
             OriginKind.WAKE: InterfaceKind.WINDOWS_COMPANION}.get(origin.kind, InterfaceKind.UNKNOWN)
 
 
+class AsleepAnswer(Enum):
+    """character-day §5.5: how a sleeping HIMARI meets a message (or a poke) of its day session."""
+
+    NONE = "none"  # no answer: the message stays, no Run (it only stirs)
+    MUMBLE = "mumble"  # half asleep: one short mumbled line, no Tools; the sleep goes on
+    WAKE = "wake"  # woken: an ordinary turn; the sleep ends (woken by the user)
+
+
 @dataclass(frozen=True)
 class UserMessage(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
     answers_call: CallRef | None = None  # older history only: the ask_user call it answered (T7a, gone)
     origin: MessageOrigin | None = None  # V3-P83: set by the entry point; None for older messages
     interface: InterfaceSnapshot | None = None  # V3-P93: server-owned; None on legacy inputs
+    # character-day §5.6: received while HIMARI slept, and how it was met; set by the Driver, never by a
+    # client. None: awake (or an older message).
+    while_asleep: AsleepAnswer | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +214,8 @@ class WakeKind(Enum):
     TRY = "try"  # the operator's try (§11)
     ANNIVERSARY = "anniversary"  # character-bond §6: a day to mark together; the model may pass
     WORK_DONE = "work_done"  # character-work §7.1: HIMARI just finished a piece of its work; the model may pass
+    TOGETHER = "together"  # character-day §9: a time HIMARI and the user set together has come (``entry_id``)
+    POKE = "poke"  # character-day §5.5, §11: the user poked the sleeping HIMARI on a device and it stirred (§19)
 
 
 @dataclass(frozen=True)
@@ -217,6 +235,7 @@ class WakeReason(DeepFrozen):
     # ANNIVERSARY (character-bond §6): days together (100, 200, 300), years together, or a ``date``
     # entry of the bond (its id only: the prompt reads its text when it draws the wake).
     # WORK_DONE (character-work §7.1): ``entry_id`` is the work piece's (read when the wake is drawn).
+    # TOGETHER (character-day §9): ``entry_id`` is the ``together`` slot's (read when the wake is drawn).
     days: int | None = None
     years: int | None = None
     entry_id: int | None = None
@@ -668,7 +687,8 @@ class FileCatalog(Protocol):
     async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
                            image: ImageSetup = NO_IMAGE) -> FileRecord:
         """A staged upload (§4.2). LIMIT_EXCEEDED at MAX_STAGED_UPLOADS;
-        BLOB_MISSING if the blob (or the image's copy) is gone or expired."""
+        BLOB_MISSING if the blob (or the image's copy) is gone or expired;
+        DAY_CLOSED in a closed day session (character-day §3.2: only read)."""
         ...
 
     async def stage_tool_file(self, scope: TrustedScope, call: CallRef, blob: StoredBlob, name: str,
@@ -786,6 +806,9 @@ class ToolCompletion(DeepFrozen):
     # call as its source. Only with SUCCEEDED (INVALID_ARGUMENT otherwise);
     # MemoryStore's errors when the note cannot be written.
     memory_change: MemoryChange | None = None
+    # character-day §18.6: a schedule Tool's change (origin HIMARI), written in the same transaction. Only with
+    # SUCCEEDED (INVALID_ARGUMENT otherwise); LifeStore.write_plan's errors when it cannot be written.
+    plan_change: PlanChange | None = None
 
 
 @dataclass(frozen=True)
@@ -1547,8 +1570,9 @@ class WakeStore(Protocol):
         """One transaction (§3.3): each key is taken (DUPLICATE_IDENTITY when one
         was taken already), each reminder goes ``scheduled → claimed``
         (INVALID_STATE_TRANSITION when it is not scheduled), the wake Event is
-        appended and its record written. Refused as an Event is (trash).
-        INVALID_ARGUMENT: no reason, or more than MAX_WAKE_REASONS."""
+        appended and its record written. Refused as an Event is (trash; a closed
+        day session, DAY_CLOSED). INVALID_ARGUMENT: no reason, or more than
+        MAX_WAKE_REASONS."""
         ...
 
     async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus) -> WakeRecord:
@@ -1780,6 +1804,19 @@ THOUGHT_DAYS = timedelta(days=3)  # §5.2: a kept thought lasts this long from w
 INTENT_DAYS = timedelta(days=2)  # an ``intent`` one (what HIMARI wants to say or do) this long
 MAX_EVENT_CHARS = 200  # character-mind §7: what happened to HIMARI, one sentence
 MAX_EVENTS_PER_DAY = 2  # §7: a persona's live events of one date
+# character-day §4.1, §4.4: HIMARI's schedule — a plan is a slot with its start (``day``, ``time_of_day``) and length
+MIN_PLAN_MINUTES = 5
+MAX_PLAN_MINUTES = 720
+DEFAULT_PLAN_MINUTES = 60  # a slot written without a length (and every plan from before v29)
+SCHEDULE_DAYS = 7  # §4.4: a slot is dated today or within the seven days after (as PLAN_DAYS)
+MIN_SLEEP_MINUTES = 5 * 60  # §4.4: a sleep slot is 5 to 11 hours
+MAX_SLEEP_MINUTES = 11 * 60
+NIGHT_STARTS = time(21, 0)  # §4.4: the night of date D: a slot starting from D 21:00 ...
+NIGHT_ENDS = time(5, 0)  # ... to D+1 05:00 (inclusive: the latest a sleep may start)
+SLEEP_ENDS_FROM = time(5, 0)  # §4.4: a sleep slot ends from 05:00 ...
+SLEEP_ENDS_BY = time(12, 0)  # ... to 12:00 the morning after
+MAX_HIMARI_PLAN_WRITES = 20  # §4.4: slots HIMARI's Tools may change a day (from the user's midnight)
+MAX_PLAN_REASON_CHARS = 200  # §4.1: why a slot was moved or cancelled, one line in HIMARI's voice
 
 
 class LifeKind(Enum):
@@ -1805,9 +1842,26 @@ class ThoughtAbout(Enum):
 class LifeOrigin(Enum):
     """Who wrote an entry's current text."""
 
-    WRITER = "writer"  # the story writer (never a bond entry, character-bond §2)
+    WRITER = "writer"  # the story writer (never a bond entry, character-bond §2); character-day: the day's keeper too
     CONVERSATION = "conversation"  # a memory pass, from what HIMARI said of itself (§4) or what the two settled
     USER = "user"  # the Web's Settings → Life: automatic writes leave it alone
+    HIMARI = "himari"  # character-day §4.2: HIMARI itself, in a conversation, with its schedule Tools
+
+
+class PlanKind(Enum):
+    """character-day §4.1: what a slot of HIMARI's schedule is."""
+
+    SLEEP = "sleep"  # the night's sleep: one a night, placed by the keeper, moved by HIMARI or the user
+    WORK = "work"  # work time for a project (``arc_id``)
+    TOGETHER = "together"  # a time set with the user (only HIMARI's Tools write one)
+    OWN = "own"  # something HIMARI does alone
+
+
+class PlanState(Enum):
+    """character-day §4.1: a slot that no longer stands (kept a while: the diary and the next day see it)."""
+
+    CANCELLED = "cancelled"  # HIMARI cancelled it (with why)
+    MISSED = "missed"  # a ``together`` slot the user never came to (§5.4)
 
 
 class BondTag(Enum):
@@ -1860,11 +1914,98 @@ class LifeEntry(DeepFrozen):
     about: ThoughtAbout | None = None
     expires_at: datetime | None = None
     draft: bool = False  # character-mind §4.4: a work piece begun at the start step, not finished yet
+    # character-day §4.1: a plan is a slot — its length, what it is, whether it still stands and why it was last
+    # moved or cancelled (HIMARI's line). Every plan has a length and a kind from v29 on.
+    minutes: int | None = None
+    plan_kind: PlanKind | None = None
+    plan_state: PlanState | None = None
+    reason: str | None = None
 
     @property
     def arc_open(self) -> bool:
         """character-world §4: an arc not closed yet."""
         return self.kind is LifeKind.ARC and self.end_day is None
+
+    @property
+    def live_plan(self) -> bool:
+        """character-day §4.1: a plan that still stands (not cancelled, not missed)."""
+        return self.kind is LifeKind.PLAN and self.plan_state is None
+
+    @property
+    def sleep_slot(self) -> bool:
+        """character-day §4.4: a live sleep slot."""
+        return self.live_plan and self.plan_kind is PlanKind.SLEEP
+
+
+def plan_kind_of(entry: LifeEntry) -> PlanKind:
+    """character-day §4.1: a plan's kind — as stored, else (a plan from before v29) a work plan with a project,
+    something of its own without."""
+    if entry.plan_kind is not None:
+        return entry.plan_kind
+    return PlanKind.WORK if entry.arc_id is not None else PlanKind.OWN
+
+
+def plan_span(entry: LifeEntry, zone: tzinfo) -> tuple[datetime, datetime] | None:
+    """character-day §4.1: a timed plan's [start, end) in ``zone`` (its length, else DEFAULT_PLAN_MINUTES);
+    None without a date and a time."""
+    if entry.kind is not LifeKind.PLAN or not entry.day or not entry.time_of_day:
+        return None
+    try:
+        start = datetime.combine(date.fromisoformat(entry.day), time.fromisoformat(entry.time_of_day), tzinfo=zone)
+    except ValueError:
+        return None
+    return start, start + timedelta(minutes=entry.minutes or DEFAULT_PLAN_MINUTES)
+
+
+def night_of(start: datetime) -> date | None:
+    """character-day §4.4: the night a moment (its own zone) begins in — D for D 21:00 to D+1 05:00 (inclusive),
+    None in the day between."""
+    clock = start.timetz().replace(tzinfo=None)
+    if clock >= NIGHT_STARTS:
+        return start.date()
+    if clock <= NIGHT_ENDS:
+        return start.date() - timedelta(days=1)
+    return None
+
+
+@dataclass(frozen=True)
+class PlanWrite(DeepFrozen):
+    """character-day §4.3, §18.2: a slot to write — new (``entry_id`` None) or a change of a live one (a move
+    too). ``time_of_day`` HH:MM, ``minutes`` MIN_PLAN_MINUTES..MAX_PLAN_MINUTES, ``reason`` why it was moved or
+    changed (HIMARI's line; None keeps the slot's). A ``sleep`` slot is only ever changed by HIMARI or the user."""
+
+    day: str
+    time_of_day: str
+    minutes: int
+    kind: PlanKind
+    text: str
+    entry_id: int | None = None
+    arc_id: int | None = None
+    reason: str | None = None
+
+
+class PlanOp(Enum):
+    """character-day §4.3: what a schedule Tool does."""
+
+    WRITE = "write"  # schedule_write: a slot written or changed
+    CANCEL = "cancel"  # schedule_cancel: a slot cancelled with why
+    SLEEP_NOW = "sleep_now"  # go_to_sleep: tonight's sleep slot starts now; HIMARI sleeps once the turn ends
+
+
+@dataclass(frozen=True)
+class PlanChange(DeepFrozen):
+    """character-day §18.6: one schedule Tool's change, checked and written by Data with the call's result
+    (origin HIMARI) — for the persona the Driver gave the call (never one the model names), read in ``zone`` at
+    ``at``: WRITE carries ``write``; CANCEL ``entry_id`` and ``reason``; SLEEP_NOW ``reason`` (go_to_sleep also
+    marks the keeper's ``sleep_requested_at``)."""
+
+    op: PlanOp
+    persona_id: int
+    zone: str
+    at: datetime
+    write: PlanWrite | None = None
+    entry_id: int | None = None
+    reason: str | None = None
 
 
 class LifeChangeOp(Enum):
@@ -1941,6 +2082,9 @@ class LifePlan(DeepFrozen):
     mood_at: datetime | None = None
     arc: ArcMove | None = None
     plan_arcs: tuple[int | None, ...] = ()
+    # character-day §4.2, §7: the plans' lengths by position (missing or None: DEFAULT_PLAN_MINUTES); a plan that
+    # overlaps a sleep slot is left out alone as it is written
+    plan_minutes: tuple[int | None, ...] = ()
 
 
 NEW_ARC = 0  # character-work §4: a plan's project is the arc the same write starts
@@ -2036,6 +2180,30 @@ class LifeStore(Protocol):
         is kept), a SAID retires a live one of the persona (``unknown`` otherwise); ``invalid``."""
         ...
 
+    async def write_plan(self, principal: PrincipalId, persona_id: int, plan: PlanWrite, *, origin: LifeOrigin,
+                         zone: str, now: datetime) -> LifeEntry:
+        """character-day §4.3, §4.4, §18.2, one transaction: a slot of the persona's schedule written — new
+        (``plan.entry_id`` None: origin's, revision 1) or a live one changed (moved too: it becomes origin's,
+        revision + 1; its kind stays a sleep slot's) — within the schedule's limits, read in ``zone`` (the
+        user's) at ``now``: PLAN_REFUSED with one English sentence the model can act on (a sleep slot only
+        changed, one a night, from 21:00 to 05:00 and ending 05:00 to 12:00 after 5 to 11 hours; no other slot
+        over a live sleep slot; dated today to SCHEDULE_DAYS on; never a slot already past; MAX_HIMARI_PLAN_WRITES
+        a day for HIMARI). The keeper (origin WRITER) places and adjusts sleep slots with the shape's checks only.
+        NOT_FOUND: no live plan of the persona; INVALID_ARGUMENT, TOO_LARGE: the shape (as a plan's text,
+        MAX_PLAN_REASON_CHARS for the reason)."""
+        ...
+
+    async def cancel_plan(self, principal: PrincipalId, entry_id: int, reason: str, *, origin: LifeOrigin,
+                          zone: str, now: datetime) -> LifeEntry:
+        """character-day §4.3: a live slot cancelled with why (kept, ``cancelled``): PLAN_REFUSED for a sleep
+        slot or one past, and past MAX_HIMARI_PLAN_WRITES for HIMARI; NOT_FOUND: no live plan."""
+        ...
+
+    async def mark_plan_missed(self, principal: PrincipalId, entry_id: int, *, now: datetime) -> LifeEntry:
+        """character-day §5.4: a live ``together`` slot the user never came to (``missed``, by the keeper).
+        NOT_FOUND: no live plan; INVALID_ARGUMENT: not a ``together`` slot."""
+        ...
+
 
 class LifeJob(Enum):
     """character-mind §14.2: what a life write is for."""
@@ -2064,6 +2232,8 @@ class LifeWriteStart(DeepFrozen):
     # no other has one) and why its model was chosen (§4.1)
     job: LifeJob | None = None
     model_reason: str | None = None
+    # character-day §7: the day session a diary was written in the context of (None: a self run with no history)
+    conversation_id: ConversationId | None = None
 
 
 class LifeWriteStatus(Enum):
@@ -2096,6 +2266,7 @@ class LifeWrite(DeepFrozen):
     job: LifeJob = LifeJob.REVIEW  # character-mind §14.2
     model_reason: str | None = None  # §4.1: why its model was chosen
     thought: str | None = None  # §4.1: a self run's thought, kept with it (never shown, never told again)
+    conversation_id: ConversationId | None = None  # character-day §7: the day session it was written in
 
 
 class LifeWriteLog(Protocol):
@@ -2117,6 +2288,12 @@ class LifeWriteLog(Protocol):
 
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
         """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED."""
+        ...
+
+    async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
+                              plan_id: int | None = None) -> LifeWrite | None:
+        """character-day §10, §18.7: the latest write of ``job`` for this persona and date (with ``plan_id``: for that
+        work plan) — whether it ended with no answer decides the backup model; None: none yet."""
         ...
 
     async def note_life_thought(self, write_id: str, thought: str) -> None:
@@ -2142,7 +2319,8 @@ class LifeWriteLog(Protocol):
         unless PREPARED or DISPATCHED."""
         ...
 
-    async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime) -> tuple[LifeEntry, ...]:
+    async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime,
+                               zone: str | None = None) -> tuple[LifeEntry, ...]:
         """One transaction (§2, §3): the day's diary (a writer's of that date is
         rewritten, the user's stays), the plans (with their times, character-state
         §3) and the facts (one the same as a live fact is skipped; at
@@ -2207,6 +2385,10 @@ class LifeWriteLog(Protocol):
 
     async def list_life_writes(self, principal: PrincipalId, *, limit: int = 20) -> tuple[LifeWrite, ...]:
         """The newest first."""
+        ...
+
+    async def session_writes(self, principal: PrincipalId, conversation_id: ConversationId) -> tuple[LifeWrite, ...]:
+        """character-day §7, §18.11: the writes made in a day session's context (its diaries), oldest first."""
         ...
 
 
@@ -2422,6 +2604,164 @@ class MoodStore(Protocol):
         ...
 
 
+# --- HIMARI's day: sleep (character-day v0.1 §5, §18.2) ----------------------------------------
+
+LAST_WORDS_CHARS = 1_500  # §3.3: the closed session's last words handed to the next one, newest kept
+
+
+class SleepState(Enum):
+    """§5.1: HIMARI's sleep as the server keeps it (per principal, the persona chosen now)."""
+
+    AWAKE = "awake"
+    DROWSY = "drowsy"  # from DROWSY_MINUTES before the sleep slot's start until it falls asleep
+    ASLEEP = "asleep"  # deep for DEEP_HOURS after it fell asleep, light after
+    HALF_ASLEEP = "half_asleep"  # only the turn of a mumble (or a reminder heard asleep, §9): the sleep goes on
+
+
+class FellBy(Enum):
+    """§5.1: how HIMARI fell asleep."""
+
+    SCHEDULE = "schedule"  # its sleep slot came (or it slept again after being woken)
+    TOOL = "tool"  # it went to sleep early (go_to_sleep)
+    MISSED = "missed"  # it fell asleep waiting for a promise the user missed (§5.4)
+
+
+class WokeBy(Enum):
+    """§5.1: how HIMARI woke."""
+
+    SCHEDULE = "schedule"  # its sleep slot ended
+    USER = "user"  # the user woke it (§5.5)
+
+
+@dataclass(frozen=True)
+class SleepRecord(DeepFrozen):
+    """§5.1: one sleep — when and how it began and ended, the messages (and mumbles) it got meanwhile, the
+    wake count now (``count`` as of ``count_at``), whether the day was closed in it (§6) and the sleep slot it
+    sleeps in (its night: waking, the early wake and the handoff read it, never the night of ``fell_at``)."""
+
+    sleep_id: int
+    persona_id: int
+    fell_at: datetime
+    how_fell: FellBy
+    woke_at: datetime | None = None
+    how_woke: WokeBy | None = None
+    messages: int = 0
+    mumbles: int = 0
+    count: int = 0
+    count_at: datetime | None = None
+    closed_day: bool = False
+    first_message_at: datetime | None = None  # §5.6: the messages received while asleep, from …
+    last_message_at: datetime | None = None  # … to
+    slot_id: int | None = None  # the sleep slot's entry id; None: it fell asleep with no slot
+
+    @property
+    def asleep(self) -> bool:
+        return self.woke_at is None
+
+
+@dataclass(frozen=True)
+class DayLine(DeepFrozen):
+    """§3.3: one of the closed session's last words: when (HH:MM), whose (``user``, ``himari``) and the text."""
+
+    at: str
+    who: str
+    text: str
+
+
+@dataclass(frozen=True)
+class DayBefore(DeepFrozen):
+    """§3.3: what a new day session is handed of the day before — its last words (newest kept within
+    LAST_WORDS_CHARS, oldest first, no thoughts), the promises kept and missed, how HIMARI fell asleep (and why
+    its sleep slot was moved later, when it was), how often the user woke it and when it woke."""
+
+    day: str  # the closed session's date
+    last_words: tuple[DayLine, ...] = ()
+    kept: tuple[str, ...] = ()  # "HH:MM text" of the ``together`` slots the user came to
+    missed: tuple[str, ...] = ()  # and of those missed (§5.4)
+    fell_at: datetime | None = None
+    how_fell: FellBy | None = None
+    delayed: str | None = None  # the sleep slot moved later: HIMARI's reason
+    woken: int = 0  # times the user woke it that night (read when told)
+    woke_at: datetime | None = None  # when it woke in the morning (read when told)
+    sleep_id: int | None = None  # the sleep the day was closed in
+    conversation_id: ConversationId | None = None  # the closed session: the next is any other (never by date)
+
+
+@dataclass(frozen=True)
+class DayState(DeepFrozen):
+    """§18.2: the keeper's small state per principal and persona: go_to_sleep asked (applied when the turn's
+    job ends) for the sleep slot it moved (``sleep_requested_slot``: only that slot is slept in for it), when the
+    user last woke it (it sleeps again after DOZE_MINUTES of quiet in its slot), the last closing (§6) and what the
+    next day session is handed (§3.3)."""
+
+    persona_id: int
+    sleep_requested_at: datetime | None = None
+    woken_at: datetime | None = None
+    last_closing_at: datetime | None = None
+    before: DayBefore | None = None
+    sleep_requested_slot: int | None = None
+
+
+@dataclass(frozen=True)
+class SleepView(DeepFrozen):
+    """§5.1, §8: HIMARI's sleep as a turn (and the Web) sees it now: its state, whether the sleep is deep, the
+    minutes to its slot while drowsy, tonight's sleep slot (or the one under way), the current or last sleep,
+    and when the user just woke it (in this slot)."""
+
+    state: SleepState
+    deep: bool = False
+    minutes_to_sleep: int | None = None
+    tonight: LifeEntry | None = None
+    last: SleepRecord | None = None
+    woken_at: datetime | None = None
+
+
+class SleepStore(Protocol):
+    """§5.1, §18.2: HIMARI's sleeps and the day keeper's state, per principal and persona. The principal comes
+    from the trusted entry point (the keeper), never from model output."""
+
+    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy,
+                         slot_id: int | None = None) -> SleepRecord:
+        """It falls asleep, in the sleep slot ``slot_id`` (its night). INVALID_STATE_TRANSITION while a sleep of the
+        persona is open."""
+        ...
+
+    async def current_sleep(self, principal: PrincipalId, persona_id: int) -> SleepRecord | None:
+        """The persona's latest sleep, open or ended; None: it never slept."""
+        ...
+
+    async def end_sleep(self, principal: PrincipalId, sleep_id: int, *, at: datetime, how: WokeBy) -> SleepRecord:
+        """It wakes. NOT_FOUND: no such sleep; INVALID_STATE_TRANSITION: it ended already; INVALID_ARGUMENT: ``at``
+        before it fell asleep (a wake never precedes its fall)."""
+        ...
+
+    async def count_wake(self, principal: PrincipalId, sleep_id: int, *, count: int, at: datetime,
+                         answer: AsleepAnswer, message: bool) -> SleepRecord:
+        """§5.5: a message (or a poke, ``message`` False) to the open sleep — the wake count set, a message and
+        a mumble counted. NOT_FOUND; INVALID_STATE_TRANSITION: it ended already."""
+        ...
+
+    async def recent_sleeps(self, principal: PrincipalId, persona_id: int, *, limit: int) -> tuple[SleepRecord, ...]:
+        """The persona's latest sleeps, newest first."""
+        ...
+
+    async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
+                           before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
+        """§6: the day was closed in this sleep, all in one transaction — the open day session ``conversation_id``
+        (when given) closed at ``at``, the sleep says so, the keeper's last closing is ``at`` and the next session
+        is handed ``before``. Whether the session was closed now. NOT_FOUND: no such sleep;
+        INVALID_STATE_TRANSITION: the day was closed in it already (nothing written)."""
+        ...
+
+    async def read_day_state(self, principal: PrincipalId, persona_id: int) -> DayState:
+        """The keeper's state (all None when none was written)."""
+        ...
+
+    async def write_day_state(self, principal: PrincipalId, state: DayState) -> None:
+        """Replaces the keeper's state of ``state.persona_id``."""
+        ...
+
+
 # --- Devices (V3-P83) -----------------------------------------------------------
 
 MAX_DEVICE_NAME_CHARS = 40
@@ -2602,6 +2942,10 @@ class ConversationSummary(DeepFrozen):
     last_sequence: int
     preview: str
     trashed_at: datetime | None = None  # V3-P65: when it was moved to the trash
+    # character-day §3: a day session's date (YYYY-MM-DD, the day it was opened) and when it was closed (then it
+    # is only read); None, None: an ordinary conversation
+    day_session: str | None = None
+    closed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -2624,7 +2968,8 @@ class ConversationLog(Protocol):
         """T1: user input; one with ``answers_call`` (older history only) is
         INVALID_STATE_TRANSITION.
         Same key + same message → the original Event; same key + a different
-        message → DUPLICATE_IDENTITY."""
+        message → DUPLICATE_IDENTITY. character-day §3.2: DAY_CLOSED in a closed
+        day session (checked in the write's own transaction)."""
         ...
 
     async def read_events(
@@ -2633,7 +2978,8 @@ class ConversationLog(Protocol):
 
     async def prepare_run(self, scope: TrustedScope, preparation: RunPreparation) -> RunId:
         """T2: persist the request before any send. Raises
-        RAW_PERSISTENCE_UNAVAILABLE when it cannot be stored — do not send."""
+        RAW_PERSISTENCE_UNAVAILABLE when it cannot be stored — do not send;
+        DAY_CLOSED in a closed day session (character-day §3.2: no new Run)."""
         ...
 
     async def mark_dispatch(self, scope: TrustedScope, run_id: RunId) -> None:
@@ -2832,6 +3178,22 @@ class ConversationCatalog(Protocol):
         kinds (each once), atomically. The id is generated by Data.
         A title longer than MAX_TITLE_CHARS raises INVALID_ARGUMENT; a blank
         title is stored as None."""
+        ...
+
+    async def open_day_session(self, principal: PrincipalId, day: str, title: str, *,
+                               environments: Sequence[EnvironmentKind] = (),
+                               model_setting: ModelSetting | None = None) -> ConversationId:
+        """character-day §3.2: T0 of the principal's day session for ``day`` (YYYY-MM-DD). One is open at a
+        time: DUPLICATE_IDENTITY while another is (closed or trashed ones do not count)."""
+        ...
+
+    async def current_day_session(self, principal: PrincipalId) -> ConversationSummary | None:
+        """§3.1: the principal's open day session; None: none is open (a trashed one is closed)."""
+        ...
+
+    async def close_day_session(self, principal: PrincipalId, conversation_id: ConversationId,
+                                now: datetime) -> bool:
+        """§3.2: the open day session closed (only read from now on); False when it was not open."""
         ...
 
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:

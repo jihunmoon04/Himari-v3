@@ -9,6 +9,11 @@ checks again when it applies the result (§4.4). One pass at a time per
 principal, two in the server (§4.8). Every call's request is stored before
 it is sent, and the tokens it may use are reserved against the principal's
 daily budget first.
+
+character-day §6, §18.8: a closed day session is read at once — no quiet time
+to wait for, and a short part does not wait for more (none will come). §10: a
+pass after the Conversation's last one got no answer at all (``retryable``)
+asks the backup model (``MemoryPassSettings.backup_model_id``) instead.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from himari.data.api import (
     LifeKind,
     BondStore,
     ConversationEvent,
+    ConversationSummary,
     DataError,
     DataErrorCode,
     NO_PERSONA,
@@ -67,7 +73,14 @@ from himari.memory.passes import (
     waits,
 )
 from himari.prompt.api import ModelInput, RequestOptions
-from himari.provider.api import NativeNoResponse, NativeReceived, NormalizedFinal, ProviderAdapter, ProviderError
+from himari.provider.api import (
+    NativeNoResponse,
+    NativeReceived,
+    NormalizedFinal,
+    ProviderAdapter,
+    ProviderError,
+    retryable,
+)
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +96,8 @@ EVENTS_PAGE = 200  # Events read at a time while a part is collected
 class MemoryPassData(MemoryStore, MemoryPassLog, Protocol):  # what the worker reads and writes
     async def read_events(self, scope: TrustedScope, *, after_sequence: int = 0,
                           limit: int | None = None) -> Sequence[ConversationEvent]: ...
+
+    async def read_conversation(self, scope: TrustedScope) -> ConversationSummary: ...  # character-day §18.8
 
 
 class MemoryPasses:
@@ -273,7 +288,9 @@ class MemoryPasses:
             last = await self._data.last_event(scope)
             if last is None or last[0] <= cursor.through_sequence:
                 return PassOutcome.NOTHING
-            if now - last[1] < self._settings.idle:
+            # character-day §6, §18.8: a closed day session is read at once
+            closed = (await self._data.read_conversation(scope)).closed_at is not None
+            if not closed and now - last[1] < self._settings.idle:
                 return PassOutcome.WAITING
             part = await self._read_part(scope, cursor.through_sequence, last)
         except DataError as error:
@@ -282,7 +299,7 @@ class MemoryPasses:
             raise
         if part is None:
             return PassOutcome.NOTHING
-        return await self._run(scope, PassKind.LIVE, part, last[0], now)
+        return await self._run(scope, PassKind.LIVE, part, last[0], now, closed=closed)
 
     # --- past parts (§4.9): the operator's backfill and retry ------------------------
 
@@ -334,20 +351,37 @@ class MemoryPasses:
             return PassOutcome.NOTHING  # a skipped part too long to read whole: it stays skipped
         return await self._run(scope, kind, part, snapshot[0], now, retry_of=retry_of)
 
+    async def _model(self, scope: TrustedScope) -> tuple[str, str | None]:
+        """character-day §10, §18.8: the pass's model and effort — the memory model, or the backup model when the
+        Conversation's last pass got no answer at all and may be tried again."""
+        backup = self._settings.backup_model_id
+        if backup is not None:
+            passes = await self._data.list_passes(scope)
+            last = passes[-1] if passes else None
+            if (last is not None and last.status in (PassStatus.FAILED, PassStatus.SKIPPED) and last.error
+                    and retryable(last.error)):
+                log.info("memory pass of %s asks the backup model %s: the last one got no answer (%s)",
+                         scope.conversation_id, backup, last.error[:80])
+                return backup, self._settings.backup_effort
+        return self._settings.model_id, self._settings.reasoning_effort
+
     async def _run(self, scope: TrustedScope, kind: PassKind, part: Part, snapshot: int, now: datetime, *,
-                   retry_of: str | None = None) -> PassOutcome:
-        """One pass over ``part``: the request, the budget, the record, the call and the plan."""
+                   retry_of: str | None = None, closed: bool = False) -> PassOutcome:
+        """One pass over ``part``: the request, the budget, the record, the call and the plan. ``closed``: a
+        closed day session's part (character-day §18.8), which never waits for more."""
         live = kind is PassKind.LIVE
         notes = await self._data.list_memories(scope.principal_id)
-        if live and waits(part, open_loops=any(n.category is MemoryCategory.LOOP for n in notes), now=now):
+        if (live and not closed
+                and waits(part, open_loops=any(n.category is MemoryCategory.LOOP for n in notes), now=now)):
             return PassOutcome.WAITING
         previous = await self._data.last_episode(scope) if live else None
         shown = shown_notes(notes)
         zone = self._settings.time_zone if self._zone_for is None else await self._zone_for(scope, part.origin)
         persona_id, facts, thoughts = await self._facts(scope, now, zone) if live else (NO_PERSONA, None, None)
         bond = None if facts is None else await self._bond_entries(scope, persona_id)
-        options = RequestOptions(self._settings.model_id, self._settings.reasoning_effort,
-                                 provider_key=self._provider.provider_key, max_output_tokens=PASS_MAX_OUTPUT_TOKENS)
+        model_id, effort = await self._model(scope)
+        options = RequestOptions(model_id, effort, provider_key=self._provider.provider_key,
+                                 max_output_tokens=PASS_MAX_OUTPUT_TOKENS)
         asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=kind, facts=facts, bond=bond,
                                          thoughts=thoughts),
                             options, life=facts is not None, bond=bond is not None)
@@ -357,7 +391,7 @@ class MemoryPasses:
         try:
             pass_id = await self._data.begin_pass(scope, PassStart(
                 kind, part.from_sequence, part.through_sequence, snapshot, self._provider.provider_key,
-                self._settings.model_id, part.omitted, retry_of))
+                model_id, part.omitted, retry_of))
         except DataError as error:
             if error.code is DataErrorCode.NOT_FOUND:
                 return PassOutcome.NOTHING

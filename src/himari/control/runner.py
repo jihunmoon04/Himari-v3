@@ -20,6 +20,12 @@ forgotten.
 
 Listening (V3-P83 §2.2): a ``JobListener`` is told when an input is
 accepted, a job starts (with its message's origin), a Run ends and a job ends.
+
+The day (character-day §3.2, §6): ``day_closing`` (set by the composition root)
+says a day session is closed or fenced for its closing; a resume or a
+compaction is then refused DataError DAY_CLOSED, checked with no await before
+its job starts (a message's and a wake's admission is the Driver's, under the
+count of inputs being taken, which the day's keeper sees in ``working``).
 """
 
 from __future__ import annotations
@@ -45,7 +51,9 @@ from himari.control.api import (
     TurnProgress,
     TurnUsage,
 )
-from himari.data.api import DataError, MessageOrigin, OriginKind, UserMessage, Wake, WakeReason
+from himari.data.api import (
+    AsleepAnswer, DataError, DataErrorCode, MessageOrigin, OriginKind, UserMessage, Wake, WakeReason,
+)
 from himari.provider.api import OutputDelta
 
 log = logging.getLogger(__name__)
@@ -144,6 +152,7 @@ class BackgroundRunner:
         self._live: dict[_Key, _Live] = {}  # V3-P73 §5.2: the latest streamed Run of the job
         self._live_versions: dict[_Key, int] = {}
         self._live_changes: dict[_Key, asyncio.Event] = {}  # set (and dropped) at the next change
+        self.day_closing: Callable[[TrustedScope], bool] = lambda scope: False  # character-day §6, set by bootstrap
 
     @staticmethod
     def _key(scope: TrustedScope) -> _Key:
@@ -152,8 +161,21 @@ class BackgroundRunner:
     def _running_in(self, conversation_id: ConversationId) -> bool:
         return any(key[1] == conversation_id and not task.done() for key, task in self._tasks.items())
 
+    def working(self, scope: TrustedScope) -> bool:
+        """character-day §6: a job runs in the Conversation, or an input (a message, a wake) is being taken into it
+        — the day's keeper never closes a day session under either."""
+        return self._running_in(scope.conversation_id) or bool(self._admitting.get(scope.conversation_id))
+
+    def _check_day(self, scope: TrustedScope) -> None:
+        if self.day_closing(scope):
+            raise DataError(DataErrorCode.DAY_CLOSED, scope.conversation_id)
+
     async def submit(self, scope: TrustedScope, message: UserMessage | None) -> JobStatus:
         self._check_open(scope)
+        # character-day §6: a day closing or closed takes no work — a resume starts below with no await (nothing
+        # closes the day between); a message is refused before it cancels a wake the fence lets settle (second
+        # review 9; the Driver's admission checks again, durably)
+        self._check_day(scope)
         if message is not None:
             await self._yield_wake(scope)
         if self._running_in(scope.conversation_id):
@@ -161,15 +183,22 @@ class BackgroundRunner:
         if message is not None:
             self._admit(scope.conversation_id)
             try:
-                await self._driver.accept(scope, message)  # durable before anything is reported
+                event = await self._driver.accept(scope, message)  # durable before anything is reported
             finally:
                 self._admit(scope.conversation_id, -1)
             self._tell(lambda listener: listener.accepted(scope))
             if self._running_in(scope.conversation_id):  # cannot happen: accept holds the driver lock
                 raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-        # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
+            asleep = (event.payload.while_asleep if event is not None and isinstance(event.payload, UserMessage)
+                      else None)
+            if asleep is AsleepAnswer.NONE:  # character-day §5.5: HIMARI only stirred — recorded, no job
+                # a receipt of its own: idle, no job (an earlier job's id or result is not this message's)
+                return JobStatus(running=False, generation=self.status(scope).generation, asleep=asleep)
+            # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
+            return replace(self._start(scope, lambda s, stop, progress: self._driver.resume(
+                s, stop=stop, progress=progress), "drive", message.origin), asleep=asleep)
         return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress),
-                           "drive", None if message is None else message.origin)
+                           "drive", None)
 
     async def _yield_wake(self, scope: TrustedScope) -> None:
         """V3-P87 §4.3 (the user wins): a running wake job is asked to cancel and
@@ -271,6 +300,7 @@ class BackgroundRunner:
     async def submit_compaction(self, scope: TrustedScope) -> JobStatus:
         if self._running_in(scope.conversation_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        self._check_day(scope)  # character-day §3.2: a closed day is not compacted
         return self._start(scope, lambda s, stop, progress: self._driver.compact(s, stop=stop, progress=progress),
                            "compact")
 

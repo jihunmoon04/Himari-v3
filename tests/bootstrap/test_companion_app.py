@@ -65,7 +65,7 @@ def test_the_runners_events_reach_the_stream(tmp_path: Path) -> None:
             assert working and {w.pop("job_id") for w in working} == {app.runner.status(scope).job_id}  # §6.3
             jobs = {cast(dict[str, Any], data).pop("job_id") for name, data in got if name == "job"}
             assert jobs == {app.runner.status(scope).job_id} != {None}  # V3-P84 §6.3: one job, started and ended
-            assert [g for g in got if g[0] != "activity"] == [
+            assert [g for g in got if g[0] not in ("activity", "himari_sleep")] == [
                 ("conversation", {"conversation": cid}),  # accepted
                 ("job", {"conversation": cid, "state": "started", "origin": {"kind": "device", "device_id": "d1"}}),
                 ("conversation", {"conversation": cid}), ("conversation", {"conversation": cid}),  # two Runs

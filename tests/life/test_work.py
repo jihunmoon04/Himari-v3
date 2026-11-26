@@ -27,6 +27,8 @@ from himari.data.api import (
     LifePlan,
     LifeWriteStart,
     LifeWriteStatus,
+    PlanKind,
+    PlanState,
     RawReceived,
     WorkDraft,
 )
@@ -94,6 +96,24 @@ def test_a_work_plan_is_due_from_the_end_of_its_hour_for_six_hours_until_its_pie
     assert work.next_plan((*life, draft), at - timedelta(hours=1), SEOUL) == PLAN
 
 
+def test_a_work_plans_time_is_its_slots_length_and_a_slot_that_no_longer_stands_is_not_worked() -> None:
+    """character-day §18.7: the work time is the slot's minutes (WORK_MINUTES without); a cancelled or missed slot
+    has no start step and no piece."""
+    at = datetime(2026, 11, 25, 11, 0, tzinfo=UTC)  # 20:00 in Seoul
+    long = replace(PLAN, minutes=150, plan_kind=PlanKind.WORK)
+    assert work.work_length(long) == timedelta(minutes=150) and work.work_length(PLAN) == timedelta(minutes=60)
+    assert work.due_plan((ARC, long), at + timedelta(minutes=149), SEOUL) is None  # still at work
+    assert work.due_plan((ARC, long), at + timedelta(minutes=150), SEOUL) == long
+    assert work.due_plan((ARC, long), at + timedelta(minutes=150) + work.WORK_WINDOW, SEOUL) is None
+    assert work.next_plan((ARC, long), at + timedelta(minutes=100), SEOUL) == long
+    assert work.step_data((ARC, long), long, ARC, now=NOW, zone=SEOUL)["plan"]["minutes"] == 150  # type: ignore
+    for state in PlanState:
+        gone = replace(long, plan_state=state, reason="비가 와서")
+        assert work.due_start((ARC, gone), at, SEOUL) is None
+        assert work.due_plan((ARC, gone), at + timedelta(hours=3), SEOUL) is None
+        assert work.next_plan((ARC, gone), at - timedelta(hours=1), SEOUL) is None
+
+
 def test_the_start_step_is_due_in_the_first_half_hour_until_it_has_begun() -> None:
     at = datetime(2026, 11, 25, 11, 0, tzinfo=UTC)
     life = (ARC, PLAN)
@@ -120,7 +140,7 @@ def test_a_step_is_told_the_project_its_finished_pieces_the_plan_the_events_the_
                                       {"date": "2026-11-11", "title": "조각 1", "summary": "요약 1"}]
     assert data["recent_pieces"] == [{"date": "2026-11-12", "title": "조각 2", "piece": "조각 2 본문"},
                                      {"date": "2026-11-13", "title": "조각 3", "piece": "조각 3 본문"}]  # no draft
-    assert data["plan"] == {"date": "2026-11-25", "time": "20:00", "text": "오늘 밤엔 냉각부 도면 그려야지."}
+    assert data["plan"] == {"date": "2026-11-25", "time": "20:00", "minutes": 60, "text": "오늘 밤엔 냉각부 도면 그려야지."}
     assert (data["day"], data["weekday"], data["now"]) == ("2026-11-25", "Wednesday", "2026-11-25T22:30+09:00")
     assert data["events"] == [{"time": "15:00", "text": "택배가 왔다."}]
     assert data["draft"] == {"title": "냉각부 스케치", "concept": "세 겹 방열판", "text": "초안 본문"}
@@ -188,6 +208,9 @@ class Link:
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
         self.asked.append((since, until))
         return self.said
+
+    async def session_input(self, principal: PrincipalId) -> None:
+        return None  # character-day §7: no day session
 
 
 def setup(*script: object, settings: LifeSettings = SETTINGS, now: datetime = NOW,

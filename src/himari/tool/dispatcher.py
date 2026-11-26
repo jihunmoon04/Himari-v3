@@ -109,6 +109,14 @@ _MEMORY_REFUSED = {
     DataErrorCode.LIMIT_EXCEEDED: "memory is full; forget or rewrite a note first",
 }
 
+# character-day §4.3: why Data refused a schedule Tool's change, when it said nothing of its own
+_PLAN_REFUSED = {
+    DataErrorCode.PLAN_REFUSED: "it is past the schedule's limits.",
+    DataErrorCode.NOT_FOUND: "there is no such slot that still stands; read your schedule again.",
+    DataErrorCode.INVALID_ARGUMENT: "the slot is out of shape.",
+    DataErrorCode.TOO_LARGE: "the text or the reason is too long.",
+}
+
 _NOT_KEPT_CANCELLED = "[an image was returned but not kept: the call was cancelled]"
 
 UNKNOWN_OUTCOME_RESULT = ModelToolResult(
@@ -319,6 +327,7 @@ class Dispatcher:
             record_event=record_event,
             presented_files=outcome.presented_files if outcome.status is ToolStatus.SUCCEEDED else (),
             memory_change=outcome.memory_change if outcome.status is ToolStatus.SUCCEEDED else None,
+            plan_change=outcome.plan_change if outcome.status is ToolStatus.SUCCEEDED else None,
         )
         try:
             await self._log.commit_tool_outcome(scope, call, completion)
@@ -329,6 +338,12 @@ class Dispatcher:
             await self._commit_refused(scope, call, completion, ModelToolResult(
                 (TextBlock(f"Nothing was saved: {_MEMORY_REFUSED[error.code]}."),), is_error=True),
                 {"memory": None, "refused": error.code.value})
+            return
+        if completion.plan_change is not None and error.code in _PLAN_REFUSED:
+            # character-day §4.3: the refusal is said so the model can fix it and call again
+            said = error.message or _PLAN_REFUSED[error.code]
+            await self._commit_refused(scope, call, completion, ModelToolResult(
+                (TextBlock(f"Not written: {said}"),), is_error=True), {"plan": None, "refused": error.code.value})
             return
         if completion.presented_files and error.code in _FILES_REFUSED:
             # V3-P66 §7.1 (review B3): the result says the files were given;
@@ -349,7 +364,7 @@ class Dispatcher:
         """A success whose effect Data refused, committed as the failure it is."""
         failed = replace(
             completion, status=ToolExecutionStatus.FAILED, presented_files=(),
-            memory_change=None, model_result=model_result, raw_result=raw_result)
+            memory_change=None, plan_change=None, model_result=model_result, raw_result=raw_result)
         await self._log.commit_tool_outcome(scope, call, failed)
 
     @staticmethod

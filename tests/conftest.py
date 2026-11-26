@@ -32,6 +32,17 @@ def assert_api_dataclasses_frozen() -> Callable[[ModuleType], None]:
     return _assert_api_dataclasses_frozen
 
 
+@pytest.fixture(autouse=True)
+def _a_day_keeper_at_noon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """character-day: an Application's day keeper reads the wall clock at noon in Seoul (03:00 UTC, today), so no
+    test falls asleep by the hour it happens to run at; the day's own tests give their keeper a clock."""
+    from datetime import UTC, datetime
+
+    from himari.life import keeper
+
+    monkeypatch.setattr(keeper, "wall_clock", lambda: datetime.now(UTC).replace(hour=3, minute=0))
+
+
 @pytest.fixture(params=["memory", "sqlite"])
 def data_backend(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory,
                  monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:

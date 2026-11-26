@@ -19,7 +19,10 @@ export interface Shown {
 }
 
 export type Item =
-  | { kind: "user"; key: string; text: string; files?: Shown[]; references?: string[] }
+  // asleep: character-day §5.6, a message HIMARI got asleep — no answer, a mumble, or it woke it
+  | { kind: "user"; key: string; text: string; files?: Shown[]; references?: string[]; asleep?: "none" | "mumble" | "wake" }
+  // character-day §7: the diary HIMARI wrote in this day session's context (not part of the conversation), folded
+  | { kind: "diary"; key: string; at: string; text: string }
   | { kind: "answer"; key: string; text: string; model: string | null; thought?: string }
   | { kind: "work"; key: string; notes: string[]; steps: ToolStep[]; model: string | null; thoughts?: string[] }
   | { kind: "files"; key: string; files: Shown[] }

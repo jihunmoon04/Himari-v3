@@ -33,6 +33,8 @@ export const referenceLabel = (ref: ReferenceView) =>
 export function toItems(events: readonly EventView[], conversation?: string | null): Item[] {
   const items: Item[] = [];
   const steps = new Map<string, ToolStep>();
+  const diaries = new Set<string>(); // the diaries shown, by id
+  let unnamed = 0; // diaries without an id (an older server), told apart by order
   let work: Extract<Item, { kind: "work" }> | null = null;
 
   const closeWork = () => {
@@ -48,6 +50,7 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
           kind: "user", key, text: event.text ?? "",
           ...(event.attachments?.length ? { files: event.attachments.map((f) => shownFile(f, conversation)) } : {}),
           ...(event.references?.length ? { references: event.references.map(referenceLabel) } : {}),
+          ...(event.while_asleep ? { asleep: event.while_asleep } : {}),
         });
         break;
       case "assistant_final":
@@ -100,6 +103,18 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
         items.push({ kind: "notice", key, text: `${event.status === "dropped" ? "Not said" : "Let pass"}: ${event.text ?? ""}`,
           ...(event.thought ? { thought: event.thought } : {}) });
         break;
+      case "diary": { // character-day §7: written in this session's context, kept out of it; the owner's
+        // review 9: keyed by its own id — its sequence is the event it follows, which another diary may share — and
+        // shown once, should it come again (at a page's edge)
+        if (event.id) {
+          if (diaries.has(event.id)) break;
+          diaries.add(event.id);
+        }
+        closeWork();
+        items.push({ kind: "diary", key: event.id ? `diary:${event.id}` : `${key}:diary:${unnamed++}`,
+          at: event.created_at, text: event.text ?? "" });
+        break;
+      }
       default:
         break; // a kind this page does not know yet
     }

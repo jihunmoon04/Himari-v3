@@ -35,7 +35,7 @@ from himari.common import (
     TrustedScope,
     UnknownOutcomePolicy,
 )
-from himari.data.api import MemoryChange
+from himari.data.api import MemoryChange, PlanChange
 # Owned by Data, re-exported here so that a Tool implementation (e.g. the MCP
 # connector, which may import only tool.api — V3-059) can use them.
 from himari.data.api import PresentedFile as PresentedFile
@@ -190,6 +190,9 @@ class ToolOutcome(DeepFrozen):
     # If Data refuses it the call is committed FAILED instead, saying why: the
     # result said the note was written.
     memory_change: MemoryChange | None = None
+    # character-day §18.6: a schedule Tool's change, written with the result (SUCCEEDED only, origin HIMARI). If
+    # Data refuses it the call is committed FAILED instead, with Data's sentence (what the model can fix).
+    plan_change: PlanChange | None = None
 
 
 @runtime_checkable

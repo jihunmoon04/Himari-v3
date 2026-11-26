@@ -382,6 +382,20 @@ var pageTwo = JsonSerializer.SerializeToElement(new { items = new[] { new { sequ
 var requestedPages = new List<int>();
 string historyText = await HistoryReader.ReadAsync((after, ct) => { requestedPages.Add(after); return Task.FromResult(after == 0 ? pageOne : pageTwo); }, null, CancellationToken.None);
 Check(requestedPages.SequenceEqual(new[] { 0, 100 }) && historyText.Contains("<hello>") && historyText.Contains("안녕하세요") && !historyText.Contains("private tool result") && !historyText.Contains("[[mood:"), "history pages and display text");
+// character-day second review P2 6: pages go by what the server says of them (more, last_sequence), never by their rows
+var hiddenPage = JsonSerializer.SerializeToElement(new { items = Enumerable.Range(1, 99).Select(n => new { sequence = n, kind = "tool_result" }), last_sequence = 100, more = true });
+var afterHidden = JsonSerializer.SerializeToElement(new { items = new[] { new { sequence = 101, kind = "user_message", text = "다음 쪽" } }, last_sequence = 101, more = false });
+var hiddenPages = new List<int>();
+string hiddenText = await HistoryReader.ReadAsync((after, ct) => { hiddenPages.Add(after); return Task.FromResult(after == 0 ? hiddenPage : afterHidden); }, null, CancellationToken.None);
+Check(hiddenPages.SequenceEqual(new[] { 0, 100 }) && hiddenText.Contains("다음 쪽"), "a page a hidden wake made short still goes on, from the server's cursor");
+var emptyMore = JsonSerializer.SerializeToElement(new { items = Array.Empty<object>(), last_sequence = 7, more = true });
+var fullDone = JsonSerializer.SerializeToElement(new { items = Enumerable.Range(1, 100).Select(n => new { sequence = n }), last_sequence = 100, more = false });
+var olderFull = JsonSerializer.SerializeToElement(new { items = Enumerable.Range(1, 100).Select(n => new { sequence = n }), last_sequence = 100 });
+var olderShort = JsonSerializer.SerializeToElement(new { items = new[] { new { sequence = 1 } }, last_sequence = 1 });
+Check(EventPages.Next(emptyMore, 0, 3, 100) == 7 && EventPages.Next(fullDone, 100, 100, 100) is null,
+    "more: from last_sequence even past a page showing nothing; no more: the last page, however full");
+Check(EventPages.Next(olderFull, 100, 100, 100) == 100 && EventPages.Next(olderShort, 1, 1, 100) is null,
+    "an older server (no more): a full page may have more after its last row, a short one was the last");
 // V3-P87 §9, §10: a wake in the history, and whose a job is
 var wakeHistory = JsonSerializer.SerializeToElement(new { items = new object[] {
     new { sequence = 1, kind = "wake", text = "HIMARI reached out · a try" },
@@ -437,6 +451,21 @@ var toldAwake = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
 toldAwake.SetSleeping(true, Ms(1000));
 toldAwake.SetSleeping(false, Ms(9000), stretch: false);
 Check(toldAwake.Pose(Ms(9010)).Clip == "idle", "woken only to say a wake's words, it does not stretch (V3-P90 §2.4)");
+// character-day §18.13: drowsy, the idle extras are yawns; §5.5: poked asleep and not woken, it only stirs
+var drowsy = new CharacterAnimator(shipped, 7, TimeSpan.Zero) { Drowsy = true };
+var drowsyClips = new HashSet<string>();
+for (double t = 0; t <= 300_000; t += 50) drowsyClips.Add(drowsy.Pose(Ms(t)).Clip);
+Check(drowsyClips.SetEquals(["idle", "yawn"]), "drowsy, it yawns now and then instead of the other extras");
+var stirring = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
+stirring.Stir(Ms(100));
+Check(stirring.Pose(Ms(110)).Clip == "idle", "awake, a poke does not stir it");
+stirring.SetSleeping(true, Ms(1000));
+stirring.Stir(Ms(1100));
+Check(stirring.Pose(Ms(1110)).Clip == "yawn", "still yawning into its sleep, a poke changes nothing");
+Check(stirring.Pose(Ms(60_000)) is { Clip: "sleep", Frame: > 0 }, "deep in its sleep, the breathing loop");
+stirring.Stir(Ms(60_000));
+Check(stirring.Pose(Ms(60_010)) is { Clip: "sleep", Frame: 0 } && stirring.Pose(Ms(60_000 + shippedSleep.IntroMs + 10)) is { Clip: "sleep", Frame: > 0 },
+    "poked and not woken, it stirs: the sleep starts over from its nod-off, and sleeps on");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
@@ -703,6 +732,64 @@ Check(lockedPolicy.WakeNow() && !lockedPolicy.Asleep && !lockedPolicy.Locked, "t
 var afterSuspend = new SleepPolicy(); afterSuspend.WakeNow();
 Check(afterSuspend.FallAsleep() && afterSuspend.Asleep && !afterSuspend.FallAsleep(), "after the computer's sleep it goes on asleep");
 Check(afterSuspend.WakeNow() && !afterSuspend.WakeNow(), "a key or a click wakes it once");
+
+// character-day §11, §18.13: a server that keeps HIMARI's day — its sleep, today's day session, a closed day
+using (var dayInfo = JsonDocument.Parse("{\"features\":{\"persona_choice\":1,\"day_session\":1},\"himari\":{\"sleep\":\"half_asleep\"}}"))
+    Check(DaySession.Announced(dayInfo.RootElement) && DaySession.Sleep(dayInfo.RootElement.GetProperty("himari").GetProperty("sleep")) == "half_asleep",
+        "a day server says so in its features, with HIMARI's sleep");
+using (var olderInfo = JsonDocument.Parse("{\"features\":{\"persona_choice\":1,\"sleep_signals\":1}}"))
+    Check(!DaySession.Announced(olderInfo.RootElement) && !DaySession.Announced(default), "an older server keeps the old behaviour");
+using (var sleeps = JsonDocument.Parse("[\"asleep\",{\"state\":\"drowsy\"},\"dreaming\",null,3]"))
+{
+    var told = sleeps.RootElement;
+    Check(DaySession.Sleep(told[0]) == "asleep" && DaySession.Sleep(told[1]) == "drowsy" && DaySession.Sleep(told[2]) is null
+        && DaySession.Sleep(told[3]) is null && DaySession.Sleep(told[4]) is null && DaySession.Sleep(default) is null,
+        "the sleep comes as a string or an object's state; anything else is not told");
+}
+Check(DaySession.Sleeping("asleep") && DaySession.Sleeping("half_asleep") && !DaySession.Sleeping("drowsy") && !DaySession.Sleeping("awake") && !DaySession.Sleeping(null),
+    "the character sleeps asleep and half asleep (a mumble is said in its sleep)");
+Check(DaySession.Drowsy("drowsy") && !DaySession.Drowsy("asleep") && !DaySession.Drowsy(null), "drowsy is told apart");
+Check(DaySession.Follow(null, "d2", false, false, "") && DaySession.Follow("d1", "d2", true, false, "쓰는 중") && !DaySession.Follow("d2", "d2", true, true, "")
+    && !DaySession.Follow("d1", null, true, true, ""), "from none or a closed day it goes to today's, the draft along; not when shown or none named");
+Check(DaySession.Follow("w1", "d2", false, true, "") && !DaySession.Follow("w1", "d2", false, true, "쓰는 중") && !DaySession.Follow("w1", "d2", false, false, ""),
+    "from a conversation the user picked: only to a day just opened, and not while typing");
+var dayClosed = new ApiException(HttpStatusCode.Conflict, "day_closed");
+Check(MessageFailures.Classify(dayClosed) == MessageFailure.Rejected && !MessageFailures.ReuseScreen(dayClosed),
+    "a message to a closed day is refused unrecorded, and its screen is not sent again elsewhere");
+// review 6: a message HIMARI slept through (202, asleep "none") is recorded with no job — nothing is waited on, even
+// when the receipt names a job (an earlier one's)
+using (var dayReceipts = JsonDocument.Parse("[{\"running\":false,\"job_id\":null,\"asleep\":\"none\"},{\"running\":false,\"job_id\":\"j0\",\"asleep\":\"none\"},"
+    + "{\"running\":true,\"job_id\":\"j1\",\"asleep\":\"mumble\"},{\"running\":true,\"job_id\":\"j2\",\"asleep\":\"wake\"},"
+    + "{\"running\":true,\"job_id\":\"j3\",\"asleep\":null},{\"running\":true,\"job_id\":\"j4\"}]"))
+{
+    var receipt = dayReceipts.RootElement;
+    Check(DaySession.SleptThrough(receipt[0]) && DaySession.SleptThrough(receipt[1]), "slept through: shown sent, no reply waited on, whatever job the receipt names");
+    Check(!DaySession.SleptThrough(receipt[2]) && !DaySession.SleptThrough(receipt[3]) && !DaySession.SleptThrough(receipt[4])
+        && !DaySession.SleptThrough(receipt[5]) && !DaySession.SleptThrough(default),
+        "a mumble, a wake, awake, or an older server's receipt is answered as any message");
+}
+// review 8: an unsent message of a day now closed is sent again from anywhere — to today's session — and belongs to
+// today's once the app knows it; any other goes back only to the conversation it was written for
+Check(DaySession.CanRetry("d1", "d1", false) && !DaySession.CanRetry("d1", "w1", false) && DaySession.CanRetry("d1", "d2", true)
+    && DaySession.CanRetry("d1", "d1", true) && !DaySession.CanRetry(null, null, true),
+    "a closed day's unsent bubble is retried from anywhere (to today's); another only where it was written");
+Check(DaySession.Rebind("d1", true, "d2") == "d2" && DaySession.Rebind("w1", false, "d2") == "w1" && DaySession.Rebind(null, true, "d2") is null,
+    "once today's is known, a closed day's unsent message belongs to it; others keep their conversation");
+// second review P2 5: a day fenced for its closing is still named as today's while it closes — it stays closed, and the
+// send waits for a different open session
+Check(DaySession.Today("d2", false) == "d2" && DaySession.Today("d1", true) is null && DaySession.Today(null, false) is null,
+    "the server's today is taken unless it is a day known closed (one closing): then the rollover is waited for");
+// second review P1 4: a send leaving a closed day goes on only to the session it resolved, still shown, on the same
+// client and connection
+var rolloverClient = new object(); var rolloverLine = new object();
+Check(DaySession.Verified("d2", "d2", rolloverClient, rolloverClient, rolloverLine, rolloverLine),
+    "today's resolved, still shown, the same client and connection: the send goes there");
+Check(!DaySession.Verified("d2", "w1", rolloverClient, rolloverClient, rolloverLine, rolloverLine)
+    && !DaySession.Verified(null, "d2", rolloverClient, rolloverClient, rolloverLine, rolloverLine)
+    && !DaySession.Verified("d2", "d2", rolloverClient, new object(), rolloverLine, rolloverLine)
+    && !DaySession.Verified("d2", "d2", rolloverClient, rolloverClient, rolloverLine, new object())
+    && !DaySession.Verified("d2", "d2", rolloverClient, null, rolloverLine, rolloverLine),
+    "another conversation picked meanwhile, none resolved, or a reconnect: nothing is sent, the draft stays");
 
 // V3-P90 §6.1, §5.3: the main task, and the games and videos that clearly end
 TaskTracker Run(TaskTracker tracker, DateTime from, int seconds, Func<int, string?> category, bool gameAlive = true,

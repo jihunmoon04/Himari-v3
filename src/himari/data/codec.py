@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, cast
 
 from himari.common import (
@@ -20,6 +21,7 @@ from himari.common import (
     CallId,
     CallRef,
     ContentBlock,
+    ConversationId,
     EventId,
     JsonValue,
     ModelToolResult,
@@ -33,6 +35,10 @@ from himari.common import (
     thaw,
 )
 from himari.data.api import (
+    AsleepAnswer,
+    DayBefore,
+    DayLine,
+    FellBy,
     AssistantFinal,
     AssistantToolCalls,
     CompletedGroupRef,
@@ -194,6 +200,8 @@ def payload(value: EventPayload) -> str:
                 data["origin"] = _origin(origin)
             if value.interface is not None:
                 data["interface"] = interface_snapshot(value.interface)
+            if value.while_asleep is not None:  # character-day §5.6: an optional field; older messages have none
+                data["while_asleep"] = value.while_asleep.value
             return dumps(data)
         case AssistantFinal(blocks=blocks):
             return dumps({"blocks": _blocks(blocks)})
@@ -219,9 +227,10 @@ def payload_from(kind: EventKind, text: str) -> EventPayload:
     data = _obj(json.loads(text))
     match kind:
         case EventKind.USER_MESSAGE:
-            answers, origin = data.get("answers_call"), data.get("origin")
+            answers, origin, asleep = data.get("answers_call"), data.get("origin"), data.get("while_asleep")
             return UserMessage(_blocks_from(data["blocks"]), None if answers is None else _call_ref_from(answers),
-                               None if origin is None else _origin_from(origin), _interface_from(data.get("interface")))
+                               None if origin is None else _origin_from(origin), _interface_from(data.get("interface")),
+                               None if asleep is None else AsleepAnswer(str(asleep)))
         case EventKind.ASSISTANT_FINAL:
             return AssistantFinal(_blocks_from(data["blocks"]))
         case EventKind.ASSISTANT_TOOL_CALLS:
@@ -349,3 +358,33 @@ def continuation_from(text: str | None) -> ProviderContinuation | None:
         return None
     data = _obj(json.loads(text))
     return ProviderContinuation(str(data["provider_key"]), str(data["model_id"]), cast(JsonValue, data["payload"]))
+
+
+# --- the day's handoff (character-day §3.3) -----------------------------------------------------
+
+
+def day_before(value: DayBefore | None) -> str | None:
+    if value is None:
+        return None
+    return dumps({
+        "day": value.day, "last_words": [[w.at, w.who, w.text] for w in value.last_words],
+        "kept": list(value.kept), "missed": list(value.missed),
+        "fell_at": None if value.fell_at is None else value.fell_at.isoformat(),
+        "how_fell": None if value.how_fell is None else value.how_fell.value, "delayed": value.delayed,
+        "sleep_id": value.sleep_id, "conversation_id": value.conversation_id,
+    })
+
+
+def day_before_from(text: str | None) -> DayBefore | None:
+    if text is None:
+        return None
+    data = _obj(json.loads(text))
+    fell, how = data.get("fell_at"), data.get("how_fell")
+    return DayBefore(str(data["day"]), tuple(DayLine(str(at), str(who), str(said))
+                                             for at, who, said in cast(list[list[str]], data.get("last_words", []))),
+                     tuple(str(k) for k in data.get("kept", [])), tuple(str(m) for m in data.get("missed", [])),
+                     None if fell is None else datetime.fromisoformat(str(fell)),
+                     None if how is None else FellBy(str(how)), _optional_str(data.get("delayed")),
+                     sleep_id=_optional_int(data.get("sleep_id")),
+                     conversation_id=None if (conv := _optional_str(data.get("conversation_id"))) is None
+                     else ConversationId(conv))

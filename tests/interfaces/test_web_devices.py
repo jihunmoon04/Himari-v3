@@ -41,6 +41,7 @@ SEND = {"origin": ORIGIN}
 ALLOWED = {
     ("GET", "/api/device"),
     ("POST", "/api/device/presence"),
+    ("POST", "/api/device/poke"),  # character-day §11
     ("PUT", "/api/presence/quiet"),  # V3-P88 §6.2
     ("GET", "/api/events"),
     ("GET", "/api/conversations"),
@@ -96,14 +97,17 @@ class Bare:
 
 class Server:
     def __init__(self, tmp_path: Path, companion: bool = True, *, provider: ScriptedAdapter | None = None,
-                 model_id: str = "scripted-model", models: tuple[tuple[str, str | None], ...] = ()) -> None:
+                 model_id: str = "scripted-model", models: tuple[tuple[str, str | None], ...] = (),
+                 life: bool = False) -> None:
+        """character-day: HIMARI's life off by default here (a device's recent conversation as before; the day
+        session's are tests/interfaces/test_web_day.py's)."""
         self.provider = provider if provider is not None else ScriptedAdapter([], companion=companion)
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id=model_id,
                                                       models=models, sandbox=False, cleanup_seconds=None,
-                                                      companion=companion)
+                                                      companion=companion, life=life)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),
@@ -1107,9 +1111,18 @@ def test_a_device_reads_the_personas_names_and_chooses_one_never_their_text(serv
         assert (response.status_code, error_code(response)) == (403, "device_scope"), path
 
 
-def test_a_devices_character_starts_with_himaris_mood(server: Server) -> None:
+def test_a_devices_character_starts_with_himaris_mood(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """§2: right after ``hello`` a device hears the chosen persona's mood while it is told ("neutral": none);
-    the Web hears none."""
+    the Web hears none. (HIMARI's life on: its mood is kept.)"""
+    monkeypatch.setattr(event_stream, "MAX_SECONDS", 0.2)
+    server = Server(tmp_path, life=True)
+    with server.client:
+        server.app.devices._failure_delay = 0  # type: ignore[attr-defined]
+        server.sign_in()
+        _starts_with_the_mood(server)
+
+
+def _starts_with_the_mood(server: Server) -> None:
     me = server.as_device(server.paired())
     assert frames_of(server.device.get("/api/events", headers=me).text)[1] == ("mood", {"mood": "neutral"})
     cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]

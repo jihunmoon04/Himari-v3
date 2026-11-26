@@ -81,6 +81,55 @@ async def turn(data: InMemoryData, scope: TrustedScope, said: str, answered: str
     await data.project_model_output(scope, run_id, AssistantFinal((TextBlock(answered),)))
 
 
+def test_a_closed_day_session_is_read_at_once_short_or_not() -> None:
+    """character-day §6 step 3, §18.8: no quiet time to wait for, and a short part does not wait for more."""
+    async def scenario() -> None:
+        data = InMemoryData(InMemoryStore())  # its own ids: the session is the first conversation
+        provider = ScriptedAdapter(memory_passes=True)
+        provider.extend([reply()])
+        passes = MemoryPasses(data, provider, MemoryPassSettings("m", time_zone="Asia/Seoul"), Probe(),
+                              clock=lambda: datetime.now(UTC))
+        day = TrustedScope(ME, await data.open_day_session(ME, "2026-11-26", "11월 26일 (목)"))
+        await turn(data, day, "합격했어")
+        assert await passes.read(day) == [PassOutcome.WAITING]  # open: not quiet yet
+        assert await data.close_day_session(ME, day.conversation_id, datetime.now(UTC))
+        assert await passes.read(day) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+        assert len(provider.sent) == 1
+
+    asyncio.run(scenario())
+
+
+def test_after_a_pass_got_no_answer_at_all_the_next_asks_the_backup_model() -> None:
+    """character-day §10, §18.8: the Conversation's last pass failed with no answer (retryable) — this one asks the
+    backup; after an HTTP 400, or with no backup, the memory model again."""
+    async def scenario() -> None:
+        later = [LATER]
+        backed = MemoryPassSettings("m", time_zone="Asia/Seoul", backup_model_id="spare", backup_effort="low")
+        data, provider, _, passes = setup(NativeNoResponse("http_503"), reply(BUILDS), settings=backed)
+        passes._clock = lambda: datetime.now(UTC) + later[0]  # noqa: SLF001 — past each retry time
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.")
+        assert (await passes.read(SCOPE))[0] is PassOutcome.FAILED
+        later[0] += timedelta(hours=1)
+        assert (await passes.read(SCOPE))[0] is PassOutcome.APPLIED
+        options = provider.prepared_inputs[-1].request_options
+        assert (options.model_id, options.reasoning_effort) == ("spare", "low")
+        first, second = await data.list_passes(SCOPE)
+        assert (first.model_id, first.error, second.model_id, second.status) == (
+            "m", "http_503", "spare", PassStatus.APPLIED)
+        for failure, settings in ((NativeNoResponse("http_400"), backed),
+                                  (NativeNoResponse("http_503"), MemoryPassSettings("m", time_zone="Asia/Seoul"))):
+            later[0] = LATER
+            data, provider, _, passes = setup(failure, reply(BUILDS), settings=settings)
+            passes._clock = lambda: datetime.now(UTC) + later[0]  # noqa: SLF001
+            await turn(data, SCOPE, "I build HIMARI, the companion agent.")
+            assert (await passes.read(SCOPE))[0] is PassOutcome.FAILED
+            later[0] += timedelta(hours=1)
+            assert (await passes.read(SCOPE))[0] is PassOutcome.APPLIED
+            assert provider.prepared_inputs[-1].request_options.model_id == "m"
+
+    asyncio.run(scenario())
+
+
 def test_a_quiet_settled_conversation_is_read_once_into_notes_and_an_episode() -> None:
     async def scenario() -> None:
         data, provider, _, passes = setup(Measured(reply(BUILDS, episode=TALKED), 1200, 80))

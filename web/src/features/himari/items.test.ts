@@ -125,6 +125,43 @@ describe("HIMARI's thoughts (character-mind §3.2, §3.3)", () => {
   });
 });
 
+describe("a day session (character-day §5.6, §7)", () => {
+  it("marks a message HIMARI got asleep with how it took it, and leaves the others plain", () => {
+    const items = toItems([
+      event(1, "user_message", { text: "자?", while_asleep: "none" }),
+      event(2, "user_message", { text: "자냐고", while_asleep: "mumble" }),
+      event(3, "user_message", { text: "일어나!", while_asleep: "wake" }),
+      event(4, "user_message", { text: "안녕", while_asleep: null }),
+    ]);
+    expect(items.map((item) => (item.kind === "user" ? item.asleep ?? "-" : item.kind))).toEqual(["none", "mumble", "wake", "-"]);
+  });
+
+  it("shows the diary written from the session as its own folded line, after the turn it follows", () => {
+    const items = toItems([
+      event(5, "assistant_tool_calls", { run_id: "r", calls: [{ call_id: "c", tool_id: "schedule_read", arguments: {} }] }),
+      event(5, "diary", { id: "lw_9", created_at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["work", "diary"]);
+    expect(items[1]).toEqual({ kind: "diary", key: "diary:lw_9", at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." });
+  });
+
+  it("keys each diary on its id, not the sequence it follows, and shows one that comes again once (review 9)", () => {
+    const items = toItems([
+      event(5, "user_message", { text: "잘 자" }),
+      event(5, "diary", { id: "lw_1", text: "첫 일기" }),
+      event(5, "diary", { id: "lw_2", text: "다음 일기" }), // the same sequence: nothing new between them
+      event(5, "diary", { id: "lw_1", text: "첫 일기" }), // the next page gave it again
+      event(6, "user_message", { text: "좋은 아침" }),
+    ]);
+    expect(items.map((item) => item.key)).toEqual(["5", "diary:lw_1", "diary:lw_2", "6"]);
+  });
+
+  it("tells diaries without an id (an older server) apart by order", () => {
+    const items = toItems([event(5, "diary", { text: "하나" }), event(5, "diary", { text: "둘" })]);
+    expect(items.map((item) => item.key)).toEqual(["5:diary:0", "5:diary:1"]);
+  });
+});
+
 describe("a wake dropped unshown (review 2)", () => {
   it("is worded as not said, not as one the model let pass", () => {
     const items = toItems([event(5, "wake_thought", { text: "spoke on its own", thought: "말할까 했다.", status: "dropped" })]);

@@ -26,7 +26,7 @@ ON = ProactiveSettings(enabled=True)
 
 async def opened(tmp_path: Path, adapter: ScriptedAdapter, **options: object) -> Application:
     return await Application.open(tmp_path / "data", adapter, model_id="scripted-model", sandbox=False,
-                                  cleanup_seconds=None, **options)  # type: ignore[arg-type]
+                                  cleanup_seconds=None, **{"life": False, **options})  # type: ignore[arg-type]
 
 
 async def current_device(app: Application) -> str:
@@ -225,6 +225,35 @@ def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> N
             assert done.result.detail == "model_unchecked"
             assert len(adapter.sent) == sent  # no Run
             assert await ended(app, status.wake_id or "") is WakeStatus.CANCELLED
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_try_while_himari_sleeps_is_the_operators_override_a_half_asleep_turn(tmp_path: Path) -> None:
+    """character-day §9, §19.1 (review 15): the scheduler opens nothing but a reminder while HIMARI sleeps; the
+    operator's Try is a deliberate override — it opens in the day session, and the turn is half asleep (no Tool, one
+    Run) and leaves the sleep unbroken."""
+    async def scenario() -> None:
+        from himari.data.api import NO_PERSONA, FellBy
+        from himari.life import keeper as day_keeper
+
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("음… 왜…"),))], companion=True)
+        app = await opened(tmp_path, adapter, proactive=ON, companion=True, life=True)
+        try:
+            await current_device(app)
+            day = await app.day_session(ME)
+            assert day is not None
+            await app.data.open_sleep(ME, NO_PERSONA, at=day_keeper.wall_clock(), how=FellBy.SCHEDULE)
+            conversation, status = await app.try_wake(ME)
+            assert conversation == day.conversation_id and status.wake_id is not None
+            scope = TrustedScope(ME, conversation)
+            done = await app.runner.wait(scope)
+            assert done.result is not None and done.result.state is DriveState.COMPLETED
+            sent = adapter.prepared_inputs[-1]
+            assert sent.request_options.half_asleep and sent.tool_catalog == ()
+            assert (await app.data.current_sleep(ME, NO_PERSONA)).asleep  # type: ignore[union-attr]
         finally:
             await app.close()
 

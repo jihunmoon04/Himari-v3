@@ -34,9 +34,18 @@ def answers(*texts: str) -> ScriptedAdapter:
     return ScriptedAdapter([NormalizedFinal((TextBlock(t),)) for t in texts], companion=True)
 
 
-async def opened(root: Path, adapter: ScriptedAdapter, settings: ProactiveSettings = ON) -> Application:
+async def opened(root: Path, adapter: ScriptedAdapter, settings: ProactiveSettings = ON, *,
+                 life: bool = False) -> Application:
+    """character-day: the wakes of a life left off (to a companion conversation); with ``life``, of the day."""
     return await Application.open(root, adapter, model_id="scripted-model", sandbox=False, cleanup_seconds=None,
-                                  proactive=settings)
+                                  proactive=settings, life=life)
+
+
+async def day_scope(app: Application) -> TrustedScope:
+    """character-day §18.9: where a wake goes with HIMARI's life — the day session."""
+    session = await app.day_session(ME)
+    assert session is not None
+    return TrustedScope(ME, session.conversation_id)
 
 
 async def paired(app: Application) -> str:
@@ -97,12 +106,12 @@ def test_an_anniversary_is_marked_once_that_day_and_may_pass(tmp_path: Path) -> 
     opens a wake that may pass, once; the drawn wake names the day."""
     async def scenario() -> None:
         adapter = answers("응", "[[pass]]")
-        app = await opened(tmp_path / "data", adapter)
+        app = await opened(tmp_path / "data", adapter, life=True)
         try:
             device = await paired(app)
             app.presence.subscribe(ME, device)
             app.presence.signal(ME, device, 0, "Asia/Seoul")
-            scope = TrustedScope(ME, await app.create_conversation(ME))
+            scope = await day_scope(app)  # character-day §18.9: the wake goes to the day session
             await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
             later = datetime.now(UTC) + timedelta(minutes=15)  # past the talking
@@ -134,12 +143,12 @@ def test_a_finished_piece_is_shared_once_and_may_pass(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         adapter = answers("응", "설정집 냉각부 끝냈어. 나중에 보여 줄게.")
-        app = await opened(tmp_path / "data", adapter)
+        app = await opened(tmp_path / "data", adapter, life=True)
         try:
             device = await paired(app)
             app.presence.subscribe(ME, device)
             app.presence.signal(ME, device, 0, "Asia/Seoul")
-            scope = TrustedScope(ME, await app.create_conversation(ME))
+            scope = await day_scope(app)  # character-day §18.9: the wake goes to the day session
             await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
             await app.runner.wait(scope)
             today = datetime.now(ZoneInfo(app.time_zone)).date().isoformat()

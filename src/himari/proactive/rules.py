@@ -61,8 +61,10 @@ TALKING_KINDS = frozenset(set(WakeKind) - {WakeKind.REMINDER, WakeKind.TRY})
 # §6.4, V3-P90 §4: the order reasons are told in, and kept when over MAX_WAKE_REASONS; character-bond §6 (B5):
 # an anniversary right after a reminder
 # character-work §7.1: a finished piece right after an anniversary, before a loop
-MERGE_ORDER = (WakeKind.REMINDER, WakeKind.ANNIVERSARY, WakeKind.WORK_DONE, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED,
-               WakeKind.FREE, WakeKind.RETURNED)
+# character-day §9: a time set together right after a reminder (the user asked for both)
+MERGE_ORDER = (WakeKind.REMINDER, WakeKind.TOGETHER, WakeKind.ANNIVERSARY, WakeKind.WORK_DONE, WakeKind.LOOP_DUE,
+               WakeKind.TASK_ENDED, WakeKind.FREE, WakeKind.RETURNED)
+TOGETHER_WINDOW = timedelta(minutes=10)  # character-day §18.9: a together slot opens its wake this soon after it starts
 # character-bond §6: the kinds the day's count holds (an anniversary counts with the free wakes; character-work
 # §7.1: a finished piece too)
 DAILY_KINDS = frozenset({WakeKind.FREE, WakeKind.ANNIVERSARY, WakeKind.WORK_DONE})
@@ -144,6 +146,11 @@ class Situation:
     # character-work §7.1: the chosen persona's work pieces made lately — given only with the life told and a
     # model checked for free wakes (it may pass)
     work: tuple[LifeEntry, ...] = ()
+    # character-day §9, §18.9: whether HIMARI sleeps now (its day's keeper); None: its life is off, and the quiet
+    # hours stand in for its sleep as before
+    himari_asleep: bool | None = None
+    # §18.9: the ``together`` slots that still stand, with their starts (the server's zone)
+    together: tuple[tuple[LifeEntry, datetime], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -312,6 +319,14 @@ def anniversary_candidates(s: Situation) -> list[Candidate]:
                       f"anniversary:{s.bond_day}:{a.key}", s.now) for a in s.anniversaries]
 
 
+def together_candidates(s: Situation) -> list[Candidate]:
+    """character-day §9, §18.9: each ``together`` slot that started less than TOGETHER_WINDOW ago, once (its key
+    names the slot); with no current device it is held (``no_device``) and, past its window, left to the keeper
+    (§5.4: a promise missed)."""
+    return [Candidate(WakeReason(WakeKind.TOGETHER, entry_id=entry.entry_id), f"together:{entry.entry_id}", start)
+            for entry, start in s.together if start <= s.now < start + TOGETHER_WINDOW]
+
+
 def _sleeps(s: Situation) -> bool:
     return s.device is not None and s.device.sleeps
 
@@ -326,6 +341,7 @@ def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | Non
         found.append(back)
     if (ended := task_ended_candidate(s.device_id, s.device, s.settings, s.now)) is not None:
         found.append(ended)
+    found += together_candidates(s)
     found += anniversary_candidates(s)
     found += work_candidates(s)
     if (free := free_candidate(s)) is not None:
@@ -391,16 +407,19 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
     if s.device is not None and s.device.sleep is not None:
         return "asleep"
     if kind is WakeKind.REMINDER:
-        return None
+        return None  # character-day §9: even while HIMARI sleeps (it speaks half asleep)
+    if s.himari_asleep:  # character-day §9: HIMARI's own sleep holds the rest
+        return "himari_asleep"
     if s.quiet_until is not None and s.quiet_until > s.now:
         return "quiet"
     if s.last_user_message_at is not None and s.now - s.last_user_message_at < TALKING:
         return "talking"
-    if kind in EVENT_KINDS:
+    if kind in EVENT_KINDS or kind is WakeKind.TOGETHER:  # §18.9: a promise passes the gap, the day and the rest
         return None
     if unanswered(s):
         return "unanswered"
-    if in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
+    # character-day §9: the quiet hours only stand in for HIMARI's sleep while its life is off
+    if s.himari_asleep is None and in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
         return "quiet_hours"
     counted = [w for w in s.wakes if spoke(w, s.said)]
     last = max((w.created_at for w in counted), default=None)

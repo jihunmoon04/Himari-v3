@@ -56,6 +56,7 @@ def test_companion_capable_models_in_openrouter_catalog() -> None:
         "xiaomi/mimo-v2.6-pro",
         "deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-v4.1-flash-1017",
+        "openai/gpt-6-luna",  # character-day §10: the owner's decision, 2026-11-26 (a known risk)
     }
     for model_id in capable:
         assert KNOWN_CAPABILITIES[model_id].companion_capable
@@ -67,10 +68,12 @@ def test_companion_capable_models_in_openrouter_catalog() -> None:
     assert glm_flash.screen_tool and glm_flash.image_input and not glm_flash.free_wake
     assert not glm_flash.companion and not glm_flash.companion_capable
 
-    # Verify why each excluded model fails companion_capable:
+    # character-day §10: luna is turned on as a companion model (free_wake with it) by the owner's decision
     luna = KNOWN_CAPABILITIES["openai/gpt-6-luna"]
-    assert luna.screen_tool and luna.screen_points and luna.speaks_first and not luna.free_wake
-    assert not luna.companion and not luna.companion_capable
+    assert luna.screen_tool and luna.screen_points and luna.speaks_first and luna.free_wake
+    assert luna.companion and luna.companion_capable
+
+    # Verify why each excluded model fails companion_capable:
 
     sol = KNOWN_CAPABILITIES["openai/gpt-6.1-sol"]
     assert sol.screen_tool and sol.screen_points and not sol.speaks_first
@@ -227,7 +230,8 @@ def test_wakes_select_the_latest_compatible_user_conversation(
         app = await Application.open(tmp_path / "app", provider, model_id="standard-model",
                                      models=(("standard-model", None), ("companion-model", None)), sandbox=False,
                                      cleanup_seconds=None,
-                                     proactive=ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None))
+                                     proactive=ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None),
+                                     life=False)  # character-day: with a life, wakes go to the day session
         try:
             await app.ticker.close()  # drive the scheduler explicitly; no wall-clock job may race this test
             made = await app.devices.create(ALICE, "desktop")

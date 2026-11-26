@@ -19,7 +19,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import FakeMcpServer  # noqa: E402
-from testkit import NoWakes, calls, final  # noqa: E402
+from testkit import NoWakes, accepted, calls, final  # noqa: E402
 
 from himari.bootstrap import application as bootstrap  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
@@ -27,7 +27,7 @@ from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
-from himari.data.api import UserMessage  # noqa: E402
+from himari.data.api import ConversationEvent, UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.provider.api import ProviderCapabilities  # noqa: E402
@@ -135,6 +135,18 @@ def test_the_offered_models_are_configured() -> None:
                          ("a/one,b=lo w", "not model")]:
         with pytest.raises(WebConfigError, match=message):
             WebConfig.from_env({**base, "HIMARI_MODEL": "a/one", "HIMARI_MODELS": raw})
+
+
+def test_the_backup_model_is_an_offered_one() -> None:
+    """character-day §10, §18.10: HIMARI_BACKUP_MODEL must be offered (the default or listed); empty: none."""
+    base = {"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_MODEL": "a/one", "HIMARI_MODELS": "a/one=low,b/two"}
+    assert WebConfig.from_env(base).backup_model is None
+    assert WebConfig.from_env({**base, "HIMARI_BACKUP_MODEL": "  "}).backup_model is None
+    assert WebConfig.from_env({**base, "HIMARI_BACKUP_MODEL": " b/two "}).backup_model == "b/two"
+    assert WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_MODEL": "a/one",
+                               "HIMARI_BACKUP_MODEL": "a/one"}).backup_model == "a/one"
+    with pytest.raises(WebConfigError, match="HIMARI_BACKUP_MODEL=c/three is not offered"):
+        WebConfig.from_env({**base, "HIMARI_BACKUP_MODEL": "c/three"})
 
 
 def test_the_run_limit_is_configured() -> None:
@@ -258,7 +270,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     assert server.client.get("/api/server").status_code == 401
     server.sign_in()
     info = server.client.get("/api/server").json()
-    assert info == {"model": "scripted-model", "context_budget": 128_000, "trash_days": 30,
+    assert info == {"model": "scripted-model", "backup_model": None, "context_budget": 128_000, "trash_days": 30,
                     "images": False,  # V3-P67: no image sandbox in this test
                     "documents": {"read": False, "libraries": {}},  # V3-P70: no toolkit
                     "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
@@ -381,8 +393,8 @@ class GatedDriver(NoWakes):
                      progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
-        pass
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
+        return accepted(scope, message)
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
                      progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:

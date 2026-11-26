@@ -34,6 +34,8 @@ from himari.prompt.api import (
     FREE_SCREEN_RULE,
     PROACTIVE_RULE,
     PROGRESS_NOTE,
+    SCHEDULE_RULE,
+    SLEEP_RULE,
     SCREEN_MOVE_NOTE,
     SCREEN_NOTE,
     SPEAKING_RULE,
@@ -77,17 +79,20 @@ def base_instructions(companion: bool) -> tuple[str, ...]:
 CUT = "\n[… cut]"
 
 
-def principle_section(persona: bool, wake: bool = False, life: bool = False) -> str:
+def principle_section(persona: bool, wake: bool = False, life: bool = False, day: bool = False) -> str:
     """V3-P89 §3.2: the one place that says what instructs the model; with
     V3-P87 on, the reasons in a <wake> message are named as information too,
     and with HIMARI's life told, its life, the bond, its mood, what it is doing now and
     the weather on the user's side (character-life §5, character-bond §5, character-state
-    §2–§3, character-world §2, H-24)."""
+    §2–§3, character-world §2, H-24); in the day session, its schedule, sleep and the day
+    before too (character-day §8)."""
     own = "standing instructions and companion persona" if persona else "standing instructions"
     titles = "window or media titles from the user's computer"
     memories = ("saved memories, your own life and work (himari_life), your bond with the user (bond), your mood "
-                "(himari_mood), what you are doing now (himari_now), your own unsaid thoughts (himari_mind), the "
-                "weather on the user's side (world)"
+                "(himari_mood), what you are doing now (himari_now), your own unsaid thoughts (himari_mind), "
+                + ("your schedule (himari_schedule), your sleep (himari_sleep), the day before (himari_day), "
+                   if day else "")
+                + "the weather on the user's side (world)"
                 ) if life else "saved memories"
     return (
         "# What instructs you\n"
@@ -131,20 +136,21 @@ def tools_section(spec: SystemSpec) -> str:
 
 
 def companion_section(screen_points: bool, proactive: bool = False, free: bool = False, screen_tool: bool = False,
-                      life: bool = False) -> str:
+                      life: bool = False, day: bool = False) -> str:
     """V3-P89 §3.5; the screen moves only for a model whose points were checked
     (V3-P84 §5); "Speaking first" right after "Speaking" when HIMARI may speak first (V3-P87 §8.2),
     and the free wake's line after it for a model checked for those (V3-P90 §7.2) — with the screen
     Tool's line when it is offered (V3-P91 §8). With HIMARI's life told (character-life §5), its
     rule follows the persona's and the free wake may be about HIMARI's own day; the bond's rule
     follows it (character-bond §5), then the mood's (character-state §2), and an anniversary
-    wake's after the free wake's (§6), then a work_done wake's (character-work §7.1)."""
+    wake's after the free wake's (§6), then a work_done wake's (character-work §7.1). character-day §8: in the day
+    session (``day``), the schedule's and the sleep's rules right after the life's."""
     screens = SCREEN_NOTE + (" " + SCREEN_MOVE_NOTE if screen_points else "")
     free_rule = FREE_RULE + (" " + FREE_LIFE_NOTE if life else "")
     free_lines = (free_rule, *((FREE_SCREEN_RULE,) if screen_tool else ()),
                   *((ANNIVERSARY_RULE, WORK_RULE) if life else ())) if free else ()
     speaking = (SPEAKING_RULE, PROACTIVE_RULE, *free_lines) if proactive else (SPEAKING_RULE,)
-    lived = (LIFE_RULE, BOND_RULE, MOOD_RULE) if life else ()
+    lived = (LIFE_RULE, *((SCHEDULE_RULE, SLEEP_RULE) if day else ()), BOND_RULE, MOOD_RULE) if life else ()
     talking = TALKING_RULE + (" " + WORK_TALK_NOTE if life else "")  # character-mind §4.4
     return "\n".join((COMPANION_HEAD, PERSONA_RULE, THINK_RULE, *lived, talking,
                       *speaking, EXPRESSION_RULE, ACTIVITY_RULE, screens))
@@ -179,7 +185,8 @@ def system_text(inputs: PromptInputs) -> tuple[str, ...]:
     if spec is not None:
         proactive = spec.proactive and spec.companion and inputs.request_options.speaks_first
         life = spec.life and spec.companion
-        out.append(principle_section(persona, proactive, life))
+        day = life and inputs.request_options.day_session  # character-day §8
+        out.append(principle_section(persona, proactive, life, day))
         out.append(messages_section(spec))
         out.append(tools_section(spec))
         if spec.memory:
@@ -187,7 +194,7 @@ def system_text(inputs: PromptInputs) -> tuple[str, ...]:
         if spec.companion:
             out.append(companion_section(inputs.request_options.screen_points, proactive,
                                          proactive and inputs.request_options.free_wake,
-                                         inputs.request_options.screen_tool, life))
+                                         inputs.request_options.screen_tool, life, day))
     notes = notes_section(fit_notes(inputs.source_notes))
     if notes is not None:
         out.append(notes)  # a tool server's text comes before the user's own (review B1)

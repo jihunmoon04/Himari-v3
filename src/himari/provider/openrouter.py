@@ -129,7 +129,11 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
         speaks_first=True,  # V3-P87: 18 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 24 of 24
-        # free_wake off (V3-P90 §7.5): 4 of 6 in the either scenes — said the last free wake's words again
+        # character-day §10 (owner's decision 2026-11-26): on as a companion model although V3-P90 §7.5's either
+        # scenes gave 4 of 6 (it said the last free wake's words again) — a known risk; that rule and the wake
+        # algorithm change in this stage and after
+        free_wake=True,
+        companion=True,
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22

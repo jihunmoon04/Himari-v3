@@ -35,6 +35,10 @@ class MemoryPassSettings(DeepFrozen):
     idle: timedelta = DEFAULT_IDLE
     daily_tokens: int = DEFAULT_DAILY_TOKENS
     time_zone: str = "UTC"  # the server's: the day of the budget, and the zone a pass is told
+    # character-day §10, §18.8: the model a pass falls back to after the Conversation's last pass got no answer at
+    # all (a retryable failure); None: none
+    backup_model_id: str | None = None
+    backup_effort: str | None = None
 
 
 class PassOutcome(Enum):

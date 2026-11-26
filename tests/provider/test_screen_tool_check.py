@@ -84,10 +84,15 @@ def test_enabled_models_have_complete_passing_live_evidence() -> None:
     checked = sorted({row["model"] for row in rows})
     passing = {model for model in checked if not failed_groups(rows, [model])}
     enabled = {model for model, caps in KNOWN_CAPABILITIES.items() if caps.screen_tool}
-    assert enabled == passing and len(enabled) == 7
+    # character-day §10 (the owner's decision, 2026-11-26): luna's free wake is on with its free-wake screen scenes
+    # never run — its screen bars passed, and only those scenes are missing (a known risk)
+    owner = {"openai/gpt-6-luna"}
+    assert {(group, hits, total) for _, group, hits, total in failed_groups(rows, sorted(owner))} == {
+        ("choice", 0, 0), ("speak", 0, 0), ("pass", 0, 0)}
+    assert enabled == passing | owner and len(enabled) == 7
     assert all(KNOWN_CAPABILITIES[model].image_input for model in enabled)
     assert {model for model, *_ in failed_groups(rows, checked)} == {
-        "openai/gpt-5-nano", "minimax/minimax-m3", "anthropic/claude-haiku-5.5"}
+        "openai/gpt-5-nano", "minimax/minimax-m3", "anthropic/claude-haiku-5.5", *owner}
     # Replaying fixed grading preserves failures and makes no model calls.
     corrected = [row for row in rows if "initial_problems" in row]
     assert corrected and all(row["pass"] for row in corrected)

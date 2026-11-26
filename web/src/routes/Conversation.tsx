@@ -11,6 +11,7 @@ import { ConversationMenu } from "@/components/ConversationMenu";
 import { JumpToLatest } from "@/components/JumpToLatest";
 import { HimariComposer } from "@/components/HimariComposer";
 import { PageHeader } from "@/components/Shell";
+import { DayMark } from "@/components/Sidebar";
 import { Timeline } from "@/components/Timeline";
 import { Button, IconButton } from "@/components/ui/button";
 import { toItems } from "@/features/himari/items";
@@ -103,7 +104,10 @@ export function Conversation() {
             </>
           }
         >
-          <h1 className="truncate text-sm font-medium">{conversation?.title || conversation?.preview || "Conversation"}</h1>
+          <div className="flex min-w-0 items-center gap-2">
+            <h1 className="truncate text-sm font-medium">{conversation?.title || conversation?.preview || "Conversation"}</h1>
+            {conversation?.day_session && <DayMark closed={conversation.closed} />}
+          </div>
         </PageHeader>
         <div ref={box} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-3xl px-4 py-6">
@@ -122,14 +126,22 @@ export function Conversation() {
         <div className="relative mx-auto w-full max-w-3xl px-4 pb-4">
           {!atBottom && <JumpToLatest onClick={jump} />}
           {error && <p role="alert" className="mb-2 text-sm text-danger">{error}</p>}
-          <HimariComposer
-            key={id}
-            conversation={id}
-            running={running}
-            onStop={() => void act(() => cancelJob(id)).catch(() => undefined)}
-            onSent={refresh}
-            onError={setError}
-          />
+          {conversation?.day_session && conversation.closed ? (
+            // character-day §3.2: a closed day is read only, so what comes later never mixes into its memories
+            <p role="status" aria-label="Closed day"
+              className="rounded-2xl border border-line bg-panel px-4 py-3 text-center text-sm text-muted">
+              A closed day: read only. Today's day session is in the list.
+            </p>
+          ) : (
+            <HimariComposer
+              key={id}
+              conversation={id}
+              running={running}
+              onStop={() => void act(() => cancelJob(id)).catch(() => undefined)}
+              onSent={refresh}
+              onError={setError}
+            />
+          )}
         </div>
       </div>
       <SidePanel

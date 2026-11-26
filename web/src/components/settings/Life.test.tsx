@@ -1,10 +1,10 @@
-// HIMARI's life screen (character-life §6): whose life it is, the entries under Facts, Plans and Diary, a fact added
+// HIMARI's life screen (character-life §6): whose life it is, the entries under Facts, Schedule and Diary, a fact added
 // to the life shown, and an entry edited or deleted from the revision it was opened with.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
-import { addLifeFact, deleteLife, editLife, type Life, type LifeEntry } from "@/api/settings";
+import { addLifeFact, addPlan, deleteLife, editLife, editPlan, type Life, type LifeEntry } from "@/api/settings";
 import { toast } from "@/features/toast";
 import { LifeSettings } from "./Life";
 
@@ -34,6 +34,8 @@ vi.mock("@/api/settings", () => ({
   addLifeFact: vi.fn(async () => ({})),
   editLife: vi.fn(async () => ({})),
   deleteLife: vi.fn(async () => undefined),
+  addPlan: vi.fn(async () => ({})),
+  editPlan: vi.fn(async () => ({})),
 }));
 
 vi.mock("@/features/toast", () => ({ toast: vi.fn() }));
@@ -59,9 +61,10 @@ describe("the life screen", () => {
     expect(part("Facts").getByText("고양이를 무서워한다.")).toBeTruthy();
     expect(part("Facts").getByText("from a conversation")).toBeTruthy();
     expect(part("Facts").getByText("1 of 200")).toBeTruthy();
-    expect(part("Plans").getByText("도서관에 간다.")).toBeTruthy();
-    expect(part("Plans").getByText("2026-11-26 · written by the story writer")).toBeTruthy();
-    expect(part("Plans").queryByText("늦잠을 잤다.")).toBeNull();
+    expect(part("Schedule").getByText("도서관에 간다.")).toBeTruthy();
+    expect(within(part("Schedule").getByLabelText("Day 2026-11-26")).getByText("written by the story writer"))
+      .toBeTruthy();
+    expect(part("Schedule").queryByText("늦잠을 잤다.")).toBeNull();
     const days = part("Diary").getAllByText(/^2026-11-2\d · /).map((line) => line.textContent);
     expect(days).toEqual(["2026-11-25 · written by the story writer", "2026-11-24 · yours"]); // newest first
     expect(part("Diary").getByText(/우산을 잃어버렸다/)).toBeTruthy();
@@ -75,7 +78,7 @@ describe("the life screen", () => {
       now: { asleep: false, doing: "빵집 들르기", since: "13:30" },
     };
     await shown();
-    expect(part("Plans").getByText("2026-11-26 14:00 · written by the story writer")).toBeTruthy();
+    expect(within(part("Schedule").getByLabelText("Day 2026-11-26")).getByText("14:00")).toBeTruthy();
     const line = screen.getByLabelText("Now").textContent ?? "";
     expect(line).toContain("Mood: happy (새 책을 찾았다)");
     expect(line).toContain("Doing: 빵집 들르기 (from 13:30)");
@@ -204,8 +207,7 @@ describe("an entry", () => {
       expect(project.getByText("2026-11-25 20:00 · written by the story writer")).toBeTruthy();
       expect(project.getByText("Show the piece")).toBeTruthy();
       expect(within(part("Work").getByLabelText("Project 작곡 노트")).getByText("Nothing made yet.")).toBeTruthy();
-      expect(part("Plans").getByText("2026-11-26 20:00 · work on 블랙홀 전자포 · written by the story writer"))
-        .toBeTruthy();
+      expect(part("Schedule").getByText("work on 블랙홀 전자포 · written by the story writer")).toBeTruthy();
       fireEvent.click(project.getByRole("button", { name: "Edit" }));
       const summary = screen.getByLabelText("Piece summary") as HTMLInputElement;
       expect([summary.value, summary.maxLength]).toEqual(["냉각부 설계 끝냈어.", 200]);
@@ -285,11 +287,156 @@ describe("an entry", () => {
   it("is deleted only when confirmed", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     await shown();
-    const remove = await part("Plans").findByRole("button", { name: "Delete" });
+    const remove = await part("Schedule").findByRole("button", { name: "Delete" });
     fireEvent.click(remove);
     expect(deleteLife).not.toHaveBeenCalled();
     fireEvent.click(remove);
     await waitFor(() => expect(deleteLife).toHaveBeenCalledWith(9, 1));
     confirm.mockRestore();
+  });
+});
+
+describe("the schedule and sleep (character-day §12)", () => {
+  // today is 2026-11-26 on this page's clock (only the date is faked: the queries' timers stay real)
+  beforeEach(() => {
+    state.data = aLife();
+    vi.clearAllMocks();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 10, 26, 22, 40));
+  });
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+  const sleepSlot = { ...entry(40, "plan", "2026-11-26", "잠", "writer", 4), time: "23:30", minutes: 460,
+    plan_kind: "sleep" as const };
+  const withSchedule = (): Life => ({
+    ...aLife(),
+    entries: [
+      { ...entry(41, "plan", "2026-11-27", "방송 같이 보기", "himari"), time: "03:00", minutes: 120,
+        plan_kind: "together" as const },
+      sleepSlot,
+      { ...entry(42, "plan", "2026-11-26", "산책", "himari"), time: "15:00", minutes: 60, plan_kind: "own" as const,
+        plan_state: "cancelled" as const, reason: "비가 와서 못 나가" },
+      { ...entry(43, "plan", "2026-11-25", "같이 게임", "himari"), time: "21:00", minutes: 90,
+        plan_kind: "together" as const, plan_state: "missed" as const },
+    ],
+  });
+
+  it("shows the slots by day, earliest first, with their kind, time, length, state and why", async () => {
+    state.data = withSchedule();
+    await shown();
+    const days = part("Schedule").getAllByText(/^2026-11-2\d/).map((line) => line.textContent);
+    expect(days).toEqual(["2026-11-25", "2026-11-26 · today", "2026-11-27 · tomorrow"]);
+    const today = within(part("Schedule").getByLabelText("Day 2026-11-26"));
+    expect(today.getAllByText(/^\d\d:\d\d–/).map((line) => line.textContent))
+      .toEqual(["15:00–16:00 · 1h", "23:30–07:10 · 7h 40m"]); // by start
+    expect(today.getByText("Sleep")).toBeTruthy();
+    expect(today.getByText("cancelled")).toBeTruthy();
+    expect(today.getByText("Why: 비가 와서 못 나가")).toBeTruthy();
+    const tomorrow = within(part("Schedule").getByLabelText("Day 2026-11-27"));
+    expect(tomorrow.getByText("Together")).toBeTruthy();
+    expect(tomorrow.getByText("by HIMARI")).toBeTruthy();
+    expect(within(part("Schedule").getByLabelText("Day 2026-11-25")).getByText("missed")).toBeTruthy();
+  });
+
+  it("only moves the sleep slot, never deletes it, and leaves a cancelled or missed slot unedited", async () => {
+    state.data = { ...aLife(), entries: [sleepSlot, withSchedule().entries[2]!] };
+    await shown();
+    const schedule = part("Schedule");
+    expect(schedule.getAllByRole("button", { name: "Delete" })).toHaveLength(1); // the cancelled one's
+    expect(schedule.queryByRole("button", { name: "Edit" })).toBeNull();
+    fireEvent.click(schedule.getByRole("button", { name: "Move" }));
+    expect(screen.queryByLabelText("Slot text")).toBeNull();
+    expect((screen.getByLabelText("Slot kind") as HTMLSelectElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Slot day"), { target: { value: "2026-11-27" } });
+    fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "01:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editPlan).toHaveBeenCalledWith(40,
+      { day: "2026-11-27", time: "01:00", minutes: 460, plan_kind: "sleep", text: "잠" }, 4));
+  });
+
+  it("adds a slot to the persona's schedule", async () => {
+    await shown();
+    fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
+    expect((screen.getByLabelText("Slot day") as HTMLSelectElement).value).toBe("2026-11-26");
+    const kind = screen.getByLabelText("Slot kind") as HTMLSelectElement;
+    expect([...kind.options].map((o) => o.value)).toEqual(["own"]); // no open project: no work slot; never together
+    expect(kind.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Slot day"), { target: { value: "2026-11-27" } });
+    fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "03:00" } });
+    fireEvent.change(screen.getByLabelText("Slot minutes"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("Slot text"), { target: { value: " 방송 보기 " } });
+    fireEvent.click(screen.getByRole("button", { name: "Add slot" }));
+    await waitFor(() => expect(addPlan).toHaveBeenCalledWith(
+      { day: "2026-11-27", time: "03:00", minutes: 120, plan_kind: "own", text: "방송 보기" }, 2));
+    await waitFor(() => expect(screen.queryByLabelText("Slot text")).toBeNull());
+  });
+
+  it("leaves together slots to HIMARI: none offered new or from an own slot; one may stay so or turn own (review 14)",
+    async () => {
+      state.data = {
+        ...aLife(),
+        entries: [
+          withSchedule().entries[0]!, // together, 2026-11-27 03:00
+          { ...entry(44, "plan", "2026-11-26", "책 읽기", "user"), time: "23:00", minutes: 30, plan_kind: "own" as const },
+          { ...entry(60, "arc", "2026-11-20", "노래를 만든다.", "writer"), title: "첫 노래", status: "open" as const },
+        ],
+      };
+      await shown();
+      const kinds = () => [...(screen.getByLabelText("Slot kind") as HTMLSelectElement).options].map((o) => o.value);
+      fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
+      expect(kinds()).toEqual(["own", "work"]);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(within(part("Schedule").getByLabelText("Day 2026-11-26")).getByRole("button", { name: "Edit" }));
+      expect(kinds()).toEqual(["own"]);
+      expect((screen.getByLabelText("Slot kind") as HTMLSelectElement).disabled).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(within(part("Schedule").getByLabelText("Day 2026-11-27")).getByRole("button", { name: "Edit" }));
+      expect(kinds()).toEqual(["together", "own"]);
+      fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "04:00" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(editPlan).toHaveBeenCalledWith(41,
+        { day: "2026-11-27", time: "04:00", minutes: 120, plan_kind: "together", text: "방송 같이 보기" }, 1));
+    });
+
+  it("says why the schedule refused a slot and keeps what was written", async () => {
+    vi.mocked(addPlan).mockRejectedValueOnce(new ApiError(409, "plan_refused",
+      "It overlaps the sleep slot (23:30-07:10); move the sleep slot first."));
+    await shown();
+    fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
+    fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "23:50" } });
+    fireEvent.change(screen.getByLabelText("Slot text"), { target: { value: "책 읽기" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add slot" }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      "The schedule did not take it: It overlaps the sleep slot (23:30-07:10); move the sleep slot first.", "error"));
+    expect((screen.getByLabelText("Slot text") as HTMLTextAreaElement).value).toBe("책 읽기");
+  });
+
+  it("shows HIMARI's sleep on the Now line", async () => {
+    const tonight = { day: "2026-11-26", time: "23:30", minutes: 460 };
+    state.data = { ...aLife(), sleep: { state: "drowsy", minutes_to_sleep: 20, tonight } };
+    await shown();
+    expect(screen.getByLabelText("Now").textContent).toBe("Sleep: Drowsy · sleeps in 20 min");
+    cleanup();
+    state.data = { ...aLife(), now: { asleep: true, doing: null, since: null },
+      sleep: { state: "asleep", deep: true, tonight } };
+    await shown();
+    expect(screen.getByLabelText("Now").textContent).toBe("Sleep: Asleep (deep) · wakes at 07:10");
+  });
+
+  it("lists the sleep log: how it fell asleep and woke, what came meanwhile, whether the day closed", async () => {
+    state.data = {
+      ...aLife(),
+      sleeps: [
+        { fell_at: "2026-11-26T14:40:00+00:00", how_fell: "tool", woke_at: null, how_woke: null, messages: 0,
+          mumbles: 0, closed_day: false },
+        { fell_at: "2026-11-25T15:10:00+00:00", how_fell: "schedule", woke_at: "2026-11-25T18:20:00+00:00",
+          how_woke: "user", messages: 3, mumbles: 1, closed_day: true },
+      ],
+    };
+    await shown();
+    const log = part("Sleep log");
+    expect(log.getByText("went to sleep early · still asleep")).toBeTruthy();
+    expect(log.getByText("fell asleep at its sleep slot · woken by you · 3 messages, 1 mumble · closed the day"))
+      .toBeTruthy();
   });
 });
