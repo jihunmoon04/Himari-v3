@@ -18,6 +18,10 @@ Models (V3-P64 §3): ``HIMARI_MODEL`` is the default; ``HIMARI_MODELS``
 optionally lists every offered model as ``id[=effort]`` (comma-separated;
 an id may hold ``:``, so the effort follows ``=``). The default must be
 listed. Unset, the default model is the only one offered.
+``HIMARI_BACKUP_MODEL`` (character-day v0.1 §10) names the model every call
+falls back to once when its own got no answer at all (connection, HTTP 408,
+429, 5xx); it must be offered (the default model or one listed). Unset or
+empty: no backup.
 
 Trash (V3-P65): ``HIMARI_TRASH_DAYS`` (1..365, default 30) is how long a
 deleted Conversation stays in the trash before it is deleted for good.
@@ -97,6 +101,7 @@ SECURE_COOKIE_VAR = "HIMARI_WEB_SECURE_COOKIE"
 DATA_ROOT_VAR = "HIMARI_DATA_ROOT"
 MODEL_VAR = "HIMARI_MODEL"
 MODELS_VAR = "HIMARI_MODELS"  # V3-P64: the offered models
+BACKUP_MODEL_VAR = "HIMARI_BACKUP_MODEL"  # character-day §10: the backup model; unset or empty: none
 REASONING_VAR = "HIMARI_REASONING_EFFORT"
 SANDBOX_VAR = "HIMARI_SANDBOX"
 CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
@@ -191,6 +196,7 @@ class WebConfig:
     companion: bool = True  # V3-P83
     companion_default_model: str | None = None  # V3-P92: automatic preference unless explicitly configured
     companion_models_only: bool = False  # only companion-verified models offered
+    backup_model: str | None = None  # character-day §10: HIMARI_BACKUP_MODEL, an offered model
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket_ignored: bool = False  # V3-P109 §3 D9: HIMARI_MACHINE_SOCKET is set but no longer used
     machine_principals: tuple[str, ...] = ("operator",)
@@ -244,6 +250,9 @@ class WebConfig:
         model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
         models_raw = source.get(MODELS_VAR)
         models = _models(models_raw, model_id) if models_raw is not None and models_raw.strip() else ()
+        backup_model = source.get(BACKUP_MODEL_VAR, "").strip() or None
+        if backup_model is not None and backup_model not in (model_id, *(m for m, _ in models)):
+            raise WebConfigError(f"{BACKUP_MODEL_VAR}={backup_model} is not offered: list it in {MODELS_VAR}")
         documents_dir = source.get(DOCUMENTS_DIR_VAR, "").strip() or None
         if documents_dir is not None and not os.path.isabs(documents_dir):
             raise WebConfigError(f"{DOCUMENTS_DIR_VAR} must be an absolute path")
@@ -284,6 +293,7 @@ class WebConfig:
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
             companion_default_model=source.get(COMPANION_DEFAULT_MODEL_VAR, "").strip() or None,
             companion_models_only=_flag(source.get(COMPANION_MODELS_ONLY_VAR), COMPANION_MODELS_ONLY_VAR, default=False),
+            backup_model=backup_model,
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket_ignored=machine_socket_ignored,
             machine_principals=machine_principals,

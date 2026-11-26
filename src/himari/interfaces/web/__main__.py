@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
                                              streaming=config.streaming, companion=config.companion,
                                              companion_default_model=config.companion_default_model,
                                              companion_models_only=config.companion_models_only,
+                                             backup_model=config.backup_model,
                                              time_zone=config.time_zone,
                                              machine_principals=config.machine_principals,
                                              proactive=config.proactive)
@@ -95,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
         for model in application.models:
             effort = f", reasoning {model.default_effort}" if model.default_effort else ""
             print(f"HIMARI web: model {model.model_id}{' (default)' if model.is_default else ''}{effort}",
+                  file=sys.stderr, flush=True)
+        if application.backup_model is not None:  # character-day §10
+            print(f"HIMARI web: backup model {application.backup_model} (when a call gets no answer at all)",
                   file=sys.stderr, flush=True)
         if not application.memory_enabled:  # V3-P71 §9
             print("HIMARI web: memory is off (HIMARI_MEMORY=0): models neither save nor see notes; "

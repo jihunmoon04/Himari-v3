@@ -137,6 +137,18 @@ def test_the_offered_models_are_configured() -> None:
             WebConfig.from_env({**base, "HIMARI_MODEL": "a/one", "HIMARI_MODELS": raw})
 
 
+def test_the_backup_model_is_an_offered_one() -> None:
+    """character-day §10, §18.10: HIMARI_BACKUP_MODEL must be offered (the default or listed); empty: none."""
+    base = {"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_MODEL": "a/one", "HIMARI_MODELS": "a/one=low,b/two"}
+    assert WebConfig.from_env(base).backup_model is None
+    assert WebConfig.from_env({**base, "HIMARI_BACKUP_MODEL": "  "}).backup_model is None
+    assert WebConfig.from_env({**base, "HIMARI_BACKUP_MODEL": " b/two "}).backup_model == "b/two"
+    assert WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_MODEL": "a/one",
+                               "HIMARI_BACKUP_MODEL": "a/one"}).backup_model == "a/one"
+    with pytest.raises(WebConfigError, match="HIMARI_BACKUP_MODEL=c/three is not offered"):
+        WebConfig.from_env({**base, "HIMARI_BACKUP_MODEL": "c/three"})
+
+
 def test_the_run_limit_is_configured() -> None:
     # V3-P106: one Run limit, 12 by default; it cannot be turned off.
     base = {"HIMARI_DATA_ROOT": "/srv/himari"}
