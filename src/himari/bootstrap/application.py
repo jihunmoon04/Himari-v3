@@ -1465,6 +1465,18 @@ class Application:
                                             since=since)
         return chosen, entries
 
+    async def next_world(self, principal: PrincipalId) -> datetime | None:
+        """character-mind §8, character-day §6: when the world next decides HIMARI's day (None: no story writer) —
+        today's closing brings it on before noon."""
+        if self.life_writer is None:
+            return None
+        closed = None
+        if self.keeper is not None:
+            chosen = await self.data.active_persona(principal)
+            closed = (await self.data.read_day_state(
+                principal, NO_PERSONA if chosen is None else chosen.persona_id)).last_closing_at
+        return self.life_writer.next_world(datetime.now(UTC), closed)
+
     def next_work(self, entries: Sequence[LifeEntry]) -> LifeEntry | None:
         """character-work §8: the next work plan among the life as read (the server's clock and zone)."""
         return next_plan(entries, datetime.now(UTC), ZoneInfo(self.time_zone))

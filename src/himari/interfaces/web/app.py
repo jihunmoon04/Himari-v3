@@ -1954,9 +1954,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 # character-world §2, §3: what the writer and a turn know of the real world, as told at startup
                 "world": {"weather": application.world_weather, "today": application.weather_today(),
                           "topics": application.world_topics,
-                          # character-mind §8: when the world next decides what happens to HIMARI
-                          "next": None if application.life_writer is None
-                          else _time(application.life_writer.next_world(datetime.now(UTC)))},
+                          # character-mind §8: when the world next decides what happens to HIMARI (character-day
+                          # §6: after the day's closing, else noon)
+                          "next": _time(await application.next_world(who))},
                 "entries": [life_entry_view(e) for e in entries],
                 # character-day §12, §18.11: the sleep now and the latest sleeps (newest first)
                 "sleep": sleep_view_json(await application.sleep_view(who), ZoneInfo(application.time_zone)),
