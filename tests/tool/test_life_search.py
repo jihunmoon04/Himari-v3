@@ -52,9 +52,13 @@ def test_kind_life_finds_the_turns_personas_facts_diaries_and_events() -> None:
     search = MemorySearch(data, life=data)
     found = run(search, 1, query="고양이", kind="life")
     assert found.status is ToolStatus.SUCCEEDED
-    assert said(found).splitlines() == ["[happened to you 2026-11-25 15:00] 택배로 고양이 인형이 왔다.",
-                                        "[your fact] 고양이를 무서워한다.",
-                                        "[your diary 2026-11-24] 유나랑 고양이 카페에 갔다. 무서웠다."]
+    # a fact's day is when it was written (the real clock), so only the dated entries' order is fixed
+    lines = said(found).splitlines()
+    assert sorted(lines) == sorted(["[happened to you 2026-11-25 15:00] 택배로 고양이 인형이 왔다.",
+                                    "[your fact] 고양이를 무서워한다.",
+                                    "[your diary 2026-11-24] 유나랑 고양이 카페에 갔다. 무서웠다."])
+    assert lines.index("[happened to you 2026-11-25 15:00] 택배로 고양이 인형이 왔다.") < lines.index(
+        "[your diary 2026-11-24] 유나랑 고양이 카페에 갔다. 무서웠다.")
     assert len(found.raw_result["life"]) == 3  # type: ignore[index, arg-type, call-overload]
     assert said(run(search, 2, query="고양이", kind="life")) == "[your fact] 다른 페르소나의 고양이."
     days = run(search, 1, query="고양이", kind="life", **{"from": "2026-11-24", "to": "2026-11-24"})
