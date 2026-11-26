@@ -649,17 +649,20 @@ Web과 Windows 앱(§18.12, §18.13)을 만들며 정한 것이다. 서버와 �
 
 - **Web 글은 영어다**(9단계의 "Thought"처럼). 하루 → `Day` 표시, 닫힌 하루 → 입력란 자리에 "A closed day: read only. …", 자는 동안 → 사용자 말 아래 `While asleep · no answer`/`· mumbled`/`· woke HIMARI`, 일기 → 접힌 줄 `Wrote the diary · <시각>`(펼치면 일기 글), 일정표 → `Schedule`, 잠 기록 → `Sleep log`.
 - **일정표 모양:** 서버가 준 일정을 날짜별로 묶어 이른 날부터, 날 안에서는 시작 순으로 보인다(지난 날짜의 취소·놓친 칸도 그대로). 빈 날은 제목을 두지 않는다. 날 제목은 `YYYY-MM-DD`와 today/tomorrow.
-- **고치기 범위:** 새 칸의 종류는 `own`·`together`, 열린 프로젝트가 있으면 `work`(프로젝트를 고름)다. `sleep`은 새로 쓰지 않는다. 잠 칸은 날짜·시작·길이만 옮기고(단추 "Move", 지우기 없음), 작업 칸은 종류와 프로젝트가 그대로, 나머지는 `own`↔`together`만 바꾼다. 취소·놓친 칸은 고치지 않고 지우기만 된다. `reason`은 Web에서 쓰지 않는다.
+- **고치기 범위:** 새 칸의 종류는 `own`, 열린 프로젝트가 있으면 `work`(프로젝트를 고름)다. `sleep`은 새로 쓰지 않는다. 잠 칸은 날짜·시작·길이만 옮기고(단추 "Move", 지우기 없음), 작업 칸은 종류와 프로젝트가 그대로다. 취소·놓친 칸은 고치지 않고 지우기만 된다. `reason`은 Web에서 쓰지 않는다.
+  - **`together`는 HIMARI만 만든다**(리뷰 14, 서버 규칙 "Only HIMARI writes a together slot"). 그래서 새 칸에 내놓지 않고, `own` 칸을 `together`로 바꾸는 것도 만드는 것으로 보아 내놓지 않는다(`own` 칸의 종류는 그대로). 있는 `together` 칸은 서버가 받는 대로 고치고(`together` 그대로 또는 `own`으로) 지울 수 있다.
 - **지금 상태 줄:** `Sleep: Awake · sleeps at 23:30` / `Drowsy · sleeps in 20 min` / `Asleep (deep) · wakes at 07:10` / `Half asleep`. `himari_now.asleep`의 "Asleep"은 `sleep`이 없을 때만 보인다.
 - **예비 모델 표시**(§10 "예비 모델(luna)로 답함")는 §18.12에 없어 Web에 따로 두지 않았다. Run의 `model`에 실제 모델이 남는다.
 - **Web이 읽는 모양(§18.11에서 열려 있던 것):**
   - `GET /api/life`의 `sleep`: `{state, deep?, minutes_to_sleep?, tonight?: {day, time, minutes}}`. `sleeps[]`: `{fell_at, how_fell, woke_at, how_woke, messages, mumbles, closed_day}`(최신 먼저).
   - `POST /api/life/plans`: `{day, time, minutes, plan_kind, text, arc_id?, persona_id}`. `PUT /api/life/plans/{id}`: 같은 칸에 `revision`(`persona_id` 없음). 거부는 `409 plan_refused`, 그 밖에 `revision_conflict`, `persona_changed`도 지금 삶 항목처럼 읽는다.
-  - 대화 이벤트의 `diary`: `{sequence, kind: "diary", created_at, text}`(`text`는 일기 글).
+  - 대화 이벤트의 `diary`: `{sequence, id, kind: "diary", created_at, text}`(`text`는 일기 글). `id`(문자열)는 그 일기의 것이다(리뷰 9). `sequence`는 일기가 뒤따르는 사건의 순번이라 일기 둘이 같을 수 있어, Web은 일기를 `id`로 구별해 React 키로 쓰고(`diary:<id>`) 같은 `id`가 다시 오면(페이지 경계) 한 번만 보인다. `id`가 없는 옛 서버의 일기는 순서로 키를 단다.
   - 스트림(`/api/events`) `himari_sleep`이 오면 삶을, `day_session`이 오면 목록·그 대화·삶을 다시 읽는다.
 - **Windows 졸림:** `drowsy`면 평소 잔동작(30–90초 간격) 자리에 하품을 넣는다.
 - **Windows 쿡 찌르기:** 클릭은 쿡 찌르기와 함께 평소처럼 입력창도 연다. 답이 `none`이면 잠 동작을 처음부터 다시 틀어 뒤척임을 보인다(따로 그림 없음). `mumble`·`wake`는 서버의 작업과 `himari_sleep`으로 보인다.
+- **Windows 무반응 메시지**(리뷰 6): 메시지 `202`의 `asleep`이 `"none"`이면 일이 없다. 글을 보낸 것으로 보이고 쿡 찌르기의 `none`처럼 뒤척인 뒤, 답 기다리기(`job_id` 추적)·생각 중 표정·진행 표시를 하지 않는다. 영수증이 `job_id`를 담아도(앞선 일의 것) 따르지 않는다. 상태 글은 "히마리가 자고 있어요. 메시지는 대화에 남았어요."다.
 - **Windows 하루 세션 따라가기:** 새 세션(`day_session`, `closed: false`)으로는 지금 대화가 없거나 닫힌 하루면 늘 옮기고(초안도 함께), 사용자가 고른 다른 대화면 입력 중이 아닐 때만 옮긴다. `hello` 때는 지금 대화가 닫힌 하루이거나 목록에 없던 하루 세션이면 옮긴다.
 - **Windows 닫힌 하루에 보내기:** 먼저 `GET /api/device`로 오늘 세션을 연다(그 호출이 세션을 연다고 봄). 그 사이 닫혀 `409 day_closed`면 기록되지 않은 것으로 보고 글을 입력창에 되돌린 뒤 오늘 대화로 옮긴다. 자동으로 다시 보내지 않는다.
+  - **보내지 못한 말풍선도 오늘로 간다**(리뷰 8). 말풍선의 "다시 보내기"도 보내기 전에 같은 길을 간다: 그 말풍선이 닫힌 하루의 것이면 오늘 세션을 열고 그리로 옮겨 보낸다. 다시 보내다 `409 day_closed`면 말풍선으로 남기고(입력창의 새 초안은 그대로), 오늘 세션을 알게 되면(`GET /api/device`, `day_session` 열림 이벤트) 닫힌 하루의 보내지 못한 말풍선을 모두 오늘 대화의 것으로 옮긴다. 그 전까지도 닫힌 하루의 말풍선은 어느 대화에서나 다시 보낼 수 있고(오늘로 감), "닫힌 하루에서 보내지 못한 메시지예요. 다시 보내면 오늘의 대화로 가요."라고 적는다. 보냈는지 모르는 말풍선은 옮겨도 원래 하루의 기록에서 확인한다.
 - **Windows 상태 글:** 하루 세션 서버에서는 답하는 중의 "새 대화를 열 수 있습니다"를 "히마리가 답하는 중이에요."로 바꿨다.
-- **Windows 앱은 이 환경에 .NET SDK가 없어 빌드·실행하지 않고 썼다.** 계약 시험(`DaySession`, `CharacterAnimator`의 졸림·뒤척임, `day_closed` 분류)을 더했다. 빌드와 실기 확인이 남았다.
+- **Windows 앱은 이 환경에 .NET SDK가 없어 빌드·실행하지 않고 썼다.** 계약 시험(`DaySession`, `CharacterAnimator`의 졸림·뒤척임, `day_closed` 분류)을 더했다. 리뷰 고침(6, 8)도 빌드하지 않고 썼고, 그 규칙(`DaySession.SleptThrough`·`CanRetry`·`Rebind`)을 계약 시험에 더했다. 빌드와 실기 확인이 남았다.
