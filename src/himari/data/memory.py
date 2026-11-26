@@ -1673,6 +1673,30 @@ class InMemoryData:
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return tuple(written)
 
+    async def apply_life_amend(self, write_id: str, day: str, text: str | None, *, mood: str | None = None,
+                               mood_reason: str | None = None, now: datetime) -> LifeEntry | None:
+        diary = None if text is None else rules.check_life_text(LifeKind.DIARY, text)
+        kept_mood = rules.amend_mood(mood, mood_reason, now)
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.AMEND or row.record.day != day:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not an amend of {day}")
+        principal, persona_id = row.owner, row.record.persona_id
+        before = next((e for (owner, _), (e, retired) in self._store.life.items()
+                       if owner == principal and retired is None and e.persona_id == persona_id
+                       and e.kind is LifeKind.DIARY and e.day == day), None)
+        written = None
+        if before is not None and before.origin is not LifeOrigin.USER:  # character-diary §5: the user's stays
+            if diary is not None:
+                written = self._put_life(principal, replace(before, text=diary, origin=LifeOrigin.WRITER,
+                                                            revision=before.revision + 1, updated_at=now,
+                                                            source=write_id))
+            if kept_mood is not None:
+                self._keep_mood(principal, replace(kept_mood, persona_id=persona_id))
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return written
+
     async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
         checked = [rules.check_world_event(event) for event in events]
         row = self._life_write(write_id)

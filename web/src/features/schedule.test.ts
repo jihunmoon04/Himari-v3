@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { LifeEntry } from "@/api/settings";
-import { addDays, dayLabel, endOf, lengthOf, scheduleDays, sleepNote, sleepText, slotsByDay, spanOf } from "./schedule";
+import {
+  addDays, dayLabel, endOf, lengthOf, minutesOf, onlyMoves, scheduleDays, sleepNote, sleepText, slotsByDay, spanOf,
+} from "./schedule";
 
 const at = "2026-11-26T01:00:00+00:00";
 const plan = (id: number, day: string, time: string | null, minutes: number | null = null): LifeEntry =>
@@ -28,6 +30,14 @@ describe("the schedule's days and times (character-day §4)", () => {
       plan(3, "2026-11-26", "15:00"), { ...plan(4, "2026-11-26", "10:00"), kind: "diary" }]);
     expect(days.map(({ day, slots }) => [day, slots.map((slot) => slot.id)])).toEqual([
       ["2026-11-26", [3, 2]], ["2026-11-27", [1]]]);
+  });
+
+  it("only moves the sleep and diary slots, a diary slot 10 to 60 minutes (character-diary §3)", () => {
+    expect((["sleep", "diary", "work", "together", "own"] as const).map(onlyMoves))
+      .toEqual([true, true, false, false, false]);
+    expect(minutesOf("diary")).toEqual({ min: 10, max: 60 });
+    expect([minutesOf("sleep"), minutesOf("own")]).toEqual([{ min: 5, max: 720 }, { min: 5, max: 720 }]);
+    expect(spanOf({ time: "22:10", minutes: 30 })).toBe("22:10–22:40 · 30m");
   });
 
   it("names today and tomorrow", () => {

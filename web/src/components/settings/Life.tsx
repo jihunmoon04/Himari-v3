@@ -12,6 +12,7 @@
 // character-day §12, §18.12: the plans are HIMARI's Schedule — its slots from today on, by day, each with its kind,
 // start and length, and a cancelled or missed one with why; the owner adds, edits and deletes slots, and the sleep
 // slot only moves (it is never deleted). The Sleep log below lists its last 14 sleeps, and the Now line its sleep.
+// character-diary §10: the diary slot (the night's diary time, placed by the server) only moves, as the sleep slot.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState, type ReactNode } from "react";
 import { ApiError } from "@/api/client";
@@ -20,7 +21,9 @@ import {
   type LifeOrigin, type PlanInput, type PlanKind, type PlanState,
 } from "@/api/settings";
 import { Button } from "@/components/ui/button";
-import { dayLabel, localDay, scheduleDays, sleepNote, sleepText, slotsByDay, spanOf } from "@/features/schedule";
+import {
+  dayLabel, localDay, minutesOf, onlyMoves, scheduleDays, sleepNote, sleepText, slotsByDay, spanOf,
+} from "@/features/schedule";
 import { toast } from "@/features/toast";
 import { cn } from "@/lib/cn";
 
@@ -41,7 +44,9 @@ const NAMES: Record<LifeKind, string> = {
   fact: "fact", plan: "slot", diary: "diary entry", arc: "arc", work: "work piece", thought: "kept thought",
   event: "event",
 };
-const KINDS: Record<PlanKind, string> = { sleep: "Sleep", work: "Work", together: "Together", own: "Own" };
+const KINDS: Record<PlanKind, string> = {
+  sleep: "Sleep", diary: "Diary", work: "Work", together: "Together", own: "Own",
+};
 const STATES: Record<PlanState, string> = { cancelled: "cancelled", missed: "missed" };
 const ABOUT: Record<string, string> = {
   user: "about you", self: "about itself", work: "about its work", intent: "something it wants to say or do",
@@ -169,9 +174,10 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
 /** character-day §4.1: a plan's kind; one from before the schedule is work with a project, its own otherwise. */
 const kindOf = (entry: LifeEntry): PlanKind => entry.plan_kind ?? (entry.arc_id != null ? "work" : "own");
 
-/** A schedule slot written (``entry`` null) or edited from the revision opened. The sleep slot only moves (its day,
- *  start and length); a work slot keeps its project. Only HIMARI makes a together slot (review 14: the server's rule),
- *  so it is never offered new, nor as what an own slot becomes; a together slot may stay so or turn into its own. */
+/** A schedule slot written (``entry`` null) or edited from the revision opened. The sleep and diary slots only move
+ *  (their day, start and length; a diary slot 10..60 minutes), are never offered new and keep their kind; a work slot
+ *  keeps its project. Only HIMARI makes a together slot (review 14: the server's rule), so it is never offered new,
+ *  nor as what an own slot becomes; a together slot may stay so or turn into its own. */
 function PlanEditor({ entry, revision, personaId, projects, today, max, onDone }: {
   entry: LifeEntry | null; revision: number; personaId: number | null; projects: { id: number; title: string }[];
   today: string; max: number; onDone: () => void;
@@ -185,17 +191,18 @@ function PlanEditor({ entry, revision, personaId, projects, today, max, onDone }
   const [project, setProject] = useState<number | null>(entry?.arc_id ?? projects[0]?.id ?? null);
   const [text, setText] = useState(entry?.text ?? "");
   const [saving, setSaving] = useState(false);
-  const sleep = kind === "sleep";
-  const kinds: PlanKind[] = was === "sleep" || was === "work" || was === "own" ? [was]
+  const moves = onlyMoves(kind);
+  const range = minutesOf(kind);
+  const kinds: PlanKind[] = was !== null && (onlyMoves(was) || was === "work" || was === "own") ? [was]
     : was === "together" ? ["together", "own"] : ["own", ...(projects.length ? ["work" as const] : [])];
   const days = scheduleDays(today);
   if (entry?.day && !days.includes(entry.day)) days.unshift(entry.day);
   const length = Number(minutes);
-  const valid = /^\d{2}:\d{2}$/.test(time) && Number.isInteger(length) && length >= 5 && length <= 720
-    && (sleep || text.trim() !== "") && (kind !== "work" || project !== null);
+  const valid = /^\d{2}:\d{2}$/.test(time) && Number.isInteger(length) && length >= range.min && length <= range.max
+    && (moves || text.trim() !== "") && (kind !== "work" || project !== null);
   const save = async () => {
     setSaving(true);
-    const plan: PlanInput = { day, time, minutes: length, plan_kind: kind, text: sleep ? entry?.text ?? "" : text.trim(),
+    const plan: PlanInput = { day, time, minutes: length, plan_kind: kind, text: moves ? entry?.text ?? "" : text.trim(),
       ...(kind === "work" ? { arc_id: project } : {}) };
     try {
       if (entry) await editPlan(entry.id, plan, revision);
@@ -226,8 +233,8 @@ function PlanEditor({ entry, revision, personaId, projects, today, max, onDone }
         <input aria-label="Slot start" type="time" value={time} readOnly={saving}
           onChange={(event) => setTime(event.target.value)} className={small} />
         <label className="flex items-center gap-1 text-xs text-muted">
-          <input aria-label="Slot minutes" type="number" min={5} max={720} step={5} value={minutes} readOnly={saving}
-            onChange={(event) => setMinutes(event.target.value)} className={cn(small, "w-20")} />
+          <input aria-label="Slot minutes" type="number" min={range.min} max={range.max} step={5} value={minutes}
+            readOnly={saving} onChange={(event) => setMinutes(event.target.value)} className={cn(small, "w-20")} />
           minutes
         </label>
         <select aria-label="Slot kind" value={kind} disabled={saving || kinds.length < 2}
@@ -241,7 +248,7 @@ function PlanEditor({ entry, revision, personaId, projects, today, max, onDone }
           </select>
         )}
       </div>
-      {!sleep && (
+      {!moves && (
         <textarea aria-label="Slot text" value={text} rows={2} maxLength={max} readOnly={saving}
           placeholder="What HIMARI does then, in a line." onChange={(event) => setText(event.target.value)}
           className={cn(field, "resize-y")} />
@@ -274,10 +281,10 @@ function SlotRow({ entry, locked, project, onEdit, onDelete }: {
       </div>
       {!gone && (
         <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEdit}>
-          {kind === "sleep" ? "Move" : "Edit"}
+          {onlyMoves(kind) ? "Move" : "Edit"}
         </Button>
       )}
-      {kind !== "sleep" && (
+      {!onlyMoves(kind) && (
         <Button variant="ghost" className="px-2 py-0.5 text-xs text-danger" disabled={locked} onClick={onDelete}>
           Delete
         </Button>
@@ -486,7 +493,7 @@ export function LifeSettings() {
         empty="Nothing happened lately.">{rows("event")}</Group>
       <Group title="Arcs" note="HIMARI starts, carries on and ends them in its day's review; at most 2 open"
         empty="No arcs yet.">{rows("arc")}</Group>
-      <Group title="Schedule" note="HIMARI's slots for the next seven days; the sleep slot only moves"
+      <Group title="Schedule" note="HIMARI's slots for the next seven days; the sleep and diary slots only move"
         top={addSlot} empty="Nothing on the schedule.">{schedule}</Group>
       <Group title="Sleep log" note="its last 14 sleeps" empty="No sleep logged yet.">{sleepLog}</Group>
       <Group title="Facts" note={`${facts.length} of ${limits.facts}`} empty="No facts yet."

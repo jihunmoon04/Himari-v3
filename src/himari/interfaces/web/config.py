@@ -79,6 +79,10 @@ Conversations only talk, with no files or uploads (V3-P101).
 ``HIMARI_MACHINE_SOCKET`` (the removed ``himari-runner``) is no longer used:
 when set, the start says so.
 
+Speaking first (character-diary v0.1 §9): ``HIMARI_PROACTIVE_QUIET`` (the quiet
+hours) is no longer used — HIMARI's sleep and the user's device keep the night:
+when set, the start says so.
+
 """
 
 from __future__ import annotations
@@ -90,7 +94,7 @@ from datetime import time
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from himari.bootstrap.proactive import ProactiveSettings, parse_quiet
+from himari.bootstrap.proactive import ProactiveSettings
 from himari.world.api import parse_location
 
 HOST_VAR = "HIMARI_WEB_HOST"
@@ -131,7 +135,7 @@ MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P109: no longer used (the run
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
-PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
+PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"  # character-diary §9: no longer used (no quiet hours); said when set
 PROACTIVE_GAP_VAR = "HIMARI_PROACTIVE_GAP_MINUTES"
 # V3-P107 §4: free wakes opened a day, passes too (HIMARI_PROACTIVE_FREE_ATTEMPTS is no more)
 PROACTIVE_FREE_DAILY_VAR = "HIMARI_PROACTIVE_FREE_DAILY"
@@ -199,6 +203,7 @@ class WebConfig:
     backup_model: str | None = None  # character-day §10: HIMARI_BACKUP_MODEL, an offered model
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket_ignored: bool = False  # V3-P109 §3 D9: HIMARI_MACHINE_SOCKET is set but no longer used
+    proactive_quiet_ignored: bool = False  # character-diary §9: HIMARI_PROACTIVE_QUIET is set but no longer used
     machine_principals: tuple[str, ...] = ("operator",)
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
@@ -296,6 +301,7 @@ class WebConfig:
             backup_model=backup_model,
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket_ignored=machine_socket_ignored,
+            proactive_quiet_ignored=source.get(PROACTIVE_QUIET_VAR) is not None,
             machine_principals=machine_principals,
             proactive=_proactive(source),
         )
@@ -311,14 +317,10 @@ def _non_empty(value: str | None, default: str, name: str) -> str:
 
 
 def _proactive(source: Mapping[str, str]) -> ProactiveSettings:
-    """V3-P87 §11: off unless HIMARI_PROACTIVE; 0 turns a trigger off where the setting allows."""
-    try:
-        quiet_start, quiet_end = parse_quiet(source.get(PROACTIVE_QUIET_VAR))
-    except ValueError:
-        raise WebConfigError(f"{PROACTIVE_QUIET_VAR} must be HH:MM-HH:MM, or empty for no quiet hours") from None
+    """V3-P87 §11: off unless HIMARI_PROACTIVE; 0 turns a trigger off where the setting allows. character-diary §9:
+    HIMARI_PROACTIVE_QUIET is not read (there are no quiet hours)."""
     return ProactiveSettings(
         enabled=_flag(source.get(PROACTIVE_VAR), PROACTIVE_VAR, default=False),
-        quiet_start=quiet_start, quiet_end=quiet_end,
         gap_minutes=_required(source.get(PROACTIVE_GAP_VAR), PROACTIVE_GAP_VAR, 15, 0, 24 * 60),  # V3-P90 §8
         daily=_required(source.get(PROACTIVE_FREE_DAILY_VAR), PROACTIVE_FREE_DAILY_VAR, 10, 0, 96),
         free_minutes=_free_minutes(source),

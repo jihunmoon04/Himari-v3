@@ -257,12 +257,11 @@ def test_a_memory_pass_keeps_what_himari_said_of_itself() -> None:
 
 
 def test_the_world_decides_events_that_pass_their_checks() -> None:
-    """character-mind §7: one world call for the day; 0 to 2 events, each a time outside the sleep (character-day
-    §18.7)."""
+    """character-mind §7: one world call for the day; 0 to 2 events, each at any hour (character-diary §7)."""
     day = date(2026, 11, 25)
     data = world.request_data(PERSONA, LIFE, day=day, weather=WEATHER, topics=TOPICS, zone=SEOUL)
     options = RequestOptions(MODEL, effort(), provider_key=adapter().provider_key,
                              max_output_tokens=world.WORLD_MAX_OUTPUT_TOKENS)
     text, usage = call(review.model_input(world.WORLD_INSTRUCTIONS, data, options, "life-world-input"))
-    events = world.parse_events(text, day, world.day_sleeps(LIFE, day, SEOUL), SEOUL)  # every §7 check
+    events = world.parse_events(text)  # every §7 check
     record("world", text, usage, events=[(e.time_of_day, e.text) for e in events])

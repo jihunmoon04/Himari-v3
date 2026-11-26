@@ -358,6 +358,66 @@ def test_the_diary_written_in_the_day_session_is_a_line_of_its_timeline_for_the_
         "user_message", "assistant_final"]  # the owner's Web only
 
 
+def test_the_diary_lines_say_whether_it_was_written_or_added_to(server: Server) -> None:
+    """character-diary §10, §16.7: ``step`` ``write`` (its text as it stands) and ``amend`` (added to as the session
+    closed) — an amend that added nothing is no line."""
+    cid = server.day()
+    server.provider.extend([final("응, 좋았어!")])
+    assert server.post(f"/api/conversations/{cid}/messages", {"text": "오늘 좋았지?"}).status_code == 202
+    server.wait(cid)
+
+    async def written() -> None:
+        data = server.app.data
+        for job, text in ((LifeJob.REVIEW, "같이 이야기해서 좋은 하루였다."), (LifeJob.AMEND, "덧붙였다."),
+                          (LifeJob.AMEND, None)):
+            write_id = await data.begin_life_write(OPERATOR, LifeWriteStart(
+                NO_PERSONA, today(server), "p", "m", b"{}", "j", 1, job=job, conversation_id=ConversationId(cid)))
+            await data.mark_life_write_dispatched(write_id)
+            await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+            if job is LifeJob.REVIEW:
+                await data.apply_life_write(write_id, LifePlan(str(text)), now=datetime.now(UTC))
+            else:
+                await data.apply_life_amend(write_id, today(server), text, now=datetime.now(UTC))
+
+    server.call(written)
+    items = [i for i in server.client.get(f"/api/conversations/{cid}/events").json()["items"] if i["kind"] == "diary"]
+    assert [(i["step"], i["text"]) for i in items] == [("write", "덧붙였다."), ("amend", "덧붙였다.")]
+    assert items[0]["id"] != items[1]["id"]
+
+
+def test_the_diary_slot_is_only_moved_on_the_schedule(server: Server) -> None:
+    """character-diary §10, §16.7: kind ``diary`` read and moved; never made, deleted or turned into another kind."""
+    tomorrow = (datetime.now(ZoneInfo(server.app.time_zone)).date() + timedelta(days=1)).isoformat()
+    after = (datetime.now(ZoneInfo(server.app.time_zone)).date() + timedelta(days=2)).isoformat()
+    made = server.post("/api/life/plans", {"day": tomorrow, "time": "22:00", "minutes": 30, "plan_kind": "diary",
+                                           "text": "일기", "persona_id": None})
+    assert (made.status_code, error_code(made)) == (409, "plan_refused")
+    assert "A diary slot is only moved, never made" in made.json()["error"]["message"]
+
+    async def placed() -> int:  # the keeper's slots for tomorrow night
+        data, zone, now = server.app.data, server.app.time_zone, datetime.now(UTC)
+        await data.write_plan(OPERATOR, NO_PERSONA, PlanWrite(after, "00:30", 480, PlanKind.SLEEP, "잠"),
+                              origin=LifeOrigin.WRITER, zone=zone, now=now)
+        diary = await data.write_plan(OPERATOR, NO_PERSONA, PlanWrite(tomorrow, "22:00", 30, PlanKind.DIARY,
+                                                                      "일기 쓰기"),
+                                      origin=LifeOrigin.WRITER, zone=zone, now=now)
+        return diary.entry_id
+
+    diary_id = server.call(placed)
+    shown = {e["id"]: e for e in server.client.get("/api/life").json()["entries"]}[diary_id]
+    assert (shown["plan_kind"], shown["minutes"], shown["time"]) == ("diary", 30, "22:00")
+    moved = server.client.put(f"/api/life/plans/{diary_id}", headers=SEND, json={
+        "day": tomorrow, "time": "23:10", "minutes": 40, "plan_kind": "diary", "text": "x", "revision": 1})
+    assert moved.status_code == 200, moved.text
+    assert (moved.json()["time"], moved.json()["minutes"], moved.json()["text"], moved.json()["origin"]) == (
+        "23:10", 40, "일기 쓰기", "user")
+    turned = server.client.put(f"/api/life/plans/{diary_id}", headers=SEND, json={
+        "day": tomorrow, "time": "23:10", "minutes": 40, "plan_kind": "own", "text": "x", "revision": 2})
+    assert (turned.status_code, error_code(turned)) == (409, "plan_refused")
+    kept = server.client.delete(f"/api/life/{diary_id}?revision=2", headers=SEND)
+    assert (kept.status_code, error_code(kept)) == (409, "plan_refused")
+
+
 def test_the_schedule_is_written_moved_and_refused_with_the_schedules_own_sentence(server: Server) -> None:
     tomorrow = (datetime.now(ZoneInfo(server.app.time_zone)).date() + timedelta(days=1)).isoformat()
     added = server.post("/api/life/plans", {"day": tomorrow, "time": "15:00", "minutes": 90, "plan_kind": "own",

@@ -223,7 +223,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -876,12 +876,17 @@ CREATE TABLE day_state (
 ) STRICT;
 ALTER TABLE life_writes ADD COLUMN conversation_id TEXT;
 """
+# v30 (character-diary v0.1 §11, §16.2): a plan may be the night's diary slot (plan_kind 'diary') and a life write
+# the diary's amend (job 'amend'). No table changes (both columns are free text): the version keeps an older server
+# from reading them.
+_V30_ADDITIONS = ""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
               _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS, _V25_ADDITIONS,
-              _V26_ADDITIONS, _V27_ADDITIONS, _V28_ADDITIONS, _V29_ADDITIONS)  # what each version from v3 added
+              _V26_ADDITIONS, _V27_ADDITIONS, _V28_ADDITIONS, _V29_ADDITIONS,
+              _V30_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -3125,6 +3130,32 @@ class SqliteData:
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return tuple(written)
+
+    async def apply_life_amend(self, write_id: str, day: str, text: str | None, *, mood: str | None = None,
+                               mood_reason: str | None = None, now: datetime) -> LifeEntry | None:
+        diary = None if text is None else rules.check_life_text(LifeKind.DIARY, text)
+        kept_mood = rules.amend_mood(mood, mood_reason, now)
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] != "received":
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            if row["job"] != LifeJob.AMEND.value or str(row["day"]) != day:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not an amend of {day}")
+            principal, persona_id = PrincipalId(row["owner"]), int(row["persona_id"])
+            found = tx.one(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
+                           " AND kind='diary' AND day=? AND retired_at IS NULL", principal, persona_id, day)
+            before = None if found is None else _life_entry(found)
+            written = None
+            if before is not None and before.origin is not LifeOrigin.USER:  # character-diary §5: the user's stays
+                if diary is not None:
+                    written = self._rewrite_life(tx, principal, dataclasses.replace(
+                        before, text=diary, origin=LifeOrigin.WRITER, revision=before.revision + 1, updated_at=now,
+                        source=write_id))
+                if kept_mood is not None:
+                    self._keep_mood(tx, principal, dataclasses.replace(kept_mood, persona_id=persona_id))
+            tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
+                       write_id)
+            return written
 
     async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
         checked = [rules.check_world_event(event) for event in events]

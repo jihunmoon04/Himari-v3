@@ -1,5 +1,6 @@
 """What the day's review reads and writes (character-mind v0.1 §4.3, after the story writer's, character-life v0.1
-§3): the date, the data, the answer's thought and JSON, and the checks."""
+§3): the date, the data, the answer's thought and JSON, and the checks. character-diary v0.1 §4, §5: when the diary
+is due, the events it is told, whether an amend is called and the amend's answer."""
 
 from __future__ import annotations
 
@@ -10,12 +11,15 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from himari.common import ConversationId
+from himari.common import ConversationId, EventId, TextBlock
 from himari.data.api import (
     MAX_DIARY_CHARS,
     ArcMove,
     ArcOp,
+    AssistantFinal,
+    ConversationEvent,
     Episode,
+    EventKind,
     LifeEntry,
     LifeKind,
     LifeOrigin,
@@ -25,15 +29,24 @@ from himari.data.api import (
     PlanState,
     RecentEpisode,
     ThoughtAbout,
+    UserMessage,
 )
 from himari.life.review import (
+    AMEND_TASK,
     REVIEW_TASK,
+    AmendPlan,
     AnswerError,
+    PassedEvent,
+    amend_data,
+    amend_due,
+    diary_due,
+    diary_of,
+    parse_amend,
     parse_answer,
+    passed_events,
     request_data,
     season,
     self_answer,
-    target_day,
 )
 from himari.life.settle import MAX_SETTLED, SETTLE_INSTRUCTIONS, parse_facts
 from himari.life.settle import request_data as settle_data
@@ -50,24 +63,120 @@ def entry(entry_id: int, kind: LifeKind, text: str, day: str | None = None,
     return LifeEntry(entry_id, 1, kind, day, text, origin, 1, NOW, NOW)
 
 
-def test_the_date_written_is_today_once_himari_fell_asleep_from_21_00() -> None:
-    """character-day §7: asleep before 22:00 (from 21:00 that date), the diary is today's as it falls asleep."""
-    at = time(22, 0)
-    now = datetime(2026, 11, 25, 12, 40, tzinfo=UTC)  # 21:40 in Seoul
-    assert target_day(now, SEOUL, at, datetime(2026, 11, 25, 12, 30, tzinfo=UTC)) == DAY  # asleep at 21:30
-    assert target_day(now, SEOUL, at, datetime(2026, 11, 25, 11, 30, tzinfo=UTC)) == date(2026, 11, 24)  # 20:30
-    assert target_day(now, SEOUL, at, datetime(2026, 11, 24, 12, 30, tzinfo=UTC)) == date(2026, 11, 24)  # yesterday
-    assert target_day(now, SEOUL, at, None) == date(2026, 11, 24)
+def slot(entry_id: int, kind: PlanKind, day: str, at: str, minutes: int) -> LifeEntry:
+    return replace(entry(entry_id, LifeKind.PLAN, kind.value, day), time_of_day=at, minutes=minutes, plan_kind=kind)
 
 
-def test_the_date_written_is_the_latest_whose_time_has_come() -> None:
+def seoul(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 11, day, hour, minute, tzinfo=SEOUL)
+
+
+def test_the_diary_is_due_when_its_slot_starts() -> None:
+    """character-diary §4, §16.3: tonight's once the night's diary slot starts (also past midnight); before it,
+    yesterday's — even after the write time."""
     at = time(22, 0)
-    assert target_day(datetime(2026, 11, 25, 13, 0, tzinfo=UTC), SEOUL, at) == DAY  # 22:00 sharp
-    assert target_day(datetime(2026, 11, 25, 12, 59, tzinfo=UTC), SEOUL, at) == date(2026, 11, 24)  # before: yesterday
-    assert target_day(datetime(2026, 11, 25, 0, 30, tzinfo=UTC), SEOUL, at) == date(2026, 11, 24)  # 09:30 the next day
-    assert target_day(datetime(2026, 11, 25, 15, 30, tzinfo=UTC), SEOUL, at) == DAY  # 00:30 the next day there
-    assert target_day(datetime(2026, 11, 25, 15, 30, tzinfo=UTC), SEOUL, time(0, 0)) == date(2026, 11, 26)
+    plans = (slot(1, PlanKind.DIARY, "2026-11-25", "22:40", 30), slot(2, PlanKind.SLEEP, "2026-11-26", "00:30", 480))
+    assert diary_due(seoul(25, 22, 39), SEOUL, at, plans) == date(2026, 11, 24)  # past 22:00, the slot not yet
+    assert diary_due(seoul(25, 22, 40), SEOUL, at, plans) == DAY
+    assert diary_due(seoul(26, 1, 0), SEOUL, at, plans) == DAY  # past midnight, the same night
+    assert diary_due(seoul(26, 9, 30), SEOUL, at, plans) == DAY  # the next morning: yesterday's
+    late = (slot(3, PlanKind.DIARY, "2026-11-26", "00:10", 30),)  # after midnight, the night of the 25th
+    assert diary_due(seoul(26, 0, 5), SEOUL, at, late) == date(2026, 11, 24)
+    assert diary_due(seoul(26, 0, 10), SEOUL, at, late) == DAY
+
+
+def test_the_diary_is_due_as_himari_falls_asleep_first() -> None:
+    """character-diary §4: asleep after 18:00 before the slot came (a sleep moved early covers it), tonight's."""
+    at = time(22, 0)
+    plans = (slot(1, PlanKind.DIARY, "2026-11-25", "23:00", 30),)
+    now = seoul(25, 21, 40)
+    assert diary_due(now, SEOUL, at, plans, seoul(25, 21, 30)) == DAY
+    assert diary_due(now, SEOUL, at, plans, seoul(24, 23, 30)) == date(2026, 11, 24)  # last night's sleep
+    assert diary_due(now, SEOUL, at, plans, None) == date(2026, 11, 24)
+
+
+def test_with_no_diary_slot_that_night_it_is_due_at_the_write_time() -> None:
+    """character-diary §16.1: a night without a slot (no room was left), the write time or falling asleep."""
+    at = time(22, 0)
+    assert diary_due(seoul(25, 22, 0), SEOUL, at, ()) == DAY  # 22:00 sharp
+    assert diary_due(seoul(25, 21, 59), SEOUL, at, ()) == date(2026, 11, 24)  # before: yesterday
+    assert diary_due(seoul(26, 9, 30), SEOUL, at, ()) == DAY  # the next morning
+    assert diary_due(seoul(26, 0, 30), SEOUL, at, ()) == DAY  # 00:30 the next day there
+    assert diary_due(seoul(25, 21, 40), SEOUL, at, (), seoul(25, 21, 30)) == DAY  # asleep at 21:30
+    assert diary_due(seoul(25, 21, 40), SEOUL, at, (), seoul(25, 17, 30)) == date(2026, 11, 24)  # before 18:00
+    cancelled = (replace(slot(1, PlanKind.DIARY, "2026-11-25", "23:00", 30), plan_state=PlanState.CANCELLED),)
+    assert diary_due(seoul(25, 22, 30), SEOUL, at, cancelled) == DAY  # not live: no slot
+    assert diary_of(seoul(26, 6, 20), SEOUL) == DAY and diary_of(seoul(25, 21, 0), SEOUL) == DAY
+    assert diary_of(seoul(25, 17, 0), SEOUL) == date(2026, 11, 24)
     assert [season(date(2026, m, 1)) for m in (1, 3, 6, 9, 12)] == ["winter", "spring", "summer", "autumn", "winter"]
+
+
+def event(entry_id: int, day: str, at: str, text: str) -> LifeEntry:
+    return replace(entry(entry_id, LifeKind.EVENT, text, day), time_of_day=at)
+
+
+def test_the_diary_is_told_the_events_passed_and_those_of_last_nights_sleep() -> None:
+    """character-diary §4, §7: the day's events whose time has passed (not those still to come), and those while
+    HIMARI slept last night marked while_asleep — each once."""
+    entries = (event(1, "2026-11-25", "03:00", "밤새 비가 왔다."), event(2, "2026-11-25", "15:00", "택배가 왔다."),
+               event(3, "2026-11-25", "23:30", "친구가 쪽지를 두고 갔다."), event(4, "2026-11-24", "23:50", "고양이가 왔다."),
+               event(5, "2026-11-23", "15:00", "오래전 일."))
+    slept = (seoul(24, 23, 40), seoul(25, 8, 0))
+    found = passed_events(entries, DAY, seoul(25, 22, 0), slept, SEOUL)
+    assert [(f.entry.entry_id, f.while_asleep) for f in found] == [(4, True), (1, True), (2, False)]
+    assert [f.entry.entry_id for f in passed_events(entries, DAY, seoul(25, 22, 0), None, SEOUL)] == [1, 2]
+    data = request_data((), (), day=DAY, now=NOW, zone=SEOUL, events=found)
+    assert data["events"] == [{"date": "2026-11-24", "time": "23:50", "text": "고양이가 왔다.", "while_asleep": True},
+                              {"time": "03:00", "text": "밤새 비가 왔다.", "while_asleep": True},
+                              {"time": "15:00", "text": "택배가 왔다."}]
+    assert request_data((), (), day=DAY, now=NOW, zone=SEOUL, events=[PassedEvent(entries[1])])["events"] == [
+        {"time": "15:00", "text": "택배가 왔다."}]
+
+
+def said(sequence: int, at: datetime, payload: object, kind: EventKind) -> ConversationEvent:
+    return ConversationEvent(EventId(f"e{sequence}"), ConversationId("conv_day"), sequence, kind,
+                             payload, 1, at.astimezone(UTC))  # type: ignore[arg-type]
+
+
+def test_an_amend_is_called_only_when_something_new_came_before_himari_fell_asleep() -> None:
+    """character-diary §5, §16.3: between the diary's writing and the fall — a message or an answer, an event of that
+    time, a piece finished then; nothing new (or the user only after the fall): no call."""
+    since, until = seoul(25, 22, 30), seoul(26, 0, 30)
+    before = said(1, seoul(25, 22, 0), UserMessage((TextBlock("저녁 뭐 먹었어?"),)), EventKind.USER_MESSAGE)
+    after = said(2, seoul(25, 23, 0), UserMessage((TextBlock("나 내일 면접이야"),)), EventKind.USER_MESSAGE)
+    answered = said(3, seoul(25, 23, 1), AssistantFinal((TextBlock("화이팅!"),)), EventKind.ASSISTANT_FINAL)
+    asleep = said(4, seoul(26, 1, 0), UserMessage((TextBlock("자?"),)), EventKind.USER_MESSAGE)
+    assert not amend_due((before, asleep), (), since, until, SEOUL)
+    assert amend_due((before, after), (), since, until, SEOUL)
+    assert amend_due((answered,), (), since, until, SEOUL)
+    assert amend_due((), (event(9, "2026-11-25", "23:30", "쪽지"),), since, until, SEOUL)
+    assert not amend_due((), (event(9, "2026-11-25", "21:30", "쪽지"),), since, until, SEOUL)  # before the diary
+    piece = replace(entry(7, LifeKind.WORK, "조각", "2026-11-25"), created_at=seoul(25, 23, 10))
+    assert amend_due((), (piece,), since, until, SEOUL)
+    assert not amend_due((), (replace(piece, draft=True),), since, until, SEOUL)
+    assert not amend_due((after,), (), since, since, SEOUL)  # asleep before it was written
+
+
+def test_the_amend_is_told_the_diary_and_what_came_after_and_answers_the_whole_diary_or_nothing() -> None:
+    diary = entry(7, LifeKind.DIARY, "오늘은 산책을 했다.", "2026-11-25")
+    arc = replace(entry(5, LifeKind.ARC, "설정집", "2026-11-20"), title="블랙홀 전자포")
+    piece = replace(entry(8, LifeKind.WORK, "조각", "2026-11-25"), created_at=seoul(25, 23, 10), title="포신",
+                    summary="포신 다 그렸어.", arc_id=5)
+    data = amend_data(diary, (arc, piece, event(9, "2026-11-25", "23:30", "쪽지가 왔다.")), since=seoul(25, 22, 30),
+                      until=seoul(26, 0, 30), zone=SEOUL, said=[{"at": "23:00", "who": "user", "text": "면접이야"}])
+    assert data == {"day": "2026-11-25", "weekday": "Wednesday", "diary": "오늘은 산책을 했다.", "written_at": "22:30",
+                    "fell_asleep": "00:30", "events": [{"time": "23:30", "text": "쪽지가 왔다."}],
+                    "work": [{"title": "포신", "summary": "포신 다 그렸어.", "project": "블랙홀 전자포"}],
+                    "said_after": [{"at": "23:00", "who": "user", "text": "면접이야"}]}
+    assert parse_amend('{"diary": " 산책을 했고, 밤엔 면접 이야기를 했다. ", "mood": {"name": "happy", "reason": "응원"}}'
+                       ) == AmendPlan("산책을 했고, 밤엔 면접 이야기를 했다.", "happy", "응원")
+    assert parse_amend("{}") == AmendPlan() and parse_amend('{"diary": null, "mood": "x"}') == AmendPlan()
+    for bad in ('{"diary": ""}', json.dumps({"diary": "가" * (MAX_DIARY_CHARS + 1)}), "[]", '{"diary": 3}'):
+        with pytest.raises(AnswerError):
+            parse_amend(bad)
+    for words in ("Keep what you already wrote", "Never invent anything done with the user",
+                  "Leave diary out when there is nothing worth adding", "not touched here"):
+        assert words in AMEND_TASK, words
 
 
 def test_the_data_holds_the_days_plans_episodes_and_the_date_but_not_what_a_turn_already_has() -> None:
@@ -237,9 +346,16 @@ def test_the_input_holds_each_projects_so_far_the_plans_projects_the_days_work_a
     assert "when persona_makes is given, start them out of it" in WRITER_INSTRUCTIONS
     # K7: HIMARI's own memo, projects out of itself and never the user's conversations, a day of its own
     for words in ("memo", "never the project's goal again", "never out of the user's conversations",
-                  "when no arc is open, start one today", "a sentence or two at most", "never within your sleep",
+                  "when no arc is open, start one today", "never within your sleep",
                   "Starting and ending them is yours"):
         assert words in WRITER_INSTRUCTIONS, words
+    # character-diary §8 (E2): the whole day, the user in it as it really went, never invented
+    for words in ("the whole day", "write only what really happened today", "never invents anything done with them",
+                  "while_asleep"):
+        assert words in WRITER_INSTRUCTIONS, words
+    assert "a sentence or two at most" not in WRITER_INSTRUCTIONS
+    diary_slot = slot(12, PlanKind.DIARY, "2026-11-26", "22:30", 30)  # never a plan ahead
+    assert request_data((plan, diary_slot), (), day=DAY, now=NOW, zone=SEOUL)["plans"] == data["plans"]
 
 
 def test_a_plans_project_comes_with_a_time_and_a_plan_over_the_sleep_is_left_out_alone() -> None:

@@ -1,6 +1,6 @@
 """The world (character-mind v0.1 §7): once a day, after the day was closed (character-day §6: the sleep's closing
-that date) or from noon, the memory model decides 0 to 2 events of HIMARI's day — never the user, never feelings,
-never while it sleeps — stored as events of the date; the review is told them all, the work those whose time has
+that date) or from noon until midnight, the memory model decides 0 to 2 events of HIMARI's day — never the user, never
+feelings, at any hour (character-diary §7) — stored as events of the date; the review is told them all, the work those whose time has
 come."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -43,7 +43,6 @@ NOON = datetime(2026, 11, 25, 3, 30, tzinfo=UTC)  # 12:30 in Seoul, a Wednesday
 MORNING = datetime(2026, 11, 24, 22, 0, tzinfo=UTC)  # 07:00 the 25th in Seoul
 CLOSED = datetime(2026, 11, 24, 18, 30, tzinfo=UTC)  # 03:30 the 25th in Seoul: the sleep's closing
 DAY = date(2026, 11, 25)
-AT = time(22, 0)
 
 
 def entry(entry_id: int, kind: LifeKind, text: str, day: str | None = None, at: str | None = None) -> LifeEntry:
@@ -55,14 +54,17 @@ def events(*raw: object) -> str:
     return json.dumps({"events": list(raw)}, ensure_ascii=False)
 
 
-def test_the_world_is_decided_after_the_days_closing_or_from_noon_and_before_the_review() -> None:
-    assert world.due_day(NOON, SEOUL, AT) == DAY
-    assert world.due_day(datetime(2026, 11, 25, 2, 59, tzinfo=UTC), SEOUL, AT) is None  # 11:59, no closing
-    assert world.due_day(MORNING, SEOUL, AT, CLOSED) == DAY  # 07:00, closed at 03:30
-    assert world.due_day(datetime(2026, 11, 24, 18, 0, tzinfo=UTC), SEOUL, AT, CLOSED) is None  # 03:00: not yet
+def test_the_world_is_decided_after_the_days_closing_or_from_noon_until_the_day_ends() -> None:
+    """character-diary §7, §16.3: until midnight, no longer the review time."""
+    assert world.due_day(NOON, SEOUL) == DAY
+    assert world.due_day(datetime(2026, 11, 25, 2, 59, tzinfo=UTC), SEOUL) is None  # 11:59, no closing
+    assert world.due_day(MORNING, SEOUL, CLOSED) == DAY  # 07:00, closed at 03:30
+    assert world.due_day(datetime(2026, 11, 24, 18, 0, tzinfo=UTC), SEOUL, CLOSED) is None  # 03:00: not yet
     the_24th = datetime(2026, 11, 23, 18, 30, tzinfo=UTC)  # another date's closing: noon then
-    assert world.due_day(MORNING, SEOUL, AT, the_24th) is None
-    assert world.due_day(datetime(2026, 11, 25, 13, 0, tzinfo=UTC), SEOUL, AT, CLOSED) is None  # 22:00: review time
+    assert world.due_day(MORNING, SEOUL, the_24th) is None
+    assert world.due_day(datetime(2026, 11, 25, 13, 0, tzinfo=UTC), SEOUL, CLOSED) == DAY  # 22:00: still today
+    assert world.due_day(datetime(2026, 11, 25, 14, 59, tzinfo=UTC), SEOUL, CLOSED) == DAY  # 23:59
+    assert world.due_day(datetime(2026, 11, 25, 15, 0, tzinfo=UTC), SEOUL, CLOSED) is None  # 00:00: the next day
     assert world.world_start(DAY, SEOUL) == datetime(2026, 11, 25, 12, 0, tzinfo=SEOUL)
     assert world.world_start(DAY, SEOUL, CLOSED) == CLOSED
 
@@ -89,25 +91,29 @@ def test_the_input_holds_who_himari_is_its_life_its_schedule_and_sleep_and_the_l
                      {"time": "16:00-17:00", "kind": "own", "text": "산책"}],  # what still stands
         "sleep": ["00:30-08:10"], "weather": "맑음", "topics": ["첫눈"]}
     assert "quiet_hours" not in data and "schedule" not in world.request_data("", (), day=DAY)
+    diary = replace(entry(11, LifeKind.PLAN, "일기 쓰기", "2026-11-26", "22:00"), minutes=30, plan_kind=PlanKind.DIARY)
+    assert world.request_data("", (*life, diary), day=DAY, zone=SEOUL)["plans"] == data["plans"]  # nor a diary slot
+    assert "outside its sleep" not in world.WORLD_INSTRUCTIONS
     for words in ("never how HIMARI felt", "The user never appears", "Never repeat recent_events",
-                  "never undo one", "Most days have none or one", "outside its sleep"):
+                  "never undo one", "Most days have none or one", "at any hour of the day",
+                  "While HIMARI sleeps, only what happens without it", "which it finds when it wakes"):
         assert words in world.WORLD_INSTRUCTIONS, words
 
 
-def test_an_answer_is_zero_to_two_events_with_a_time_outside_the_sleep() -> None:
-    sleeps = [(datetime(2026, 11, 25, 0, 30, tzinfo=SEOUL), datetime(2026, 11, 25, 8, 10, tzinfo=SEOUL)),
-              (datetime(2026, 11, 25, 23, 30, tzinfo=SEOUL), datetime(2026, 11, 26, 7, 30, tzinfo=SEOUL))]
-    assert world.parse_events(events({"time": "9:30", "text": " 창문으로 비가\n샜다. "}), DAY, sleeps, SEOUL) == (
+def test_an_answer_is_zero_to_two_events_at_any_hour() -> None:
+    """character-diary §7: an event in HIMARI's sleep is taken (the instructions keep it to what happens without
+    it); the rest of the checks stand."""
+    assert world.parse_events(events({"time": "9:30", "text": " 창문으로 비가\n샜다. "})) == (
         WorldEvent("09:30", "창문으로 비가 샜다."),)
-    assert world.parse_events(events(), DAY, sleeps, SEOUL) == () and world.parse_events("{}") == ()
-    assert world.parse_events(events({"time": "02:00", "text": "새벽"})) == (WorldEvent("02:00", "새벽"),)  # no sleep
-    for bad in (events(*[{"time": "10:00", "text": "x"}] * 3), events({"time": "02:00", "text": "자는 중"}),
-                events({"time": "23:45", "text": "다시 자는 중"}), events({"time": "08:09", "text": "아직 잠"}),
-                events({"text": "시각 없음"}), events({"time": "10:00", "text": "x" * (MAX_EVENT_CHARS + 1)}),
-                events("odd"), "not json"):
+    assert world.parse_events(events()) == () and world.parse_events("{}") == ()
+    assert world.parse_events(events({"time": "02:00", "text": "밤새 택배가 문 앞에 왔다."})) == (
+        WorldEvent("02:00", "밤새 택배가 문 앞에 왔다."),)  # in its sleep
+    assert world.parse_events(events({"time": "23:45", "text": "비"}, {"time": "08:09", "text": "쪽지"})) == (
+        WorldEvent("23:45", "비"), WorldEvent("08:09", "쪽지"))
+    for bad in (events(*[{"time": "10:00", "text": "x"}] * 3), events({"text": "시각 없음"}),
+                events({"time": "10:00", "text": "x" * (MAX_EVENT_CHARS + 1)}), events("odd"), "not json"):
         with pytest.raises(AnswerError):
-            world.parse_events(bad, DAY, sleeps, SEOUL)
-    assert world.parse_events(events({"time": "08:10", "text": "깼다"}), DAY, sleeps, SEOUL)  # its end is awake
+            world.parse_events(bad)
     assert world.day_sleeps((), DAY, SEOUL) == []
 
 
@@ -147,25 +153,23 @@ def test_the_world_writes_the_days_events_once_a_date_on_the_memory_model() -> N
     asyncio.run(scenario())
 
 
-def test_a_closing_brings_the_days_world_on_and_its_events_keep_out_of_the_sleep() -> None:
+def test_a_closing_brings_the_days_world_on_and_its_events_may_fall_in_the_sleep() -> None:
     """character-day §6 step 4, §18.7: after the sleep's closing (the keeper's last closing that date) the world
-    runs before noon; an event in the sleep throws the answer away, as any out of shape."""
+    runs before noon; character-diary §7: an event in the sleep is kept (found as HIMARI wakes)."""
     async def scenario() -> None:
-        data, provider, writer = setup(final(events({"time": "03:00", "text": "자는 중"})),
-                                       final(events({"time": "10:00", "text": "택배가 왔다."})), clock=MORNING)
+        data, provider, writer = setup(final(events({"time": "03:00", "text": "밤새 문 앞에 택배가 왔다."})),
+                                       clock=MORNING)
         await data.write_plan(ME, NO_PERSONA, PlanWrite("2026-11-25", "00:30", 460, PlanKind.SLEEP, "잠"),
                               origin=LifeOrigin.WRITER, zone="Asia/Seoul",
                               now=datetime(2026, 11, 24, 12, 0, tzinfo=UTC))
         assert await writer.world(ME) is WriteOutcome.NOTHING and provider.sent == []  # 07:00, no closing
         await data.write_day_state(ME, DayState(NO_PERSONA, last_closing_at=CLOSED))
-        assert await writer.world(ME) is WriteOutcome.FAILED  # 03:00 is in the sleep
+        assert await writer.world(ME) is WriteOutcome.WRITTEN  # 03:00 is in the sleep: kept all the same
         told = json.loads(provider.prepared_inputs[-1].conversation[0].blocks[-1].text)  # type: ignore[union-attr]
         assert told["sleep"] == ["00:30-08:10"] and told["schedule"] == [
             {"time": "00:30-08:10", "kind": "sleep", "text": "잠"}]
-        (failed,) = await data.list_life_writes(ME)
-        assert failed.error is not None and "while HIMARI sleeps" in failed.error
-        assert await writer.world(ME) is WriteOutcome.WRITTEN
-        assert [e.text for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.EVENT] == ["택배가 왔다."]
+        assert [(e.time_of_day, e.text) for e in await data.list_life(ME, NO_PERSONA) if e.kind is LifeKind.EVENT]             == [("03:00", "밤새 문 앞에 택배가 왔다.")]
+        assert await writer.world(ME) is WriteOutcome.NOTHING  # once a date
 
     asyncio.run(scenario())
 

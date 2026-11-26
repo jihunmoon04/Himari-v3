@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from himari.common import LEGACY_ASK_USER, PrincipalId, TrustedScope
@@ -72,18 +72,6 @@ class ProactiveRefused(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
-
-
-def parse_quiet(value: str | None) -> tuple[time | None, time | None]:
-    """``"23:00-08:00"``; unset: those defaults; empty: no quiet hours. ValueError otherwise."""
-    if value is None:
-        return time(23, 0), time(8, 0)
-    if not value.strip():
-        return None, None
-    start, dash, end = value.strip().partition("-")
-    if not dash:
-        raise ValueError("quiet hours are HH:MM-HH:MM")
-    return time.fromisoformat(start.strip()), time.fromisoformat(end.strip())
 
 
 def wake_turn(after: Sequence[ConversationEvent]) -> list[ConversationEvent]:
@@ -302,7 +290,7 @@ class ProactiveScheduler:
                  free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None, bond: bool = False,
                  work: bool = False, day: DayKeeper | None = None) -> None:
         self._data, self._hub, self._devices, self._runner = data, hub, devices, runner
-        self._day = day  # character-day §9: HIMARI's own sleep and promises; None: its life is off (quiet hours)
+        self._day = day  # character-day §9: HIMARI's own sleep and promises; None: its life is off
         self._bond = bond  # character-bond §6: the bond is told, so its anniversaries may open a wake
         self._work = work  # character-work §7.1: HIMARI's life is told, so a finished piece may open a wake
         self._inputs = inputs

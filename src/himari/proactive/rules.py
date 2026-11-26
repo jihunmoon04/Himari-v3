@@ -9,9 +9,10 @@ no more. Something that just happened — a return, a game or a video that
 ended (V3-P90 §5.3, let go past ENDED_FRESH) — also waits for the user's quiet
 and for talk to end. HIMARI's own openings — a loop, a free wake (V3-P90 §6.2,
 §7), an anniversary (character-bond §6), a piece of work just finished
-(character-work §7.1) — also wait for an answer to the last wake, the quiet
-hours and the gap, and a free wake, an anniversary and a finished piece for the
-day's count. A long focus and a game's end by the program in front (V3-P87
+(character-work §7.1) — also wait for an answer to the last wake and the gap,
+and a free wake, an anniversary and a finished piece for the day's count.
+character-diary §9: there are no quiet hours: HIMARI's sleep and the user's
+device already keep the night. A long focus and a game's end by the program in front (V3-P87
 §5.4) are made no more.
 
 character-work §7.2 (K5): a free wake opens when the user is at the computer (the
@@ -54,7 +55,7 @@ SLEEP_RETURN_FRESH = timedelta(minutes=3)
 TALKING = timedelta(minutes=10)  # §6.1: a user message this recent means the user is talking
 ENDED_FRESH = timedelta(minutes=3)  # V3-P90 §5.3: a task's end is spoken of this soon, else let go
 ENDED_GROUPS = frozenset({"game", "video"})  # V3-P90 §5.3: the ends the app can tell clearly
-# V3-P107 §3: what just happened — past the gap, the quiet hours and the day, not past quiet or talk
+# V3-P107 §3: what just happened — past the gap and the day, not past quiet or talk
 EVENT_KINDS = frozenset({WakeKind.RETURNED, WakeKind.TASK_ENDED})
 # V3-P107 §3: the kinds the talking rule holds back — all but a reminder (and the operator's try)
 TALKING_KINDS = frozenset(set(WakeKind) - {WakeKind.REMINDER, WakeKind.TRY})
@@ -78,9 +79,7 @@ class ProactiveSettings:
     """V3-P87 §11, with the owner's numbers (§15; V3-P90 §8: gap 15 min, a return after an
     hour away; V3-P107 §4: one free interval, one daily count)."""
 
-    enabled: bool = False  # HIMARI_PROACTIVE
-    quiet_start: time | None = time(23, 0)  # HIMARI_PROACTIVE_QUIET "23:00-08:00"; None: no quiet hours
-    quiet_end: time | None = time(8, 0)
+    enabled: bool = False  # HIMARI_PROACTIVE (character-diary §9: no quiet hours any more)
     gap_minutes: int = 15  # V3-P90: for a loop and a free wake
     daily: int = 10  # V3-P107 §4: free wakes opened a day, passes too (each costs a request)
     free_minutes: int = 30  # character-work §7.2: this long since the last wake or the user's message; 0: none
@@ -91,11 +90,9 @@ class ProactiveSettings:
         """The startup line and the status (§11)."""
         if not self.enabled:
             return "off (HIMARI_PROACTIVE=0)"
-        quiet = "no quiet hours" if self.quiet_start is None or self.quiet_end is None else \
-            f"quiet {self.quiet_start:%H:%M}-{self.quiet_end:%H:%M}"
         free = "no free wakes" if self.free_minutes <= 0 or self.daily <= 0 else \
             f"free every {self.free_minutes}m, {self.daily} a day"
-        return f"on ({quiet}, gap {self.gap_minutes}m, {free})"
+        return f"on (gap {self.gap_minutes}m, {free})"
 
 
 @dataclass(frozen=True)
@@ -146,8 +143,8 @@ class Situation:
     # character-work §7.1: the chosen persona's work pieces made lately — given only with the life told and a
     # model checked for free wakes (it may pass)
     work: tuple[LifeEntry, ...] = ()
-    # character-day §9, §18.9: whether HIMARI sleeps now (its day's keeper); None: its life is off, and the quiet
-    # hours stand in for its sleep as before
+    # character-day §9, §18.9: whether HIMARI sleeps now (its day's keeper); None: its life is off (character-diary
+    # §9: nothing stands in for its sleep then — a wake waits for the user's device as always)
     himari_asleep: bool | None = None
     # §18.9: the ``together`` slots that still stand, with their starts (the server's zone)
     together: tuple[tuple[LifeEntry, datetime], ...] = ()
@@ -349,14 +346,6 @@ def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | Non
     return found, expired, upcoming
 
 
-def in_quiet_hours(now: datetime, zone: str, start: time | None, end: time | None) -> bool:
-    """§6.2: in the device's zone; a range over midnight (23:00-08:00) wraps."""
-    if start is None or end is None or start == end:
-        return False
-    local = now.astimezone(ZoneInfo(zone)).time()
-    return start <= local < end if start < end else (local >= start or local < end)
-
-
 def local_midnight(now: datetime, zone: str) -> datetime:
     """The start of ``now``'s day in ``zone`` (the daily limit's day, §6.2)."""
     local = now.astimezone(ZoneInfo(zone))
@@ -399,7 +388,7 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
     user asked for it: past their quiet too, Q8 of V3-P87). What just happened (EVENT_KINDS): the
     user's quiet and talk. HIMARI's own openings (a loop, a free wake, an anniversary, a finished
     piece): also an unanswered wake (character-work §7.3: for a while after one, until the user
-    speaks after two), the quiet hours and the gap, and the free kinds their day's count."""
+    speaks after two) and the gap, and the free kinds their day's count (character-diary §9: no quiet hours)."""
     if s.device_id is None:
         return "no_device"
     if s.working:
@@ -418,9 +407,6 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
         return None
     if unanswered(s):
         return "unanswered"
-    # character-day §9: the quiet hours only stand in for HIMARI's sleep while its life is off
-    if s.himari_asleep is None and in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
-        return "quiet_hours"
     counted = [w for w in s.wakes if spoke(w, s.said)]
     last = max((w.created_at for w in counted), default=None)
     if last is not None and s.now - last < timedelta(minutes=s.settings.gap_minutes):

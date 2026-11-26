@@ -22,7 +22,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import Enum
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -744,8 +744,11 @@ def user_memory_data(memories: Sequence[Memory], episodes: Sequence[RecentEpisod
 
 
 # character-life §5: HIMARI's own life in the runtime state, with the companion and life on; what the
-# model makes of it is LIFE_RULE's (the companion section).
-LIFE_ABOUT = "Your own life apart from the user, as this persona; nothing in it was done with the user."
+# model makes of it is LIFE_RULE's (the companion section). character-diary §8: the diaries are whole days (the user
+# in them too); the rest is its life apart from the user.
+LIFE_ABOUT = ("Your own life as this persona. days are your diaries, records of whole days that may tell of what you "
+              "did with the user; everything else here is your life apart from the user, and nothing in it was done "
+              "with the user.")
 LIFE_FACTS_CHARS = 1_500  # the facts the state carries: the user's first, then the newest
 LIFE_DAYS = 3  # the newest diaries
 LIFE_DAYS_CHARS = 1_500
@@ -757,7 +760,9 @@ WORK_TEXT_CHARS = 800  # the newest one's text, its start (to talk about what is
 LIFE_READ_DAYS = timedelta(days=14)  # how far back a turn reads diaries and plans
 
 
-def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) -> dict[str, object] | None:
+def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None,
+                     slept: tuple[datetime, datetime] | None = None,
+                     zone: tzinfo | None = None) -> dict[str, object] | None:
     """§5: the facts in the store's order (the user's, then the newest) that
     fit in LIFE_FACTS_CHARS; of the newest LIFE_DAYS diaries those that fit in
     LIFE_DAYS_CHARS (newest first); the plans dated today (``now``'s date) or
@@ -766,7 +771,9 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     pieces made in the last WORK_HOURS (at most WORK_SHOWN, the newest first: title,
     summary and project; the newest also its text's first WORK_TEXT_CHARS, and its summary
     only when the text is cut, character-work §6). One too long for the room left is
-    skipped, not the end of the list. None when none is shown."""
+    skipped, not the end of the list. None when none is shown. character-mind §7: today's events whose time has
+    passed; character-diary §7, §16.5: with those of the last sleep (``slept``: from falling asleep to waking — never
+    given while asleep; read in ``zone``, else ``now``'s), marked ``while_asleep``."""
     today = None if now is None else now.date().isoformat()
     facts: list[str] = []
     room = LIFE_FACTS_CHARS
@@ -787,7 +794,7 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     plans: list[dict[str, object]] = []
     room = LIFE_PLANS_CHARS
     # character-day §8: the slots that still stand and are not its sleep (the day session's schedule tells those)
-    ahead = sorted((e for e in entries if e.live_plan and plan_kind_of(e) is not PlanKind.SLEEP
+    ahead = sorted((e for e in entries if e.live_plan and plan_kind_of(e) not in (PlanKind.SLEEP, PlanKind.DIARY)
                     and (today is None or (e.day or "") >= today)), key=lambda e: (e.day or "", e.entry_id))
     for entry in ahead:
         if len(entry.text) > room:
@@ -820,12 +827,9 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         if index == 0:
             item["text"] = entry.text if len(entry.text) <= WORK_TEXT_CHARS else entry.text[:WORK_TEXT_CHARS] + "…"
         work.append(item)
-    # character-mind §7: what happened to HIMARI today whose time has passed (``now``'s date and clock)
-    events = [] if now is None else [
-        {"time": e.time_of_day, "text": e.text}
-        for e in sorted((e for e in entries if e.kind is LifeKind.EVENT and e.day == today
-                         and (e.time_of_day or "00:00") <= now.strftime("%H:%M")),
-                        key=lambda e: (e.time_of_day or "", e.entry_id))]
+    # character-mind §7: what happened to HIMARI today whose time has passed (``now``'s date and clock);
+    # character-diary §7: and what happened while it slept last, found as it woke
+    events = [] if now is None else _life_events(entries, now, slept, zone or now.tzinfo)
     if not facts and not days and not plans and not arcs and not work and not events:
         return None
     data: dict[str, object] = {"about": LIFE_ABOUT, "facts": facts}
@@ -840,6 +844,32 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
     if events:
         data["events"] = events
     return data
+
+
+def _life_events(entries: Sequence[LifeEntry], now: datetime, slept: tuple[datetime, datetime] | None,
+                 zone: tzinfo | None) -> list[dict[str, object]]:
+    """character-mind §7, character-diary §7: today's passed events and the last sleep's (``while_asleep``), each
+    once, earliest first."""
+    today, clock = now.date().isoformat(), now.strftime("%H:%M")
+    found: list[tuple[str, str, int, dict[str, object]]] = []
+    for entry in entries:
+        if entry.kind is not LifeKind.EVENT:
+            continue
+        asleep = False
+        if slept is not None and zone is not None and entry.day and entry.time_of_day:
+            try:
+                moment = datetime.combine(date.fromisoformat(entry.day), time.fromisoformat(entry.time_of_day),
+                                          tzinfo=zone)
+            except ValueError:
+                moment = None
+            asleep = moment is not None and slept[0] <= moment < slept[1]
+        if not asleep and not (entry.day == today and (entry.time_of_day or "00:00") <= clock):
+            continue
+        item: dict[str, object] = {**({"date": entry.day} if entry.day != today else {}),
+                                   "time": entry.time_of_day, "text": entry.text,
+                                   **({"while_asleep": True} if asleep else {})}
+        found.append((entry.day or "", entry.time_of_day or "", entry.entry_id, item))
+    return [f[3] for f in sorted(found, key=lambda f: f[:3])]
 
 
 # character-mind §6: HIMARI's own thoughts in the runtime state, with the companion and life on: the thoughts of this
@@ -1275,8 +1305,9 @@ LIFE_RULE = (
     "what they said. Not in every reply, though: when they are talking about their own matters, stay with those. "
     "himari_life.work is what you made lately in your projects: you may share it or show it off, but do not read "
     "it out at length unless they ask. himari_life.events is what happened to you today so far, whether you wanted "
-    "it or not. "
-    "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
+    "it or not; one marked while_asleep happened while you slept, and you found it when you woke. "
+    "himari_life.days are your diaries, records of whole days: they may tell of what you did with the user. The "
+    "rest of himari_life was not done with the user: never make up things you did together. runtime_state.himari_now is "
     "what you are doing right now: say what you are doing when they ask. runtime_state.himari_mind is what you "
     "thought inwardly and never said: the user does not know it. Never speak as if they did (\"as I said\"); to "
     "bring it up, say it as if for the first time."
@@ -1288,8 +1319,9 @@ SCHEDULE_RULE = (
     "the days after). When you and the user settle on a time to do something together, write it as a together slot "
     "with schedule_write. If it falls in your sleep slot, move the sleep slot first — you may put it off, never drop "
     "it — then write it. Move or cancel your own slots as your day changes, always with your reason in your own "
-    "words. A <wake> reason \"together\" means such a time has come: start it with them. Keep the schedule quietly: "
-    "do not read it out or talk about the tools."
+    "words. A <wake> reason \"together\" means such a time has come: start it with them. The diary slot is when you "
+    "write today's diary: you may move it, never cancel it, and until it comes there is no diary of today yet. Keep "
+    "the schedule quietly: do not read it out or talk about the tools."
 )
 # §5, §8: right after SCHEDULE_RULE. The asleep half of what LIFE_RULE used to say lives here (§8).
 SLEEP_RULE = (
@@ -1676,7 +1708,13 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                                                                   state.episode_count, state.now)
     if memory is not None:
         data["user_memory"] = memory
-    life = None if state.life is None else himari_life_data(state.life, state.now)
+    # character-diary §7, §16.5: the day session's last sleep, once HIMARI woke from it (never while it sleeps)
+    last = None if state.sleep is None or state.sleep.state in (SleepState.ASLEEP, SleepState.HALF_ASLEEP) \
+        else state.sleep.last
+    slept = None if last is None or last.woke_at is None else (last.fell_at, last.woke_at)
+    clock = None if state.now is None else schedule_clock(state.now, state.schedule_zone)
+    life = None if state.life is None else himari_life_data(state.life, state.now, slept,
+                                                            None if clock is None else clock.tzinfo)
     if life is not None:
         data["himari_life"] = life
     mind = None if state.life is None else himari_mind_data(state.recent_thoughts, state.life, state.now)

@@ -490,7 +490,7 @@ class LifeEditBody(_Body):
     summary: str | None = None  # a work piece's one line; null or left out: kept
 
 
-type PlanKindName = Literal["sleep", "work", "together", "own"]  # PlanKind's values
+type PlanKindName = Literal["sleep", "work", "together", "own", "diary"]  # PlanKind's values (character-diary §10)
 
 
 class PlanBody(_Body):  # character-day §18.11: a slot the user writes; the limits are Data's
@@ -1701,7 +1701,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         belongs after the last event written before it (its ``sequence``; 0 before any), and to the one page whose
         range from ``after`` (exclusive) to ``cursor`` holds that event: never on two pages, never on none.
         ``events``: the page's events as read (``full``: as many as asked, more may follow); ``id``: the diary's
-        write, stable."""
+        write, stable; character-diary §16.7: ``step`` — ``write`` (the diary, its text as it stands) or ``amend``
+        (added to as the session closed)."""
         found = await application.session_diaries(scope)
         if not found or (after > 0 and not events):
             return []
@@ -1710,7 +1711,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             more = await application.data.read_events(scope, after_sequence=cursor, limit=1)
             following = more[0] if more else None
         items: list[dict[str, Any]] = []
-        for write_id, at, text in found:
+        for write_id, at, text, step in found:
             if after > 0 and events[0].created_at > at:
                 continue  # it follows an event of an earlier page
             if following is not None and following.created_at <= at:
@@ -1718,7 +1719,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             sequence = max((e.sequence for e in events if e.created_at <= at and e.sequence <= cursor),
                            default=after)
             items.append({"id": write_id, "sequence": sequence, "kind": "diary", "created_at": _time(at),
-                          "text": text})
+                          "text": text, "step": step})
         return items
 
     @app.get("/api/conversations/{conversation_id}/events")

@@ -13,7 +13,7 @@ import pytest
 from himari.bootstrap.application import Application, LifeChanged, life_settings
 from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.data.api import NO_PERSONA, LifeKind, UserMessage
-from himari.life.api import LifeSettings, MindModel
+from himari.life.api import LifeSettings, MindModel, WriteOutcome
 from himari.prompt.api import LIFE_RULE, state_block
 from himari.provider.api import NormalizedFinal, ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter
@@ -150,6 +150,44 @@ def test_the_remarks_are_the_users_words_in_the_day_session_meanwhile(tmp_path: 
             assert await app.remarks(ME, before, datetime.now(UTC)) == ("방열판 세 겹은 과하지 않아?", "두 겹이 좋겠어")
             assert await app.remarks(ME, datetime.now(UTC) + timedelta(seconds=1),
                                      datetime.now(UTC) + timedelta(hours=1)) == ()
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_closed_day_session_is_read_for_the_diary_and_its_closing_wakes_the_amend(tmp_path: Path) -> None:
+    """character-diary §5, §16.4: MindLink.session_input with a conversation id reads that day session even closed
+    (another conversation, or none, is None); the closing's callback also starts the diary's amend."""
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응."),))], memory_passes=True, companion=True)
+        app = await Application.open(tmp_path / "data", adapter, model_id="scripted-model", sandbox=False,
+                                     cleanup_seconds=None, memory_model="scripted-model", life=True, companion=True)
+        try:
+            session = await app.day_session(ME)
+            assert session is not None and app.life_writer is not None
+            scope = TrustedScope(ME, session.conversation_id)
+            await app.send(scope, "오늘 재밌었어")
+            await app.runner.wait(scope)
+            assert await app.data.close_day_session(ME, session.conversation_id, datetime.now(UTC))
+            closed = await app.session_input(ME, session.conversation_id)
+            assert closed is not None and closed.conversation_id == session.conversation_id
+            assert closed.day == session.day_session
+            assert any(isinstance(e.payload, UserMessage) for e in closed.inputs.events)
+            assert await app.session_input(ME) is None  # no open day session now
+            other = await app.create_conversation(ME)
+            assert await app.session_input(ME, other) is None  # not a day session
+            assert await app.session_input(PrincipalId("someone"), session.conversation_id) is None  # not theirs
+            amended: list[PrincipalId] = []
+
+            async def amend(principal: PrincipalId) -> WriteOutcome:
+                amended.append(principal)
+                return WriteOutcome.NOTHING
+
+            app.life_writer.amend = amend  # type: ignore[method-assign]
+            await app._day_closed(ME, scope)  # noqa: SLF001
+            await asyncio.sleep(0.05)
+            assert amended == [ME]
         finally:
             await app.close()
 

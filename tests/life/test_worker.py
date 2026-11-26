@@ -71,7 +71,7 @@ class Link:
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
         return ()
 
-    async def session_input(self, principal: PrincipalId) -> None:
+    async def session_input(self, principal: PrincipalId, conversation_id: ConversationId | None = None) -> None:
         return None  # character-day §7: no day session
 
 

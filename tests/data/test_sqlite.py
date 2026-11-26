@@ -43,9 +43,13 @@ from himari.data.api import (
     ArcOp,
     DayState,
     FellBy,
+    LifeJob,
     LifeKind,
+    LifeOrigin,
     LifePlan,
     LifeWriteStart,
+    PlanKind,
+    PlanWrite,
     ThoughtAbout,
     ThoughtChange,
     ThoughtOp,
@@ -298,6 +302,7 @@ _ADDED_IN = {
     27: V27_UNDO,
     28: V28_UNDO,
     29: V29_UNDO,
+    30: (),  # character-diary §16.2: no table changes
 }
 
 
@@ -313,13 +318,13 @@ def old_database(path: Path, version: int) -> None:
 
 
 @pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-                                     24, 25, 26, 27, 28])
+                                     24, 25, 26, 27, 28, 29])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 29
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 30
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -646,6 +651,30 @@ def test_a_v28_database_makes_its_plans_hour_slots_and_keeps_its_conversations(t
         store.close()
 
 
+def test_a_v29_database_is_backed_up_and_takes_diary_slots_and_amends(tmp_path: Path) -> None:
+    """v30 (character-diary §11, §16.2): no table changes — backed up first, the version moved, and a diary slot and
+    an amend write are kept from then on (an older server stops at the version, never at them)."""
+    path = tmp_path / "h.db"
+    old_database(path, 29)
+    store = SqliteStore(path)
+    try:
+        assert list(tmp_path.glob("h.db.v29-*.bak")) and store.backup_path is not None
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 30
+        data = SqliteData(store)
+        now = datetime(2026, 11, 27, 3, 0, tzinfo=UTC)  # 12:00 in Seoul
+        await_(data.write_plan(SCOPE.principal_id, 0, PlanWrite("2026-11-27", "23:30", 480, PlanKind.SLEEP, "잠"),
+                               origin=LifeOrigin.WRITER, zone="Asia/Seoul", now=now))
+        slot = await_(data.write_plan(SCOPE.principal_id, 0, PlanWrite("2026-11-27", "22:00", 30, PlanKind.DIARY,
+                                                                       "일기 쓰기"),
+                                      origin=LifeOrigin.WRITER, zone="Asia/Seoul", now=now))
+        assert slot.plan_kind is PlanKind.DIARY and slot.diary_slot
+        write = await_(data.begin_life_write(SCOPE.principal_id, LifeWriteStart(
+            0, "2026-11-26", "scripted", "m", b"{}", "application/json", 10, job=LifeJob.AMEND)))
+        assert (await_(data.list_life_writes(SCOPE.principal_id))[0]).job is LifeJob.AMEND and write
+    finally:
+        store.close()
+
+
 def await_[T](coroutine: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coroutine)
 
@@ -719,7 +748,7 @@ def test_a_v20_conversation_keeps_its_environments_and_loses_the_rest(tmp_path: 
 
 
 @pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-                                     24, 25, 26, 27, 28])
+                                     24, 25, 26, 27, 28, 29])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"

@@ -21,7 +21,6 @@ from himari.proactive import (
     candidates,
     decide,
     free_today,
-    in_quiet_hours,
     local_midnight,
     loop_moment,
 )
@@ -198,14 +197,11 @@ DUE = (loop(1, "2026-11-04T14:00+09:00"),)
     ({"quiet_until": NOW + timedelta(minutes=5)}, "quiet"),
     ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
     ({"unanswered_wake": True}, "unanswered"),
-    ({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
     ({"wakes": (wake(NOW - timedelta(minutes=14)),)}, "gap"),  # V3-P90 §8: 15 minutes
     ({"device": device(sleeps=True, sleep="idle")}, "asleep"),  # V3-P90 §5: waits for the wake
 ])
 def test_what_holds_a_trigger_back(changes: dict[str, object], blocked: str) -> None:
     decided = decide(situation(loops=DUE, **changes))
-    if blocked == "quiet_hours":  # the loop's day is past its window then: use one due that evening
-        decided = decide(situation(loops=(loop(1, "2026-11-04T22:00+09:00"),), **changes))
     assert decided.reasons == () and decided.blocked == blocked and decided.held
 
 
@@ -285,14 +281,16 @@ def test_reminders_do_not_count_toward_the_daily_limit_but_do_toward_the_gap() -
     assert decide(situation(loops=DUE, wakes=(wake(NOW - timedelta(minutes=5), WakeKind.REMINDER),))).blocked == "gap"
 
 
-def test_quiet_hours_wrap_midnight_in_the_devices_zone() -> None:
-    late, early = time(23, 0), time(8, 0)
-    at = datetime(2026, 11, 4, 22, 30, tzinfo=UTC)  # 07:30 KST, 22:30 London
-    assert in_quiet_hours(at, SEOUL, late, early)
-    assert in_quiet_hours(at, "Europe/London", time(22, 0), time(7, 0))
-    assert not in_quiet_hours(at, "Europe/London", late, early)
-    assert not in_quiet_hours(at, SEOUL, None, None)
-    assert in_quiet_hours(datetime(2026, 11, 4, 3, 0, tzinfo=UTC), SEOUL, time(9, 0), time(18, 0))  # 12:00, no wrap
+def test_there_are_no_quiet_hours_the_users_device_keeps_the_night() -> None:
+    """character-diary §9: at 23:30 or 03:00 a wake is held only by the rules of any hour (the device, the user's
+    quiet) — its life on or off."""
+    night = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)  # 23:30 KST
+    evening = (loop(1, "2026-11-04T22:00+09:00"),)
+    assert decide(situation(now=night, loops=evening)).reasons
+    assert decide(situation(now=night, loops=evening, himari_asleep=False)).reasons
+    assert decide(situation(now=night, loops=evening, device=device(sleeps=True, sleep="idle"))).blocked == "asleep"
+    assert decide(situation(now=night, loops=evening, quiet_until=night + timedelta(hours=8))).blocked == "quiet"
+    assert not hasattr(ON, "quiet_start") and "quiet" not in ON.describe()
 
 
 def test_the_day_is_the_devices_day() -> None:
@@ -444,8 +442,7 @@ def test_each_wait_opens_once() -> None:
 
 
 def test_a_free_wake_is_held_by_every_rule_and_its_day() -> None:
-    for changes, blocked in (({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
-                             ({"unanswered_wake": True}, "unanswered"),
+    for changes, blocked in (({"unanswered_wake": True}, "unanswered"),
                              ({"working": True}, "working"),
                              ({"quiet_until": NOW + timedelta(hours=1)}, "quiet")):
         decided = decide(situation(**{"free_ok": True, **changes}))
@@ -516,7 +513,7 @@ def test_a_finished_piece_waits_as_himaris_own_openings_do_and_counts_in_the_day
         assert decided.reasons == () and decided.blocked == blocked, changes
     night = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)  # 23:30 KST, a piece made half an hour before
     late = situation(now=night, work=(replace(piece(9, 0), created_at=night - timedelta(minutes=30)),))
-    assert decide(late).blocked == "quiet_hours"
+    assert decide(late).reasons  # character-diary §9: no quiet hours
     spoken = tuple(replace(free_at(40 + 20 * i), wake_id=f"s{i}") for i in range(10))
     assert decide(situation(**work, wakes=spoken)).blocked == "daily"
     finished = replace(free_at(40), reasons=(WakeReason(WakeKind.WORK_DONE, entry_id=9),))
@@ -559,8 +556,7 @@ def test_an_anniversary_is_spoken_of_once_that_day_and_may_pass() -> None:
 
 def test_an_anniversary_waits_as_himaris_own_openings_do_and_counts_in_the_day() -> None:
     days = {"anniversaries": (HUNDRED,), "bond_day": "2026-11-04"}
-    for changes, blocked in (({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
-                             ({"unanswered_wake": True}, "unanswered"),
+    for changes, blocked in (({"unanswered_wake": True}, "unanswered"),
                              ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
                              ({"device": device(sleeps=True, sleep="idle")}, "asleep"),
                              ({"wakes": (wake(NOW - timedelta(minutes=5)),)}, "gap")):
@@ -601,12 +597,11 @@ def test_himaris_sleep_holds_every_wake_but_a_reminder_which_it_speaks_half_asle
     told = decide(situation(loops=(note, *DUE), himari_asleep=True))
     assert told.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7),) and told.blocked == "himari_asleep"
     assert decide(situation(loops=DUE, himari_asleep=False)).reasons  # awake: the usual rules
-    # its life on, the quiet hours no longer stand in for its sleep: awake at 03:00, it may speak
-    hours = replace(ON, quiet_start=time(23, 0), quiet_end=time(8, 0))
+    # awake at 03:00, it may speak; character-diary §9: with its life off, nothing stands in for its sleep either
     night = datetime(2026, 11, 3, 18, 0, tzinfo=UTC)  # 03:00 in Seoul
     late = (loop(1, "2026-11-04T01:00+09:00"),)
-    assert decide(situation(settings=hours, now=night, loops=late, himari_asleep=False)).reasons
-    assert decide(situation(settings=hours, now=night, loops=late)).blocked == "quiet_hours"  # its life off
+    assert decide(situation(now=night, loops=late, himari_asleep=False)).reasons
+    assert decide(situation(now=night, loops=late)).reasons
 
 
 def test_a_together_slot_opens_its_wake_once_within_ten_minutes_of_its_start() -> None:

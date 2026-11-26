@@ -1,6 +1,6 @@
 // character-day §4, §12: HIMARI's schedule as Settings → HIMARI shows it — its slots by day, each with its start,
 // length, kind and state — and its sleep in words. Pure functions, tested in schedule.test.ts.
-import type { LifeEntry, SleepRecord, SleepView } from "@/api/settings";
+import type { LifeEntry, PlanKind, SleepRecord, SleepView } from "@/api/settings";
 
 /** The schedule's days: today and the six after it (character-day §4.4). */
 export const SCHEDULE_DAYS = 7;
@@ -18,6 +18,14 @@ export function addDays(day: string, count: number): string {
 
 /** The days a slot may be written on: today and the six after it. */
 export const scheduleDays = (today: string) => Array.from({ length: SCHEDULE_DAYS }, (_, index) => addDays(today, index));
+
+/** Whether a slot of this kind only moves (its day, start and length): the night's sleep, and (character-diary §3) its
+ *  diary time. The owner never deletes one, never makes one, and never turns it into another kind or another into it. */
+export const onlyMoves = (kind: PlanKind) => kind === "sleep" || kind === "diary";
+
+/** A slot's length limits in minutes, as the server's: a diary slot 10..60 (character-diary §3), any other 5..720. */
+export const minutesOf = (kind: PlanKind): { min: number; max: number } =>
+  kind === "diary" ? { min: 10, max: 60 } : { min: 5, max: 720 };
 
 /** When a slot ends, HH:MM (past midnight it wraps: a sleep slot from 23:30 for 460 minutes ends at 07:10). */
 export function endOf(time: string, minutes: number): string {

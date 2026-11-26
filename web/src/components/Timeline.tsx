@@ -54,9 +54,13 @@ function UserBubble({ text, files, references, asleep }: {
   );
 }
 
-/** character-day §7: the diary HIMARI wrote from this day's conversation, folded; the owner opens it. */
-function DiaryLine({ at, text }: { at: string; text: string }) {
+/** character-day §7: the diary HIMARI wrote from this day's conversation, folded; the owner opens it. character-diary
+ *  §10: what it added when the session closed is a line with its time only (the write shows the diary as it is now). */
+function DiaryLine({ at, text, step }: { at: string; text: string; step: "write" | "amend" }) {
   const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (step === "amend") {
+    return <p className="text-center text-xs text-faint" aria-label="Diary">Added to the diary · {time}</p>;
+  }
   return (
     <details className="text-center text-xs text-faint" aria-label="Diary">
       <summary className="cursor-pointer select-none">Wrote the diary · {time}</summary>
@@ -172,7 +176,7 @@ export function Timeline({ items, live, running, conversation }: {
             return <UserBubble key={item.key} text={item.text} files={item.files} references={item.references}
               asleep={item.asleep} />;
           case "diary":
-            return <DiaryLine key={item.key} at={item.at} text={item.text} />;
+            return <DiaryLine key={item.key} at={item.at} text={item.text} step={item.step} />;
           case "answer":
             return (
               <div key={item.key} className="group">

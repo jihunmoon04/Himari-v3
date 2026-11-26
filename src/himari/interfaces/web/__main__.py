@@ -122,6 +122,9 @@ def main(argv: list[str] | None = None) -> int:
         if config.machine_socket_ignored:  # V3-P109 §3 D9
             print("HIMARI web: HIMARI_MACHINE_SOCKET is no longer used (himari-runner was removed, V3-P109); "
                   "remove it", file=sys.stderr, flush=True)
+        if config.proactive_quiet_ignored:  # character-diary §9
+            print("HIMARI web: HIMARI_PROACTIVE_QUIET is no longer used (no quiet hours: HIMARI's sleep and the "
+                  "user's device keep the night); remove it", file=sys.stderr, flush=True)
         if not application.images_available:  # V3-P67 §3.1: fail-closed, said once at startup
             print("HIMARI web: images are not shown to models on this server (the image sandbox is unavailable): "
                   "an image is attached as a file line only", file=sys.stderr, flush=True)

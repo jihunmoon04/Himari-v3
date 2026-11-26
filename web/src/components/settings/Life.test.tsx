@@ -354,6 +354,39 @@ describe("the schedule and sleep (character-day §12)", () => {
       { day: "2026-11-27", time: "01:00", minutes: 460, plan_kind: "sleep", text: "잠" }, 4));
   });
 
+  it("only moves the diary slot (10 to 60 minutes), never deletes it, and never offers it new (character-diary §10)",
+    async () => {
+      const diarySlot = { ...entry(45, "plan", "2026-11-26", "일기 쓰기", "writer", 2), time: "22:10", minutes: 30,
+        plan_kind: "diary" as const };
+      state.data = { ...aLife(), entries: [diarySlot, sleepSlot] };
+      await shown();
+      const schedule = part("Schedule");
+      expect(schedule.getByText("Diary")).toBeTruthy();
+      expect(schedule.getByText("22:10–22:40 · 30m")).toBeTruthy();
+      expect(schedule.queryByRole("button", { name: "Delete" })).toBeNull();
+      expect(schedule.queryByRole("button", { name: "Edit" })).toBeNull();
+      fireEvent.click(schedule.getAllByRole("button", { name: "Move" })[0] as HTMLElement); // the diary slot, by start
+      expect(screen.queryByLabelText("Slot text")).toBeNull();
+      const kind = screen.getByLabelText("Slot kind") as HTMLSelectElement;
+      expect([...kind.options].map((o) => o.value)).toEqual(["diary"]);
+      expect(kind.disabled).toBe(true);
+      const minutes = screen.getByLabelText("Slot minutes") as HTMLInputElement;
+      expect([minutes.min, minutes.max]).toEqual(["10", "60"]);
+      fireEvent.change(minutes, { target: { value: "70" } });
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.change(minutes, { target: { value: "5" } });
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.change(minutes, { target: { value: "40" } });
+      fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "21:40" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(editPlan).toHaveBeenCalledWith(45,
+        { day: "2026-11-26", time: "21:40", minutes: 40, plan_kind: "diary", text: "일기 쓰기" }, 2));
+      await waitFor(() => expect(screen.queryByLabelText("Slot editor")).toBeNull());
+      fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
+      expect([...(screen.getByLabelText("Slot kind") as HTMLSelectElement).options].map((o) => o.value))
+        .toEqual(["own"]);
+    });
+
   it("adds a slot to the persona's schedule", async () => {
     await shown();
     fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));

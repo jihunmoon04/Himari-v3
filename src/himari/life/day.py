@@ -3,6 +3,8 @@ no randomness of its own — every function takes the time and the random source
 
 - ``place_sleep``: a night's sleep slot when none is there (§5.2): its start from 23:00 to 02:00 in ten minutes, its
   end from 07:00 to 10:00 but at least five hours on and by 12:00, never over the slots already that night.
+- ``place_diary``: the night's diary slot beside its sleep slot (character-diary §3): from 21:00 to DIARY_BEFORE
+  before the sleep in ten minutes, never already past; none when no room is left before the sleep.
 - ``sleep_view``: what a turn and the Web see of the sleep now (§5.1): awake, drowsy from DROWSY_MINUTES before the
   slot, asleep (deep for DEEP_HOURS) — half asleep is only a mumble's turn, which the Driver knows.
 - ``answer_message``: how a message (or a poke) meets a sleeping HIMARI (§5.5): deep sleep — nothing, a mumble, awake;
@@ -26,6 +28,8 @@ from random import Random
 
 from himari.common import ConversationId, TextBlock, split_marks
 from himari.data.api import (
+    DIARY_EARLIEST,
+    DIARY_MINUTES,
     LAST_WORDS_CHARS,
     MAX_SLEEP_MINUTES,
     MIN_SLEEP_MINUTES,
@@ -48,6 +52,7 @@ from himari.data.api import (
     SleepView,
     UserMessage,
     WokeBy,
+    diary_night,
     night_of,
     plan_span,
 )
@@ -71,6 +76,8 @@ NO_SLOT_SLEEP = timedelta(minutes=(MIN_SLEEP_MINUTES + MAX_SLEEP_MINUTES) // 2) 
 PUSH_SLACK = timedelta(minutes=30)  # §5.4: a sleep slot starting this soon after a promise (and what runs on from it)
 MISSED_REASON = "약속을 기다리다 잠듦"  # §5.4: why the sleep slot was pulled forward (it falls asleep waiting)
 WEEKDAYS_KO = "월화수목금토일"
+DIARY_FROM = time(21, 0)  # character-diary §3: a placed diary slot starts from 21:00 ...
+DIARY_BEFORE = timedelta(minutes=40)  # ... to this before the night's sleep slot, in ten minutes
 
 
 def session_title(day: date) -> str:
@@ -87,12 +94,15 @@ def current_night(now: datetime) -> date:
 
 
 @dataclass(frozen=True)
-class PlacedSleep:
-    """A sleep slot to place: its start's date and time (HH:MM) and its length."""
+class PlacedSlot:
+    """A slot to place (a sleep or a diary slot): its start's date and time (HH:MM) and its length."""
 
     day: str
     time_of_day: str
     minutes: int
+
+
+PlacedSleep = PlacedSlot
 
 
 def _steps(first: datetime, last: datetime) -> list[datetime]:
@@ -141,6 +151,44 @@ def place_sleep(night: date, rng: Random, zone: tzinfo,
 def _ceil(moment: datetime) -> datetime:
     moment = moment.replace(second=0, microsecond=0)
     return moment + timedelta(minutes=(-moment.minute) % STEP_MINUTES)
+
+
+def _ceil_up(moment: datetime) -> datetime:
+    """``moment`` rounded up to the next ten minutes (a moment past a whole minute counts as the next one)."""
+    whole = moment.replace(second=0, microsecond=0)
+    if whole < moment:
+        whole += timedelta(minutes=1)
+    return _ceil(whole)
+
+
+# --- placing a diary slot (character-diary §3) ----------------------------------------------------
+
+
+def place_diary(night: date, sleep_start: datetime, rng: Random, zone: tzinfo, now: datetime) -> PlacedSlot | None:
+    """character-diary §3, §16.3: the night's diary slot, DIARY_MINUTES long, beside its sleep slot starting at
+    ``sleep_start`` — a start drawn from 21:00 to DIARY_BEFORE before the sleep (ten-minute steps); when that range
+    is empty (the sleep starts before 21:40), DIARY_BEFORE before the sleep but never before DIARY_EARLIEST. Never
+    already past: a start before ``now`` moves to ``now`` rounded up to ten minutes. None when it would then end
+    after the sleep starts (the diary is written as HIMARI falls asleep)."""
+    sleep_start = sleep_start.astimezone(zone)
+    soonest = _ceil_up(now.astimezone(zone))
+    first = datetime.combine(night, DIARY_FROM, tzinfo=zone)
+    last = sleep_start - DIARY_BEFORE
+    choices = [s for s in _steps(first, last) if s >= soonest]
+    if choices:
+        start = rng.choice(choices)
+    else:
+        start = max(min(last, first), datetime.combine(night, DIARY_EARLIEST, tzinfo=zone), soonest)
+    if start + timedelta(minutes=DIARY_MINUTES) > sleep_start:
+        return None
+    return PlacedSlot(start.date().isoformat(), start.strftime("%H:%M"), DIARY_MINUTES)
+
+
+def diary_of_night(plans: Sequence[LifeEntry], night: date, zone: tzinfo) -> LifeEntry | None:
+    """character-diary §3: the live diary slot of ``night``, if any."""
+    found = sorted(((s[0], e) for e in plans if e.diary_slot and (s := plan_span(e, zone)) is not None
+                    and diary_night(s[0].astimezone(zone)) == night), key=lambda f: (f[0], f[1].entry_id))
+    return found[0][1] if found else None
 
 
 # --- the sleep as seen now (§5.1) ----------------------------------------------------------------
@@ -292,8 +340,8 @@ def _missed_pull(promise: LifeEntry, together: tuple[datetime, datetime], slot: 
     None: no pull."""
     if slot is None or span is None or night_of(now.astimezone(zone)) is None or not now < span[0]:
         return None
-    others = [s for e in plans if e.live_plan and e.plan_kind is not PlanKind.SLEEP and e.entry_id != promise.entry_id
-              and (s := plan_span(e, zone)) is not None]
+    others = [s for e in plans if e.live_plan and e.plan_kind not in (PlanKind.SLEEP, PlanKind.DIARY)
+              and e.entry_id != promise.entry_id and (s := plan_span(e, zone)) is not None]  # the diary holds none back
     if not pushed_past(together, span[0], others):
         return None
     between = [o[1] for o in others if o[0] < span[0] and o[1] > now]

@@ -224,3 +224,29 @@
 
 - 단위: §14. 엄격 mypy(`src`, `tests`), `scripts/check_imports.py`, Web의 tsc·lint·vitest.
 - 라이브: 일기 칸 일기와 보완 한 장면씩(`tests/live`).
+
+## 17. 구현에서 정한 것
+
+### 17.1 서버
+
+1. `apply_life_amend(write_id, day, text | None, *, mood=None, mood_reason=None, now) -> LifeEntry | None`. 기분은 하루 돌아보기처럼 이름과 이유다. 그 날짜의 `amend` 기록이 아니면 거부한다.
+2. `passed_events(entries, day, now, slept, zone) -> PassedEvent(entry, while_asleep)`. 작업은 `now`를 그 밤에 잠든 때로 자른다. 잠든 뒤의 사건은 다음 날 일기의 자료다(§7).
+3. 일기가 보는 "지난밤 잠"은 밤 D−1의 끝난 잠들의 첫 잠듦부터 마지막 깸까지다. 밤은 `diary_of(t) = (t − 18:00)의 날짜`로 정한다. 닫힌 세션을 그 일기 날짜에 맞출 때도 쓴다.
+4. `himari_life_data(entries, now, slept=None, zone=None)`. `zone`은 사건 시각을 읽는 일정표의 시간대다. `slept`는 잠 상태가 `asleep`·`half_asleep`이 아니고 마지막 잠이 끝났을 때만 준다.
+5. **정사 추리기의 때:** "일기 뒤에 그날이 닫혔다"를 잠 기록으로 본다(밤 D 이후에 잠든 잠 가운데 `closed_day`가 있음). `last_closing_at`과 기록의 끝 시각을 견주면, 닫힌 세션으로 닫힌 뒤 쓴 일기는 영영 추리기를 하지 않기 때문이다. 보완이 남아 있으면 기다린다.
+6. **닫힌 세션을 짤 수 없을 때**(읽을 수 없거나 모델 한계를 넘음) 보완은 혼자 하는 호출로 가고, 자료에 일기 뒤의 말(`said_after`)을 더한다.
+7. 보완 기록은 언제나 `conversation_id`가 닫힌 세션이다(타임라인에 보이게, 혼자 하는 호출로 가도). 모델은 그 세션의 모델이고 예비 규칙은 같다.
+8. **닫힌 세션에는 하루 상태가 없다.** `Driver.turn_inputs`는 그대로라, 하루 지기는 열린 세션만 하루 세션으로 본다. 그래서 보완 입력에는 일정표·잠 상태와 그 규칙이 없고 프롬프트 캐시는 일부만 맞는다.
+9. 하루 지기에 일기용 단계는 따로 없다(`day.due()`는 그대로). `_place`가 잠 칸 바로 뒤에 일기 칸을 놓고, `look`·`ensure_slots`가 오늘 밤과 다음 밤의 빠진 일기 칸을 채운다.
+10. 규칙 세부: 일기 칸의 밤은 D 18:00–D+1 05:00이다. 옮겨도 글은 그대로다(잠 칸처럼). "잠 칸 전에 끝남"은 그 밤에 잠 칸이 있을 때만 본다. 하루 지기(`writer`)도 일기 칸을 쓸 수 있다.
+11. `place_diary`: 뽑은 시각이 모두 지났으면 지금을 10분 단위로 올린 때에, 잠 칸 전에 30분이 들어가면 놓는다.
+12. 일기 칸은 하루 돌아보기·세계의 "앞으로 할 일"과 `himari_life.plans`에서 뺀다.
+13. 일기 과제는 3–8문장이다(하루 전체를 담으니 3–6에서 늘림).
+14. 타임라인의 `amend` 줄은 그 보완이 실제로 일기를 고쳤을 때만 보인다(일기의 `source`가 그 기록).
+15. 설정 경고는 `HIMARI_PROACTIVE_QUIET`가 있으면(비어 있어도) 남긴다. `ProactiveSettings.describe()`에서 조용한 시간이 빠진다.
+16. 없앤 것: `world.parse_events`의 `day/sleeps/zone` 인자, `world.due_day`의 `review_at`, `review.target_day`.
+
+### 17.2 화면
+
+1. 일정표: `onlyMoves(kind)`(잠, 일기)와 `minutesOf(kind)`(일기 10–60분). 일기 칸은 글 칸 없이 옮기기만 하고, 종류가 고정되며 새 칸으로 고를 수 없다.
+2. 타임라인: `step`이 `"amend"`가 아니면 `"write"`로 읽는다(옛 서버). 보완 줄은 펼칠 것이 없는 한 줄("Added to the diary · HH:MM")이다.
