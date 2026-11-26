@@ -358,18 +358,45 @@ describe("the schedule and sleep (character-day §12)", () => {
     await shown();
     fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
     expect((screen.getByLabelText("Slot day") as HTMLSelectElement).value).toBe("2026-11-26");
-    expect([...(screen.getByLabelText("Slot kind") as HTMLSelectElement).options].map((o) => o.value))
-      .toEqual(["own", "together"]); // no open project: no work slot
+    const kind = screen.getByLabelText("Slot kind") as HTMLSelectElement;
+    expect([...kind.options].map((o) => o.value)).toEqual(["own"]); // no open project: no work slot; never together
+    expect(kind.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("Slot day"), { target: { value: "2026-11-27" } });
     fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "03:00" } });
     fireEvent.change(screen.getByLabelText("Slot minutes"), { target: { value: "120" } });
-    fireEvent.change(screen.getByLabelText("Slot kind"), { target: { value: "together" } });
-    fireEvent.change(screen.getByLabelText("Slot text"), { target: { value: " 방송 같이 보기 " } });
+    fireEvent.change(screen.getByLabelText("Slot text"), { target: { value: " 방송 보기 " } });
     fireEvent.click(screen.getByRole("button", { name: "Add slot" }));
     await waitFor(() => expect(addPlan).toHaveBeenCalledWith(
-      { day: "2026-11-27", time: "03:00", minutes: 120, plan_kind: "together", text: "방송 같이 보기" }, 2));
+      { day: "2026-11-27", time: "03:00", minutes: 120, plan_kind: "own", text: "방송 보기" }, 2));
     await waitFor(() => expect(screen.queryByLabelText("Slot text")).toBeNull());
   });
+
+  it("leaves together slots to HIMARI: none offered new or from an own slot; one may stay so or turn own (review 14)",
+    async () => {
+      state.data = {
+        ...aLife(),
+        entries: [
+          withSchedule().entries[0]!, // together, 2026-11-27 03:00
+          { ...entry(44, "plan", "2026-11-26", "책 읽기", "user"), time: "23:00", minutes: 30, plan_kind: "own" as const },
+          { ...entry(60, "arc", "2026-11-20", "노래를 만든다.", "writer"), title: "첫 노래", status: "open" as const },
+        ],
+      };
+      await shown();
+      const kinds = () => [...(screen.getByLabelText("Slot kind") as HTMLSelectElement).options].map((o) => o.value);
+      fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
+      expect(kinds()).toEqual(["own", "work"]);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(within(part("Schedule").getByLabelText("Day 2026-11-26")).getByRole("button", { name: "Edit" }));
+      expect(kinds()).toEqual(["own"]);
+      expect((screen.getByLabelText("Slot kind") as HTMLSelectElement).disabled).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(within(part("Schedule").getByLabelText("Day 2026-11-27")).getByRole("button", { name: "Edit" }));
+      expect(kinds()).toEqual(["together", "own"]);
+      fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "04:00" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(editPlan).toHaveBeenCalledWith(41,
+        { day: "2026-11-27", time: "04:00", minutes: 120, plan_kind: "together", text: "방송 같이 보기" }, 1));
+    });
 
   it("says why the schedule refused a slot and keeps what was written", async () => {
     vi.mocked(addPlan).mockRejectedValueOnce(new ApiError(409, "plan_refused",

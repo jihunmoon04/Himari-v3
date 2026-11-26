@@ -170,7 +170,8 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
 const kindOf = (entry: LifeEntry): PlanKind => entry.plan_kind ?? (entry.arc_id != null ? "work" : "own");
 
 /** A schedule slot written (``entry`` null) or edited from the revision opened. The sleep slot only moves (its day,
- *  start and length); a work slot keeps its project; any other may turn between its own and together. */
+ *  start and length); a work slot keeps its project. Only HIMARI makes a together slot (review 14: the server's rule),
+ *  so it is never offered new, nor as what an own slot becomes; a together slot may stay so or turn into its own. */
 function PlanEditor({ entry, revision, personaId, projects, today, max, onDone }: {
   entry: LifeEntry | null; revision: number; personaId: number | null; projects: { id: number; title: string }[];
   today: string; max: number; onDone: () => void;
@@ -185,8 +186,8 @@ function PlanEditor({ entry, revision, personaId, projects, today, max, onDone }
   const [text, setText] = useState(entry?.text ?? "");
   const [saving, setSaving] = useState(false);
   const sleep = kind === "sleep";
-  const kinds: PlanKind[] = was === "sleep" || was === "work" ? [was]
-    : entry ? ["own", "together"] : ["own", "together", ...(projects.length ? ["work" as const] : [])];
+  const kinds: PlanKind[] = was === "sleep" || was === "work" || was === "own" ? [was]
+    : was === "together" ? ["together", "own"] : ["own", ...(projects.length ? ["work" as const] : [])];
   const days = scheduleDays(today);
   if (entry?.day && !days.includes(entry.day)) days.unshift(entry.day);
   const length = Number(minutes);
