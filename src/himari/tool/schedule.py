@@ -217,8 +217,9 @@ class ScheduleCancel(_Schedule):
 class GoToSleep(_Schedule):
     definition = _definition(
         GO_TO_SLEEP,
-        "Go to sleep once this answer is done: tonight's sleep slot starts now. For a good night with the user "
-        "(\"잘 자\"). Only from 21:00.",
+        "Go to sleep once this answer is done: tonight's sleep slot starts now. Call it in the same reply as your "
+        "good night whenever the user says good night (\"잘 자\", \"나 잘게\") or you part for the night. Only from "
+        "21:00.",
         {"reason": {"type": ["string", "null"], "description": "Why you sleep early, one line."}}, [],
         EffectProfile.SCOPED_WRITE)
 
