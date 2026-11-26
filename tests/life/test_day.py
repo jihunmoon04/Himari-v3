@@ -161,12 +161,23 @@ def test_it_falls_asleep_at_its_slot_but_never_mid_answer_and_places_the_next_ni
 
 
 def test_go_to_sleep_is_applied_once_the_turn_ends_and_only_once() -> None:
-    asked = DayState(1, sleep_requested_at=at("2026-11-26 22:03"))
+    asked = DayState(1, sleep_requested_at=at("2026-11-26 22:03"), sleep_requested_slot=1)
     now = at("2026-11-26 22:04")
     assert day.due(now, [SLEEP, NEXT], None, asked, SEOUL, running=True) == []
-    assert steps(day.due(now, [SLEEP, NEXT], None, asked, SEOUL, running=False)) == [(Step.FALL, FellBy.TOOL)]
+    found = day.due(now, [SLEEP, NEXT], None, asked, SEOUL, running=False)
+    assert steps(found) == [(Step.FALL, FellBy.TOOL)] and found[0].entry == SLEEP
     slept = asleep("2026-11-26 22:04", woke="2026-11-27 07:00", how_woke=WokeBy.SCHEDULE, closed=True)
     assert day.due(at("2026-11-26 23:00"), [SLEEP, NEXT], slept, asked, SEOUL, running=False) == []
+
+
+def test_go_to_sleep_only_ever_starts_the_slot_it_moved() -> None:
+    """Second review 1: a request bound to a slot that ended (22:00–03:00, looked at 04:00 after a delay) starts
+    nothing — never the next night's slot; one bound to no slot neither."""
+    early = plan(1, "2026-11-26 22:00", 300, PlanKind.SLEEP)  # the keeper's fallback: up at 03:00 for a slot
+    asked = DayState(1, sleep_requested_at=at("2026-11-27 02:50"), sleep_requested_slot=1)
+    assert day.due(at("2026-11-27 04:00"), [early, NEXT], None, asked, SEOUL, running=False) == []
+    loose = DayState(1, sleep_requested_at=at("2026-11-26 22:03"))
+    assert day.due(at("2026-11-26 22:04"), [SLEEP, NEXT], None, loose, SEOUL, running=False) == []
 
 
 def test_it_wakes_at_its_slots_end_and_closes_the_day_after_three_unbroken_hours() -> None:

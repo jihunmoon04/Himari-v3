@@ -224,7 +224,8 @@ def test_go_to_sleep_starts_tonights_slot_now_and_asks_the_keeper_to_sleep() -> 
         moved = next(e for e in await data.list_life(ALICE, 1, now=at) if e.entry_id == sleep.entry_id)
         assert (moved.day, moved.time_of_day, moved.minutes, moved.reason, moved.origin) == (
             "2026-11-26", "22:10", 600, "잘 자", LifeOrigin.HIMARI)
-        assert (await data.read_day_state(ALICE, 1)).sleep_requested_at == at
+        state = await data.read_day_state(ALICE, 1)
+        assert (state.sleep_requested_at, state.sleep_requested_slot) == (at, sleep.entry_id)  # second review 1
         with refused(DataErrorCode.PLAN_REFUSED, "from 21:00"):
             if isinstance(data, SqliteData):
                 with data._tx() as tx:  # noqa: SLF001
@@ -250,6 +251,90 @@ def test_go_to_sleep_with_no_slot_tonight_never_makes_one() -> None:
                 data._stage_plan_change(ALICE, change)
         assert not [e for e in await data.list_life(ALICE, 1, now=NOW) if e.kind is LifeKind.PLAN]
         assert (await data.read_day_state(ALICE, 1)).sleep_requested_at is None
+
+    asyncio.run(scenario())
+
+
+def apply_change(data: object, change: PlanChange) -> None:
+    """A schedule Tool's change as the call's commit applies it."""
+    from himari.data.sqlite import SqliteData
+    if isinstance(data, SqliteData):
+        with data._tx() as tx:  # noqa: SLF001
+            data._apply_plan_change(tx, ALICE, change)
+    else:
+        data._stage_plan_change(ALICE, change)()  # type: ignore[attr-defined]
+
+
+def test_go_to_sleep_in_a_slot_already_over_is_refused_and_asks_nothing() -> None:
+    """Second review 1: the night's slot was placed early (22:00–03:00); at 04:00 go_to_sleep is refused — never the
+    next night's slot — and no request is kept."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        early = await data.write_plan(ALICE, 1, slot("2026-11-26", "22:00", 300, PlanKind.SLEEP, "잠"),
+                                      origin=LifeOrigin.WRITER, zone=ZONE, now=NOW - timedelta(hours=1))
+        await data.write_plan(ALICE, 1, slot("2026-11-27", "23:30", 480, PlanKind.SLEEP, "잠"),
+                              origin=LifeOrigin.WRITER, zone=ZONE, now=NOW)  # the next night's
+        at = NOW + timedelta(hours=6)  # 04:00 in Seoul
+        with refused(DataErrorCode.PLAN_REFUSED, "is over"):
+            apply_change(data, PlanChange(PlanOp.SLEEP_NOW, 1, ZONE, at, reason="졸려"))
+        state = await data.read_day_state(ALICE, 1)
+        assert (state.sleep_requested_at, state.sleep_requested_slot) == (None, None)
+        kept = next(e for e in await data.list_life(ALICE, 1, now=at) if e.entry_id == early.entry_id)
+        assert (kept.time_of_day, kept.minutes, kept.revision) == ("22:00", 300, 1)
+
+    asyncio.run(scenario())
+
+
+def test_a_wake_never_precedes_its_fall_and_a_slot_slept_in_never_ends_before_now() -> None:
+    """Second review 2: a sleep's end before it fell asleep is INVALID_ARGUMENT; while HIMARI sleeps in its slot, the
+    slot's end moves only to now or later (PLAN_REFUSED), for anyone."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        night = await data.write_plan(ALICE, 1, slot("2026-11-27", "00:30", 460, PlanKind.SLEEP, "잠"),
+                                      origin=LifeOrigin.WRITER, zone=ZONE, now=NOW)
+        fell = NOW + timedelta(hours=8, minutes=30)  # 06:30 in Seoul, dozed off again after being woken
+        sleep = await data.open_sleep(ALICE, 1, at=fell, how=FellBy.SCHEDULE, slot_id=night.entry_id)
+        with refused(DataErrorCode.INVALID_ARGUMENT, "at or after it began"):
+            await data.end_sleep(ALICE, sleep.sleep_id, at=fell - timedelta(minutes=1), how=WokeBy.SCHEDULE)
+        assert (await data.current_sleep(ALICE, 1)).asleep  # type: ignore[union-attr]
+        now = fell + timedelta(minutes=30)  # 07:00
+        for origin in (LifeOrigin.USER, LifeOrigin.HIMARI, LifeOrigin.WRITER):
+            with refused(DataErrorCode.PLAN_REFUSED, "asleep in this slot"):
+                await data.write_plan(ALICE, 1, slot("2026-11-27", "00:30", 300, PlanKind.SLEEP, "잠",
+                                                     entry_id=night.entry_id), origin=origin, zone=ZONE, now=now)
+        moved = await data.write_plan(ALICE, 1, slot("2026-11-27", "00:30", 390, PlanKind.SLEEP, "잠",
+                                                     entry_id=night.entry_id), origin=LifeOrigin.USER, zone=ZONE,
+                                      now=now)  # to now: taken
+        assert moved.minutes == 390
+        woke = await data.end_sleep(ALICE, sleep.sleep_id, at=now, how=WokeBy.SCHEDULE)
+        assert woke.woke_at == now >= woke.fell_at
+
+    asyncio.run(scenario())
+
+
+def test_the_user_never_turns_a_slot_into_together_and_a_sleep_slot_moves_without_its_text() -> None:
+    """Second review 7, shared by both stores: a user's own slot never becomes together (a together slot HIMARI made
+    stays one when the user moves it); a sleep slot's text stays as it is — only its times move."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        own = await data.write_plan(ALICE, 1, slot("2026-11-28", "15:00", 60, text="산책"), origin=LifeOrigin.USER,
+                                    zone=ZONE, now=NOW)
+        with refused(DataErrorCode.PLAN_REFUSED, "Only HIMARI makes a together slot"):
+            await data.write_plan(ALICE, 1, slot("2026-11-28", "15:00", 60, PlanKind.TOGETHER, "산책",
+                                                 entry_id=own.entry_id), origin=LifeOrigin.USER, zone=ZONE, now=NOW)
+        promise = await data.write_plan(ALICE, 1, slot("2026-11-28", "18:00", 60, PlanKind.TOGETHER, "게임"),
+                                        origin=LifeOrigin.HIMARI, zone=ZONE, now=NOW)
+        later = await data.write_plan(ALICE, 1, slot("2026-11-28", "19:00", 60, PlanKind.TOGETHER, "게임",
+                                                     entry_id=promise.entry_id), origin=LifeOrigin.USER, zone=ZONE,
+                                      now=NOW)
+        assert (later.plan_kind, later.time_of_day) == (PlanKind.TOGETHER, "19:00")
+        night = await data.write_plan(ALICE, 1, slot("2026-11-27", "00:30", 460, PlanKind.SLEEP, "잠"),
+                                      origin=LifeOrigin.WRITER, zone=ZONE, now=NOW)
+        for origin, text, at in ((LifeOrigin.USER, "밤샘", "00:30"), (LifeOrigin.USER, "밤샘", "01:00"),
+                                 (LifeOrigin.HIMARI, "늦잠", "01:30")):
+            moved = await data.write_plan(ALICE, 1, slot("2026-11-27", at, 420, PlanKind.SLEEP, text,
+                                                         entry_id=night.entry_id), origin=origin, zone=ZONE, now=NOW)
+            assert (moved.text, moved.time_of_day, moved.minutes) == ("잠", at, 420)
 
     asyncio.run(scenario())
 

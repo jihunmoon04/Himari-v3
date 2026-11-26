@@ -216,7 +216,10 @@ def test_go_to_sleep_is_kept_until_the_turn_ends_then_it_sleeps() -> None:
     async def scenario() -> None:
         clock = Clock("2026-11-26 22:10")
         keeper, data, scope, told = await kept(clock, busy=True)
-        await data.write_day_state(ME, DayState(0, sleep_requested_at=clock.now))  # type: ignore[attr-defined]
+        slot = next(e for e in await data.list_life(ME, 0, since="2026-11-26")  # type: ignore[attr-defined]
+                    if e.sleep_slot and e.time_of_day == "00:30")
+        await data.write_day_state(ME, DayState(0, sleep_requested_at=clock.now,  # type: ignore[attr-defined]
+                                                sleep_requested_slot=slot.entry_id))
         await keeper.look(ME)
         assert await data.current_sleep(ME, 0) is None  # type: ignore[attr-defined]
         keeper.busy = lambda scope: False
@@ -224,8 +227,9 @@ def test_go_to_sleep_is_kept_until_the_turn_ends_then_it_sleeps() -> None:
         await asyncio.sleep(0.05)
         await keeper.aclose()
         sleep = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
-        assert sleep is not None and sleep.how_fell is FellBy.TOOL
-        assert (await data.read_day_state(ME, 0)).sleep_requested_at is None  # type: ignore[attr-defined]
+        assert sleep is not None and (sleep.how_fell, sleep.slot_id) == (FellBy.TOOL, slot.entry_id)
+        state = await data.read_day_state(ME, 0)  # type: ignore[attr-defined]
+        assert (state.sleep_requested_at, state.sleep_requested_slot) == (None, None)
 
     asyncio.run(scenario())
 
@@ -361,5 +365,65 @@ def test_a_missed_promise_pulls_the_sleep_only_past_a_slot_still_between() -> No
         await keeper.look(ME)
         sleep = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
         assert sleep is not None and (sleep.how_fell, sleep.slot_id) == (FellBy.MISSED, slot.entry_id)
+
+    asyncio.run(scenario())
+
+
+def test_a_message_after_the_slots_end_finds_himari_woken_on_time() -> None:
+    """Second review 3: dozed at 05:12 in a slot ending 08:10, two messages at 08:13 before the keeper's next look
+    — the sleep ended at 08:10 (on schedule, 2h58m: no closing), and both are met awake."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-27 05:12")
+        keeper, data, scope, told = await kept(clock)
+        await keeper.look(ME)
+        fell = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
+        assert fell is not None and fell.asleep and fell.fell_at == clock.now
+        clock.go("2026-11-27 08:13")
+        assert await keeper.answer(scope, WEB) is None and await keeper.answer(scope, WEB) is None
+        woke = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
+        assert (woke.sleep_id, woke.woke_at, woke.how_woke, woke.messages) == (
+            fell.sleep_id, at("2026-11-27 08:10"), WokeBy.SCHEDULE, 0)
+        await keeper.look(ME)
+        assert not (await data.current_sleep(ME, 0)).closed_day  # type: ignore[attr-defined]
+        assert (await data.read_conversation(scope)).closed_at is None  # type: ignore[attr-defined]
+        clock.go("2026-11-28 08:30")  # a turn reads it the same way: its slot's end, not now
+        dozed = await data.open_sleep(ME, 0, at=at("2026-11-28 06:00"), how=FellBy.SCHEDULE,  # type: ignore[attr-defined]
+                                      slot_id=fell.slot_id)
+        await keeper.view(scope)
+        assert (await data.current_sleep(ME, 0)).woke_at == dozed.fell_at  # type: ignore[attr-defined]  # (ended)
+
+    asyncio.run(scenario())
+
+
+def test_an_active_sleeps_slot_end_never_moves_before_now() -> None:
+    """Second review 2: dozed at 06:30 in a 00:30–08:10 slot, the owner's edit at 07:00 to end it at 05:30 is
+    refused (its end moves only to now or later); a later end is taken, and the wake follows it."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-27 06:30")
+        keeper, data, scope, told = await kept(clock)
+        state = await data.read_day_state(ME, 0)  # type: ignore[attr-defined]
+        await data.write_day_state(ME, DayState(0, woken_at=at("2026-11-27 06:00"),  # type: ignore[attr-defined]
+                                                last_closing_at=state.last_closing_at or at("2026-11-27 03:00")))
+        await keeper.look(ME)
+        sleep = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
+        assert sleep is not None and sleep.asleep
+        slot = next(e for e in await data.list_life(ME, 0, since="2026-11-26")  # type: ignore[attr-defined]
+                    if e.entry_id == sleep.slot_id)
+        clock.go("2026-11-27 07:00")
+        with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.PLAN_REFUSED and "asleep" in e.message):
+            await data.write_plan(ME, 0, PlanWrite("2026-11-27", "00:30", 300, PlanKind.SLEEP, "잠",  # type: ignore[attr-defined]
+                                                   slot.entry_id), origin=LifeOrigin.USER, zone=ZONE, now=clock.now)
+        with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.INVALID_ARGUMENT):
+            await data.end_sleep(ME, sleep.sleep_id, at=at("2026-11-27 05:30"), how=WokeBy.SCHEDULE)  # type: ignore[attr-defined]
+        await data.write_plan(ME, 0, PlanWrite("2026-11-27", "00:30", 450, PlanKind.SLEEP, "밤샘",  # type: ignore[attr-defined]
+                                               slot.entry_id), origin=LifeOrigin.USER, zone=ZONE, now=clock.now)
+        moved = next(e for e in await data.list_life(ME, 0, since="2026-11-26")  # type: ignore[attr-defined]
+                     if e.entry_id == slot.entry_id)
+        assert (moved.minutes, moved.text) == (450, "잠")  # second review 7: its text stays, only times move
+        clock.go("2026-11-27 08:00")
+        await keeper.look(ME)
+        woke = await data.current_sleep(ME, 0)  # type: ignore[attr-defined]
+        assert (woke.woke_at, woke.how_woke) == (at("2026-11-27 08:00"), WokeBy.SCHEDULE)
+        assert woke.woke_at >= woke.fell_at
 
     asyncio.run(scenario())

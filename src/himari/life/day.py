@@ -170,10 +170,11 @@ def slot_of(plans: Sequence[LifeEntry], sleep: SleepRecord) -> LifeEntry | None:
 
 
 def wakes_at(plans: Sequence[LifeEntry], sleep: SleepRecord, zone: tzinfo) -> datetime:
-    """§5.2: when ``sleep`` is due to end — its slot's end; with no slot, NO_SLOT_SLEEP after it fell asleep."""
+    """§5.2: when ``sleep`` is due to end — its slot's end (never before it fell asleep); with no slot,
+    NO_SLOT_SLEEP after it fell asleep."""
     slot = slot_of(plans, sleep)
     span = None if slot is None else plan_span(slot, zone)
-    return span[1] if span is not None else sleep.fell_at + NO_SLOT_SLEEP
+    return max(span[1], sleep.fell_at) if span is not None else sleep.fell_at + NO_SLOT_SLEEP
 
 
 def deep(sleep: SleepRecord, now: datetime) -> bool:
@@ -348,8 +349,12 @@ def due(now: datetime, plans: Sequence[LifeEntry], sleep: SleepRecord | None, st
         return out
     asked = state.sleep_requested_at
     if asked is not None and now - asked < REQUEST_KEPT and (sleep is None or asked > sleep.fell_at):
-        out.append(Transition(Step.FALL, entry=slot, how=FellBy.TOOL))
-        return out
+        # second review 1: go_to_sleep is for the slot it moved — never another (a later night's) after a delay
+        bound = next((e for e in plans if e.entry_id == state.sleep_requested_slot and e.sleep_slot), None)
+        bound_span = None if bound is None else plan_span(bound, zone)
+        if bound is not None and bound_span is not None and bound_span[1] > now:
+            out.append(Transition(Step.FALL, entry=bound, how=FellBy.TOOL))
+            return out
     if span is not None and span[0] <= now < span[1]:
         woken = state.woken_at is not None and state.woken_at >= span[0]
         quiet_since = max((t for t in (state.woken_at, last_activity_at) if t is not None), default=None)

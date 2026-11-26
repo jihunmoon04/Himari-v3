@@ -1411,9 +1411,12 @@ class InMemoryData:
         entries = self._plans(principal, persona_id)
         before = None if plan.entry_id is None else rules.live_plan_of(self._live_entry(principal, plan.entry_id),
                                                                         persona_id)
+        asleep_in = before is not None and any(  # character-day second review 2: HIMARI sleeps in it now
+            owner == principal and s.asleep and s.slot_id == before.entry_id
+            for owner, s in self._store.sleeps.values())
         plan = rules.check_plan_limits(plan, before, [e for e in entries if e.kind is LifeKind.PLAN],
                                        [e for e in entries if e.kind is LifeKind.ARC], origin=origin, zone=where,
-                                       now=now)
+                                       now=now, asleep_in=asleep_in)
         return rules.planned_entry(persona_id, plan, before, origin, now), before is None
 
     def _keep_planned(self, principal: PrincipalId, planned: tuple[LifeEntry, bool]) -> LifeEntry:
@@ -1456,8 +1459,9 @@ class InMemoryData:
                                         change.at), False)
         state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
 
-        def keep() -> LifeEntry | None:
-            self._store.day_states[(principal, persona_id)] = replace(state, sleep_requested_at=change.at)
+        def keep() -> LifeEntry | None:  # second review 1: the request bound to the slot it moved
+            self._store.day_states[(principal, persona_id)] = replace(state, sleep_requested_at=change.at,
+                                                                      sleep_requested_slot=slot.entry_id)
             return slot if made is None else self._keep_planned(principal, made)
 
         return keep
@@ -1831,6 +1835,7 @@ class InMemoryData:
                    default=None)
 
     async def end_sleep(self, principal: PrincipalId, sleep_id: int, *, at: datetime, how: WokeBy) -> SleepRecord:
+        rules.check_wake_at(self._open(principal, sleep_id), at)
         sleep = replace(self._open(principal, sleep_id), woke_at=at, how_woke=WokeBy(how))
         self._store.sleeps[sleep.sleep_id] = (principal, sleep)
         return sleep

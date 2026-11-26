@@ -250,6 +250,8 @@ class DayKeeper:
                 return None
             now = self._clock()
             plans = await self._plans(principal, persona_id, now)
+            if await self._woke_on_time(principal, sleep, plans, now):
+                return None  # its slot had ended before this came: it is met awake
             state = await self._data.read_day_state(principal, persona_id)
             view = day.sleep_view(now, day.tonight(plans, now, self._zone), sleep, state, self._zone)
             answer = day.answer_message(view, sleep, now)
@@ -262,6 +264,20 @@ class DayKeeper:
             self._tell(principal, SleepState.HALF_ASLEEP if answer is AsleepAnswer.MUMBLE
                        else SleepState.AWAKE if answer is AsleepAnswer.WAKE else SleepState.ASLEEP)
             return answer
+
+    async def _woke_on_time(self, principal: PrincipalId, sleep: SleepRecord, plans: Sequence[LifeEntry],
+                            now: datetime) -> bool:
+        """§5.2, second review 3: an open sleep whose slot ended before the keeper's next look woke at that end —
+        recorded so before a message or a poke is counted against it (or a turn reads it); whether it did."""
+        if not sleep.asleep:
+            return False
+        ends = day.wakes_at(plans, sleep, self._zone)
+        if now < ends:
+            return False
+        await self._data.end_sleep(principal, sleep.sleep_id, at=ends, how=WokeBy.SCHEDULE)
+        log.info("HIMARI woke for %s (its slot had ended)", principal)
+        self._tell(principal, SleepState.AWAKE)
+        return True
 
     async def _woken(self, principal: PrincipalId, persona_id: int, sleep: SleepRecord, plans: Sequence[LifeEntry],
                      state: DayState, now: datetime) -> None:
@@ -280,11 +296,14 @@ class DayKeeper:
 
     async def ensure_slots(self, principal: PrincipalId) -> None:
         """§4.2: tonight's and the next night's sleep slots, placed now when missing (the keeper's rule, on first
-        need: a turn of the day session starts with them)."""
+        need: a turn of the day session starts with them); an overdue scheduled wake recorded first."""
         async with self._lock(principal):
             persona_id = await self._persona(principal)
             now = self._clock()
             plans = await self._plans(principal, persona_id, now)
+            sleep = await self._data.current_sleep(principal, persona_id)
+            if sleep is not None:
+                await self._woke_on_time(principal, sleep, plans, now)
             night = day.current_night(now.astimezone(self._zone))
             for wanted in (night, night + timedelta(days=1)):
                 if day.slot_of_night(plans, wanted, self._zone) is None:
@@ -370,7 +389,8 @@ class DayKeeper:
             await self._data.open_sleep(principal, persona_id, at=now, how=transition.how,
                                         slot_id=None if transition.entry is None else transition.entry.entry_id)
             await self._data.write_day_state(principal, dataclasses.replace(
-                await self._data.read_day_state(principal, persona_id), sleep_requested_at=None))
+                await self._data.read_day_state(principal, persona_id), sleep_requested_at=None,
+                sleep_requested_slot=None))
             log.info("HIMARI fell asleep for %s (%s)", principal, transition.how.value)
             if self.on_asleep is not None:
                 self.on_asleep(principal)

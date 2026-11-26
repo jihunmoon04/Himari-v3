@@ -26,6 +26,7 @@ from himari.data.api import (
     SLEEP_ENDS_FROM,
     PlanKind,
     PlanWrite,
+    SleepRecord,
     night_of,
     plan_span,
     PERSONA_FIELDS,
@@ -1096,6 +1097,12 @@ def check_plan_ref(plan_id: object) -> bool:
     return plan_id is None or (isinstance(plan_id, int) and not isinstance(plan_id, bool) and plan_id > 0)
 
 
+def check_wake_at(sleep: SleepRecord, at: object) -> None:
+    """character-day §5.1: a sleep ends at or after it began (INVALID_ARGUMENT)."""
+    if not isinstance(at, datetime) or at < sleep.fell_at:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a sleep ends at or after it began")
+
+
 def check_slot_ref(slot_id: object) -> int | None:
     """character-day §5.1: the sleep slot a sleep is in — None or an entry id (INVALID_ARGUMENT)."""
     if not check_plan_ref(slot_id):
@@ -1325,15 +1332,23 @@ def _uncovered(start: datetime, end: datetime, plans: Sequence[LifeEntry], zone:
 
 
 def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence[LifeEntry],
-                      arcs: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo, now: datetime) -> PlanWrite:
+                      arcs: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo, now: datetime,
+                      asleep_in: bool = False) -> PlanWrite:
     """§4.2, §4.4: a checked slot (``check_plan_write``) against the persona's schedule — ``before`` the live slot
     it changes (None: a new one), ``plans`` every plan of the persona (live or not), ``arcs`` its arcs — as
-    ``origin`` writes it at ``now``; the write as kept (a sleep slot stays one), else PLAN_REFUSED. The keeper
-    (WRITER) places and adjusts sleep slots with the night's start and one a night only."""
+    ``origin`` writes it at ``now``; the write as kept (a sleep slot stays one and keeps its text: only its times
+    move), else PLAN_REFUSED. The keeper (WRITER) places and adjusts sleep slots with the night's start and one a
+    night only. ``asleep_in``: HIMARI sleeps in ``before`` now — its end never moves before now (a wake never
+    comes before the fall)."""
     local = now.astimezone(zone)
     start, end = _span(plan.day, plan.time_of_day, plan.minutes, zone)
     if before is not None and (before.plan_kind is PlanKind.SLEEP) != (plan.kind is PlanKind.SLEEP):
         raise _refused("A sleep slot stays a sleep slot, and no other slot becomes one.")
+    if plan.kind is PlanKind.SLEEP and before is not None:
+        plan = dataclasses.replace(plan, text=before.text)  # character-day second review 7: moved, times only
+        if asleep_in and end < now:
+            raise _refused(f"HIMARI is asleep in this slot now; its end can only move to now ({local:%H:%M}) or "
+                           "later.")
     if plan.kind is PlanKind.SLEEP:
         night = night_of(start)
         if night is None:
@@ -1370,7 +1385,9 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
         return plan
     if end <= now:
         raise _refused(f"That time is already past (it is {local:%H:%M} now).")
-    if plan.kind is PlanKind.TOGETHER and before is None and origin is not LifeOrigin.HIMARI:
+    # second review 7: no other slot becomes one either (a together slot stays one when moved)
+    if plan.kind is PlanKind.TOGETHER and origin is not LifeOrigin.HIMARI and (
+            before is None or before.plan_kind is not PlanKind.TOGETHER):
         raise _refused("Only HIMARI makes a together slot, when it sets a time with you in a conversation: ask it "
                        "there, or add the slot as its own.")
     if plan.kind is PlanKind.WORK and not any(a.entry_id == plan.arc_id and a.arc_open for a in arcs):
@@ -1435,8 +1452,9 @@ def sleep_now(plans: Sequence[LifeEntry], *, zone: tzinfo, now: datetime,
               reason: str | None) -> tuple[LifeEntry, PlanWrite | None]:
     """§4.3, §5.2 (go_to_sleep): tonight's sleep slot and the change that makes it start now (rounded up to ten
     minutes, its end kept within the limits) — None when it is under way already. The slot is only moved, never
-    made (the keeper places the night's on first need, §4.2). PLAN_REFUSED outside the night's start (21:00 to
-    05:00), with no slot tonight, or when a slot of the night would be covered."""
+    made (the keeper places the night's on first need, §4.2); the request is bound to it (the keeper sleeps in no
+    other). PLAN_REFUSED outside the night's start (21:00 to 05:00), with no slot tonight or one already over,
+    or when a slot of the night would be covered."""
     local = now.astimezone(zone)
     night = night_of(local)
     if night is None:
@@ -1446,6 +1464,8 @@ def sleep_now(plans: Sequence[LifeEntry], *, zone: tzinfo, now: datetime,
         raise _refused("Tonight has no sleep slot yet (no room was left for one): move or cancel a slot of the "
                        "night first.")
     span = plan_span(slot, zone)
+    if span is not None and span[1] <= local:  # second review 1: never the next night's for an ended one
+        raise _refused(f"Tonight's sleep slot is over {_slot_words(slot, zone)}; you are up for the day.")
     if span is not None and span[0] <= local:
         return slot, None  # its time came already (it was woken): it only sleeps again
     start = _ceil_ten(local)

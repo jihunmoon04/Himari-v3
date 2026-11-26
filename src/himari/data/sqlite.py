@@ -871,6 +871,7 @@ CREATE TABLE day_state (
     woken_at TEXT,
     last_closing_at TEXT,
     before TEXT,
+    sleep_requested_slot INTEGER,
     PRIMARY KEY (owner, persona_id)
 ) STRICT;
 ALTER TABLE life_writes ADD COLUMN conversation_id TEXT;
@@ -2839,8 +2840,11 @@ class SqliteData:
         before = None
         if plan.entry_id is not None:
             before = rules.live_plan_of(self._live_entry(tx, principal, plan.entry_id), persona_id)
+        asleep_in = before is not None and tx.one(  # character-day second review 2: HIMARI sleeps in it now
+            "SELECT 1 FROM sleeps WHERE owner=? AND slot_id=? AND woke_at IS NULL", principal,
+            before.entry_id) is not None
         plan = rules.check_plan_limits(plan, before, plans, [e for e in entries if e.kind is LifeKind.ARC],
-                                       origin=origin, zone=where, now=now)
+                                       origin=origin, zone=where, now=now, asleep_in=asleep_in)
         made = rules.planned_entry(persona_id, plan, before, origin, now)
         return self._new_life(tx, principal, made) if before is None else self._rewrite_life(tx, principal, made)
 
@@ -2877,8 +2881,9 @@ class SqliteData:
             rules.check_himari_count(plans, slot.entry_id, zone, change.at)
             made = self._rewrite_life(tx, principal, rules.planned_entry(
                 persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI, change.at))
-        state = self._day_state(tx, principal, persona_id)
-        self._put_day_state(tx, principal, dataclasses.replace(state, sleep_requested_at=change.at))
+        state = self._day_state(tx, principal, persona_id)  # second review 1: bound to the slot it moved
+        self._put_day_state(tx, principal, dataclasses.replace(state, sleep_requested_at=change.at,
+                                                               sleep_requested_slot=slot.entry_id))
         return made
 
     async def write_plan(self, principal: PrincipalId, persona_id: int, plan: PlanWrite, *, origin: LifeOrigin,
@@ -3274,19 +3279,22 @@ class SqliteData:
         if row is None:
             return DayState(persona_id)
         return DayState(persona_id, _moment(row["sleep_requested_at"]), _moment(row["woken_at"]),
-                        _moment(row["last_closing_at"]), codec.day_before_from(row["before"]))
+                        _moment(row["last_closing_at"]), codec.day_before_from(row["before"]),
+                        None if row["sleep_requested_slot"] is None else int(row["sleep_requested_slot"]))
 
     @staticmethod
     def _put_day_state(tx: _Tx, principal: PrincipalId, state: DayState) -> None:
         def stamp(moment: datetime | None) -> str | None:
             return None if moment is None else _timestamp(moment)
 
-        tx.execute("INSERT INTO day_state (owner, persona_id, sleep_requested_at, woken_at, last_closing_at, before)"
-                   " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (owner, persona_id) DO UPDATE SET"
+        tx.execute("INSERT INTO day_state (owner, persona_id, sleep_requested_at, woken_at, last_closing_at, before,"
+                   " sleep_requested_slot) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (owner, persona_id) DO UPDATE SET"
                    " sleep_requested_at=excluded.sleep_requested_at, woken_at=excluded.woken_at,"
-                   " last_closing_at=excluded.last_closing_at, before=excluded.before",
+                   " last_closing_at=excluded.last_closing_at, before=excluded.before,"
+                   " sleep_requested_slot=excluded.sleep_requested_slot",
                    principal, rules.check_life_persona(state.persona_id), stamp(state.sleep_requested_at),
-                   stamp(state.woken_at), stamp(state.last_closing_at), codec.day_before(state.before))
+                   stamp(state.woken_at), stamp(state.last_closing_at), codec.day_before(state.before),
+                   rules.check_slot_ref(state.sleep_requested_slot))
 
     @staticmethod
     def _sleep_row(tx: _Tx, principal: PrincipalId, sleep_id: object) -> SleepRecord:
@@ -3319,8 +3327,10 @@ class SqliteData:
     async def end_sleep(self, principal: PrincipalId, sleep_id: int, *, at: datetime, how: WokeBy) -> SleepRecord:
         how = WokeBy(how)
         with self._tx() as tx:
-            if not self._sleep_row(tx, principal, sleep_id).asleep:
+            sleep = self._sleep_row(tx, principal, sleep_id)
+            if not sleep.asleep:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"sleep {sleep_id} ended already")
+            rules.check_wake_at(sleep, at)
             tx.execute("UPDATE sleeps SET woke_at=?, how_woke=? WHERE sleep_id=?", _timestamp(at), how.value, sleep_id)
             return self._sleep_row(tx, principal, sleep_id)
 

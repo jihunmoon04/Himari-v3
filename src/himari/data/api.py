@@ -2689,14 +2689,16 @@ class DayBefore(DeepFrozen):
 @dataclass(frozen=True)
 class DayState(DeepFrozen):
     """§18.2: the keeper's small state per principal and persona: go_to_sleep asked (applied when the turn's
-    job ends), when the user last woke it (it sleeps again after DOZE_MINUTES of quiet in its slot), the last
-    closing (§6) and what the next day session is handed (§3.3)."""
+    job ends) for the sleep slot it moved (``sleep_requested_slot``: only that slot is slept in for it), when the
+    user last woke it (it sleeps again after DOZE_MINUTES of quiet in its slot), the last closing (§6) and what the
+    next day session is handed (§3.3)."""
 
     persona_id: int
     sleep_requested_at: datetime | None = None
     woken_at: datetime | None = None
     last_closing_at: datetime | None = None
     before: DayBefore | None = None
+    sleep_requested_slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2728,7 +2730,8 @@ class SleepStore(Protocol):
         ...
 
     async def end_sleep(self, principal: PrincipalId, sleep_id: int, *, at: datetime, how: WokeBy) -> SleepRecord:
-        """It wakes. NOT_FOUND: no such sleep; INVALID_STATE_TRANSITION: it ended already."""
+        """It wakes. NOT_FOUND: no such sleep; INVALID_STATE_TRANSITION: it ended already; INVALID_ARGUMENT: ``at``
+        before it fell asleep (a wake never precedes its fall)."""
         ...
 
     async def count_wake(self, principal: PrincipalId, sleep_id: int, *, count: int, at: datetime,
