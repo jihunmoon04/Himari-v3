@@ -55,7 +55,14 @@ export const choosePersona = (personaId: number | null, revision: number) =>
 // day, decided by the world (character-mind §7: its day and time)
 export type LifeKind = "fact" | "plan" | "diary" | "arc" | "work" | "thought" | "event";
 export type ThoughtAbout = "user" | "self" | "work" | "intent";
-export type LifeOrigin = "writer" | "conversation" | "user"; // the story writer, a conversation, the user
+// the story writer, a conversation, the user; himari: HIMARI itself in a day session, by its schedule Tool
+// (character-day §4.1)
+export type LifeOrigin = "writer" | "conversation" | "user" | "himari";
+// character-day §4.1: a schedule slot's kind (sleep: the night's sleep; work: a project's, with arc_id; together: a
+// time agreed with the user; own: something on its own), and a slot no longer alive (cancelled by HIMARI, or a
+// together slot the user did not come to)
+export type PlanKind = "sleep" | "work" | "together" | "own";
+export type PlanState = "cancelled" | "missed";
 
 export interface LifeEntry {
   id: number;
@@ -83,11 +90,38 @@ export interface LifeEntry {
   // character-mind §5.2: a kept thought's subject and when it stops being told (it is only deleted, never edited)
   about?: ThoughtAbout | null;
   expires_at?: string | null;
+  // character-day §4.1: a plan is a schedule slot — its length (5..720 minutes), kind, state (null: alive) and why
+  // HIMARI moved or cancelled it
+  minutes?: number | null;
+  plan_kind?: PlanKind | null;
+  plan_state?: PlanState | null;
+  reason?: string | null;
+}
+
+/** character-day §5.1: HIMARI's sleep now (the server keeps it), for the persona in use. */
+export type SleepState = "awake" | "drowsy" | "asleep" | "half_asleep";
+export interface SleepView {
+  state: SleepState;
+  deep?: boolean | null; // asleep: in its first three hours (hard to wake)
+  minutes_to_sleep?: number | null; // awake or drowsy: until tonight's sleep slot starts
+  tonight?: { day: string; time: string; minutes: number } | null; // tonight's sleep slot
+}
+
+/** character-day §5.1: one night's sleep, as the sleep log keeps it. */
+export interface SleepRecord {
+  fell_at: string;
+  how_fell: "schedule" | "tool" | "missed"; // its sleep slot came, it went early by itself, waiting for a promise
+  woke_at: string | null; // null: still asleep
+  how_woke: "schedule" | "user" | null; // its slot ended, the user woke it
+  messages: number; // messages it got while asleep
+  mumbles: number;
+  closed_day: boolean; // whether this sleep closed the day (§6)
 }
 
 /** HIMARI's mood while it is told (character-state §2): a reply's last mood or the story writer's, with why. */
 export interface HimariMood { mood: string; set_at: string; source: "reply" | "writer"; reason: string | null }
-/** What HIMARI is doing now (character-state §3): asleep in the quiet hours, or a timed plan under way. */
+/** What HIMARI is doing now (character-state §3): asleep (character-day §4.5: from its sleep state), or a slot of
+ *  its schedule under way. */
 export interface HimariNow { asleep: boolean; doing: string | null; since: string | null }
 
 export interface Life {
@@ -105,8 +139,21 @@ export interface Life {
   work?: { running: boolean; next: LifeEntry | null };
   // character-mind §8: the model HIMARI's self runs (the day's review) use now, and why; null: no life runs
   mind?: { model: string; reason: string } | null;
+  // character-day §12: HIMARI's sleep now (null: the life is off) and its last 14 sleeps, newest first
+  sleep?: SleepView | null;
+  sleeps?: SleepRecord[];
   limits: { facts: number; chars: number; diary_chars: number; arc_chars?: number; arc_title_chars?: number;
     work_chars?: number; summary_chars?: number; event_chars?: number };
+}
+
+/** character-day §18.11: a schedule slot the owner writes (``origin=user``). ``arc_id``: a work slot's project. */
+export interface PlanInput {
+  day: string; // YYYY-MM-DD, the day it starts (a slot over midnight keeps its start's day)
+  time: string; // HH:MM
+  minutes: number;
+  plan_kind: PlanKind;
+  text: string;
+  arc_id?: number | null;
 }
 
 export const readLife = () => get<Life>("/api/life");
@@ -121,6 +168,12 @@ export const editLife = (id: number, text: string, revision: number, title?: str
     text, revision, ...(title === undefined ? {} : { title }), ...(summary === undefined ? {} : { summary }),
   });
 export const deleteLife = (id: number, revision: number) => del<void>(`/api/life/${id}?revision=${revision}`);
+/** character-day §18.11: a schedule slot written or edited (moved); one past the limits (the sleep slot's range, an
+ * overlap with it, seven days) is refused with ``plan_refused`` and says why. ``personaId`` as for a fact. */
+export const addPlan = (plan: PlanInput, personaId: number | null) =>
+  post<LifeEntry>("/api/life/plans", { ...plan, persona_id: personaId });
+export const editPlan = (id: number, plan: PlanInput, revision: number) =>
+  put<LifeEntry>(`/api/life/plans/${id}`, { ...plan, revision });
 
 // The bond (character-bond §1): what is settled between the user and the persona in use, how close the two are, and
 // the memories' timeline (the bond's entries with the newest episodes).

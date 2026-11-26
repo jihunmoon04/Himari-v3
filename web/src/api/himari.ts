@@ -27,7 +27,14 @@ export interface ConversationSummary {
   created_at: string;
   last_activity_at: string;
   last_sequence: number;
+  // character-day §3: a day session's date (YYYY-MM-DD, the day it opened; null for any other conversation), and
+  // whether it is closed (read only, §3.2)
+  day_session?: string | null;
+  closed?: boolean;
 }
+
+/** character-day §5.5: how HIMARI, asleep, took a message — no answer, a mumble, or woken by it. */
+export type AsleepAnswer = "none" | "mumble" | "wake";
 
 export interface Job {
   running: boolean;
@@ -84,7 +91,8 @@ export interface MemoryView {
 export interface EventView {
   sequence: number;
   // user_message | assistant_final | assistant_tool_calls | tool_result | wake | wake_thought (character-mind §3.3:
-  // a free wake HIMARI thought about and let pass; its thought is the owner's) | …
+  // a free wake HIMARI thought about and let pass; its thought is the owner's) | diary (character-day §7: the diary
+  // HIMARI wrote in a day session's context, kept out of the conversation; the owner's) | …
   kind: string;
   created_at: string;
   text?: string;
@@ -101,6 +109,7 @@ export interface EventView {
   presented_files?: FileView[]; // a Tool result's files given to the user
   images?: FileView[]; // and its images
   memory?: MemoryView | null; // what a memory call changed
+  while_asleep?: AsleepAnswer | null; // character-day §5.6: a user message HIMARI got asleep, and how (the owner's)
 }
 
 export interface EventsPage {
@@ -120,8 +129,11 @@ export const createConversation = () => post<ConversationSummary>("/api/conversa
 export const readConversation = (id: string) => get<ConversationDetail>(`/api/conversations/${enc(id)}`);
 export const readEvents = (id: string, after: number, limit = 500) =>
   get<EventsPage>(`/api/conversations/${enc(id)}/events?after=${after}&limit=${limit}`);
+/** character-day §18.11: a message HIMARI got asleep and does not answer comes back as ``{"asleep": "none"}`` (202,
+ *  no job); one sent to a closed day session is refused (409 ``day_closed``). */
 export const sendMessage = (id: string, text: string, attachments: string[] = []) =>
-  post<Job>(`/api/conversations/${enc(id)}/messages`, { text, ...(attachments.length ? { attachments } : {}) });
+  post<Partial<Job> & { asleep?: AsleepAnswer }>(`/api/conversations/${enc(id)}/messages`,
+    { text, ...(attachments.length ? { attachments } : {}) });
 export const cancelJob = (id: string) => post<Job>(`/api/conversations/${enc(id)}/cancel`);
 export const resumeTurn = (id: string) => post<Job>(`/api/conversations/${enc(id)}/resume`);
 export const renameConversation = (id: string, title: string | null) =>
