@@ -1167,9 +1167,15 @@ class Application:
         """§3.2, §6: the day session is fenced for its closing (or this process closed it) — takes no new work."""
         return self.keeper is not None and self.keeper.closing(scope)
 
+    def _check_day_fence(self, scope: TrustedScope) -> None:
+        """§6: DayClosed while the keeper fences this day session for its closing (or closed it), no await."""
+        if self.day_closing(scope):
+            raise DayClosed(scope.conversation_id)
+
     async def check_day_open(self, scope: TrustedScope) -> ConversationSummary:
         """§3.2: the Conversation (authorized like any read), unless it is a day session closed or closing: then
-        DayClosed (409 ``day_closed``), nothing written. The message, resume and compact entry points ask first."""
+        DayClosed (409 ``day_closed``), nothing written. The message, resume, compact and upload entry points ask
+        first."""
         summary = await self.data.read_conversation(scope)
         if summary.day_session is not None and (summary.closed_at is not None or self.day_closing(scope)):
             raise DayClosed(scope.conversation_id)
@@ -1770,11 +1776,13 @@ class Application:
             raise FileNameRefused(name[:40])
         cleaned = clean_file_name(name)
         await self._check_folder(scope)  # authorizes; FilesUnavailable without a place for uploads
+        await self.check_day_open(scope)  # character-day §3.2: before any byte is read
         if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         blob = await self.data.blobs.put(scope.principal_id, chunks, self.file_max_bytes)
         image = await self.data.blobs.prepare_image(scope.principal_id, blob, self.views)  # V3-P67 §3.1
         async with self._exclusive(scope.conversation_id):
+            self._check_day_fence(scope)  # and again as it is staged (Data refuses a closed one itself)
             return await self.data.stage_upload(scope, blob, cleaned, clean_media_type(media_type, cleaned), image)
 
     @property
@@ -1804,7 +1812,8 @@ class Application:
         came. A body that does not start as one is refused before it is
         stored (PR #126 review C1); one whose header cannot be read after is
         left unreferenced, and the cleanup drops it."""
-        await self.data.read_conversation(scope)  # 404 for a foreign id, before any byte is read
+        # 404 for a foreign id, before any byte is read; character-day §3.2: 409 for a closed (or closing) day
+        await self.check_day_open(scope)
         if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         body = await _screen_body(chunks)
@@ -1815,6 +1824,7 @@ class Application:
             raise ScreenRefused("not a PNG or JPEG image")
         name = f"screen-{datetime.now(UTC):%Y%m%d-%H%M%S}.{extension}"
         async with self._exclusive(scope.conversation_id):
+            self._check_day_fence(scope)  # and again as it is staged (Data refuses a closed one itself)
             return await self.data.stage_upload(scope, blob, name, image.image_type or "", image)
 
     async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),

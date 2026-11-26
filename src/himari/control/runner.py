@@ -172,8 +172,10 @@ class BackgroundRunner:
 
     async def submit(self, scope: TrustedScope, message: UserMessage | None) -> JobStatus:
         self._check_open(scope)
-        if message is None:
-            self._check_day(scope)  # a resume starts below with no await: nothing closes the day between
+        # character-day §6: a day closing or closed takes no work — a resume starts below with no await (nothing
+        # closes the day between); a message is refused before it cancels a wake the fence lets settle (second
+        # review 9; the Driver's admission checks again, durably)
+        self._check_day(scope)
         if message is not None:
             await self._yield_wake(scope)
         if self._running_in(scope.conversation_id):

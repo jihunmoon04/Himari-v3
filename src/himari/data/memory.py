@@ -1084,7 +1084,7 @@ class InMemoryData:
 
     async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
                            image: ImageSetup = NO_IMAGE) -> FileRecord:
-        conv = self._conv(scope)
+        conv = self._writable(scope)  # character-day §3.2: nothing staged in a closed day
         if sum(1 for f in conv.files if f.attached_at is None and f.origin is FileOrigin.UPLOAD) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         return self._new_file(conv, FileOrigin.UPLOAD, None, blob, name, media_type, image)

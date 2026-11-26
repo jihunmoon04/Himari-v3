@@ -6,6 +6,7 @@ sessions (one open at a time, closed when trashed, read at once by memory passes
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -42,6 +43,11 @@ from himari.data.api import (
 ALICE = SCOPE.principal_id
 ZONE = "Asia/Seoul"
 NOW = datetime(2026, 11, 26, 13, 0, tzinfo=UTC)  # 22:00 in Seoul, a Thursday: tonight is the night of 11-26
+
+
+async def chunks(*parts: bytes) -> AsyncIterator[bytes]:
+    for part in parts:
+        yield part
 
 
 def refused(code: DataErrorCode, match: str = "") -> pytest.RaisesExc[DataError]:
@@ -438,12 +444,15 @@ def test_the_closing_is_one_step_and_a_closed_day_takes_no_message_run_or_wake()
         assert (await data.current_sleep(ALICE, 1)).closed_day  # type: ignore[union-attr]
         state = await data.read_day_state(ALICE, 1)
         assert (state.last_closing_at, state.before) == (at, before)
+        blob = await data.blobs.put(ALICE, chunks(b"screen"), 100)
         for write in (lambda: data.append_event(scope, user("늦었다")),
                       lambda: data.prepare_run(scope, preparation()),
-                      lambda: data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1")):
+                      lambda: data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1"),
+                      lambda: data.stage_upload(scope, blob, "screen.png", "image/png")):  # second review 8
             with refused(DataErrorCode.DAY_CLOSED):
                 await write()
         assert len(await data.read_events(scope)) == 1  # read as it was
+        assert await data.count_staged(scope) == 0
         other = await data.create_conversation(ALICE)  # any other conversation is written as before
         await data.append_event(TrustedScope(ALICE, other), user("여기는"))
 

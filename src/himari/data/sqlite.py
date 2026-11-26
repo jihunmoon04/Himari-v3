@@ -2363,7 +2363,7 @@ class SqliteData:
     async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
                            image: ImageSetup = NO_IMAGE) -> FileRecord:
         with self._tx() as tx:
-            tx.authorized(scope)
+            tx.writable(scope)  # character-day §3.2: nothing staged in a closed day
             if self._staged(tx, scope) >= MAX_STAGED_UPLOADS:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
             return self._stage(tx, scope, FileOrigin.UPLOAD, None, blob, name, media_type, image)

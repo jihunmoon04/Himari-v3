@@ -687,7 +687,8 @@ class FileCatalog(Protocol):
     async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
                            image: ImageSetup = NO_IMAGE) -> FileRecord:
         """A staged upload (§4.2). LIMIT_EXCEEDED at MAX_STAGED_UPLOADS;
-        BLOB_MISSING if the blob (or the image's copy) is gone or expired."""
+        BLOB_MISSING if the blob (or the image's copy) is gone or expired;
+        DAY_CLOSED in a closed day session (character-day §3.2: only read)."""
         ...
 
     async def stage_tool_file(self, scope: TrustedScope, call: CallRef, blob: StoredBlob, name: str,

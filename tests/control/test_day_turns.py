@@ -261,9 +261,17 @@ def test_a_closed_or_closing_day_takes_no_message_wake_resume_or_compaction() ->
         assert await rt.data.read_events(SCOPE) == () and gate.asked == []  # type: ignore[attr-defined]
         runner = BackgroundRunner(rt.driver)  # type: ignore[attr-defined]
         runner.day_closing = lambda scope: True
-        for submitted in (lambda: runner.submit(SCOPE, None), lambda: runner.submit_compaction(SCOPE)):
+        yielded: list[object] = []
+
+        async def yield_wake(scope: object) -> None:  # second review 9: a running wake would be cancelled here
+            yielded.append(scope)
+
+        runner._yield_wake = yield_wake  # type: ignore[method-assign]  # noqa: SLF001
+        for submitted in (lambda: runner.submit(SCOPE, None), lambda: runner.submit_compaction(SCOPE),
+                          lambda: runner.submit(SCOPE, said("늦었다"))):
             with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
                 await submitted()
         assert not runner.status(SCOPE).running and adapter.sent == []
+        assert yielded == []  # a fenced day's wake is left to settle: the message never cancels it
 
     asyncio.run(scenario())
