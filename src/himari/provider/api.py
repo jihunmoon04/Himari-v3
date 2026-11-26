@@ -224,6 +224,21 @@ class ProviderAdapter(Protocol):
         ...
 
 
+def retryable(error_code: str | None) -> bool:
+    """character-day §10, §18.4: a failure with no answer at all that another model may well not share — the
+    connection never made (``connect_failed:*``), HTTP 408, 429 or 5xx, a provider's error before any byte
+    (``provider_error_*``). Not 400, 401, 402, 403 (ours or the account's: the backup uses the same key), not an
+    answer cut short or out of shape (those are never NativeNoResponse, or are ours to fix)."""
+    if not error_code:
+        return False
+    if error_code.startswith(("connect_failed:", "provider_error_")):
+        return True
+    if error_code.startswith("http_"):
+        status = error_code.removeprefix("http_")
+        return status in ("408", "429") or (len(status) == 3 and status.startswith("5") and status.isdigit())
+    return False
+
+
 def validate_tool_calls(calls: Sequence[ToolCall]) -> None:
     """Shared normalization rule for all adapters: non-empty, unique call ids,
     ordinals exactly ``0..n-1`` in listed order."""

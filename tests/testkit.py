@@ -196,6 +196,14 @@ class NoWakes:
         return result
 
 
+def accepted(scope: TrustedScope, message: UserMessage, sequence: int = 1) -> ConversationEvent:
+    """What a fake driver's ``accept`` returns: the message as an Event (character-day §18.4)."""
+    from himari.common import EventId
+    from himari.data.api import EventKind
+    return ConversationEvent(EventId(f"evt_{sequence}"), scope.conversation_id, sequence, EventKind.USER_MESSAGE,
+                             message, 1, datetime.now(UTC))
+
+
 def user(text: str) -> UserMessage:
     return UserMessage(blocks=(TextBlock(text),))
 

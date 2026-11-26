@@ -213,6 +213,7 @@ class WakeKind(Enum):
     ANNIVERSARY = "anniversary"  # character-bond §6: a day to mark together; the model may pass
     WORK_DONE = "work_done"  # character-work §7.1: HIMARI just finished a piece of its work; the model may pass
     TOGETHER = "together"  # character-day §9: a time HIMARI and the user set together has come (``entry_id``)
+    POKE = "poke"  # character-day §5.5, §11: the user poked the sleeping HIMARI on a device and it stirred (§19)
 
 
 @dataclass(frozen=True)

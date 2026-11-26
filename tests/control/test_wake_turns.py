@@ -8,7 +8,7 @@ import asyncio
 from collections.abc import Sequence
 
 import pytest
-from testkit import SCOPE, RecordingTool, calls, final, runtime, user
+from testkit import accepted, SCOPE, RecordingTool, calls, final, runtime, user
 
 from himari.common import TrustedScope
 from himari.control import runner as runner_module
@@ -138,8 +138,9 @@ class WakeDriver:
         return ConversationEvent(EventId("e1"), scope.conversation_id, len(self.wakes), EventKind.WAKE,
                                  Wake(f"wake_{len(self.wakes)}", tuple(reasons), device_id), 1, datetime.now(UTC))
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
         self.accepted.append(message)
+        return accepted(scope, message)
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
                      progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:

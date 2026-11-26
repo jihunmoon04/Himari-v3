@@ -108,20 +108,23 @@ class _Models(ScriptedAdapter):
         return self._models.get(model_id) or super().describe_capabilities(model_id)
 
 
-def test_a_self_run_uses_the_latest_companion_conversations_model_else_the_memory_model(tmp_path: Path) -> None:
-    """character-mind §4.1: the model of the conversation a wake would go to, when it is checked for free
-    wakes; else the memory model, with why."""
+def test_a_self_run_uses_the_day_sessions_model_else_the_default_model(tmp_path: Path) -> None:
+    """character-day §10, §18.7: the model of the day session (where a wake goes) — no free-wake branch any
+    more; with no day session open, the default model, with why."""
     async def scenario() -> None:
         app = await Application.open(tmp_path / "data", _Models(), model_id="standard-model",
                                      models=(("standard-model", None), ("companion-model", None)),
                                      memory_model="memory-model", sandbox=False, cleanup_seconds=None)
         try:
             assert app.life_writer is not None
-            assert await app.mind_model(ME) == MindModel(None, reason="the memory model (no companion conversation)")
-            assert (await app.life_writer.mind_model(ME)).model_id == "memory-model"
-            scope = TrustedScope(ME, await app.create_conversation(ME, initial_model="companion-model"))
-            await app.data.append_event(scope, UserMessage((TextBlock("안녕"),)))
-            assert await app.mind_model(ME) == MindModel("companion-model", None, "the latest conversation's model")
+            assert await app.mind_model(ME) == MindModel(None, reason="the default model (no day session)")
+            assert (await app.life_writer.mind_model(ME)).model_id == "standard-model"
+            other = TrustedScope(ME, await app.create_conversation(ME, initial_model="companion-model"))
+            await app.data.append_event(other, UserMessage((TextBlock("안녕"),)))  # not the day session
+            assert (await app.mind_model(ME)).model_id is None
+            session = await app.day_session(ME)  # opened on the companion's default model
+            assert session is not None
+            assert await app.mind_model(ME) == MindModel("companion-model", None, "the day session's model")
             assert (await app.life_writer.mind_model(ME)).model_id == "companion-model"
         finally:
             await app.close()
@@ -129,15 +132,18 @@ def test_a_self_run_uses_the_latest_companion_conversations_model_else_the_memor
     asyncio.run(scenario())
 
 
-def test_the_remarks_are_the_users_words_in_the_latest_companion_conversation_meanwhile(tmp_path: Path) -> None:
-    """character-mind §4.4: what the user said while HIMARI worked, as text, oldest first."""
+def test_the_remarks_are_the_users_words_in_the_day_session_meanwhile(tmp_path: Path) -> None:
+    """character-mind §4.4, character-day §18.9: what the user said in the day session while HIMARI worked, as
+    text, oldest first."""
     async def scenario() -> None:
         app = await Application.open(tmp_path / "data", _Models(), model_id="standard-model",
                                      models=(("standard-model", None), ("companion-model", None)),
                                      memory_model="memory-model", sandbox=False, cleanup_seconds=None)
         try:
             assert await app.remarks(ME, datetime.now(UTC) - timedelta(hours=1), datetime.now(UTC)) == ()
-            scope = TrustedScope(ME, await app.create_conversation(ME, initial_model="companion-model"))
+            session = await app.day_session(ME)
+            assert session is not None
+            scope = TrustedScope(ME, session.conversation_id)
             before = datetime.now(UTC)
             for said in ("방열판 세 겹은 과하지 않아?", "두 겹이 좋겠어"):
                 await app.data.append_event(scope, UserMessage((TextBlock(said),)))

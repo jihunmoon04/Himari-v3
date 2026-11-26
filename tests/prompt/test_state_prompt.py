@@ -16,6 +16,8 @@ from himari.data.api import (
     LifeOrigin,
     MoodSource,
     PersistedStateBasis,
+    PlanKind,
+    PlanState,
 )
 from himari.prompt.api import (
     BOND_RULE,
@@ -23,6 +25,7 @@ from himari.prompt.api import (
     MOOD_ABOUT,
     MOOD_RULE,
     NOW_ABOUT,
+    SLEEP_RULE,
     TALKING_RULE,
     HimariNow,
     PromptInputs,
@@ -58,22 +61,27 @@ def test_the_mood_is_told_by_name_hours_and_reason() -> None:
     assert himari_mood_data(reply) == {"about": MOOD_ABOUT, "mood": "happy"}
 
 
-def test_what_himari_is_doing_is_a_timed_plan_under_way_else_asleep_in_the_quiet_hours() -> None:
+def test_what_himari_is_doing_is_a_slot_from_its_start_to_its_end_else_asleep_when_its_sleep_says() -> None:
+    """character-day §4.5: a slot's [start, end) (an hour without a length), never its sleep slot or one that no
+    longer stands; asleep only from the sleep (the day session's), never from a clock's quiet hours."""
     plans = (plan(1, "2026-11-25", "도서관에서 공부", "13:30"), plan(2, "2026-11-25", "빵집 들르기", "14:00"),
              plan(3, "2026-11-25", "저녁 산책", "19:00"), plan(4, "2026-11-25", "언젠가 청소", None),
              plan(5, "2026-11-24", "어제 일", "14:00"))
-    assert doing_now(plans, NOW, QUIET) == HimariNow(doing="빵집 들르기", since="14:00")  # the latest start wins
-    assert doing_now(plans, NOW + timedelta(minutes=59), QUIET) == HimariNow(doing="빵집 들르기", since="14:00")
-    assert doing_now(plans, NOW + timedelta(minutes=60), QUIET) is None  # 90 minutes after 14:00 have passed
-    assert doing_now(plans, NOW.replace(hour=12), QUIET) is None  # not started yet
-    assert doing_now((), NOW.replace(hour=23, minute=30), QUIET) == HimariNow(asleep=True)
-    assert doing_now((), NOW.replace(hour=7, minute=59), QUIET) == HimariNow(asleep=True)
-    assert doing_now((), NOW.replace(hour=8, minute=0), QUIET) is None
-    assert doing_now((), NOW.replace(hour=23, minute=30)) is None  # no quiet hours: never asleep
+    assert doing_now(plans, NOW) == HimariNow(doing="빵집 들르기", since="14:00")  # the latest start wins
+    assert doing_now(plans, NOW + timedelta(minutes=29)) == HimariNow(doing="빵집 들르기", since="14:00")
+    assert doing_now(plans, NOW + timedelta(minutes=30)) is None  # its hour ended at 15:00
+    assert doing_now(plans, NOW.replace(hour=12)) is None  # not started yet
+    long = (replace(plan(7, "2026-11-25", "작업", "13:00"), minutes=180, plan_kind=PlanKind.WORK, arc_id=1),)
+    assert doing_now(long, NOW + timedelta(minutes=89)) == HimariNow(doing="작업", since="13:00")  # 16:00 ends it
+    gone = (replace(plans[1], plan_state=PlanState.CANCELLED),
+            replace(plan(8, "2026-11-25", "잠", "14:00"), minutes=480, plan_kind=PlanKind.SLEEP))
+    assert doing_now(gone, NOW) is None  # awake in its sleep slot is not asleep
+    assert doing_now(plans, NOW, asleep=True) == HimariNow(asleep=True)
+    assert doing_now((), NOW.replace(hour=23, minute=30)) is None  # no quiet hours: never asleep by the clock
     late = (plan(6, "2026-11-25", "별 보기", "23:30"),)
-    midnight = datetime(2026, 11, 26, 0, 30, tzinfo=SEOUL)
-    assert doing_now(late, midnight, QUIET) == HimariNow(doing="별 보기", since="23:30")  # a plan wins over sleep
-    assert doing_now(late, midnight.astimezone(UTC), QUIET) is None  # read in now's zone: 15:30 UTC
+    midnight = datetime(2026, 11, 26, 0, 29, tzinfo=SEOUL)
+    assert doing_now(late, midnight) == HimariNow(doing="별 보기", since="23:30")
+    assert doing_now(late, midnight.astimezone(UTC)) is None  # read in now's zone: 15:29 UTC
     assert himari_now_data(HimariNow(asleep=True)) == {"about": NOW_ABOUT, "asleep": True}
     assert himari_now_data(HimariNow(doing="빵집 들르기", since="14:00")) == {
         "about": NOW_ABOUT, "doing": "빵집 들르기", "since": "14:00"}
@@ -111,7 +119,8 @@ def test_the_mood_rule_follows_the_bond_rule_and_the_life_rule_tells_of_sleep() 
     composed = "\n\n".join(system_text(inputs(LIVED)))
     assert f"{BOND_RULE}\n{MOOD_RULE}\n{TALKING_RULE}" in composed
     assert "do not announce it unasked" in MOOD_RULE and "user's matters come first" in MOOD_RULE
-    assert "himari_now" in LIFE_RULE and "as if just woken" in LIFE_RULE
+    # character-day §8: the asleep half moved to SLEEP_RULE (the day session's)
+    assert "himari_now" in LIFE_RULE and "as if just woken" not in LIFE_RULE and "just woken" in SLEEP_RULE
     without = "\n\n".join(system_text(inputs(SystemSpec(companion=True, proactive=True))))
     assert MOOD_RULE not in without and "himari_mood" not in without and "himari_now" not in without
     told = principle_section(False, life=True)

@@ -45,7 +45,7 @@ from himari.control.api import (
     TurnProgress,
     TurnUsage,
 )
-from himari.data.api import DataError, MessageOrigin, OriginKind, UserMessage, Wake, WakeReason
+from himari.data.api import AsleepAnswer, DataError, MessageOrigin, OriginKind, UserMessage, Wake, WakeReason
 from himari.provider.api import OutputDelta
 
 log = logging.getLogger(__name__)
@@ -161,15 +161,21 @@ class BackgroundRunner:
         if message is not None:
             self._admit(scope.conversation_id)
             try:
-                await self._driver.accept(scope, message)  # durable before anything is reported
+                event = await self._driver.accept(scope, message)  # durable before anything is reported
             finally:
                 self._admit(scope.conversation_id, -1)
             self._tell(lambda listener: listener.accepted(scope))
             if self._running_in(scope.conversation_id):  # cannot happen: accept holds the driver lock
                 raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-        # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
+            asleep = (event.payload.while_asleep if event is not None and isinstance(event.payload, UserMessage)
+                      else None)
+            if asleep is AsleepAnswer.NONE:  # character-day §5.5: HIMARI only stirred — recorded, no job
+                return replace(self.status(scope), asleep=asleep)
+            # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
+            return replace(self._start(scope, lambda s, stop, progress: self._driver.resume(
+                s, stop=stop, progress=progress), "drive", message.origin), asleep=asleep)
         return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress),
-                           "drive", None if message is None else message.origin)
+                           "drive", None)
 
     async def _yield_wake(self, scope: TrustedScope) -> None:
         """V3-P87 §4.3 (the user wins): a running wake job is asked to cancel and

@@ -64,6 +64,7 @@ from himari.bootstrap.application import (
     Application,
     ConnectionGenerationRequired,
     ConversationStillStopping,
+    DayClosed,
     DeleteNotice,
     FileNameRefused,
     LifeChanged,
@@ -129,6 +130,12 @@ from himari.common import (
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
+    AsleepAnswer,
+    PlanKind,
+    PlanWrite,
+    SleepRecord,
+    SleepView,
+    plan_span,
     IMAGE_HEAD_BYTES,
     sniff_image,
     ALREADY_SENT,
@@ -483,6 +490,29 @@ class LifeEditBody(_Body):
     summary: str | None = None  # a work piece's one line; null or left out: kept
 
 
+type PlanKindName = Literal["sleep", "work", "together", "own"]  # PlanKind's values
+
+
+class PlanBody(_Body):  # character-day §18.11: a slot the user writes; the limits are Data's
+    day: str
+    time: str
+    minutes: int
+    plan_kind: PlanKindName
+    text: str
+    arc_id: int | None = None
+    persona_id: int | None  # the persona whose schedule the page showed; null: no persona
+
+
+class PlanEditBody(_Body):  # a slot changed (moved too) from the revision the page read
+    day: str
+    time: str
+    minutes: int
+    plan_kind: PlanKindName
+    text: str
+    arc_id: int | None = None
+    revision: int = Field(ge=1)
+
+
 type BondTagName = Literal["name", "promise", "joke", "first", "date"]  # BondTag's values
 
 
@@ -631,6 +661,9 @@ def summary_view(summary: ConversationSummary) -> dict[str, Any]:
         "created_at": _time(summary.created_at),
         "last_activity_at": _time(summary.last_activity_at),
         "last_sequence": summary.last_sequence,
+        # character-day §18.11: a day session's date (null: an ordinary conversation), and whether it is closed
+        "day_session": summary.day_session,
+        "closed": summary.closed_at is not None,
     }
 
 
@@ -690,6 +723,10 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
             parts.append(f"{'a game' if r.group == 'game' else 'a video'} ended after {_span(r.minutes or 0)}")
         elif r.kind is WakeKind.WORK_DONE:  # character-work §7.1
             parts.append(f"finished a piece of work (w{r.entry_id})")
+        elif r.kind is WakeKind.TOGETHER:  # character-day §9
+            parts.append(f"a time set together came (p{r.entry_id})")
+        elif r.kind is WakeKind.POKE:  # character-day §5.5
+            parts.append("you poked HIMARI in its sleep")
         elif r.kind is WakeKind.ANNIVERSARY:  # character-bond §6
             parts.append(f"{r.days} days together" if r.days is not None else
                          f"{r.years} year{'s' if (r.years or 0) > 1 else ''} together" if r.years is not None else
@@ -721,6 +758,8 @@ def event_view(event: ConversationEvent,
         view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
         # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
         view["origin"] = origin_view(payload.origin)
+        if not device:  # character-day §12, §18.11: received while HIMARI slept, and how (the owner's Web only)
+            view["while_asleep"] = None if payload.while_asleep is None else payload.while_asleep.value
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(drop_thought(payload.blocks) if device else payload.blocks)
         view["display"] = display_view(view["text"])
@@ -780,6 +819,12 @@ def job_view(status: JobStatus) -> dict[str, Any]:
         "stop_requested": None if status.stop_requested is None else status.stop_requested.value,
         "turn_usage": None if status.turn_usage is None else turn_usage_view(status.turn_usage),
     }
+
+
+def sent_view(status: JobStatus) -> dict[str, Any]:
+    """A message's 202 (character-day §18.11): the job, and how a sleeping HIMARI met it (``"none"``: no answer and
+    no job; null: awake)."""
+    return {**job_view(status), "asleep": None if status.asleep is None else status.asleep.value}
 
 
 def turn_usage_view(usage: TurnUsage) -> dict[str, Any]:
@@ -1053,7 +1098,33 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
                  "expires_at": None if entry.expires_at is None else _time(entry.expires_at)}
     elif entry.arc_id is not None:  # a diary: the arc its day moved; a plan: its project (character-work §4)
         view["arc_id"] = entry.arc_id
+    if entry.kind is LifeKind.PLAN:  # character-day §4.1, §18.11: a slot of the schedule
+        view |= {"minutes": entry.minutes, "plan_kind": None if entry.plan_kind is None else entry.plan_kind.value,
+                 "plan_state": None if entry.plan_state is None else entry.plan_state.value, "reason": entry.reason}
     return view
+
+
+def sleep_view_json(view: SleepView | None, zone: ZoneInfo) -> dict[str, Any] | None:
+    """character-day §12, §18.11: HIMARI's sleep now — its state, whether deep, the minutes to its slot while drowsy
+    and tonight's slot (its date, start and length)."""
+    if view is None:
+        return None
+    out: dict[str, Any] = {"state": view.state.value}
+    if view.state.value in ("asleep", "half_asleep"):
+        out["deep"] = view.deep
+    if view.minutes_to_sleep is not None:
+        out["minutes_to_sleep"] = view.minutes_to_sleep
+    if view.tonight is not None:
+        out["tonight"] = {"id": view.tonight.entry_id, "day": view.tonight.day, "time": view.tonight.time_of_day,
+                          "minutes": view.tonight.minutes}
+    return out
+
+
+def sleep_record_view(sleep: SleepRecord) -> dict[str, Any]:
+    """character-day §12: one sleep of the record."""
+    return {"id": sleep.sleep_id, "fell_at": _time(sleep.fell_at), "how_fell": sleep.how_fell.value,
+            "woke_at": _time(sleep.woke_at), "how_woke": None if sleep.how_woke is None else sleep.how_woke.value,
+            "messages": sleep.messages, "mumbles": sleep.mumbles, "closed_day": sleep.closed_day}
 
 
 def wake_thought_view(wake: WakeRecord) -> dict[str, Any]:
@@ -1373,6 +1444,12 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                            "message": "This conversation is being deleted."}}, status_code=409)
         return JSONResponse({"error": {"code": "conflict", "message": "Not possible right now."}}, status_code=409)
 
+    @app.exception_handler(DayClosed)
+    async def day_closed(request: Request, error: DayClosed) -> JSONResponse:
+        """character-day §3.2: a closed day session is only read; nothing was recorded."""
+        return JSONResponse({"error": {"code": "day_closed", "message": "This day is over: talk in today's day "
+                                                                        "session."}}, status_code=409)
+
     @app.exception_handler(ConversationStillStopping)
     async def still_stopping(request: Request, error: ConversationStillStopping) -> JSONResponse:
         return JSONResponse({"error": {"code": "still_stopping",
@@ -1482,6 +1559,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         turn = application.turn
         return {"model": application.model_id,
                 "models": [model_view(m) for m in application.models],
+                # character-day §10: the model a turn falls back to (an answer's model says so); null: none
+                "backup_model": application.backup_model,
                 "context_budget": application.context_tokens,  # the default model's
                 "trash_days": application.trash_days,  # V3-P65: then a trashed conversation is deleted for good
                 "images": application.images_available,  # V3-P67 §3.1: model copies can be made here
@@ -1552,7 +1631,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             if summary.last_sequence else ()
         continuable = (not job.running and bool(last)
                        and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls")
-                       and not _legacy_question(last[-1]))
+                       and not _legacy_question(last[-1])
+                       # character-day §5.5: a message a sleeping HIMARI met with no answer waits for none
+                       and not (isinstance(last[-1].payload, UserMessage)
+                                and last[-1].payload.while_asleep is AsleepAnswer.NONE))
         return {"conversation": summary_view(summary), "job": job_view(job), "continuable": continuable}
 
     @app.get("/api/conversations/{conversation_id}")
@@ -1605,6 +1687,33 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 raise
             raise ApiError(409, "not_in_trash", "Move the conversation to the trash first.") from None
 
+    async def diary_items(application: Application, scope: TrustedScope, events: Sequence[ConversationEvent],
+                          after: int, through: int | None) -> list[dict[str, Any]]:
+        """character-day §7, §18.11: the diaries written in this day session's context that fall on this page —
+        each after the last event before it (the page whose events reach past it, or the last page)."""
+        found = await application.session_diaries(scope)
+        if not found:
+            return []
+        before_page: datetime | None = None
+        if after > 0:
+            previous = await application.data.read_events(scope, after_sequence=after - 1, limit=1)
+            before_page = previous[0].created_at if previous else None
+        items: list[dict[str, Any]] = []
+        for at, text in found:
+            earlier = [e for e in events if e.created_at <= at]
+            if earlier:
+                if through is not None and all(e.created_at <= at for e in events):
+                    continue  # a later page's
+                sequence = earlier[-1].sequence
+            elif after > 0 and before_page is not None and before_page <= at:
+                sequence = after  # between the last page and this one
+            elif after == 0:
+                sequence = 0
+            else:
+                continue
+            items.append({"sequence": sequence, "kind": "diary", "created_at": _time(at), "text": text})
+        return items
+
     @app.get("/api/conversations/{conversation_id}/events")
     async def read_events(conversation_id: str, request: Request, by: Caller = Depends(caller),
                           after: int = 0, limit: int = 200) -> dict[str, Any]:
@@ -1638,6 +1747,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             # page starts after the last row given (an event or a wake's line)
             items += [wake_thought_view(w) for w in await application.data.wake_thoughts(
                 scope, after=after, through=through, limit=limit)]
+            # character-day §7, §18.11: a diary written in this day session's context, a folded line where it was
+            # written (after the last event before it)
+            items += await diary_items(application, scope, events, after, through)
             items = sorted(items, key=lambda item: int(item["sequence"]))[:limit]
         return {"items": items, "last_sequence": items[-1]["sequence"] if items else after}
 
@@ -1815,6 +1927,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     # --- HIMARI's life (character-life §6): the chosen persona's, on the Web only (D4) ----------
 
     def life_refused(error: DataError) -> ApiError:
+        if error.code is DataErrorCode.PLAN_REFUSED:  # character-day §18.11: the schedule's own sentence
+            return ApiError(409, "plan_refused", error.message or "That change is past the schedule's limits.")
         if error.code not in LIFE_REFUSALS:
             raise error
         status, code, message = LIFE_REFUSALS[error.code]
@@ -1844,10 +1958,36 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                           "next": None if application.life_writer is None
                           else _time(application.life_writer.next_world(datetime.now(UTC)))},
                 "entries": [life_entry_view(e) for e in entries],
+                # character-day §12, §18.11: the sleep now and the latest sleeps (newest first)
+                "sleep": sleep_view_json(await application.sleep_view(who), ZoneInfo(application.time_zone)),
+                "sleeps": [sleep_record_view(s) for s in await application.sleeps(who)],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                            "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
                            "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS,
                            "event_chars": MAX_EVENT_CHARS}}
+
+    def plan_write(body: PlanBody | PlanEditBody, entry_id: int | None) -> PlanWrite:
+        return PlanWrite(body.day, body.time, body.minutes, PlanKind(body.plan_kind), body.text, entry_id,
+                         body.arc_id if body.plan_kind == "work" else None)
+
+    @app.post("/api/life/plans", status_code=201)
+    async def add_plan(body: PlanBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """character-day §4.2, §18.11: the user's slot (origin user); 409 ``plan_refused`` past the limits."""
+        try:
+            return life_entry_view(await himari(request).write_plan(who, body.persona_id, plan_write(body, None)))
+        except LifeChanged:
+            raise ApiError(409, "persona_changed", "Another persona is in use now; look again.") from None
+        except DataError as error:
+            raise life_refused(error) from None
+
+    @app.put("/api/life/plans/{entry_id}")
+    async def edit_plan(entry_id: int, body: PlanEditBody, request: Request,
+                        who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """§18.11: a slot changed or moved by the user (a sleep slot only moved); it becomes the user's."""
+        try:
+            return life_entry_view(await himari(request).edit_plan(who, plan_write(body, entry_id), body.revision))
+        except DataError as error:
+            raise life_refused(error) from None
 
     @app.post("/api/life", status_code=201)
     async def add_life_fact(body: LifeFactBody, request: Request,
@@ -2221,7 +2361,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
         if body.screen is not None:
             try:
-                return job_view(await application.send(
+                return sent_view(await application.send(
                     scope, text, origin=by.origin, screen=FileId(body.screen),
                     connection_generation=connection_generation, client_file_download=client_file_download))
             except DataError as error:
@@ -2229,7 +2369,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                     # §7.8: the earlier send of this screen was recorded; this one is not.
                     raise ApiError(409, "screen_already_sent", "This screen was sent already.") from None
                 raise
-        return job_view(await application.send(
+        return sent_view(await application.send(
             scope, text, [FileId(f) for f in body.attachments], origin=by.origin,
             connection_generation=connection_generation, client_file_download=client_file_download))
 
@@ -2421,19 +2561,38 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         return {**await device_state(himari(request), by), "limits": {"message_chars": MAX_MESSAGE_CHARS}}
 
     async def device_state(application: Application, by: Caller) -> dict[str, Any]:
-        """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3)."""
-        recent = (await application.data.most_recent_user_conversation(by.principal) if by.device is None
-                  else await application.recent_companion_conversation(by.principal))
+        """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3). character-day §11, §18.11: with
+        HIMARI's day, the recent conversation is today's day session (opened when none is) and HIMARI's sleep."""
+        if application.keeper is not None:
+            recent = await application.day_session(by.principal)
+        else:
+            recent = (await application.data.most_recent_user_conversation(by.principal) if by.device is None
+                      else await application.recent_companion_conversation(by.principal))
         quiet = await application.devices.quiet(by.principal)
+        features = {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1,
+                    "screen_look": 1, "file_download": 1, "connection_generation": 1,
+                    "persona_choice": 1}  # character-state §4: the app's persona menu
+        state: dict[str, Any] = {}
+        if application.keeper is not None:
+            features["day_session"] = 1
+            sleep = await application.sleep_view(by.principal)
+            state["himari"] = {"sleep": None if sleep is None else sleep.state.value}
         return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
                 "moods": list(MOODS), "current_device": application.presence.current(by.principal),
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
-                "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1,
-                             "screen_look": 1, "file_download": 1, "connection_generation": 1,
-                             "persona_choice": 1},  # character-state §4: the app's persona menu
+                "features": features, **state,
                 "quiet_until": _time(quiet)}
+
+    @app.post("/api/device/poke")
+    async def device_poke(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
+        """character-day §5.5, §11: the app's sleeping HIMARI clicked — counted as a message; a mumble or a waking
+        opens a turn on this device. ``answer`` null: it was awake (or its day is off)."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device pokes its character.")
+        answer = await himari(request).poke(by.principal, by.device.device_id)
+        return {"answer": None if answer is None else answer.value}
 
     @app.post("/api/device/presence", status_code=204)
     async def device_presence(body: PresenceBody, request: Request, by: Caller = Depends(caller)) -> None:

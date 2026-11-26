@@ -19,6 +19,7 @@ from himari.proactive.rules import (
     SLEEP_RETURN_FRESH,
     TALKING,
     TALKING_KINDS,
+    TOGETHER_WINDOW,
     UNANSWERED_WAIT,
     WORK_FRESH,
     Candidate,
@@ -41,6 +42,7 @@ from himari.proactive.rules import (
     return_candidate,
     spoke,
     task_ended_candidate,
+    together_candidates,
     unanswered,
     work_candidates,
 )
@@ -58,6 +60,7 @@ __all__ = [
     "SLEEP_RETURN_FRESH",
     "TALKING",
     "TALKING_KINDS",
+    "TOGETHER_WINDOW",
     "UNANSWERED_WAIT",
     "WORK_FRESH",
     "Candidate",
@@ -80,6 +83,7 @@ __all__ = [
     "return_candidate",
     "spoke",
     "task_ended_candidate",
+    "together_candidates",
     "unanswered",
     "work_candidates",
 ]

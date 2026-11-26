@@ -26,7 +26,7 @@ ON = ProactiveSettings(enabled=True)
 
 async def opened(tmp_path: Path, adapter: ScriptedAdapter, **options: object) -> Application:
     return await Application.open(tmp_path / "data", adapter, model_id="scripted-model", sandbox=False,
-                                  cleanup_seconds=None, **options)  # type: ignore[arg-type]
+                                  cleanup_seconds=None, **{"life": False, **options})  # type: ignore[arg-type]
 
 
 async def current_device(app: Application) -> str:

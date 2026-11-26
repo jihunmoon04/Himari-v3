@@ -153,7 +153,8 @@ def deep(sleep: SleepRecord, now: datetime) -> bool:
 def sleep_view(now: datetime, slot: LifeEntry | None, sleep: SleepRecord | None, state: DayState,
                zone: tzinfo) -> SleepView:
     """§5.1, §8: asleep while a sleep is open (deep or light); else drowsy from DROWSY_MINUTES before ``slot`` (the
-    one ahead) starts; else awake — and awake inside the slot when the user woke it (``woken_at``: just then)."""
+    one ahead) starts until it falls asleep (an answer under way at the slot's start is given drowsy); else awake —
+    awake inside the slot when the user woke it in it (``woken_at``: just then)."""
     if sleep is not None and sleep.asleep:
         return SleepView(SleepState.ASLEEP, deep(sleep, now), tonight=slot, last=sleep)
     span = None if slot is None else plan_span(slot, zone)
@@ -161,8 +162,9 @@ def sleep_view(now: datetime, slot: LifeEntry | None, sleep: SleepRecord | None,
     if sleep is not None and sleep.woke_at is not None and state.woken_at is not None \
             and sleep.woke_at == state.woken_at and now - sleep.woke_at < UP_NEAR_END:
         woken = sleep.woke_at
-    if span is not None and span[0] - timedelta(minutes=DROWSY_MINUTES) <= now < span[0]:
-        left = math.ceil((span[0] - now).total_seconds() / 60)
+    if span is not None and span[0] - timedelta(minutes=DROWSY_MINUTES) <= now < span[1] \
+            and not (state.woken_at is not None and state.woken_at >= span[0]):
+        left = max(0, math.ceil((span[0] - now).total_seconds() / 60))
         return SleepView(SleepState.DROWSY, minutes_to_sleep=left, tonight=slot, last=sleep, woken_at=woken)
     return SleepView(SleepState.AWAKE, tonight=slot, last=sleep, woken_at=woken)
 

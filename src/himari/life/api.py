@@ -16,7 +16,8 @@ from datetime import datetime, time, timedelta
 from enum import Enum
 from typing import Protocol
 
-from himari.common import DeepFrozen, PrincipalId
+from himari.common import ConversationId, DeepFrozen, PrincipalId
+from himari.prompt.api import PromptInputs
 
 DEFAULT_WRITE_AT = time(22, 0)  # §3: HIMARI_LIFE_WRITE_AT, in the server's zone
 DEFAULT_DAILY_TOKENS = 200_000  # HIMARI_LIFE_DAILY_TOKENS, per principal and day
@@ -33,6 +34,22 @@ class LifeSettings(DeepFrozen):
     write_at: time = DEFAULT_WRITE_AT
     daily_tokens: int = DEFAULT_DAILY_TOKENS
     time_zone: str = "UTC"  # the server's: the day written, the write time and the budget's day
+    # character-day §10, §18.7: the model a call falls back to after the same job's last try got no answer at all
+    # (a retryable failure); None: none
+    backup_model_id: str | None = None
+    backup_effort: str | None = None
+    default_model_id: str | None = None  # §10: a self run's model with no day session (None: the memory model)
+    default_effort: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionInput(DeepFrozen):
+    """character-day §7, §18.7: the day session a diary is written in the context of — its next turn's inputs and
+    the most its model's request may hold (tokens; None: no limit known)."""
+
+    conversation_id: ConversationId
+    inputs: PromptInputs
+    limit_tokens: int | None = None
 
 
 class WriteOutcome(Enum):
@@ -58,11 +75,16 @@ class MindLink(Protocol):
     """character-mind §4.1, §4.4: what only the composition root can tell a self run."""
 
     async def mind_model(self, principal: PrincipalId) -> MindModel:
-        """The model of the principal's latest conversation (where a wake goes) when it is checked for
-        free wakes, with its effort; else ``model_id`` None with why."""
+        """character-day §10, §18.7: the model of the principal's day session (where a wake goes), with its
+        effort; with no day session ``model_id`` None with why (the default model)."""
         ...
 
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
-        """§4.4: the user's messages (their text) in that latest conversation from ``since`` to ``until``,
-        oldest first: what they said while HIMARI worked."""
+        """§4.4: the user's messages (their text) in the day session from ``since`` to ``until``, oldest first:
+        what they said while HIMARI worked."""
+        ...
+
+    async def session_input(self, principal: PrincipalId) -> SessionInput | None:
+        """character-day §7, §18.7: the open day session's next turn as it would be composed now; None: no day
+        session open (or it cannot be read now)."""
         ...

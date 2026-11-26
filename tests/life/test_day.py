@@ -86,7 +86,10 @@ def test_drowsy_thirty_minutes_before_the_slot_asleep_deep_three_hours_then_ligh
     view = day.sleep_view(at("2026-11-27 00:05"), SLEEP, None, state, SEOUL)
     assert (view.state, view.minutes_to_sleep) == (SleepState.DROWSY, 25)
     assert day.sleep_view(at("2026-11-26 23:59"), SLEEP, None, state, SEOUL).state is SleepState.AWAKE
-    assert day.sleep_view(at("2026-11-27 01:00"), SLEEP, None, state, SEOUL).state is SleepState.AWAKE  # woken
+    view = day.sleep_view(at("2026-11-27 01:00"), SLEEP, None, state, SEOUL)  # in the slot, not asleep yet
+    assert (view.state, view.minutes_to_sleep) == (SleepState.DROWSY, 0)
+    woken = DayState(1, woken_at=at("2026-11-27 00:45"))
+    assert day.sleep_view(at("2026-11-27 01:00"), SLEEP, None, woken, SEOUL).state is SleepState.AWAKE  # woken in it
     sleep = asleep("2026-11-27 00:30")
     view = day.sleep_view(at("2026-11-27 03:29"), SLEEP, sleep, state, SEOUL)
     assert (view.state, view.deep) == (SleepState.ASLEEP, True)

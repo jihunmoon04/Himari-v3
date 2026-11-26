@@ -20,6 +20,9 @@ from himari.control.driver import Driver
 from himari.control.runner import BackgroundRunner
 from himari.data.api import (
     NO_PERSONA,
+    PlanKind,
+    SleepState,
+    plan_span,
     Anniversary,
     LifeEntry,
     LifeKind,
@@ -38,6 +41,7 @@ from himari.data.api import (
     free_wake,
 )
 from himari.data.sqlite import SqliteData
+from himari.life.keeper import DayKeeper
 from himari.presence.api import Devices, Returned
 from himari.presence.hub import PresenceHub
 from himari.proactive import ProactiveSettings as ProactiveSettings  # re-exported for the interfaces
@@ -296,8 +300,9 @@ class ProactiveScheduler:
                  zones: frozenset[str] = frozenset(), clock: Callable[[], datetime] = lambda: datetime.now(UTC),
                  poke: Callable[[float], None] = lambda after: None,
                  free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None, bond: bool = False,
-                 work: bool = False) -> None:
+                 work: bool = False, day: DayKeeper | None = None) -> None:
         self._data, self._hub, self._devices, self._runner = data, hub, devices, runner
+        self._day = day  # character-day §9: HIMARI's own sleep and promises; None: its life is off (quiet hours)
         self._bond = bond  # character-bond §6: the bond is told, so its anniversaries may open a wake
         self._work = work  # character-work §7.1: HIMARI's life is told, so a finished piece may open a wake
         self._inputs = inputs
@@ -379,6 +384,17 @@ class ProactiveScheduler:
                 since = (now.astimezone(ZoneInfo(self._zone)).date() - timedelta(days=1)).isoformat()
                 work = tuple(e for e in await self._data.list_life(principal, persona_id, since=since)
                              if e.kind is LifeKind.WORK and not e.draft and timedelta(0) <= now - e.created_at < WORK_FRESH)
+        himari_asleep: bool | None = None
+        together: tuple[tuple[LifeEntry, datetime], ...] = ()
+        if self._day is not None:  # character-day §9, §18.9: its sleep, and the times set with the user
+            himari_asleep = (await self._day.sleep_view(principal)).state in (SleepState.ASLEEP,
+                                                                               SleepState.HALF_ASLEEP)
+            chosen = await self._data.active_persona(principal)
+            server = ZoneInfo(self._zone)
+            since = (now.astimezone(server).date() - timedelta(days=1)).isoformat()
+            together = tuple((e, span[0]) for e in await self._data.list_life(
+                principal, NO_PERSONA if chosen is None else chosen.persona_id, since=since)
+                if e.live_plan and e.plan_kind is PlanKind.TOGETHER and (span := plan_span(e, server)) is not None)
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),
@@ -386,7 +402,8 @@ class ProactiveScheduler:
             working=bool(self._runner.running(principal)), unanswered_wake=unanswered,
             wakes=wakes, loops=loops, returned=self._returns.get(principal),
             said=await self._said(principal, wakes), free_ok=model_ok and self.settings.free_minutes > 0,
-            anniversaries=anniversaries, bond_day=bond_day, work=work), recent
+            anniversaries=anniversaries, bond_day=bond_day, work=work, himari_asleep=himari_asleep,
+            together=together), recent
 
     async def _said(self, principal: PrincipalId, wakes: Sequence[WakeRecord]) -> frozenset[str]:
         """PR #156 re-review P2-2: of the failed wakes, those whose turn left assistant

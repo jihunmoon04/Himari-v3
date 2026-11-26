@@ -577,7 +577,9 @@ def test_an_anniversary_goes_before_a_free_wake_and_right_after_a_reminder() -> 
     decided = decide(situation(**days, device=working(31), free_ok=True))
     assert [r.kind for r in decided.reasons] == [WakeKind.ANNIVERSARY]
     assert [c.reason.kind for c in decided.held] == [WakeKind.FREE]
-    assert MERGE_ORDER.index(WakeKind.ANNIVERSARY) == MERGE_ORDER.index(WakeKind.REMINDER) + 1
+    # character-day §9: a time set together comes between the two
+    assert MERGE_ORDER.index(WakeKind.ANNIVERSARY) == MERGE_ORDER.index(WakeKind.TOGETHER) + 1
+    assert MERGE_ORDER.index(WakeKind.TOGETHER) == MERGE_ORDER.index(WakeKind.REMINDER) + 1
     merged = decide(situation(**days, loops=DUE))
     assert [r.kind for r in merged.reasons] == [WakeKind.ANNIVERSARY, WakeKind.LOOP_DUE]
     assert not free_wake(merged.reasons)  # with a loop it is an ordinary wake

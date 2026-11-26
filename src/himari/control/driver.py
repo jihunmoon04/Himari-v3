@@ -68,7 +68,7 @@ import dataclasses
 import hashlib
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -87,6 +87,7 @@ from himari.control.api import (
     ContextStatus,
     ControlError,
     ControlErrorCode,
+    DayGate,
     DriveResult,
     DriveState,
     ModelCatalog,
@@ -101,6 +102,11 @@ from himari.control.api import (
 )
 from himari.control.turn import Turn
 from himari.data.api import (
+    AsleepAnswer,
+    DayBefore,
+    LifeKind,
+    SleepState,
+    SleepView,
     AssistantFinal,
     DataError,
     DataErrorCode,
@@ -179,6 +185,7 @@ from himari.provider.api import (
     ProviderCapabilities,
     ProviderError,
     RawCapture,
+    retryable,
 )
 from himari.tool.api import SCREEN_TOOL_ID, GroupDispatchResult, GroupState, ToolDispatcher, TurnSource, TurnWake
 from himari.world.api import WeatherSource
@@ -194,6 +201,7 @@ SHUTDOWN = "shutdown"  # of a streamed model call the server stopped (V3-P73 §5
 # Model-facing results of calls that never ran (V3-P55).
 CANCELLED_RESULT = "Not run: the user cancelled before this call started."
 REDIRECTED_RESULT = "Not run: the user sent a new message before this call started."
+HALF_ASLEEP_RESULT = "Not run: you are half asleep."  # character-day §5.5
 
 
 class _Cancelled(Exception):
@@ -220,6 +228,16 @@ def sent_from(events: Sequence[ConversationEvent]) -> MessageOrigin | None:
 def session_key(scope: TrustedScope) -> str:
     """V3-P62 §9 B1: an opaque, stable key per Conversation (never its id)."""
     return hashlib.sha256(f"himari-session:{scope.conversation_id}".encode()).hexdigest()[:32]
+
+
+class _DayContext(NamedTuple):
+    """character-day §8, §18.4: a day session's turn — the sleep as it began and what the day before handed it."""
+
+    sleep: SleepView
+    before: DayBefore | None = None
+
+
+ASLEEP_STATES = frozenset({SleepState.ASLEEP, SleepState.HALF_ASLEEP})
 
 
 class _UserContext(NamedTuple):
@@ -256,7 +274,6 @@ class Driver:
         life: LifeStore | None = None,  # character-life §5: HIMARI's life, told with the companion; None: not told
         bond: BondStore | None = None,  # character-bond §5: the bond, told with the life; None: not told
         moods: MoodStore | None = None,  # character-state §2: the mood, told and set with the life; None: neither
-        quiet_hours: tuple[time, time] | None = None,  # character-state §3 (S2): HIMARI sleeps in them; None: never
         # character-world §5 (W4): the stored bond stage the persona's hidden lines wait for; None: they stay hidden
         bond_stages: BondStore | None = None,
         weather: WeatherSource | None = None,  # character-world §2: told with the life; None: no weather
@@ -269,6 +286,8 @@ class Driver:
         presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: not told
         companion: bool = False,  # V3-P92: device turns require a verified companion model
         interfaces: InterfaceSource | None = None,
+        day: DayGate | None = None,  # character-day §18.4: the day's keeper; None: no day session, no sleep
+        backup_model: str | None = None,  # character-day §10: an offered model a turn falls back to; None: none
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -287,7 +306,6 @@ class Driver:
         self._life = life
         self._bond = bond
         self._moods = moods
-        self._quiet_hours = quiet_hours
         self._bond_stages = bond_stages
         self._weather = weather
         self._turn_personas: dict[ConversationId, int] = {}  # the persona read when the turn started (§2)
@@ -304,6 +322,13 @@ class Driver:
         self._presence = presence
         self._companion = companion
         self._interfaces = interfaces
+        self._day = day
+        if backup_model is not None and models.offer(backup_model) is None:
+            raise ValueError(f"the backup model {backup_model!r} is not offered")
+        self._backup_model = backup_model
+        self._backups: set[ConversationId] = set()  # turns that fell back to the backup model already (§18.4)
+        self._turn_days: dict[ConversationId, _DayContext] = {}  # a day session's turn, as it began (§8)
+        self._turn_half: dict[ConversationId, bool] = {}  # a half-asleep turn: no Tools, one Run (§5.5)
         self._turn_inputs: dict[ConversationId, UserMessage | Wake] = {}
         # Where the user is, read at the turn's first request — after its message
         # is recorded and the restart cleanup is done (V3-P83 §6.3).
@@ -474,8 +499,9 @@ class Driver:
         if self._planner is None or budget is None:
             return None
         # The next turn's context: today's instructions and notes, not a running turn's (V3-P69 §5).
-        inputs = await self._situated(scope, await self._loader.load(scope, (), self._request_options(scope, model),
-                                                                     *await self._read_user(scope)), turn=False)
+        user, _, day = await self._read_user_and_persona(scope)
+        inputs = await self._situated(scope, await self._loader.load(
+            scope, (), self._request_options(scope, model, day is not None), *user), turn=False, day=day)
         summary = self._planner.summary_of(inputs.snapshot)
         snapshot = inputs.snapshot if summary is not None else None
         tokens: int | None = None
@@ -496,16 +522,39 @@ class Driver:
             compactions=snapshot.revision if snapshot is not None else 0,
         )
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+    async def turn_inputs(self, scope: TrustedScope) -> PromptInputs:
+        """character-day §7, §18.7: what the next turn of this Conversation would be composed from — its model and
+        options, the user's context, the history and the runtime state (the day session's too) — before any
+        budget is fitted. Read-only; no lock (as ``context_status``)."""
+        model = await self._resolve_model(scope)
+        user, _, day = await self._read_user_and_persona(scope)
+        return await self._situated(scope, await self._loader.load(
+            scope, (), self._request_options(scope, model, day is not None), *user), turn=False, day=day)
+
+    def model_of(self, scope: TrustedScope) -> ResolvedModel | None:
+        """The model the running turn of this Conversation uses now (a fallback to the backup too); None idle."""
+        return self._turn_models.get(scope.conversation_id)
+
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
         """Record one user input durably (T1) after restart cleanup and
         projection of stored responses, without running any Tool or calling
         the Provider. ``resume`` then continues from it (CTRL-06: an
-        interface may report acceptance only once the input is committed)."""
+        interface may report acceptance only once the input is committed).
+        character-day §18.4: a sleeping HIMARI's answer is recorded with it."""
         async with self._exclusive(scope):
             await self._prepare(scope)  # a stop is reported by the following resume
             message = await self._capture_interface(scope, message)
             await self._close_latest_group(scope, REDIRECTED_RESULT)  # blocked calls: resume reports them
-            await self._log.append_event(scope, message)  # T1
+            message = await self._asleep(scope, message)
+            return await self._log.append_event(scope, message)  # T1
+
+    async def _asleep(self, scope: TrustedScope, message: UserMessage) -> UserMessage:
+        """character-day §5.5, §18.4: how a sleeping HIMARI meets the message (the keeper counts it); never what a
+        client said."""
+        answer = None
+        if self._day is not None and message.origin is not None and message.origin.kind is not OriginKind.WAKE:
+            answer = await self._day.answer(scope, message.origin)
+        return message if message.while_asleep is answer else dataclasses.replace(message, while_asleep=answer)
 
     @contextlib.asynccontextmanager
     async def _exclusive(self, scope: TrustedScope, stop: StopSignal | None = None,
@@ -515,11 +564,14 @@ class Driver:
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
-            # the user's instructions and notes, and the time (V3-P69 §5); the persona whose mood a reply sets
-            user, persona_id = await self._read_user_and_persona(scope)
+            # the user's instructions and notes, and the time (V3-P69 §5); the persona whose mood a reply sets;
+            # character-day §8: the day session's sleep and the day before, as the turn began
+            user, persona_id, day = await self._read_user_and_persona(scope)
             self._turn_models[scope.conversation_id] = model
             self._turn_users[scope.conversation_id] = user
             self._turn_personas[scope.conversation_id] = persona_id
+            if day is not None:
+                self._turn_days[scope.conversation_id] = day
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
             limit = self._max_runs if max_runs is None else min(max_runs, self._max_runs)  # V3-P87 §4.2
             self._turns[scope.conversation_id] = Turn(limit, progress)
@@ -533,6 +585,9 @@ class Driver:
                 del self._turn_models[scope.conversation_id]
                 del self._turn_users[scope.conversation_id]
                 self._turn_personas.pop(scope.conversation_id, None)
+                self._turn_days.pop(scope.conversation_id, None)
+                self._turn_half.pop(scope.conversation_id, None)
+                self._backups.discard(scope.conversation_id)
                 self._turn_presences.pop(scope.conversation_id, None)
                 self._turn_sources.pop(scope.conversation_id, None)
                 self._turn_inputs.pop(scope.conversation_id, None)
@@ -552,9 +607,17 @@ class Driver:
     async def _read_user(self, scope: TrustedScope) -> _UserContext:
         return (await self._read_user_and_persona(scope))[0]
 
-    async def _read_user_and_persona(self, scope: TrustedScope) -> tuple[_UserContext, int]:
-        """What the loader takes about the user and the turn's start, and the chosen persona's id
-        (NO_PERSONA: none, or the companion is off)."""
+    async def _read_day(self, scope: TrustedScope) -> _DayContext | None:
+        """character-day §8: the day session's sleep and the day before; None outside it (or with no keeper)."""
+        if self._day is None or self._life is None or not self._companion or not await self._day.day_session(scope):
+            return None
+        view = await self._day.view(scope)
+        return None if view is None else _DayContext(view, await self._day.before(scope))
+
+    async def _read_user_and_persona(self, scope: TrustedScope) -> tuple[_UserContext, int, _DayContext | None]:
+        """What the loader takes about the user and the turn's start, the chosen persona's id
+        (NO_PERSONA: none, or the companion is off) and, in the day session, its day (character-day §8)."""
+        day = await self._read_day(scope)
         text = persona = ""
         persona_id = NO_PERSONA
         if self._user_instructions is not None:
@@ -581,20 +644,21 @@ class Driver:
                 bond = await self._bond.read_bond(scope.principal_id, persona_id, now=now, zone=self._zone_name)
             if self._moods is not None:  # character-state §2: while it is told (S1: MOOD_HOURS)
                 mood = live_mood(await self._moods.read_mood(scope.principal_id, persona_id), now)
-            # character-state §3: a timed plan under way, else asleep in the quiet hours (the server's clock)
-            doing = doing_now(life, local or now, self._quiet_hours)
+            # character-state §3, character-day §4.5: the slot under way, else asleep as its sleep says (the day
+            # session's: elsewhere it is never asleep)
+            doing = doing_now(life, local or now, asleep=day is not None and day.sleep.state in ASLEEP_STATES)
             if self._weather is not None:  # character-world §2: as last read, from memory (the server's date)
                 found = self._weather.weather_on((local or now).date())
                 weather = None if found is None else found.line()
         if self._memories is None:
             return _UserContext(text, None, local, persona=persona, life=life, bond=bond, mood=mood,
-                                himari_now=doing, weather=weather), persona_id
+                                himari_now=doing, weather=weather), persona_id, day
         notes = await self._memories.list_memories(scope.principal_id)
         episodes = await self._memories.recent_episodes(scope.principal_id, since=now - RECENT_DAYS,
                                                         besides=scope.conversation_id, limit=RECENT_EPISODES)
         count = await self._memories.count_episodes(scope.principal_id)
         return _UserContext(text, notes, local, episodes, count, persona, life, bond, mood, doing,
-                            weather), persona_id
+                            weather), persona_id, day
 
     async def _interface_at_acceptance(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
         snapshot = (await self._interfaces.read(scope, origin) if self._interfaces is not None
@@ -623,16 +687,18 @@ class Driver:
         if found is not None:
             self._turn_inputs[scope.conversation_id] = found
 
-    async def _situated(self, scope: TrustedScope, inputs: PromptInputs, *, turn: bool = True) -> PromptInputs:
+    async def _situated(self, scope: TrustedScope, inputs: PromptInputs, *, turn: bool = True,
+                        day: _DayContext | None = None) -> PromptInputs:
         """``inputs`` with where the user is (V3-P83 §6.2) and the time in the
         zone of the device the message came from (§6.4) — read once per turn
-        (``turn``), or now for the next turn's context."""
+        (``turn``), or now for the next turn's context (``day``: its day session's day, if any)."""
         if turn:
             source_input = self._turn_inputs.get(scope.conversation_id)
             if source_input is None:
                 source_input = self._latest_input(await self._log.read_events(scope), pending=False)
                 if source_input is not None:
                     self._turn_inputs[scope.conversation_id] = source_input
+            day = self._turn_days.get(scope.conversation_id)
         else:
             source_input = self._latest_input(await self._log.read_events(scope), pending=False)
         origin = source_input.origin if isinstance(source_input, UserMessage) else None
@@ -641,6 +707,8 @@ class Driver:
         interface = (source_input.interface if source_input is not None else None) or InterfaceSnapshot(
             interface_kind(interface_origin))
         inputs = dataclasses.replace(inputs, interface=interface)
+        if day is not None:
+            inputs = self._of_the_day(scope, inputs, day, source_input, turn)
         if turn and scope.conversation_id not in self._turn_sources:
             # V3-P91 §3.4: the device the turn's message came from (a wake's was set already)
             self._turn_sources[scope.conversation_id] = TurnSource(
@@ -661,23 +729,41 @@ class Driver:
                 pass  # the server's zone, then
         return dataclasses.replace(inputs, presence=found.view, now=now)
 
+    def _of_the_day(self, scope: TrustedScope, inputs: PromptInputs, day: _DayContext,
+                    source_input: UserMessage | Wake | None, turn: bool) -> PromptInputs:
+        """character-day §5.5, §8, §18.4: a day session's turn — its schedule (today's and tomorrow's slots, from
+        the life read), its sleep and the day before; half asleep for a mumble (or a wake heard asleep: a
+        reminder, §9), with no Tools at all."""
+        half = ((isinstance(source_input, UserMessage) and source_input.while_asleep is AsleepAnswer.MUMBLE)
+                or (isinstance(source_input, Wake) and day.sleep.state is SleepState.ASLEEP))
+        if turn:
+            self._turn_half[scope.conversation_id] = half
+        sleep = dataclasses.replace(day.sleep, state=SleepState.HALF_ASLEEP) if half else day.sleep
+        today = None if inputs.now is None else inputs.now.date()
+        shown = {today.isoformat(), (today + timedelta(days=1)).isoformat()} if today is not None else set()
+        schedule = tuple(e for e in inputs.life or () if e.kind is LifeKind.PLAN and e.day in shown)
+        options = dataclasses.replace(inputs.request_options, half_asleep=half)
+        return dataclasses.replace(inputs, schedule=schedule, sleep=sleep, day_before=day.before,
+                                   request_options=options, tool_catalog=() if half else inputs.tool_catalog)
+
     def _turn_user(self, scope: TrustedScope) -> _UserContext:
         return self._turn_users[scope.conversation_id]
 
     def _turn_model(self, scope: TrustedScope) -> ResolvedModel:
         return self._turn_models[scope.conversation_id]
 
-    def _request_options(self, scope: TrustedScope, model: ResolvedModel) -> RequestOptions:
+    def _request_options(self, scope: TrustedScope, model: ResolvedModel, day: bool = False) -> RequestOptions:
         capabilities = self._provider.describe_capabilities(model.model_id)
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
                               session_key=session_key(scope), image_input=capabilities.image_input,
                               screen_points=capabilities.image_input and capabilities.screen_points,
                               speaks_first=capabilities.speaks_first,
                               free_wake=capabilities.speaks_first and capabilities.free_wake,
-                              screen_tool=capabilities.image_input and capabilities.screen_tool)
+                              screen_tool=capabilities.image_input and capabilities.screen_tool,
+                              day_session=day, half_asleep=self._turn_half.get(scope.conversation_id, False))
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
-        return self._request_options(scope, self._turn_model(scope))
+        return self._request_options(scope, self._turn_model(scope), scope.conversation_id in self._turn_days)
 
     def _compose(self, scope: TrustedScope, inputs: PromptInputs) -> ModelInput:
         """The model's input, with the turn's state as data (V3-P62 §8) — only
@@ -688,16 +774,30 @@ class Driver:
         return dataclasses.replace(model_input, turn_state=self._turn(scope).state())
 
     def _invocation(self, prepared: NativePreparedRequest, run_id: RunId, capture: RawCapture | None,
-                    live: OutputProgress | None) -> Callable[[], Awaitable[NativeInvocationOutcome]]:
-        """The one send of a Run; a streamed one with its capture and sink."""
+                    live: OutputProgress | None,
+                    shown: list[bool] | None = None) -> Callable[[], Awaitable[NativeInvocationOutcome]]:
+        """The one send of a Run; a streamed one with its capture and sink (``shown`` notes that some of it was
+        shown: character-day §10)."""
         if not prepared.streamed:
             return lambda: self._provider.invoke_prepared(prepared)
 
         def show(delta: OutputDelta) -> None:
+            if shown is not None and (delta.text or delta.tool is not None):
+                shown.append(True)
             if live is not None:
                 live.output(run_id, delta)
 
         return lambda: self._provider.invoke_prepared(prepared, show, capture)
+
+    def _backup_for(self, scope: TrustedScope, error_code: str) -> ResolvedModel | None:
+        """character-day §10, §18.4: the backup model this turn falls back to after a Run with no answer at all —
+        only for a failure another model may not share (``retryable``), from another model, once a turn."""
+        if self._backup_model is None or not retryable(error_code) or scope.conversation_id in self._backups:
+            return None
+        if self._turn_model(scope).model_id == self._backup_model:
+            return None
+        offer = self._models.offer(self._backup_model)
+        return None if offer is None else ResolvedModel(offer, offer.default_effort)
 
     async def _interruptible[T](self, scope: TrustedScope, start: Callable[[], Awaitable[T]]) -> T:
         """Await ``start()`` unless a cancel arrives first; then cancel it,
@@ -729,12 +829,15 @@ class Driver:
         recovery, stop = await self._prepare(scope)
         message = await self._capture_interface(scope, message)
         group = await self._close_latest_group(scope, REDIRECTED_RESULT) if stop is None else None
+        message = await self._asleep(scope, message)  # character-day §18.4
         event = await self._log.append_event(scope, message)  # T1: input is never dropped
         if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
             return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
         self._turn_inputs[scope.conversation_id] = message
         if stop is not None:
             return stop
+        if message.while_asleep is AsleepAnswer.NONE:  # §5.5: it only stirs — no Run
+            return DriveResult(DriveState.IDLE, recovery=recovery, detail="asleep")
         return await self._run_loop(scope, (EventRef(event.event_id),), recovery)
 
     async def _resume_locked(self, scope: TrustedScope) -> DriveResult:
@@ -875,6 +978,8 @@ class Driver:
                 case AssistantToolCalls() if event.origin_run_id is not None:
                     triggers.append(CompletedGroupRef(event.origin_run_id))
                     break
+                case UserMessage(while_asleep=AsleepAnswer.NONE):
+                    pass  # character-day §5.5: it stays in the history, never answered on its own
                 case UserMessage(answers_call=None) | Wake():  # V3-P87 §3.2: a wake is a trigger too
                     triggers.append(EventRef(event.event_id))
         return tuple(reversed(triggers))
@@ -924,6 +1029,8 @@ class Driver:
         stops the group before the next one, and closes the rest (COMPLETED
         or BLOCKED_UNKNOWN: the next boundary sees the cancel)."""
         signal = self._stop(scope)
+        if self._turn_half.get(scope.conversation_id, False):  # character-day §5.5: offered none, none runs
+            return await self._dispatcher.cancel_group(scope, run_id, HALF_ASLEEP_RESULT)
         try:
             group = await self._interruptible(
                 scope, lambda: self._dispatcher.dispatch_group(
@@ -995,6 +1102,8 @@ class Driver:
                 return result(DriveState.REQUEST_REJECTED, detail=refusal)
             if signal.cancel_requested:  # e.g. while compacting
                 return result(DriveState.CANCELLED)
+            if inputs.request_options.half_asleep and turn.max_runs > turn.steps + 1:
+                turn.max_runs = turn.steps + 1  # character-day §5.5: a mumble is one Run
             if self._streaming:  # V3-P73 §5.1: this Run answers the user
                 options = dataclasses.replace(model_input.request_options, stream=True)
                 model_input = dataclasses.replace(model_input, request_options=options)
@@ -1021,9 +1130,11 @@ class Driver:
             live = self._outputs.get(scope.conversation_id) if prepared.streamed else None
             if live is not None:
                 live.output_started(run_id)
+            shown: list[bool] = []  # character-day §10: whether any of it was shown (then never a fallback)
             try:
                 try:
-                    outcome = await self._interruptible(scope, self._invocation(prepared, run_id, capture, live))
+                    outcome = await self._interruptible(scope, self._invocation(prepared, run_id, capture, live,
+                                                                                shown))
                 except _Cancelled:
                     await self._log.record_raw_outcome(scope, run_id, _uncertain(CANCELLED_BY_USER, capture))
                     turn.charge(None, step=True)
@@ -1047,7 +1158,18 @@ class Driver:
                 await self._log.record_projection_failure(scope, run_id, CANCELLED_BY_USER)
                 return result(DriveState.CANCELLED, detail="cancelled as the answer arrived; it was not used")
             if isinstance(outcome, NativeNoResponse):
-                return result(DriveState.PROVIDER_FAILED, detail=outcome.error_code)
+                backup = None if shown else self._backup_for(scope, outcome.error_code)
+                if backup is None:
+                    return result(DriveState.PROVIDER_FAILED, detail=outcome.error_code)
+                # character-day §10, §18.4: no answer at all — the rest of the turn on the backup model (the
+                # failed Run stays recorded; the Conversation's choice is not changed), once a turn
+                _logger.warning("%s: no answer from %s (%s); the turn goes on with the backup model %s",
+                                scope.conversation_id, model_input.request_options.model_id, outcome.error_code,
+                                backup.model_id)
+                self._turn_models[scope.conversation_id] = backup
+                self._backups.add(scope.conversation_id)
+                turn.max_runs += 1  # the failed Run does not use up the turn's last step
+                continue
             if isinstance(outcome, NativeUncertain):
                 return result(DriveState.OUTCOME_UNKNOWN, detail=outcome.error_code)
 

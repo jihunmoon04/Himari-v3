@@ -82,7 +82,15 @@ from himari.control.api import (
 )
 from himari.control.driver import MAX_RUNS, Driver
 from himari.control.runner import BackgroundRunner
-from himari.life.api import DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS, DEFAULT_WRITE_AT, LifeSettings, MindModel
+from himari.life.api import (
+    DEFAULT_DAILY_TOKENS as LIFE_DAILY_TOKENS,
+    DEFAULT_WRITE_AT,
+    LifeSettings,
+    MindModel,
+    SessionInput,
+)
+from himari.life.day import session_title
+from himari.life.keeper import DAY_SECONDS, DayKeeper
 from himari.life.work import next_plan
 from himari.life.worker import LifeWriter
 from himari.bootstrap.world import WEATHER_SECONDS, search_tool, topic_search
@@ -93,6 +101,14 @@ from himari.memory.worker import MemoryPasses
 from himari.data.api import (
     NO_PERSONA,
     RETIRED_KEEP,
+    AsleepAnswer,
+    LifeJob,
+    LifeKind,
+    LifeOrigin,
+    PlanWrite,
+    SleepRecord,
+    SleepState,
+    SleepView,
     BondSnapshot,
     BondStage,
     BondStanding,
@@ -680,6 +696,10 @@ class LifeChanged(RuntimeError):
     """A fact added for a persona that is no longer the one chosen (§6)."""
 
 
+class DayClosed(RuntimeError):
+    """character-day §3.2: a message to a day session that is closed (only read now)."""
+
+
 def quiet_hours(settings: ProactiveSettings) -> tuple[time, time] | None:
     """character-state §3 (S2): HIMARI's sleeping hours are speaking first's quiet hours
     (HIMARI_PROACTIVE_QUIET, whether or not HIMARI speaks first); None: no quiet hours."""
@@ -788,6 +808,11 @@ class Application:
     inputs: Inputs | None = field(default=None, repr=False)
     scheduler: ProactiveScheduler | None = field(default=None, repr=False)
     devices: Devices = field(init=False, repr=False)  # V3-P83 §4: pairing and device tokens
+    # character-day: the day's keeper (with HIMARI's life; None: no day session, no sleep) and the backup model
+    keeper: DayKeeper | None = field(default=None, repr=False)
+    backup_model: str | None = None
+    _day_opening: dict[PrincipalId, asyncio.Lock] = field(default_factory=dict, repr=False)
+    _day_tasks: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
         self.devices = DeviceRegistry(self.data)
@@ -837,6 +862,8 @@ class Application:
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_principals: Iterable[str] = ("operator",),  # V3-P74 Q1: whose new Conversations have a folder; (): none
         proactive: ProactiveSettings | None = None,  # V3-P87 §11: HIMARI_PROACTIVE…; None: off
+        backup_model: str | None = None,  # character-day §10: HIMARI_BACKUP_MODEL, an offered model; None: none
+        day_clock: Callable[[], datetime] | None = None,  # tests: the day keeper's clock
     ) -> Application:
         speaking_first = proactive if proactive is not None else ProactiveSettings()
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
@@ -888,6 +915,8 @@ class Application:
                 resolved_companion_default = (DEFAULT_COMPANION_MODEL if DEFAULT_COMPANION_MODEL in companion_models
                                               else model_id if model_id in companion_models else companion_models[0])
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
+        if backup_model is not None and catalog.offer(backup_model) is None:  # character-day §18.10
+            raise ValueError(f"the backup model {backup_model!r} is not offered (add it to HIMARI_MODELS)")
         default_budget = catalog.default.budget
         assert default_budget is not None
         root = Path(os.path.abspath(data_root))
@@ -930,6 +959,8 @@ class Application:
                                 proactive=companion and speaking_first.enabled,
                                 documents=_documents_notes(reader, toolkit)
                                 if machine is not None else ())  # read_document is the machine's (V3-P101)
+            # character-day §18.7: the day's keeper, with HIMARI's life (its busy check is set with the runner)
+            keeper = DayKeeper(SqliteData(store), time_zone=time_zone, clock=day_clock) if life and companion else None
             runtime = build_runtime(provider, store=store, environments=[machine] if machine else [],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -940,8 +971,9 @@ class Application:
                                                   for source, note in mcp.notes.items()],
                                     max_runs_per_drive=max_runs, turn_guidance=True, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory, life=life and companion,
-                                    quiet_hours=quiet_hours(speaking_first),  # character-state §3: asleep
+                                    # character-day §13: HIMARI sleeps by its schedule, never by the quiet hours
                                     weather=weather,  # character-world §2
+                                    day=keeper, backup_model=backup_model,
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
                                     presence=presence, screen=screens,
@@ -980,6 +1012,15 @@ class Application:
             screens.job_of = lambda scope: runner.status(scope).job_id  # §6: the app's move context
             application.screens = screens
         application._wake_events = wake_events
+        application.backup_model = backup_model
+        if keeper is not None:  # character-day §18.10: the keeper, told of every job's end
+            keeper.busy = lambda scope: scope.conversation_id in runner.running(scope.principal_id)
+            keeper.on_sleep = lambda principal, state: hub.publish(principal, "himari_sleep", {"sleep": state.value})
+            keeper.on_session = application._tell_session
+            keeper.on_closed = application._day_closed
+            keeper.on_asleep = application._fell_asleep
+            listeners.listeners.append(keeper)
+            application.keeper = keeper
         assert isinstance(runtime.driver, Driver)
         await settle_cut_wakes(runtime.data, runtime.driver)  # V3-P87 §4.4: before any new wake
         settings, application.auto_memory = memory_pass_settings(
@@ -1004,6 +1045,12 @@ class Application:
         writing, application.auto_life = life_settings(
             provider, life=life, companion=companion, model_id=memory_model, write_at=life_write_at,
             daily_tokens=life_daily_tokens, time_zone=time_zone)
+        if writing is not None:  # character-day §10: a self run's default model, and the backup every call has
+            backup = None if backup_model is None else catalog.offer(backup_model)
+            writing = replace(writing, default_model_id=catalog.default.model_id,
+                              default_effort=catalog.default.default_effort,
+                              backup_model_id=None if backup is None else backup.model_id,
+                              backup_effort=None if backup is None else backup.default_effort)
         application.weather = weather
         application.world_weather = world_weather(location, life=life, companion=companion)
         topics: SearchTopics | None = None
@@ -1018,9 +1065,9 @@ class Application:
             # character-work §4: the worker runs with it; no work plan in HIMARI's sleeping hours
             # character-mind §4.1: a self run has a turn's system text (as build_runtime fills it in) and
             # chooses its model through the application (the conversation a wake would go to)
+            # character-day §13: no quiet hours: the day's sleep (its slots) is what the work and the world keep out of
             application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics,
-                                                 quiet=quiet_hours(speaking_first), composer=Composer(),
-                                                 instructions=base, link=application,
+                                                 composer=Composer(), instructions=base, link=application,
                                                  system=replace(system, memory=memory, turn_guidance=True,
                                                                 life=True))
             await application.life_writer.start()
@@ -1029,6 +1076,8 @@ class Application:
             application.ticker.add("purge", cleanup_seconds, application._purge_round)
         if application.life_writer is not None:
             application.ticker.add("life", LIFE_SECONDS, application.life_writer.run)
+        if application.keeper is not None:
+            application.ticker.add("day", DAY_SECONDS, application.keeper.run)
         if weather is not None:
             application.ticker.add("weather", WEATHER_SECONDS, weather.refresh)
         if companion:  # V3-P87 §5.2: the devices' last inputs, kept whether or not HIMARI speaks first
@@ -1039,10 +1088,11 @@ class Application:
                 scheduler = ProactiveScheduler(runtime.data, hub, application.devices, runner, application.inputs,
                                                speaking_first, time_zone, zones=zones,
                                                poke=lambda after: ticker.poke("proactive", after),
-                                               recent=application.recent_companion_conversation,
+                                               recent=application.wake_conversation,  # character-day §18.9
                                                free_ok=runtime.driver.free_wake_ok,
                                                bond=life and companion,  # character-bond §6: anniversaries
-                                               work=life and companion)  # character-work §7.1: finished pieces
+                                               work=life and companion,  # character-work §7.1: finished pieces
+                                               day=application.keeper)  # character-day §9: its sleep, promises
                 hub.on_returned = scheduler.returned
                 application.scheduler = scheduler
                 ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)
@@ -1050,22 +1100,153 @@ class Application:
         return application
 
     async def mind_model(self, principal: PrincipalId) -> MindModel:
-        """character-mind §4.1 (MindLink): a self run's model — the one the principal's latest companion
-        conversation (where a wake goes) would use next, when it is checked for free wakes; else the memory
-        model, with why."""
-        recent = await self.recent_companion_conversation(principal)
-        if recent is None:
-            return MindModel(None, reason="the memory model (no companion conversation)")
-        scope = TrustedScope(principal, recent.conversation_id)
-        choice = await self.model_choice(scope)
-        if not await self.runtime.driver.free_wake_ok(scope):
-            return MindModel(None, reason=f"the memory model ({choice.model_id} is not checked for free wakes)")
-        return MindModel(choice.model_id, choice.effort, "the latest conversation's model")
+        """character-day §10, §18.7 (MindLink): a self run's model — the day session's, as its next turn would
+        use it; with no day session (or the life off), the default model."""
+        session = await self.day_session(principal, open=False)
+        if session is None:
+            return MindModel(None, reason="the default model (no day session)")
+        choice = await self.model_choice(TrustedScope(principal, session.conversation_id))
+        return MindModel(choice.model_id, choice.effort, "the day session's model")
+
+    async def session_input(self, principal: PrincipalId) -> SessionInput | None:
+        """character-day §7, §18.7 (MindLink): the open day session's next turn as it would be composed now, and
+        its model's ceiling; None without one."""
+        session = await self.day_session(principal, open=False)
+        if session is None:
+            return None
+        scope = TrustedScope(principal, session.conversation_id)
+        inputs = await self.runtime.driver.turn_inputs(scope)
+        budget = self.runtime.models.resolve(await self.data.read_model_setting(scope)).offer.budget
+        return SessionInput(session.conversation_id, inputs, None if budget is None else budget.ceiling_tokens)
+
+    # --- the day session (character-day v0.1 §3, §18.10) ------------------------------------------
+
+    async def day_session(self, principal: PrincipalId, *, open: bool = True) -> ConversationSummary | None:
+        """§3.1, §3.2: the principal's open day session — with ``open``, opened now when none is (its title the
+        date, "11월 27일 (금)"; on the companion's default model). None with HIMARI's life off, or none open."""
+        if self.keeper is None:
+            return None
+        current = await self.data.current_day_session(principal)
+        if current is not None or not open:
+            return current
+        async with self._day_opening.setdefault(principal, asyncio.Lock()):
+            current = await self.data.current_day_session(principal)
+            if current is not None:
+                return current
+            today = datetime.now(ZoneInfo(self.time_zone)).date()
+            setting = ModelSetting(self.companion_default_model, None) if self.companion_default_model else None
+            environments = (MACHINE,) if self.machine is not None and principal in self.machine_principals else ()
+            try:
+                opened = await self.data.open_day_session(principal, today.isoformat(), session_title(today),
+                                                          environments=environments, model_setting=setting)
+            except DataError as error:
+                if error.code is not DataErrorCode.DUPLICATE_IDENTITY:
+                    raise
+                return await self.data.current_day_session(principal)
+            summary = await self.data.read_conversation(TrustedScope(principal, opened))
+            log.info("opened %s's day session %s (%s)", principal, opened, summary.title)
+            self._tell_session(principal, summary, False)
+            return summary
+
+    async def wake_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        """§18.9: where a wake (and a device, a try) goes — the day session, opened when needed; with HIMARI's life
+        off, the latest companion conversation as before."""
+        if self.keeper is None:
+            return await self.recent_companion_conversation(principal)
+        return await self.day_session(principal)
+
+    def _tell_session(self, principal: PrincipalId, summary: ConversationSummary, closed: bool) -> None:
+        """§18.10: the stream's ``day_session`` (the Web and the devices follow it)."""
+        self.presence.publish(principal, "day_session", {"conversation": summary.conversation_id,
+                                                         "title": summary.title, "closed": closed})
+
+    def _spawn(self, work: Awaitable[object], name: str) -> None:
+        async def guarded() -> object:
+            try:
+                return await work
+            except Exception:  # noqa: BLE001 — logged; the next round does it again
+                log.exception("%s failed", name)
+                return None
+
+        task: asyncio.Task[object] = asyncio.get_running_loop().create_task(guarded(), name=name)
+        self._day_tasks.add(task)
+        task.add_done_callback(self._day_tasks.discard)
+
+    async def _day_closed(self, principal: PrincipalId, closed: TrustedScope | None) -> None:
+        """§6 steps 3 and 4: the closed session read by the memory passes at once, and the world's new day."""
+        if closed is not None and self.memory_passes is not None:
+            self._spawn(self.memory_passes.read(closed), f"memory-pass-{closed.conversation_id}")
+        if self.life_writer is not None:
+            self._spawn(self.life_writer.world(principal), f"world-{principal}")
+
+    def _fell_asleep(self, principal: PrincipalId) -> None:
+        """§7: asleep before 22:00, the diary is written as it falls asleep (the writer knows whether it is due)."""
+        if self.life_writer is not None:
+            self._spawn(self.life_writer.write(principal), f"diary-{principal}")
+
+    async def poke(self, principal: PrincipalId, device_id: str) -> AsleepAnswer | None:
+        """§5.5, §11: the app's sleeping character clicked — counted as a message; when it stirs (a mumble) or wakes,
+        a turn opens on that device (a ``poke`` wake). None: awake (or HIMARI's life off)."""
+        if self.keeper is None:
+            return None
+        answer = await self.keeper.poke(principal)
+        if answer in (AsleepAnswer.MUMBLE, AsleepAnswer.WAKE):
+            session = await self.day_session(principal)
+            if session is not None:
+                try:
+                    await self.runner.submit_wake(TrustedScope(principal, session.conversation_id),
+                                                  (WakeReason(WakeKind.POKE),), device_id)
+                except (ControlError, DataError) as error:  # busy, not settled: the stir is counted all the same
+                    log.info("a poke opened no turn for %s: %s", principal, error)
+        return answer
+
+    async def sleep_view(self, principal: PrincipalId) -> SleepView | None:
+        """§12: HIMARI's sleep now (the Web's status, a device's state); None with HIMARI's life off."""
+        return None if self.keeper is None else await self.keeper.sleep_view(principal)
+
+    async def sleeps(self, principal: PrincipalId) -> tuple[SleepRecord, ...]:
+        """§12: the latest sleeps (newest first)."""
+        return () if self.keeper is None else await self.keeper.recent_sleeps(principal)
+
+    async def write_plan(self, principal: PrincipalId, persona_id: int | None, plan: PlanWrite) -> LifeEntry:
+        """§4.2, §18.11: the user's slot (origin USER) for the persona the page showed; LifeChanged as for a fact;
+        PLAN_REFUSED past the schedule's limits."""
+        shown = await self._persona_shown(principal, persona_id)
+        return await self.data.write_plan(principal, shown, plan, origin=LifeOrigin.USER, zone=self.time_zone,
+                                          now=datetime.now(UTC))
+
+    async def edit_plan(self, principal: PrincipalId, plan: PlanWrite, revision: int) -> LifeEntry:
+        """§18.11: the user's change of a slot (a move too) at the revision the page read."""
+        found = next((e for e in (await self.life(principal))[1] if e.entry_id == plan.entry_id), None)
+        if found is None or found.kind is not LifeKind.PLAN:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no slot {plan.entry_id}")
+        if found.revision != revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {found.revision}")
+        return await self.data.write_plan(principal, found.persona_id, plan, origin=LifeOrigin.USER,
+                                          zone=self.time_zone, now=datetime.now(UTC))
+
+    async def session_diaries(self, scope: TrustedScope) -> tuple[tuple[datetime, str], ...]:
+        """§7, §18.11: the diaries written in this day session's context — when each was written and its text (as
+        the diary stands now; one deleted since is left out), oldest first. Authorizes like any read."""
+        summary = await self.data.read_conversation(scope)
+        if summary.day_session is None:
+            return ()
+        found: list[tuple[datetime, str]] = []
+        for write in await self.data.session_writes(scope.principal_id, scope.conversation_id):
+            if write.job is not LifeJob.REVIEW or write.finished_at is None or write.status.value != "applied":
+                continue
+            diary = next((e for e in await self.data.list_life(scope.principal_id, write.persona_id, since=write.day)
+                          if e.kind is LifeKind.DIARY and e.day == write.day), None)
+            if diary is not None:
+                found.append((write.finished_at, diary.text))
+        return tuple(found)
 
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
-        """character-mind §4.4 (MindLink): the user's messages, as text, in the latest companion conversation
-        between ``since`` and ``until`` — what they said while HIMARI was at its own work."""
-        recent = await self.recent_companion_conversation(principal)
+        """character-mind §4.4 (MindLink): the user's messages, as text, in the day session (character-day §18.9;
+        with HIMARI's life off, the latest companion conversation) between ``since`` and ``until`` — what they said
+        while HIMARI was at its own work."""
+        recent = (await self.recent_companion_conversation(principal) if self.keeper is None
+                  else await self.day_session(principal, open=False))
         if recent is None:
             return ()
         said: list[str] = []
@@ -1342,10 +1523,12 @@ class Application:
         persona_id = await self._chosen_id(principal)
         now = datetime.now(UTC)
         local = now.astimezone(ZoneInfo(self.time_zone))
+        sleep = await self.sleep_view(principal)  # character-day §4.5: asleep as its sleep says
         entries = await self.data.list_life(principal, persona_id,
                                             since=(local.date() - LIFE_READ_DAYS).isoformat())
         return (live_mood(await self.data.read_mood(principal, persona_id), now),
-                doing_now(entries, local, quiet_hours(self.proactive)))
+                doing_now(entries, local, asleep=sleep is not None and sleep.state in (SleepState.ASLEEP,
+                                                                                    SleepState.HALF_ASLEEP)))
 
     async def current_mood(self, principal: PrincipalId) -> str | None:
         """§2: the mood a device's character starts with — the chosen persona's while it is
@@ -1619,7 +1802,9 @@ class Application:
             if connection_generation is not None and not self.presence.valid_generation(
                     scope.principal_id, origin.device_id or "", connection_generation):
                 raise StaleConnectionGeneration
-        await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
+        summary = await self.data.read_conversation(scope)  # 404 before a job is started (or a file read)
+        if summary.day_session is not None and summary.closed_at is not None:
+            raise DayClosed(scope.conversation_id)  # character-day §3.2: a closed day is only read
         if origin is not None and origin.kind is OriginKind.DEVICE:
             await self.require_companion_model(scope)
         with device_input_negotiation(connection_generation, client_file_download):
@@ -1853,6 +2038,12 @@ class Application:
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)  # its own cancellation, not ours
+        if self.keeper is not None:
+            await self.keeper.aclose()
+        for day_task in list(self._day_tasks):
+            day_task.cancel()
+        if self._day_tasks:
+            await asyncio.gather(*self._day_tasks, return_exceptions=True)
         if self.memory_passes is not None:
             await self.memory_passes.close()  # a pass cut short is counted at the next start (V3-P85 §4.5)
         try:
@@ -1883,7 +2074,7 @@ class Application:
         device = self.presence.current(principal)
         if device is None:
             raise ProactiveRefused("no_device")
-        recent = await self.recent_companion_conversation(principal)
+        recent = await self.wake_conversation(principal)  # character-day §18.9: the day session
         if recent is None:
             raise ProactiveRefused("no_conversation")
         if self.runner.running(principal):  # §6.1: never while any of the user's conversations works

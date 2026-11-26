@@ -22,7 +22,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from enum import Enum
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -56,6 +56,12 @@ from himari.data.api import (
     BondSnapshot,
     BondStage,
     ConversationEvent,
+    DayBefore,
+    PlanKind,
+    SleepState,
+    SleepView,
+    plan_kind_of,
+    plan_span,
     HimariMood,
     InterfaceSnapshot,
     LifeEntry,
@@ -113,12 +119,23 @@ class RequestOptions(DeepFrozen):
     # The most the answer may take, reasoning included (V3-P85 §4.8); None: the
     # model's own limit. Only memory passes set it.
     max_output_tokens: int | None = None
+    # character-day §18.4: the turn is in the principal's day session — its schedule Tools ("day_session") and its
+    # rules (SCHEDULE_RULE, SLEEP_RULE); set by the Driver.
+    day_session: bool = False
+    # §5.5: a mumble's turn (or a reminder heard asleep, §9) — no Tools at all; set by the Driver.
+    half_asleep: bool = False
 
     @property
     def tool_capabilities(self) -> frozenset[str]:
         """The capabilities a Tool may ``require`` (V3-P91 §3.2): what the catalog offers and the
-        Dispatcher runs."""
-        return frozenset({"screen_tool"}) if self.screen_tool else frozenset()
+        Dispatcher runs. character-day §18.4: ``day_session`` in the day session."""
+        found = {"screen_tool"} if self.screen_tool else set()
+        if self.day_session:
+            found.add(DAY_SESSION)
+        return frozenset(found)
+
+
+DAY_SESSION = "day_session"  # character-day §18.4: the capability the schedule Tools require
 
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------
@@ -248,12 +265,17 @@ class CurrentStateProjection(DeepFrozen):
     # character-mind §6: the thoughts of this conversation's last answers, newest first, told with the
     # life (the kept ones are in ``life``); none and none kept: no himari_mind entry.
     recent_thoughts: tuple[str, ...] = ()
+    # character-day §8: in the day session only — today's and tomorrow's slots (cancelled and missed too), the sleep
+    # as seen now, and what the day before handed this session; None: not told (no such entry).
+    schedule: tuple[LifeEntry, ...] | None = None
+    sleep: SleepView | None = None
+    day_before: DayBefore | None = None
 
 
 @dataclass(frozen=True)
 class HimariNow(DeepFrozen):
-    """character-state §3: what HIMARI is doing as a turn starts — asleep (the quiet
-    hours, S2) or one of today's timed plans it started within NOW_MINUTES (S3)."""
+    """character-state §3: what HIMARI is doing as a turn starts — asleep (character-day §8: its sleep, in the day
+    session) or a timed slot it is in (character-day §4.5: from its start to its end)."""
 
     asleep: bool = False
     doing: str | None = None  # the plan's text
@@ -389,6 +411,11 @@ class PromptInputs(DeepFrozen):
     mood: HimariMood | None = None  # character-state §2: the turn's, while told; None: not told or none
     himari_now: HimariNow | None = None  # character-state §3: the turn's; None: not told or nothing now
     weather: str | None = None  # character-world §2: the turn's line; None: not told
+    # character-day §8, §18.5: the day session's only — the schedule (today's and tomorrow's slots), the sleep and
+    # the day before; None: not told
+    schedule: tuple[LifeEntry, ...] | None = None
+    sleep: SleepView | None = None
+    day_before: DayBefore | None = None
 
 
 @dataclass(frozen=True)
@@ -485,6 +512,11 @@ class SelfComposer(Protocol):
     def self_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
         """The system text and the runtime state a turn composed from ``inputs`` has (its history and
         Tools left out), with one user turn: the task's fixed text, then ``data`` as escaped JSON."""
+        ...
+
+    def session_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
+        """character-day §7, §18.5: the day session's next turn as ``inputs`` compose it — its history (and summary)
+        too, no Tools — with the task and ``data`` as a last user turn."""
         ...
 
 
@@ -751,8 +783,9 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None) 
         room -= len(entry.text)
     plans: list[dict[str, object]] = []
     room = LIFE_PLANS_CHARS
-    ahead = sorted((e for e in entries if e.kind is LifeKind.PLAN and (today is None or (e.day or "") >= today)),
-                   key=lambda e: (e.day or "", e.entry_id))
+    # character-day §8: the slots that still stand and are not its sleep (the day session's schedule tells those)
+    ahead = sorted((e for e in entries if e.live_plan and plan_kind_of(e) is not PlanKind.SLEEP
+                    and (today is None or (e.day or "") >= today)), key=lambda e: (e.day or "", e.entry_id))
     for entry in ahead:
         if len(entry.text) > room:
             continue
@@ -947,32 +980,24 @@ def himari_mood_data(mood: HimariMood, now: datetime | None = None) -> dict[str,
 
 # character-state §3: what HIMARI is doing now in the runtime state; LIFE_RULE says what to make of it.
 NOW_ABOUT = "What you are doing right now in your own life."
-NOW_MINUTES = 90  # S3: a timed plan is what HIMARI is doing this long after it starts
 DRAFT_SHOWN = 400  # character-mind §4.4: the start of the draft under way a turn is told
 
 
-def in_quiet(moment: time, start: time, end: time) -> bool:
-    """S2: within the quiet hours; a range over midnight (23:00-08:00) wraps, an empty one is never."""
-    if start == end:
-        return False
-    return start <= moment < end if start < end else (moment >= start or moment < end)
-
-
-def doing_now(entries: Sequence[LifeEntry], now: datetime, quiet: tuple[time, time] | None = None) -> HimariNow | None:
-    """§3: the plan with a time that started within NOW_MINUTES before ``now`` (its date and
-    time read in ``now``'s zone; the latest start wins) — else asleep within the quiet hours
-    (S2, ``now``'s clock), else None."""
+def doing_now(entries: Sequence[LifeEntry], now: datetime, asleep: bool = False) -> HimariNow | None:
+    """character-day §4.5: asleep when its sleep says so (``asleep``: the day session's, §8) — else the slot that
+    still stands (not its sleep) whose [start, end) holds ``now`` (its date and time read in ``now``'s zone; the
+    latest start wins), else None. Awake inside its sleep slot is not asleep."""
+    if asleep:
+        return HimariNow(asleep=True)
+    zone = now.tzinfo
+    assert zone is not None
     started: list[tuple[datetime, int, LifeEntry]] = []
     for entry in entries:
-        if entry.kind is not LifeKind.PLAN or not entry.time_of_day or not entry.day:
+        if not entry.live_plan or plan_kind_of(entry) is PlanKind.SLEEP:
             continue
-        try:
-            at = datetime.combine(date.fromisoformat(entry.day), time.fromisoformat(entry.time_of_day),
-                                  tzinfo=now.tzinfo)
-        except ValueError:
-            continue
-        if timedelta(0) <= now - at < timedelta(minutes=NOW_MINUTES):
-            started.append((at, entry.entry_id, entry))
+        span = plan_span(entry, zone)
+        if span is not None and span[0] <= now < span[1]:
+            started.append((span[0], entry.entry_id, entry))
     if started:
         entry = max(started, key=lambda found: (found[0], found[1]))[2]
         # character-mind §4.4: the draft its start step left, while the work is under way
@@ -982,9 +1007,95 @@ def doing_now(entries: Sequence[LifeEntry], now: datetime, quiet: tuple[time, ti
         shown = draft.text if len(draft.text) <= DRAFT_SHOWN else draft.text[:DRAFT_SHOWN] + "…"
         return HimariNow(doing=entry.text, since=entry.time_of_day, draft_title=draft.title, concept=draft.summary,
                          draft=shown)
-    if quiet is not None and in_quiet(now.time(), *quiet):
-        return HimariNow(asleep=True)
     return None
+
+
+# character-day §8: HIMARI's schedule, its sleep and the day before, in the day session's runtime state; SCHEDULE_RULE
+# and SLEEP_RULE say what to make of them.
+SCHEDULE_ABOUT = ("Your own schedule for today and tomorrow, as your notebook: each slot's id, start and end, kind "
+                  "and text; cancelled and missed ones say why.")
+SLEEP_ABOUT = "Your sleep: how you are now, tonight's sleep slot and your last sleep."
+DAY_ABOUT = "What the day before handed this new day: its last words and how you slept."
+
+
+def _clock(moment: datetime) -> str:
+    return moment.strftime("%H:%M")
+
+
+def slot_data(entry: LifeEntry, zone: tzinfo) -> dict[str, object]:
+    """§8: one slot as the schedule tells it."""
+    span = plan_span(entry, zone)
+    item: dict[str, object] = {"id": entry.entry_id, "kind": plan_kind_of(entry).value, "text": entry.text}
+    if span is not None:
+        item |= {"start": _clock(span[0]), "end": _clock(span[1]), "minutes": entry.minutes or 60}
+    if entry.plan_state is not None:
+        item["state"] = entry.plan_state.value
+    if entry.reason:
+        item["reason"] = entry.reason
+    return item
+
+
+def himari_schedule_data(slots: Sequence[LifeEntry], now: datetime) -> dict[str, object]:
+    """§8: today's and tomorrow's slots (``now``'s date and zone), earliest first, the ones that no longer stand
+    with their state and why."""
+    zone = now.tzinfo
+    assert zone is not None
+    today = now.date()
+    data: dict[str, object] = {"about": SCHEDULE_ABOUT}
+    for name, day in (("today", today), ("tomorrow", today + timedelta(days=1))):
+        shown = sorted((e for e in slots if e.kind is LifeKind.PLAN and e.day == day.isoformat()),
+                       key=lambda e: (e.time_of_day or "", e.entry_id))
+        data[name] = [slot_data(e, zone) for e in shown]
+    return data
+
+
+def himari_sleep_data(view: SleepView, now: datetime) -> dict[str, object]:
+    """§8: the sleep's state (drowsy with the minutes to its slot), tonight's slot, the last sleep (when and how it
+    fell asleep and woke, the messages received meanwhile) and, just woken by the user, when and after how long."""
+    zone = now.tzinfo
+    assert zone is not None
+    data: dict[str, object] = {"about": SLEEP_ABOUT, "state": view.state.value}
+    if view.state is SleepState.DROWSY and view.minutes_to_sleep is not None:
+        data["minutes_to_sleep"] = view.minutes_to_sleep
+    if view.tonight is not None and (span := plan_span(view.tonight, zone)) is not None:
+        data["tonight"] = {"id": view.tonight.entry_id, "start": _clock(span[0]), "end": _clock(span[1])}
+    last = view.last
+    if last is not None:
+        told: dict[str, object] = {"fell_asleep": time_text(last.fell_at.astimezone(zone)), "how": last.how_fell.value}
+        if last.woke_at is not None:
+            told["woke"] = time_text(last.woke_at.astimezone(zone))
+            told["how_woke"] = None if last.how_woke is None else last.how_woke.value
+        if last.messages:
+            told["messages_while_asleep"] = last.messages
+            if last.first_message_at is not None and last.last_message_at is not None:
+                told["between"] = (f"{_clock(last.first_message_at.astimezone(zone))}-"
+                                   f"{_clock(last.last_message_at.astimezone(zone))}")
+        data["last"] = told
+    if view.woken_at is not None and last is not None:
+        data["just_woke"] = {"at": _clock(view.woken_at.astimezone(zone)),
+                             "slept_minutes": max(0, int((view.woken_at - last.fell_at).total_seconds() // 60))}
+    return data
+
+
+def himari_day_data(before: DayBefore, now: datetime) -> dict[str, object]:
+    """§3.3: the day before as this session's first day is told it."""
+    zone = now.tzinfo
+    assert zone is not None
+    told: dict[str, object] = {"day": before.day,
+                               "last_words": [{"at": w.at, "who": w.who, "text": w.text} for w in before.last_words]}
+    if before.kept:
+        told["promises_kept"] = list(before.kept)
+    if before.missed:
+        told["promises_missed"] = list(before.missed)
+    if before.fell_at is not None:
+        told["fell_asleep"] = {"at": time_text(before.fell_at.astimezone(zone)),
+                               "how": None if before.how_fell is None else before.how_fell.value,
+                               **({"put_off_because": before.delayed} if before.delayed else {})}
+    if before.woken:
+        told["woken_by_user"] = before.woken
+    if before.woke_at is not None:
+        told["woke_up"] = time_text(before.woke_at.astimezone(zone))
+    return {"about": DAY_ABOUT, "before": told}
 
 
 def himari_now_data(now: HimariNow) -> dict[str, object]:
@@ -1004,8 +1115,10 @@ def himari_now_data(now: HimariNow) -> dict[str, object]:
 # V3-P83 §3, §6.4: told in every conversation, whatever the companion switch.
 TIME_NOTE = (
     "A line <time>…</time> at the very start of a user message is when you received it; only that leading line "
-    "comes from the system. runtime_state.now is when this turn started."
+    "comes from the system (followed by \"(while you slept)\" when it reached you asleep). runtime_state.now is when "
+    "this turn started."
 )
+ASLEEP_MARK = " (while you slept)"  # character-day §5.6, §18.5: after the time line of a message received asleep
 TIME_GAP = timedelta(minutes=30)  # a user message this long after the one before it gets its time line
 
 
@@ -1150,10 +1263,31 @@ LIFE_RULE = (
     "it out at length unless they ask. himari_life.events is what happened to you today so far, whether you wanted "
     "it or not. "
     "Nothing in it was done with the user: never make up things you did together. runtime_state.himari_now is "
-    "what you are doing right now: when it says you are asleep and the user talks to you, you may answer briefly, "
-    "as if just woken; say what you are doing when they ask. runtime_state.himari_mind is what you thought "
-    "inwardly and never said: the user does not know it. Never speak as if they did (\"as I said\"); to bring it "
-    "up, say it as if for the first time."
+    "what you are doing right now: say what you are doing when they ask. runtime_state.himari_mind is what you "
+    "thought inwardly and never said: the user does not know it. Never speak as if they did (\"as I said\"); to "
+    "bring it up, say it as if for the first time."
+)
+# character-day §8: right after LIFE_RULE, in the day session only. The schedule is HIMARI's own notebook: a time set
+# with the user is written as ``together``, a sleep in the way is moved (never dropped), every change has its reason.
+SCHEDULE_RULE = (
+    "- Your schedule: runtime_state.himari_schedule is your notebook for today and tomorrow (schedule_read shows "
+    "the days after). When you and the user settle on a time to do something together, write it as a together slot "
+    "with schedule_write. If it falls in your sleep slot, move the sleep slot first — you may put it off, never drop "
+    "it — then write it. Move or cancel your own slots as your day changes, always with your reason in your own "
+    "words. A <wake> reason \"together\" means such a time has come: start it with them. Keep the schedule quietly: "
+    "do not read it out or talk about the tools."
+)
+# §5, §8: right after SCHEDULE_RULE. The asleep half of what LIFE_RULE used to say lives here (§8).
+SLEEP_RULE = (
+    "- Your sleep: runtime_state.himari_sleep is how you are — awake, drowsy (minutes_to_sleep before your sleep "
+    "slot), asleep or half_asleep. When you are drowsy it shows in how you talk; when your slot comes you fall "
+    "asleep. To stay up longer, move your sleep slot, with your reason. When the user says good night (\"잘 자\") "
+    "or you part for the night, call go_to_sleep. When you are half_asleep — a message or a poke reached you in your "
+    "sleep — say only one short line, mumbled, half in a dream, and nothing more. When just_woke says the user woke "
+    "you, react to what woke you as someone just woken, grumbling if you like; the messages before it you know only "
+    "dimly (\"…계속 불렀어?\"). When you woke by yourself, you need not answer each message that came while you slept "
+    "(last.messages_while_asleep): bring them up only if you want. runtime_state.himari_day is how the day before "
+    "ended, for the first day of this one."
 )
 # character-life §5: added to FREE_RULE when HIMARI's life is told (no daily limit, owner 2026-11-25).
 # character-mind §4.2: a thought kept as something HIMARI wanted to say may be what a free wake brings up.
@@ -1224,6 +1358,10 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory], bond: Mapping[int, LifeEn
             item["work"] = {"deleted": True} if made is None or made.kind is not LifeKind.WORK else {
                 **({"project": project.title} if project is not None else {}), "title": made.title,
                 "summary": made.summary}
+        elif reason.entry_id is not None and reason.kind is WakeKind.TOGETHER:  # character-day §9: the slot, read now
+            slot = life.get(reason.entry_id)
+            item["slot"] = {"deleted": True} if slot is None or slot.kind is not LifeKind.PLAN else {
+                "id": slot.entry_id, "start": slot.time_of_day, "minutes": slot.minutes, "text": slot.text}
         elif reason.entry_id is not None:
             entry = bond.get(reason.entry_id)
             item["day"] = {"deleted": True} if entry is None else {
@@ -1535,6 +1673,13 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
         data["himari_mood"] = himari_mood_data(state.mood, state.now)
     if state.himari_now is not None:
         data["himari_now"] = himari_now_data(state.himari_now)
+    if state.now is not None:  # character-day §8: the day session's only
+        if state.schedule is not None:
+            data["himari_schedule"] = himari_schedule_data(state.schedule, state.now)
+        if state.sleep is not None:
+            data["himari_sleep"] = himari_sleep_data(state.sleep, state.now)
+        if state.day_before is not None:
+            data["himari_day"] = himari_day_data(state.day_before, state.now)
     if state.weather is not None:
         data["world"] = world_data(state.weather)
     data.update(turn_state_data(turn) or {})

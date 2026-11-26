@@ -16,7 +16,8 @@ from typing import Protocol, runtime_checkable
 
 from himari.common import CallRef, ConversationId, DeepFrozen, PrincipalId, RunId, TrustedScope
 from himari.data.api import (
-    ConversationEvent, InterfaceSnapshot, MessageOrigin, ModelSetting, RecoveryReport, UserMessage, WakeReason,
+    AsleepAnswer, ConversationEvent, DayBefore, InterfaceSnapshot, MessageOrigin, ModelSetting, RecoveryReport,
+    SleepView, UserMessage, WakeReason,
 )
 from himari.prompt.api import ContextBudget, PresenceView
 from himari.provider.api import OutputDelta
@@ -265,13 +266,15 @@ class ConversationDriver(Protocol):
         Run if one is due. Same BUSY rule as ``drive``."""
         ...
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
         """Commit one user input (T1) after restart cleanup, without running
         Tools or the Provider; ``resume`` continues from it. A new message
         redirects (V3-P55): never-started calls of the latest group — left by
         an interruption, or an ``ask_user`` question of older history still
         open — are first closed as CANCELLED, telling the model the user sent
-        a new message instead. Same BUSY rule as ``drive``."""
+        a new message instead. Same BUSY rule as ``drive``. character-day §18.4:
+        in the day session, the message is recorded with how a sleeping HIMARI met
+        it (``while_asleep``); one met with no answer starts nothing. The Event recorded."""
         ...
 
     async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
@@ -334,6 +337,9 @@ class JobStatus(DeepFrozen):
     wake_id: str | None = None  # V3-P87: the wake this job answers (a server-opened turn)
     hidden: bool = False  # V3-P90 §7.3: a free wake's job not shown yet — no job event, not working
     free: bool = False  # V3-P90 §9: a free wake's job (its job event says so once shown)
+    # character-day §5.5, §18.11: how a sleeping HIMARI met the message this status answers ``submit`` for (NONE:
+    # no job was started); None: awake, or not a message's
+    asleep: AsleepAnswer | None = None
 
     @property
     def job_id(self) -> str | None:
@@ -381,6 +387,28 @@ class InterfaceSource(Protocol):
 class PresenceSource(Protocol):
     async def read(self, principal: PrincipalId, sent_from: MessageOrigin | None) -> TurnPresence:
         """``sent_from``: the origin of the turn's message, which the Driver read from the log."""
+        ...
+
+
+class DayGate(Protocol):
+    """character-day §18.1, §18.4: what the Driver asks of the day's keeper (filled by the composition root; Control
+    never imports ``life``). Only the principal's open day session has a sleep: elsewhere every answer is None."""
+
+    async def answer(self, scope: TrustedScope, origin: MessageOrigin | None) -> AsleepAnswer | None:
+        """§5.5: a user message arriving in the day session — counted against a sleeping HIMARI, and how it is met
+        (None: awake, or not the day session). A WAKE wakes it (woken by the user)."""
+        ...
+
+    async def view(self, scope: TrustedScope) -> SleepView | None:
+        """§8: the sleep as a turn of the day session sees it now; None elsewhere."""
+        ...
+
+    async def day_session(self, scope: TrustedScope) -> bool:
+        """§3.1: whether this is the principal's open day session."""
+        ...
+
+    async def before(self, scope: TrustedScope) -> DayBefore | None:
+        """§3.3: what the day before handed this session, on its first day only; None otherwise."""
         ...
 
 

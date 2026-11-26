@@ -57,8 +57,10 @@ def error_code(response: Any) -> str:
 
 def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Server) -> None:
     empty = server.client.get("/api/life").json()
-    now = empty.pop("now")  # character-state §3: asleep in the default quiet hours (23:00-08:00), else nothing
-    assert now in (None, {"asleep": True, "doing": None, "since": None})
+    now = empty.pop("now")  # character-day §4.5: never asleep by the clock; the day keeper's sleep (awake here)
+    assert now is None
+    # character-day §18.11: the sleep now (no slot placed yet: no look ran) and no sleep yet
+    assert (empty.pop("sleep"), empty.pop("sleeps")) == ({"state": "awake"}, [])
     assert empty == {"persona": None, "enabled": True,
                      "writer": {"running": False, "told": "off (no HIMARI_MEMORY_MODEL)"}, "mood": None, "entries": [],
                      "world": {"weather": "off (no HIMARI_LOCATION)", "today": None,

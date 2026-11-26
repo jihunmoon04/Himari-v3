@@ -7,13 +7,13 @@ from dataclasses import replace
 from collections.abc import Awaitable, Callable
 
 import pytest
-from testkit import SCOPE, NoWakes, final, runtime, user
+from testkit import SCOPE, NoWakes, accepted, final, runtime, user
 
 from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.control.api import (ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest,
                                 StopSignal, TurnProgress, TurnUsage)
 from himari.control.runner import BackgroundRunner
-from himari.data.api import DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind, UserMessage
+from himari.data.api import ConversationEvent, DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind, UserMessage
 
 FOREIGN = TrustedScope(PrincipalId("mallory"), SCOPE.conversation_id)
 
@@ -40,10 +40,11 @@ class GatedDriver(NoWakes):
                      progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
         if self.accept_error is not None:
             raise self.accept_error
         self.calls.append((scope, message))
+        return accepted(scope, message)
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
                      progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
@@ -280,10 +281,10 @@ class GatedAccept(GatedDriver):
         self.accepting = asyncio.Event()
         self.in_accept = asyncio.Event()
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
         self.in_accept.set()
         await self.accepting.wait()
-        await super().accept(scope, message)
+        return await super().accept(scope, message)
 
 
 def closed(error: pytest.ExceptionInfo[ControlError]) -> bool:

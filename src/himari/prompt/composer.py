@@ -25,6 +25,7 @@ from himari.data.api import (
     Wake,
 )
 from himari.prompt.api import (
+    ASLEEP_MARK,
     AssistantTurn,
     CompressedHistory,
     CurrentStateProjection,
@@ -122,6 +123,15 @@ class Composer:
             source_notes=fit_notes(quiet.source_notes),
         )
 
+    def session_input(self, inputs: PromptInputs, task: str, data: Mapping[str, JsonValue]) -> ModelInput:
+        """character-day §7, §18.5: the diary in the day session's context — the request the session's next turn
+        would send from ``inputs`` (its system text, history and summary, runtime state; no Tools), with the
+        task's fixed text and its data as one more user turn at the end."""
+        quiet = replace(inputs, tool_catalog=())
+        composed = self.compose(quiet)
+        turn = UserTurn(EventId("self-run"), (TextBlock(task), TextBlock(json_data(data))))
+        return replace(composed, tool_catalog=(), conversation=(*composed.conversation, turn), trigger_refs=())
+
     @staticmethod
     def _group(
         run_id: RunId,
@@ -148,6 +158,9 @@ def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]
     the Events' own times only, so the same history gives the same lines."""
     assert inputs.time_zone is not None
     received = {e.event_id: e.created_at for e in inputs.events}
+    # character-day §5.6, §18.5: a message received asleep always has its time line, marked so
+    asleep = {e.event_id for e in inputs.events
+              if isinstance(e.payload, UserMessage) and e.payload.while_asleep is not None}
     out: list[HistoryPart] = []
     previous = None
     for part in history:
@@ -156,7 +169,10 @@ def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]
                                          *part.blocks))
         elif isinstance(part, UserTurn):
             moment = received[part.event_id]
-            if previous is None or moment - previous > TIME_GAP:
+            if part.event_id in asleep:
+                part = replace(part, blocks=(TextBlock(time_line(moment, inputs.time_zone) + ASLEEP_MARK),
+                                             *part.blocks))
+            elif previous is None or moment - previous > TIME_GAP:
                 part = replace(part, blocks=(TextBlock(time_line(moment, inputs.time_zone)), *part.blocks))
             previous = moment
         out.append(part)

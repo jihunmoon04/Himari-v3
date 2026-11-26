@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import time
 
-from himari.control.api import InterfaceSource, ModelCatalog, ModelOffer, PresenceSource
+from himari.control.api import DayGate, InterfaceSource, ModelCatalog, ModelOffer, PresenceSource
 from himari.control.driver import MAX_RUNS, Driver
 from himari.common import TrustedScope
 from himari.data.memory import InMemoryData, InMemoryStore
@@ -31,6 +30,7 @@ from himari.tool.dispatcher import Dispatcher
 from himari.tool.images import StoredResultImages
 from himari.tool.conversation_search import conversation_search_tools
 from himari.tool.memory import memory_tools
+from himari.tool.schedule import schedule_tools
 from himari.tool.screen import ScreenTool
 from himari.tool.registry import ToolRegistry
 from himari.world.api import WeatherSource
@@ -79,7 +79,6 @@ def build_runtime(
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
     memory: bool = False,  # V3-P71: the memory Tools, the memory section and the notes in the state
     life: bool = False,  # character-life §5: HIMARI's life in the state and its rule (with the companion)
-    quiet_hours: tuple[time, time] | None = None,  # character-state §3 (S2): HIMARI is asleep in them; None: never
     weather: WeatherSource | None = None,  # character-world §2: told with the life; None: no weather
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
@@ -92,6 +91,8 @@ def build_runtime(
     # as given, with no sections — only the memory section and the turn rule are added after
     # them as before (callers with their own base text: tests). Application.open always gives one.
     system: SystemSpec | None = None,
+    day: DayGate | None = None,  # character-day §18.4: the day's keeper (with the life); None: no day session
+    backup_model: str | None = None,  # character-day §10: an offered model a turn falls back to; None: none
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -106,6 +107,8 @@ def build_runtime(
     lived = life and system is not None and system.companion
     registry = ToolRegistry([*tools, *(memory_tools(data, time_zone=time_zone or "UTC", life=data if lived else None)
                                        if memory else ()),
+                             # character-day §4.3: HIMARI's schedule Tools, offered in the day session only
+                             *(schedule_tools(data, time_zone=time_zone or "UTC") if lived else ()),
                              *(conversation_search_tools(data, compacted_through) if conversation_search else ()),
                              *((ScreenTool(screen),) if screen is not None else ())],
                             allow_require_user=allow_require_user_tools)
@@ -149,7 +152,6 @@ def build_runtime(
         life=data if spec is not None and spec.life else None,
         bond=data if spec is not None and spec.life else None,  # character-bond §5: told with the life
         moods=data if spec is not None and spec.life else None,  # character-state §2: so is the mood
-        quiet_hours=quiet_hours,
         bond_stages=data,  # character-world §5 (W4): the persona's hidden lines wait for the stage
         weather=weather if spec is not None and spec.life else None,
         max_runs_per_drive=max_runs_per_drive,
@@ -160,6 +162,8 @@ def build_runtime(
         presence=presence,
         interfaces=interfaces,
         companion=spec is not None and spec.companion,
+        day=day if spec is not None and spec.life else None,
+        backup_model=backup_model,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver, access=access, models=models)
 

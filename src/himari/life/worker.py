@@ -228,8 +228,13 @@ class LifeWriter:
         return MindModel(mind.model_id, mind.reasoning_effort, mind.reason)
 
     async def _mind(self, principal: PrincipalId) -> _Mind:
+        """character-day §10, §18.7: the day session's model; without one, the default model (the memory model
+        when no default is given)."""
         chosen = MindModel(None, reason=MEMORY_MODEL) if self._link is None else await self._link.mind_model(principal)
         if chosen.model_id is None:
+            if self.settings.default_model_id is not None:
+                return _Mind(self.settings.default_model_id, self.settings.default_effort,
+                             chosen.reason or "the default model")
             return _Mind(self.settings.model_id, self.settings.reasoning_effort, chosen.reason or MEMORY_MODEL)
         return _Mind(chosen.model_id, chosen.reasoning_effort, chosen.reason)
 
@@ -272,7 +277,7 @@ class LifeWriter:
             episode_count=count, now=local, time_zone=self.settings.time_zone, life=life,
             bond=await self._data.read_bond(principal, persona_id, now=now, zone=self.settings.time_zone),
             mood=live_mood(await self._data.read_mood(principal, persona_id), now),
-            himari_now=doing_now(life, local, self._quiet), weather=None if found is None else found.line())
+            himari_now=doing_now(life, local), weather=None if found is None else found.line())
 
     async def _prepared(self, principal: PrincipalId, asked: ModelInput, output_tokens: int,
                         now: datetime) -> tuple[NativePreparedRequest, int] | None:
