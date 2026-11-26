@@ -12,12 +12,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from testkit import SCOPE, data_for, new_store, restart, user
 
-from himari.common import ConversationId, PrincipalId, TrustedScope
+from himari.common import ConversationId, PrincipalId, RawRepresentation, TrustedScope
 from himari.data.api import (
     MAX_HIMARI_PLAN_WRITES,
     AsleepAnswer,
     PromptBasis,
-    RawRepresentation,
     RunPreparation,
     WakeKind,
     WakeReason,

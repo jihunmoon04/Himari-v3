@@ -113,11 +113,11 @@ def runtime(gate: Gate, now: datetime) -> Any:
     store = new_store()
     rt = build_runtime(OpenRouterAdapter(KEY), store=store, model_id=MODEL, reasoning_effort=effort(),
                        instructions=COMPANION_BASE, system=SystemSpec(companion=True, proactive=True),
-                       turn_guidance=True, life=True, memory=True, time_zone=ZONE, day=gate)  # type: ignore[arg-type]
+                       turn_guidance=True, life=True, memory=True, time_zone=ZONE, day=gate)
     store.create_conversation(SCOPE)
     rt.driver._clock = lambda: now  # noqa: SLF001 — the scene's hour
     for tool_id in SCHEDULE_TOOL_IDS:
-        rt.registry._handlers[tool_id]._clock = lambda: now  # noqa: SLF001
+        rt.registry._handlers[tool_id]._clock = lambda: now  # type: ignore[attr-defined]  # noqa: SLF001
     return rt
 
 

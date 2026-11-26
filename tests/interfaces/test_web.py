@@ -19,7 +19,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import FakeMcpServer  # noqa: E402
-from testkit import NoWakes, calls, final  # noqa: E402
+from testkit import NoWakes, accepted, calls, final  # noqa: E402
 
 from himari.bootstrap import application as bootstrap  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
@@ -27,7 +27,7 @@ from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
-from himari.data.api import UserMessage  # noqa: E402
+from himari.data.api import ConversationEvent, UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.provider.api import ProviderCapabilities  # noqa: E402
@@ -393,8 +393,8 @@ class GatedDriver(NoWakes):
                      progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
-    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
-        pass
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> ConversationEvent:
+        return accepted(scope, message)
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
                      progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:

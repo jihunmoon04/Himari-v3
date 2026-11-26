@@ -187,4 +187,4 @@ def test_the_schedule_and_sleep_are_told_on_the_server_zones_clock_not_the_devic
     assert [s["id"] for s in data["himari_schedule"]["today"]] == [1, 3]  # type: ignore[index]
     assert [s["id"] for s in data["himari_schedule"]["tomorrow"]] == [4]  # type: ignore[index]
     assert data["himari_sleep"]["last"]["fell_asleep"] == "2026-11-27T00:15+09:00"  # type: ignore[index]
-    assert data["now"].endswith("-08:00")
+    assert str(data["now"]).endswith("-08:00")

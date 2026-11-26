@@ -76,7 +76,7 @@ def day_runtime(gate: Gate, script: list[object], *, models: ModelCatalog | None
     adapter = ScriptedAdapter(script)  # type: ignore[arg-type]
     store = new_store()
     rt = build_runtime(adapter, store=store, life=True, system=SystemSpec(companion=True), time_zone=ZONE,
-                       day=gate, models=models, backup_model=backup)  # type: ignore[arg-type]
+                       day=gate, models=models, backup_model=backup)
     store.create_conversation(SCOPE)
     return rt, adapter
 
@@ -155,7 +155,7 @@ def test_a_schedule_write_is_kept_with_its_result_and_a_refusal_is_said_to_the_m
         written, refused = await rt.data.read_tool_executions(SCOPE, result.run_ids[0])  # type: ignore[attr-defined]
         assert written.status.value == "succeeded"
         assert refused.status.value == "failed" and refused.model_result is not None
-        told = refused.model_result.blocks[0].text  # type: ignore[union-attr]
+        told = refused.model_result.blocks[0].text
         assert told.startswith("Not written: It overlaps your sleep slot") and f"id {sleep.entry_id}" in told
         plans = [e for e in await rt.data.list_life(SCOPE.principal_id, 0) if e.kind is LifeKind.PLAN]  # type: ignore[attr-defined]
         promise = next(e for e in plans if e.plan_kind is PlanKind.TOGETHER)
@@ -177,7 +177,7 @@ def test_go_to_sleep_is_refused_by_day_with_its_reason() -> None:
         (record,) = await rt.data.read_tool_executions(SCOPE, result.run_ids[0])  # type: ignore[attr-defined]
         local = datetime.now(ZoneInfo(ZONE)).time()
         if record.status.value == "failed":  # 05:00 to 21:00 here: not yet
-            assert "You can go to sleep early from 21:00" in record.model_result.blocks[0].text  # type: ignore[union-attr]
+            assert "You can go to sleep early from 21:00" in record.model_result.blocks[0].text
         else:
             state = await rt.data.read_day_state(SCOPE.principal_id, 0)  # type: ignore[attr-defined]
             assert state.sleep_requested_at is not None and (local.hour >= 21 or local.hour <= 5)
@@ -257,7 +257,7 @@ def test_a_closed_or_closing_day_takes_no_message_wake_resume_or_compaction() ->
                         lambda: rt.driver.drive(SCOPE, said("늦었다")),  # type: ignore[attr-defined]
                         lambda: rt.driver.accept_wake(SCOPE, (WakeReason(WakeKind.TRY),), "d1")):  # type: ignore[attr-defined]
             with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
-                await refused()
+                await refused()  # type: ignore[no-untyped-call]
         assert await rt.data.read_events(SCOPE) == () and gate.asked == []  # type: ignore[attr-defined]
         runner = BackgroundRunner(rt.driver)  # type: ignore[attr-defined]
         runner.day_closing = lambda scope: True
@@ -270,7 +270,7 @@ def test_a_closed_or_closing_day_takes_no_message_wake_resume_or_compaction() ->
         for submitted in (lambda: runner.submit(SCOPE, None), lambda: runner.submit_compaction(SCOPE),
                           lambda: runner.submit(SCOPE, said("늦었다"))):
             with pytest.raises(DataError, check=lambda e: e.code is DataErrorCode.DAY_CLOSED):
-                await submitted()
+                await submitted()  # type: ignore[no-untyped-call]
         assert not runner.status(SCOPE).running and adapter.sent == []
         assert yielded == []  # a fenced day's wake is left to settle: the message never cancels it
 
