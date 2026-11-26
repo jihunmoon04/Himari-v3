@@ -9,7 +9,7 @@ single-threaded asyncio (the transaction boundaries T1–T9, T-R).
 from __future__ import annotations
 
 import itertools
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -32,6 +32,17 @@ from himari.common import (
 from himari.data import rules
 from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
 from himari.data.api import (
+    AsleepAnswer,
+    DayBefore,
+    DayState,
+    FellBy,
+    PlanChange,
+    PlanKind,
+    PlanOp,
+    PlanState,
+    PlanWrite,
+    SleepRecord,
+    WokeBy,
     ALREADY_SENT,
     EventPage,
     EventSearch,
@@ -227,6 +238,8 @@ class _Conversation:
     trashed_at: datetime | None = None  # V3-P65
     purge_started_at: datetime | None = None
     files: list[_File] = field(default_factory=list)  # V3-P66, in creation order
+    day_session: str | None = None  # character-day §3: a day session's date
+    closed_at: datetime | None = None  # and when it closed
 
 
 @dataclass
@@ -291,6 +304,10 @@ class InMemoryStore:
         self.reminders: dict[tuple[PrincipalId, int], tuple[str, str | None, int]] = {}
         self.reminded_at: dict[tuple[PrincipalId, int], datetime] = {}
         self.device_ids: dict[PrincipalId, int] = {}
+        # character-day §5.1, §18.2: HIMARI's sleeps by id (with their owner), in creation order, and the keeper's
+        # state per principal and persona
+        self.sleeps: dict[int, tuple[PrincipalId, SleepRecord]] = {}
+        self.day_states: dict[tuple[PrincipalId, int], DayState] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -746,16 +763,22 @@ class InMemoryData:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
         if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call changes memory")
+        if completion.plan_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call changes the schedule")
         presented = self._stage_presented(conv, call, completion.presented_files)
         images = self._tool_images(conv, call, completion.model_result.blocks)
         memory = (None if completion.memory_change is None
                   else self._stage_memory(scope, call, completion.memory_change))
+        planned = (None if completion.plan_change is None  # character-day §18.6: checked first, kept last
+                   else self._stage_plan_change(scope.principal_id, completion.plan_change))
         if memory is not None:
             key, note = memory
             if note is None:
                 del self._store.memories[key]
             else:
                 self._put_memory(key[0], note)
+        if planned is not None:
+            planned()
         conv.files.extend(presented)
         self._mark_attached(images)
         conv.executions[call] = replace(
@@ -901,7 +924,42 @@ class InMemoryData:
             last_sequence=len(conv.events),
             preview="" if first_user is None else rules.preview(first_user.payload.blocks),  # type: ignore[union-attr]
             trashed_at=conv.trashed_at,
+            day_session=conv.day_session,
+            closed_at=conv.closed_at,
         )
+
+    # --- day sessions (character-day v0.1 §3, §18.2) --------------------------------------------
+
+    async def open_day_session(self, principal: PrincipalId, day: str, title: str, *,
+                               environments: Sequence[EnvironmentKind] = (),
+                               model_setting: ModelSetting | None = None) -> ConversationId:
+        day = rules.check_life_day(day)
+        title_text = rules.normalize_title(title)
+        rules.check_environments(environments)
+        rules.check_model_setting(model_setting)
+        if any(c.owner == principal and c.day_session is not None and c.closed_at is None
+               for c in self._store._conversations.values()):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, "a day session is open already")
+        scope = TrustedScope(principal, ConversationId(self._store.new_id("conv")))
+        self._store.create_conversation(scope, title=title_text, model_setting=model_setting)
+        conv = self._store._conversations[scope.conversation_id]
+        conv.environments.update(environments)
+        conv.day_session = day
+        return scope.conversation_id
+
+    async def current_day_session(self, principal: PrincipalId) -> ConversationSummary | None:
+        found = next(((cid, c) for cid, c in self._store._conversations.items()
+                      if c.owner == principal and c.day_session is not None and c.closed_at is None
+                      and c.trashed_at is None), None)
+        return None if found is None else self._summary(*found)
+
+    async def close_day_session(self, principal: PrincipalId, conversation_id: ConversationId,
+                                now: datetime) -> bool:
+        conv = self._store._conversations.get(conversation_id)
+        if conv is None or conv.owner != principal or conv.day_session is None or conv.closed_at is not None:
+            return False
+        conv.closed_at = now
+        return True
 
     async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
         times = [e.created_at for conv in self._store._conversations.values()
@@ -949,6 +1007,8 @@ class InMemoryData:
         if conv.trashed_at is not None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is in the trash")
         conv.trashed_at = datetime.now(UTC)
+        if conv.day_session is not None and conv.closed_at is None:  # character-day §3.2: closed with it
+            conv.closed_at = conv.trashed_at
         return conv.trashed_at
 
     async def restore_conversation(self, scope: TrustedScope) -> None:
@@ -991,6 +1051,9 @@ class InMemoryData:
             else:
                 self._store.life[key] = (replace(entry, source_conversation=None, source_sequences=(), source=None),
                                          retired)
+        for write in self._store.life_writes.values():  # character-day §7: the diary stays, unlinked
+            if write.record.conversation_id == scope.conversation_id:
+                write.record = replace(write.record, conversation_id=None)
         for pass_id in [p for p, (_, mp) in self._store.memory_passes.items()
                         if mp.conversation_id == scope.conversation_id]:
             del self._store.memory_passes[pass_id]
@@ -1321,7 +1384,91 @@ class InMemoryData:
         entry = self._live_entry(principal, entry_id)
         if expected_revision != entry.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+        rules.check_retire(entry)  # character-day §4.2: a sleep slot is only moved
         self._retire_life(principal, entry, datetime.now(UTC))
+
+    # --- the schedule (character-day v0.1 §4, §18.2) ---------------------------------------------
+
+    def _plans(self, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
+        """Every plan of the persona not retired (cancelled and missed too), and its open arcs."""
+        return [e for (owner, _), (e, retired) in self._store.life.items()
+                if owner == principal and retired is None and e.persona_id == persona_id
+                and (e.kind is LifeKind.PLAN or e.arc_open)]
+
+    def _planned(self, principal: PrincipalId, persona_id: int, plan: PlanWrite, origin: LifeOrigin, zone: str,
+                 now: datetime) -> tuple[LifeEntry, bool]:
+        """The slot to keep and whether it is new; nothing is changed yet."""
+        persona_id = rules.check_life_persona(persona_id)
+        plan = rules.check_plan_write(plan)
+        where = rules.check_zone(zone)
+        entries = self._plans(principal, persona_id)
+        before = None if plan.entry_id is None else rules.live_plan_of(self._live_entry(principal, plan.entry_id),
+                                                                        persona_id)
+        plan = rules.check_plan_limits(plan, before, [e for e in entries if e.kind is LifeKind.PLAN],
+                                       [e for e in entries if e.kind is LifeKind.ARC], origin=origin, zone=where,
+                                       now=now)
+        return rules.planned_entry(persona_id, plan, before, origin, now), before is None
+
+    def _keep_planned(self, principal: PrincipalId, planned: tuple[LifeEntry, bool]) -> LifeEntry:
+        entry, new = planned
+        return self._new_life(principal, entry) if new else self._put_life(principal, entry)
+
+    def _cancelled(self, principal: PrincipalId, entry_id: object, reason: object, origin: LifeOrigin, zone: str,
+                   now: datetime, persona_id: int | None = None) -> LifeEntry:
+        why = rules.check_plan_reason(reason)
+        if why is None:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a cancelled slot says why")
+        before = rules.live_plan_of(self._live_entry(principal, entry_id), persona_id)
+        plans = [e for e in self._plans(principal, before.persona_id) if e.kind is LifeKind.PLAN]
+        rules.check_cancel(before, plans, origin=origin, zone=rules.check_zone(zone), now=now)
+        return replace(before, plan_state=PlanState.CANCELLED, reason=why, origin=origin,
+                       revision=before.revision + 1, updated_at=now)
+
+    def _stage_plan_change(self, principal: PrincipalId, change: PlanChange) -> Callable[[], LifeEntry | None]:
+        """§18.6: a schedule Tool's change (origin HIMARI), checked now; what it keeps, kept by the call."""
+        if not isinstance(change, PlanChange) or not isinstance(change.op, PlanOp):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a plan change")
+        if change.op is PlanOp.WRITE:
+            if change.write is None:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, "a write carries its slot")
+            planned = self._planned(principal, change.persona_id, change.write, LifeOrigin.HIMARI, change.zone,
+                                    change.at)
+            return lambda: self._keep_planned(principal, planned)
+        if change.op is PlanOp.CANCEL:
+            cancelled = self._cancelled(principal, change.entry_id, change.reason, LifeOrigin.HIMARI, change.zone,
+                                        change.at, rules.check_life_persona(change.persona_id))
+            return lambda: self._put_life(principal, cancelled)
+        persona_id = rules.check_life_persona(change.persona_id)
+        zone = rules.check_zone(change.zone)
+        plans = [e for e in self._plans(principal, persona_id) if e.kind is LifeKind.PLAN]
+        slot, write = rules.sleep_now(plans, zone=zone, now=change.at, reason=rules.check_plan_reason(change.reason))
+        made: tuple[LifeEntry, bool] | None = None
+        if write is not None:
+            rules.check_himari_count(plans, None if slot is None else slot.entry_id, zone, change.at)
+            made = (rules.planned_entry(persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI,
+                                        change.at), slot is None)
+        state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
+
+        def keep() -> LifeEntry | None:
+            self._store.day_states[(principal, persona_id)] = replace(state, sleep_requested_at=change.at)
+            return slot if made is None else self._keep_planned(principal, made)
+
+        return keep
+
+    async def write_plan(self, principal: PrincipalId, persona_id: int, plan: PlanWrite, *, origin: LifeOrigin,
+                         zone: str, now: datetime) -> LifeEntry:
+        return self._keep_planned(principal, self._planned(principal, persona_id, plan, origin, zone, now))
+
+    async def cancel_plan(self, principal: PrincipalId, entry_id: int, reason: str, *, origin: LifeOrigin,
+                          zone: str, now: datetime) -> LifeEntry:
+        return self._put_life(principal, self._cancelled(principal, entry_id, reason, origin, zone, now))
+
+    async def mark_plan_missed(self, principal: PrincipalId, entry_id: int, *, now: datetime) -> LifeEntry:
+        before = rules.live_plan_of(self._live_entry(principal, entry_id))
+        if before.plan_kind is not PlanKind.TOGETHER:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a together slot is missed")
+        return self._put_life(principal, replace(before, plan_state=PlanState.MISSED, revision=before.revision + 1,
+                                                 updated_at=now))
 
     async def apply_life_changes(self, principal: PrincipalId, persona_id: int, changes: Sequence[LifeChange], *,
                                  conversation: ConversationId, source: str, now: datetime) -> tuple[str, ...]:
@@ -1423,7 +1570,7 @@ class InMemoryData:
         self._store.life_writes[write_id] = _LifeWrite(principal, LifeWrite(
             write_id, persona_id, day, LifeWriteStatus.PREPARED, start.provider_key, start.model_id,
             start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None, start.plan_id,
-            job, start.model_reason), start.body)
+            job, start.model_reason, conversation_id=start.conversation_id), start.body)
         return write_id
 
     async def mark_life_write_dispatched(self, write_id: str) -> None:
@@ -1449,7 +1596,8 @@ class InMemoryData:
             error=None if isinstance(outcome, RawReceived) else outcome.error_code[:200],
             finished_at=None if received else datetime.now(UTC))
 
-    async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime) -> tuple[LifeEntry, ...]:
+    async def apply_life_write(self, write_id: str, plan: LifePlan, *, now: datetime,
+                               zone: str | None = None) -> tuple[LifeEntry, ...]:
         if not isinstance(plan, LifePlan):
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a life plan")
         diary = rules.check_life_text(LifeKind.DIARY, plan.diary)
@@ -1457,6 +1605,7 @@ class InMemoryData:
         facts = [rules.check_life_text(LifeKind.FACT, text) for text in plan.facts]
         mood = rules.writer_mood(plan, now)
         arc = rules.check_arc_move(plan.arc)
+        where = None if zone is None else rules.check_zone(zone)
         row = self._life_write(write_id)
         if row.record.status is not LifeWriteStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
@@ -1486,10 +1635,15 @@ class InMemoryData:
                                                              source=write_id, arc_id=arc_id)))
         started = None if arc is None or arc.op is not ArcOp.START or moved is None else moved.entry_id
         open_arcs = self._open_arcs(principal, persona_id)
-        for plan_day, text, at, project in plans:
+        sleeps = [] if where is None else [e for e in self._plans(principal, persona_id) if e.sleep_slot]
+        for plan_day, text, at, project, minutes in plans:
+            if where is not None and rules.covers_sleep(plan_day, at, minutes, sleeps, where):
+                continue  # character-day §18.7: a plan over a sleep slot is left out alone
+            project_id = rules.plan_project(project, at, open_arcs, started)
             written.append(self._new_life(principal, LifeEntry(
                 0, persona_id, LifeKind.PLAN, plan_day, text, LifeOrigin.WRITER, 1, now, now, source=write_id,
-                time_of_day=at, arc_id=rules.plan_project(project, at, open_arcs, started))))
+                time_of_day=at, arc_id=project_id, minutes=minutes,
+                plan_kind=PlanKind.OWN if project_id is None else PlanKind.WORK)))
         for text in facts:
             added = self._add_fact(principal, LifeEntry(0, persona_id, LifeKind.FACT, None, text, LifeOrigin.WRITER,
                                                         1, now, now, source=write_id), dedupe=True)
@@ -1623,6 +1777,79 @@ class InMemoryData:
     async def list_life_writes(self, principal: PrincipalId, *, limit: int = 20) -> tuple[LifeWrite, ...]:
         return tuple(reversed([w.record for w in self._store.life_writes.values() if w.owner == principal]))[
             :max(0, limit)]
+
+    async def session_writes(self, principal: PrincipalId, conversation_id: ConversationId) -> tuple[LifeWrite, ...]:
+        return tuple(w.record for w in self._store.life_writes.values()
+                     if w.owner == principal and w.record.conversation_id == conversation_id)
+
+    # --- SleepStore (character-day v0.1 §5, §18.2) -------------------------------------------
+
+    def _sleep(self, principal: PrincipalId, sleep_id: object) -> SleepRecord:
+        found = None if isinstance(sleep_id, bool) or not isinstance(sleep_id, int) else \
+            self._store.sleeps.get(sleep_id)
+        if found is None or found[0] != principal:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no sleep {sleep_id}")
+        return found[1]
+
+    def _open(self, principal: PrincipalId, sleep_id: object) -> SleepRecord:
+        sleep = self._sleep(principal, sleep_id)
+        if not sleep.asleep:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"sleep {sleep_id} ended already")
+        return sleep
+
+    def _sleeps_of(self, principal: PrincipalId, persona_id: int) -> list[SleepRecord]:
+        return [s for owner, s in self._store.sleeps.values() if owner == principal and s.persona_id == persona_id]
+
+    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy) -> SleepRecord:
+        persona_id = rules.check_life_persona(persona_id)
+        how = FellBy(how)
+        if any(s.asleep for s in self._sleeps_of(principal, persona_id)):
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "it is asleep already")
+        sleep = SleepRecord(max(self._store.sleeps, default=0) + 1, persona_id, at, how)
+        self._store.sleeps[sleep.sleep_id] = (principal, sleep)
+        return sleep
+
+    async def current_sleep(self, principal: PrincipalId, persona_id: int) -> SleepRecord | None:
+        return max(self._sleeps_of(principal, rules.check_life_persona(persona_id)), key=lambda s: s.sleep_id,
+                   default=None)
+
+    async def end_sleep(self, principal: PrincipalId, sleep_id: int, *, at: datetime, how: WokeBy) -> SleepRecord:
+        sleep = replace(self._open(principal, sleep_id), woke_at=at, how_woke=WokeBy(how))
+        self._store.sleeps[sleep.sleep_id] = (principal, sleep)
+        return sleep
+
+    async def count_wake(self, principal: PrincipalId, sleep_id: int, *, count: int, at: datetime,
+                         answer: AsleepAnswer, message: bool) -> SleepRecord:
+        sleep = self._open(principal, sleep_id)
+        answer = AsleepAnswer(answer)
+        sleep = replace(sleep, count=max(0, int(count)), count_at=at, messages=sleep.messages + int(message),
+                        mumbles=sleep.mumbles + int(answer is AsleepAnswer.MUMBLE),
+                        first_message_at=sleep.first_message_at if sleep.first_message_at is not None or not message
+                        else at, last_message_at=at if message else sleep.last_message_at)
+        self._store.sleeps[sleep.sleep_id] = (principal, sleep)
+        return sleep
+
+    async def recent_sleeps(self, principal: PrincipalId, persona_id: int, *, limit: int) -> tuple[SleepRecord, ...]:
+        found = sorted(self._sleeps_of(principal, rules.check_life_persona(persona_id)), key=lambda s: s.sleep_id,
+                       reverse=True)
+        return tuple(found[:max(0, limit)])
+
+    async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
+                           before: DayBefore | None) -> None:
+        sleep = self._sleep(principal, sleep_id)
+        persona_id = rules.check_life_persona(persona_id)
+        self._store.sleeps[sleep.sleep_id] = (principal, replace(sleep, closed_day=True))
+        state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
+        self._store.day_states[(principal, persona_id)] = replace(state, last_closing_at=at, before=before)
+
+    async def read_day_state(self, principal: PrincipalId, persona_id: int) -> DayState:
+        persona_id = rules.check_life_persona(persona_id)
+        return self._store.day_states.get((principal, persona_id), DayState(persona_id))
+
+    async def write_day_state(self, principal: PrincipalId, state: DayState) -> None:
+        if not isinstance(state, DayState):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a day state")
+        self._store.day_states[(principal, rules.check_life_persona(state.persona_id))] = state
 
     # --- BondStore (character-bond v0.1 §2–§4) ---------------------------------------------
 
@@ -2248,7 +2475,9 @@ class InMemoryData:
                     or not any(e.kind is EventKind.USER_MESSAGE and e.sequence > cursor.through_sequence
                                for e in conv.events)
                     or (cursor.retry_after is not None and cursor.retry_after > now)
-                    or self._unfinished(conv) or conv.events[-1].created_at >= quiet_before):
+                    or self._unfinished(conv)
+                    # character-day §18.8: a closed day session is read at once, without the quiet
+                    or (conv.closed_at is None and conv.events[-1].created_at >= quiet_before)):
                 continue
             due.append(DueConversation(TrustedScope(conv.owner, cid), cursor, conv.events[-1].created_at))
             if len(due) == limit:

@@ -103,6 +103,11 @@ V27_UNDO = ("ALTER TABLE personas DROP COLUMN fields",)
 V28_UNDO = ("ALTER TABLE wakes DROP COLUMN thought",
             *(f"ALTER TABLE life_writes DROP COLUMN {c}" for c in ("thought", "model_reason", "job")),
             *(f"ALTER TABLE life_entries DROP COLUMN {c}" for c in ("draft", "expires_at", "about")))
+# what v29 added (character-day v0.1), undone
+V29_UNDO = ("ALTER TABLE life_writes DROP COLUMN conversation_id", "DROP TABLE day_state", "DROP INDEX sleeps_open",
+            "DROP INDEX sleeps_by_owner", "DROP TABLE sleeps", "DROP INDEX conversations_open_day",
+            *(f"ALTER TABLE conversations DROP COLUMN {c}" for c in ("closed_at", "day_session")),
+            *(f"ALTER TABLE life_entries DROP COLUMN {c}" for c in ("reason", "plan_state", "plan_kind", "minutes")))
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")
