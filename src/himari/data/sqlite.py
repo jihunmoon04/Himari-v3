@@ -859,7 +859,8 @@ CREATE TABLE sleeps (
     count_at TEXT,
     closed_day INTEGER NOT NULL DEFAULT 0,
     first_message_at TEXT,
-    last_message_at TEXT
+    last_message_at TEXT,
+    slot_id INTEGER
 ) STRICT;
 CREATE INDEX sleeps_by_owner ON sleeps (owner, persona_id, sleep_id);
 CREATE UNIQUE INDEX sleeps_open ON sleeps (owner, persona_id) WHERE woke_at IS NULL;
@@ -1193,6 +1194,14 @@ class _Tx:
             raise DataError(DataErrorCode.NOT_AUTHORIZED, scope.conversation_id)
         return conv
 
+    def writable(self, scope: TrustedScope) -> sqlite3.Row:
+        """``authorized``, and not a closed day session (character-day §3.2: only read; DAY_CLOSED), in the write's
+        own transaction — a write that waited (a file placed, a wake cancelled) meets the closing as it is now."""
+        conv = self.authorized(scope)
+        if conv["day_session"] is not None and conv["closed_at"] is not None:
+            raise DataError(DataErrorCode.DAY_CLOSED, scope.conversation_id)
+        return conv
+
     def owned(self, scope: TrustedScope) -> sqlite3.Row:
         """The owner check alone (the trash methods, V3-P65)."""
         conv = self.one("SELECT * FROM conversations WHERE conversation_id=?", scope.conversation_id)
@@ -1360,7 +1369,8 @@ def _sleep(row: sqlite3.Row) -> SleepRecord:
                        FellBy(row["how_fell"]), _moment(row["woke_at"]),
                        None if row["how_woke"] is None else WokeBy(row["how_woke"]), int(row["messages"]),
                        int(row["mumbles"]), int(row["count"]), _moment(row["count_at"]), bool(row["closed_day"]),
-                       _moment(row["first_message_at"]), _moment(row["last_message_at"]))
+                       _moment(row["first_message_at"]), _moment(row["last_message_at"]),
+                       None if row["slot_id"] is None else int(row["slot_id"]))
 
 
 def _mood(persona_id: int, row: sqlite3.Row | None) -> HimariMood | None:
@@ -1738,7 +1748,7 @@ class SqliteData:
         self, scope: TrustedScope, message: UserMessage, *, idempotency_key: str | None = None
     ) -> ConversationEvent:
         with self._tx() as tx:
-            tx.authorized(scope)
+            tx.writable(scope)
             if idempotency_key is not None:
                 known = tx.one("SELECT event_id FROM idempotency WHERE conversation_id=? AND key=?", scope.conversation_id, idempotency_key)
                 if known is not None:
@@ -1781,7 +1791,7 @@ class SqliteData:
     async def prepare_run(self, scope: TrustedScope, preparation: RunPreparation) -> RunId:
         try:
             with self._tx() as tx:
-                tx.authorized(scope)
+                tx.writable(scope)
                 run_id = RunId(tx.new_id("run"))
                 tx.execute(
                     "INSERT INTO runs (run_id, conversation_id, status, trigger_refs, prompt_basis, provider_key, model_id,"
@@ -2081,7 +2091,7 @@ class SqliteData:
         basis: PromptBasis,
     ) -> int:
         with self._tx() as tx:
-            conv = tx.authorized(scope)
+            conv = tx.writable(scope)
             run = self._run_row(tx, scope, run_id)
             if run["status"] != RunStatus.RECEIVED.value or not run["compaction"]:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is not a received compaction Run")
@@ -2863,10 +2873,10 @@ class SqliteData:
         plans = [e for e in self._plans(tx, principal, persona_id) if e.kind is LifeKind.PLAN]
         slot, write = rules.sleep_now(plans, zone=zone, now=change.at, reason=rules.check_plan_reason(change.reason))
         made = slot
-        if write is not None:
-            rules.check_himari_count(plans, None if slot is None else slot.entry_id, zone, change.at)
-            made = rules.planned_entry(persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI, change.at)
-            made = self._new_life(tx, principal, made) if slot is None else self._rewrite_life(tx, principal, made)
+        if write is not None:  # character-day §4.2: tonight's slot moved, never made (the keeper places it)
+            rules.check_himari_count(plans, slot.entry_id, zone, change.at)
+            made = self._rewrite_life(tx, principal, rules.planned_entry(
+                persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI, change.at))
         state = self._day_state(tx, principal, persona_id)
         self._put_day_state(tx, principal, dataclasses.replace(state, sleep_requested_at=change.at))
         return made
@@ -3286,15 +3296,17 @@ class SqliteData:
             raise DataError(DataErrorCode.NOT_FOUND, f"no sleep {sleep_id}")
         return _sleep(row)
 
-    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy) -> SleepRecord:
+    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy,
+                         slot_id: int | None = None) -> SleepRecord:
         persona_id = rules.check_life_persona(persona_id)
         how = FellBy(how)
+        slot_id = rules.check_slot_ref(slot_id)
         with self._tx() as tx:
             if tx.one("SELECT 1 FROM sleeps WHERE owner=? AND persona_id=? AND woke_at IS NULL", principal,
                       persona_id) is not None:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "it is asleep already")
-            cursor = tx.execute("INSERT INTO sleeps (owner, persona_id, fell_at, how_fell) VALUES (?, ?, ?, ?)",
-                                principal, persona_id, _timestamp(at), how.value)
+            cursor = tx.execute("INSERT INTO sleeps (owner, persona_id, fell_at, how_fell, slot_id)"
+                                " VALUES (?, ?, ?, ?, ?)", principal, persona_id, _timestamp(at), how.value, slot_id)
             assert cursor.lastrowid is not None
             return self._sleep_row(tx, principal, int(cursor.lastrowid))
 
@@ -3335,12 +3347,18 @@ class SqliteData:
                 rules.check_life_persona(persona_id), max(0, limit)))
 
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
-                           before: DayBefore | None) -> None:
-        with self._tx() as tx:
-            self._sleep_row(tx, principal, sleep_id)
+                           before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:  # character-day §6 step 1: the session, the sleep and the handoff in one commit
+            if self._sleep_row(tx, principal, sleep_id).closed_day:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"the day was closed in sleep {sleep_id}")
+            closed = conversation_id is not None and tx.execute(
+                "UPDATE conversations SET closed_at=? WHERE conversation_id=? AND owner=? AND day_session IS NOT NULL"
+                " AND closed_at IS NULL", _timestamp(at), conversation_id, principal).rowcount == 1
             tx.execute("UPDATE sleeps SET closed_day=1 WHERE sleep_id=?", sleep_id)
-            state = self._day_state(tx, principal, rules.check_life_persona(persona_id))
+            state = self._day_state(tx, principal, persona_id)
             self._put_day_state(tx, principal, dataclasses.replace(state, last_closing_at=at, before=before))
+            return closed
 
     async def read_day_state(self, principal: PrincipalId, persona_id: int) -> DayState:
         with self._tx() as tx:
@@ -3800,7 +3818,7 @@ class SqliteData:
         rules.check_wake(reasons, device_id, keys, reminders)
         rules.check_interface(interface, MessageOrigin(OriginKind.DEVICE, device_id))
         with self._tx() as tx:
-            tx.authorized(scope)
+            tx.writable(scope)
             now = _timestamp(datetime.now(UTC))
             wake_id = tx.new_id("wake")
             for key in keys:

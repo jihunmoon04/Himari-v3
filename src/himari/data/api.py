@@ -75,6 +75,8 @@ class DataErrorCode(Enum):
     ATTACHMENT_REFUSED = "attachment_refused"  # an attachment a message may not carry (§4.2)
     # character-day §4.4: a schedule change past its limits; the message is one English sentence the model can act on
     PLAN_REFUSED = "plan_refused"
+    # character-day §3.2: a closed day session is only read — no new message, Run, wake or compaction is written
+    DAY_CLOSED = "day_closed"
 
 
 # DataError.reason of an upload a message names once more (V3-P84 §4.2: a screen is attached once).
@@ -1567,8 +1569,9 @@ class WakeStore(Protocol):
         """One transaction (§3.3): each key is taken (DUPLICATE_IDENTITY when one
         was taken already), each reminder goes ``scheduled → claimed``
         (INVALID_STATE_TRANSITION when it is not scheduled), the wake Event is
-        appended and its record written. Refused as an Event is (trash).
-        INVALID_ARGUMENT: no reason, or more than MAX_WAKE_REASONS."""
+        appended and its record written. Refused as an Event is (trash; a closed
+        day session, DAY_CLOSED). INVALID_ARGUMENT: no reason, or more than
+        MAX_WAKE_REASONS."""
         ...
 
     async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus) -> WakeRecord:
@@ -2632,7 +2635,8 @@ class WokeBy(Enum):
 @dataclass(frozen=True)
 class SleepRecord(DeepFrozen):
     """§5.1: one sleep — when and how it began and ended, the messages (and mumbles) it got meanwhile, the
-    wake count now (``count`` as of ``count_at``) and whether the day was closed in it (§6)."""
+    wake count now (``count`` as of ``count_at``), whether the day was closed in it (§6) and the sleep slot it
+    sleeps in (its night: waking, the early wake and the handoff read it, never the night of ``fell_at``)."""
 
     sleep_id: int
     persona_id: int
@@ -2647,6 +2651,7 @@ class SleepRecord(DeepFrozen):
     closed_day: bool = False
     first_message_at: datetime | None = None  # §5.6: the messages received while asleep, from …
     last_message_at: datetime | None = None  # … to
+    slot_id: int | None = None  # the sleep slot's entry id; None: it fell asleep with no slot
 
     @property
     def asleep(self) -> bool:
@@ -2678,6 +2683,7 @@ class DayBefore(DeepFrozen):
     woken: int = 0  # times the user woke it that night (read when told)
     woke_at: datetime | None = None  # when it woke in the morning (read when told)
     sleep_id: int | None = None  # the sleep the day was closed in
+    conversation_id: ConversationId | None = None  # the closed session: the next is any other (never by date)
 
 
 @dataclass(frozen=True)
@@ -2711,8 +2717,10 @@ class SleepStore(Protocol):
     """§5.1, §18.2: HIMARI's sleeps and the day keeper's state, per principal and persona. The principal comes
     from the trusted entry point (the keeper), never from model output."""
 
-    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy) -> SleepRecord:
-        """It falls asleep. INVALID_STATE_TRANSITION while a sleep of the persona is open."""
+    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy,
+                         slot_id: int | None = None) -> SleepRecord:
+        """It falls asleep, in the sleep slot ``slot_id`` (its night). INVALID_STATE_TRANSITION while a sleep of the
+        persona is open."""
         ...
 
     async def current_sleep(self, principal: PrincipalId, persona_id: int) -> SleepRecord | None:
@@ -2734,9 +2742,11 @@ class SleepStore(Protocol):
         ...
 
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
-                           before: DayBefore | None) -> None:
-        """§6: the day was closed in this sleep — it says so, the keeper's last closing is ``at`` and the next
-        session is handed ``before``."""
+                           before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
+        """§6: the day was closed in this sleep, all in one transaction — the open day session ``conversation_id``
+        (when given) closed at ``at``, the sleep says so, the keeper's last closing is ``at`` and the next session
+        is handed ``before``. Whether the session was closed now. NOT_FOUND: no such sleep;
+        INVALID_STATE_TRANSITION: the day was closed in it already (nothing written)."""
         ...
 
     async def read_day_state(self, principal: PrincipalId, persona_id: int) -> DayState:
@@ -2954,7 +2964,8 @@ class ConversationLog(Protocol):
         """T1: user input; one with ``answers_call`` (older history only) is
         INVALID_STATE_TRANSITION.
         Same key + same message → the original Event; same key + a different
-        message → DUPLICATE_IDENTITY."""
+        message → DUPLICATE_IDENTITY. character-day §3.2: DAY_CLOSED in a closed
+        day session (checked in the write's own transaction)."""
         ...
 
     async def read_events(
@@ -2963,7 +2974,8 @@ class ConversationLog(Protocol):
 
     async def prepare_run(self, scope: TrustedScope, preparation: RunPreparation) -> RunId:
         """T2: persist the request before any send. Raises
-        RAW_PERSISTENCE_UNAVAILABLE when it cannot be stored — do not send."""
+        RAW_PERSISTENCE_UNAVAILABLE when it cannot be stored — do not send;
+        DAY_CLOSED in a closed day session (character-day §3.2: no new Run)."""
         ...
 
     async def mark_dispatch(self, scope: TrustedScope, run_id: RunId) -> None:

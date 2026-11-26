@@ -725,9 +725,12 @@ def world_entry(persona_id: int, day: str, event: WorldEvent, write_id: str, now
 
 
 def check_editable(entry: LifeEntry) -> None:
-    """character-mind §5.2: the user deletes a kept thought, never rewrites it (INVALID_ARGUMENT)."""
+    """character-mind §5.2: the user deletes a kept thought, never rewrites it (INVALID_ARGUMENT). character-day
+    §4.2: a sleep slot is only moved, through the schedule's own write (PLAN_REFUSED to a generic edit)."""
     if entry.kind is LifeKind.THOUGHT:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a kept thought is only deleted")
+    if entry.kind is LifeKind.PLAN and entry.plan_kind is PlanKind.SLEEP:
+        raise _refused("A sleep slot is only moved (its date, start and length), on the schedule.")
 
 
 def live_thought(entry: LifeEntry, now: datetime) -> bool:
@@ -1093,6 +1096,13 @@ def check_plan_ref(plan_id: object) -> bool:
     return plan_id is None or (isinstance(plan_id, int) and not isinstance(plan_id, bool) and plan_id > 0)
 
 
+def check_slot_ref(slot_id: object) -> int | None:
+    """character-day §5.1: the sleep slot a sleep is in — None or an entry id (INVALID_ARGUMENT)."""
+    if not check_plan_ref(slot_id):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a sleep's slot is an entry id")
+    return slot_id  # type: ignore[return-value]
+
+
 def work_project(plan: LifeEntry | None, persona_id: int, arcs: Sequence[LifeEntry],
                  pieces: Sequence[LifeEntry]) -> LifeEntry:
     """character-work §4: the open arc a worker call's piece goes to — its plan a live work plan of
@@ -1304,6 +1314,16 @@ def _counted(plans: Sequence[LifeEntry], entry_id: int | None, origin: LifeOrigi
                        "until tomorrow.")
 
 
+def _uncovered(start: datetime, end: datetime, plans: Sequence[LifeEntry], zone: tzinfo, now: datetime) -> None:
+    """§4.4: a sleep slot over [start, end) covers no live slot not over yet (whoever writes it: the keeper too)."""
+    for other in plans:
+        span = plan_span(other, zone)
+        if other.live_plan and other.plan_kind is not PlanKind.SLEEP and span is not None \
+                and _overlaps((start, end), span) and span[1] > now:
+            raise _refused(f"Your sleep would cover the slot \"{other.text}\" {_slot_words(other, zone)}; move "
+                           "or cancel that first.")
+
+
 def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence[LifeEntry],
                       arcs: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo, now: datetime) -> PlanWrite:
     """§4.2, §4.4: a checked slot (``check_plan_write``) against the persona's schedule — ``before`` the live slot
@@ -1329,7 +1349,8 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
             span = plan_span(before, zone)
             if span is not None and night_of(span[0]) != night:
                 raise _refused(f"A sleep slot stays in its night (from {night_of(span[0])} 21:00 to 05:00).")
-        if origin is LifeOrigin.WRITER:
+        if origin is LifeOrigin.WRITER:  # the keeper's own rules place and move it; it never covers a live slot
+            _uncovered(start, end, plans, zone, now)
             return plan
     elif origin is LifeOrigin.WRITER:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "the keeper writes sleep slots only")
@@ -1345,17 +1366,13 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
         moved = before is None or (before.day, before.time_of_day) != (plan.day, plan.time_of_day)
         if moved and start < now - timedelta(minutes=1):
             raise _refused("A sleep slot cannot start in the past; to sleep now, use go_to_sleep.")
-        for other in plans:
-            span = plan_span(other, zone)
-            if other.live_plan and other.plan_kind is not PlanKind.SLEEP and span is not None \
-                    and _overlaps((start, end), span) and span[1] > now:
-                raise _refused(f"Your sleep would cover the slot \"{other.text}\" {_slot_words(other, zone)}; move "
-                               "or cancel that first.")
+        _uncovered(start, end, plans, zone, now)
         return plan
     if end <= now:
         raise _refused(f"That time is already past (it is {local:%H:%M} now).")
     if plan.kind is PlanKind.TOGETHER and before is None and origin is not LifeOrigin.HIMARI:
-        raise _refused("Only HIMARI writes a together slot, with the user.")
+        raise _refused("Only HIMARI makes a together slot, when it sets a time with you in a conversation: ask it "
+                       "there, or add the slot as its own.")
     if plan.kind is PlanKind.WORK and not any(a.entry_id == plan.arc_id and a.arc_open for a in arcs):
         raise _refused("A work slot names an open project by its arc id." if plan.arc_id is None
                        else f"There is no open project {plan.arc_id}.")
@@ -1415,17 +1432,20 @@ def _ceil_ten(moment: datetime) -> datetime:
 
 
 def sleep_now(plans: Sequence[LifeEntry], *, zone: tzinfo, now: datetime,
-              reason: str | None) -> tuple[LifeEntry | None, PlanWrite | None]:
+              reason: str | None) -> tuple[LifeEntry, PlanWrite | None]:
     """§4.3, §5.2 (go_to_sleep): tonight's sleep slot and the change that makes it start now (rounded up to ten
-    minutes, its end kept within the limits) — None when it is under way already or there is none to change (a
-    new one is made: to 08:00, within the limits). PLAN_REFUSED outside the night's start (21:00 to 05:00), or
-    when a slot of the night would be covered."""
+    minutes, its end kept within the limits) — None when it is under way already. The slot is only moved, never
+    made (the keeper places the night's on first need, §4.2). PLAN_REFUSED outside the night's start (21:00 to
+    05:00), with no slot tonight, or when a slot of the night would be covered."""
     local = now.astimezone(zone)
     night = night_of(local)
     if night is None:
         raise _refused(f"You can go to sleep early from {NIGHT_STARTS:%H:%M} (it is {local:%H:%M} now).")
     slot = sleep_slot_of(plans, night, zone)
-    span = None if slot is None else plan_span(slot, zone)
+    if slot is None:
+        raise _refused("Tonight has no sleep slot yet (no room was left for one): move or cancel a slot of the "
+                       "night first.")
+    span = plan_span(slot, zone)
     if span is not None and span[0] <= local:
         return slot, None  # its time came already (it was woken): it only sleeps again
     start = _ceil_ten(local)
@@ -1443,7 +1463,6 @@ def sleep_now(plans: Sequence[LifeEntry], *, zone: tzinfo, now: datetime,
                 and _overlaps((start, end), other_span) and other_span[1] > now:
             raise _refused(f"You have the slot \"{other.text}\" {_slot_words(other, zone)} tonight; cancel or move "
                            "it before you sleep.")
-    write = PlanWrite(start.date().isoformat(), _clock(start), minutes, PlanKind.SLEEP,
-                      slot.text if slot is not None else "잠", None if slot is None else slot.entry_id,
+    write = PlanWrite(start.date().isoformat(), _clock(start), minutes, PlanKind.SLEEP, slot.text, slot.entry_id,
                       reason=reason)
     return slot, write

@@ -15,6 +15,11 @@ from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.data.api import (
     MAX_HIMARI_PLAN_WRITES,
     AsleepAnswer,
+    PromptBasis,
+    RawRepresentation,
+    RunPreparation,
+    WakeKind,
+    WakeReason,
     DataError,
     DataErrorCode,
     DayBefore,
@@ -77,6 +82,9 @@ def test_the_keeper_places_a_sleep_slot_and_himari_only_moves_it_within_its_nigh
             await data.retire_life(ALICE, sleep.entry_id, expected_revision=2)
         with refused(DataErrorCode.PLAN_REFUSED, "cannot be cancelled"):
             await data.cancel_plan(ALICE, sleep.entry_id, "싫어", origin=LifeOrigin.HIMARI, zone=ZONE, now=NOW)
+        # character-day §4.2 (review 13): the generic life edit never rewrites a sleep slot — it is only moved
+        with refused(DataErrorCode.PLAN_REFUSED, "only moved"):
+            await data.edit_life(ALICE, sleep.entry_id, "밤샘", expected_revision=2)
 
     asyncio.run(scenario())
 
@@ -100,7 +108,7 @@ def test_a_slot_over_the_sleep_slot_is_refused_until_the_sleep_moves() -> None:
             await data.write_plan(ALICE, 1, slot("2026-11-27", "01:00", 420, PlanKind.SLEEP, "잠",
                                                  entry_id=sleep.entry_id), origin=LifeOrigin.HIMARI, zone=ZONE,
                                   now=NOW)
-        with refused(DataErrorCode.PLAN_REFUSED, "Only HIMARI writes a together slot"):
+        with refused(DataErrorCode.PLAN_REFUSED, "Only HIMARI makes a together slot, when it sets a time with you"):
             await data.write_plan(ALICE, 1, slot("2026-11-28", "15:00", 60, PlanKind.TOGETHER),
                                   origin=LifeOrigin.USER, zone=ZONE, now=NOW)
         data = data_for(restart(store))
@@ -227,11 +235,31 @@ def test_go_to_sleep_starts_tonights_slot_now_and_asks_the_keeper_to_sleep() -> 
     asyncio.run(scenario())
 
 
+def test_go_to_sleep_with_no_slot_tonight_never_makes_one() -> None:
+    """§4.2 (review 13): the keeper places the night's slot on first need; the Tool only moves it — with none there
+    it is refused and nothing is written."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        from himari.data.sqlite import SqliteData
+        change = PlanChange(PlanOp.SLEEP_NOW, 1, ZONE, NOW + timedelta(minutes=3), reason="잘 자")
+        with refused(DataErrorCode.PLAN_REFUSED, "no sleep slot"):
+            if isinstance(data, SqliteData):
+                with data._tx() as tx:  # noqa: SLF001
+                    data._apply_plan_change(tx, ALICE, change)
+            else:
+                data._stage_plan_change(ALICE, change)
+        assert not [e for e in await data.list_life(ALICE, 1, now=NOW) if e.kind is LifeKind.PLAN]
+        assert (await data.read_day_state(ALICE, 1)).sleep_requested_at is None
+
+    asyncio.run(scenario())
+
+
 def test_a_sleep_counts_the_messages_and_ends_once_and_the_keeper_state_is_kept() -> None:
     async def scenario() -> None:
         store = new_store()
         data = data_for(store)
-        sleep = await data.open_sleep(ALICE, 1, at=NOW, how=FellBy.SCHEDULE)
+        sleep = await data.open_sleep(ALICE, 1, at=NOW, how=FellBy.SCHEDULE, slot_id=42)
+        assert sleep.slot_id == 42  # §5.1 (review 1): the slot it sleeps in, kept with it
         with refused(DataErrorCode.INVALID_STATE_TRANSITION):
             await data.open_sleep(ALICE, 1, at=NOW, how=FellBy.TOOL)
         await data.count_wake(ALICE, sleep.sleep_id, count=1, at=NOW + timedelta(minutes=5),
@@ -249,11 +277,14 @@ def test_a_sleep_counts_the_messages_and_ends_once_and_the_keeper_state_is_kept(
         again = await data.open_sleep(ALICE, 1, at=NOW + timedelta(minutes=30), how=FellBy.SCHEDULE)
         before = DayBefore("2026-11-26", (DayLine("21:58", "user", "잘 자"),), kept=("03:00 방송",),
                            fell_at=again.fell_at, how_fell=FellBy.SCHEDULE, delayed="방송 보고 잘래",
-                           sleep_id=again.sleep_id)
-        await data.note_closing(ALICE, 1, again.sleep_id, at=NOW + timedelta(hours=4), before=before)
+                           sleep_id=again.sleep_id, conversation_id=ConversationId("conv_9"))
+        assert not await data.note_closing(ALICE, 1, again.sleep_id, at=NOW + timedelta(hours=4), before=before)
+        with refused(DataErrorCode.INVALID_STATE_TRANSITION):  # once a sleep
+            await data.note_closing(ALICE, 1, again.sleep_id, at=NOW + timedelta(hours=5), before=None)
         await data.write_day_state(ALICE, DayState(2, woken_at=NOW))
         data = data_for(restart(store))
-        assert [s.sleep_id for s in await data.recent_sleeps(ALICE, 1, limit=14)] == [again.sleep_id, sleep.sleep_id]
+        assert [(s.sleep_id, s.slot_id) for s in await data.recent_sleeps(ALICE, 1, limit=14)] == [
+            (again.sleep_id, None), (sleep.sleep_id, 42)]
         assert (await data.current_sleep(ALICE, 1)).closed_day  # type: ignore[union-attr]
         state = await data.read_day_state(ALICE, 1)
         assert (state.last_closing_at, state.before) == (NOW + timedelta(hours=4), before)
@@ -293,5 +324,61 @@ def test_a_day_session_is_one_open_at_a_time_closed_when_trashed_and_read_at_onc
         listed = {s.conversation_id: s.day_session for s in await data.list_conversations(ALICE)}
         assert listed[first] == "2026-11-26" and listed[third] == "2026-11-27"
         assert ConversationId(first) in listed
+
+    asyncio.run(scenario())
+
+
+def preparation() -> RunPreparation:
+    return RunPreparation(b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p",
+                          "m")
+
+
+def test_the_closing_is_one_step_and_a_closed_day_takes_no_message_run_or_wake() -> None:
+    """§6 step 1, §3.2 (review 2, 5): the session closed, the sleep marked and the handoff kept in one commit; after it
+    the day session refuses — in the write's own transaction — a message, a Run and a wake (DAY_CLOSED), and is
+    still read."""
+    async def scenario() -> None:
+        store = new_store()
+        data = data_for(store)
+        day = await data.open_day_session(ALICE, "2026-11-26", "11월 26일 (목)")
+        scope = TrustedScope(ALICE, day)
+        await data.append_event(scope, user("안녕"))
+        sleep = await data.open_sleep(ALICE, 1, at=NOW, how=FellBy.SCHEDULE)
+        before = DayBefore("2026-11-26", (DayLine("22:00", "user", "안녕"),), sleep_id=sleep.sleep_id,
+                           conversation_id=day)
+        at = NOW + timedelta(hours=3)
+        assert await data.note_closing(ALICE, 1, sleep.sleep_id, at=at, before=before, conversation_id=day)
+        data = data_for(restart(store))
+        assert (await data.read_conversation(scope)).closed_at == at
+        assert (await data.current_sleep(ALICE, 1)).closed_day  # type: ignore[union-attr]
+        state = await data.read_day_state(ALICE, 1)
+        assert (state.last_closing_at, state.before) == (at, before)
+        for write in (lambda: data.append_event(scope, user("늦었다")),
+                      lambda: data.prepare_run(scope, preparation()),
+                      lambda: data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1")):
+            with refused(DataErrorCode.DAY_CLOSED):
+                await write()
+        assert len(await data.read_events(scope)) == 1  # read as it was
+        other = await data.create_conversation(ALICE)  # any other conversation is written as before
+        await data.append_event(TrustedScope(ALICE, other), user("여기는"))
+
+    asyncio.run(scenario())
+
+
+def test_the_keeper_never_writes_a_sleep_slot_over_a_live_slot() -> None:
+    """§4.4 (review 7): the keeper's placing and moving go through the same overlap check as everyone's."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        await data.write_plan(ALICE, 1, slot("2026-11-27", "04:00", 120, text="해돋이"), origin=LifeOrigin.HIMARI,
+                              zone=ZONE, now=NOW)
+        with refused(DataErrorCode.PLAN_REFUSED, "would cover the slot"):
+            await data.write_plan(ALICE, 1, slot("2026-11-27", "05:00", 300, PlanKind.SLEEP, "잠"),
+                                  origin=LifeOrigin.WRITER, zone=ZONE, now=NOW)
+        placed = await data.write_plan(ALICE, 1, slot("2026-11-26", "23:00", 300, PlanKind.SLEEP, "잠"),
+                                       origin=LifeOrigin.WRITER, zone=ZONE, now=NOW)  # it gets up for it
+        with refused(DataErrorCode.PLAN_REFUSED, "would cover the slot"):
+            await data.write_plan(ALICE, 1, slot("2026-11-26", "23:30", 300, PlanKind.SLEEP, "잠",
+                                                 entry_id=placed.entry_id), origin=LifeOrigin.WRITER, zone=ZONE,
+                                  now=NOW)
 
     asyncio.run(scenario())

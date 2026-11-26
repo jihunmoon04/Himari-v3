@@ -451,6 +451,13 @@ class InMemoryData:
     def _conv(self, scope: TrustedScope) -> _Conversation:
         return self._store._authorized(scope)
 
+    def _writable(self, scope: TrustedScope) -> _Conversation:
+        """``_conv``, and not a closed day session (character-day §3.2: only read; DAY_CLOSED)."""
+        conv = self._conv(scope)
+        if conv.day_session is not None and conv.closed_at is not None:
+            raise DataError(DataErrorCode.DAY_CLOSED, scope.conversation_id)
+        return conv
+
     def _new_event(
         self, conv: _Conversation, scope: TrustedScope, payload: EventPayload, origin: RunId | None
     ) -> ConversationEvent:
@@ -582,7 +589,7 @@ class InMemoryData:
     async def append_event(
         self, scope: TrustedScope, message: UserMessage, *, idempotency_key: str | None = None
     ) -> ConversationEvent:
-        conv = self._conv(scope)
+        conv = self._writable(scope)
         if idempotency_key is not None and idempotency_key in conv.idempotency:
             existing_id = conv.idempotency[idempotency_key]
             existing = next(e for e in conv.events if e.event_id == existing_id)
@@ -613,7 +620,7 @@ class InMemoryData:
         return tuple(events if limit is None else events[:limit])
 
     async def prepare_run(self, scope: TrustedScope, preparation: RunPreparation) -> RunId:
-        conv = self._conv(scope)
+        conv = self._writable(scope)
         run_id = RunId(self._store.new_id("run"))
         conv.runs[run_id] = _Run(
             record=RunRecord(
@@ -874,7 +881,7 @@ class InMemoryData:
         covers_through_sequence: int,
         basis: PromptBasis,
     ) -> int:
-        conv = self._conv(scope)
+        conv = self._writable(scope)
         run = self._run(conv, run_id)
         if run.record.status is not RunStatus.RECEIVED or run.record.purpose is not RunPurpose.COMPACTION:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is not a received compaction Run")
@@ -1443,10 +1450,10 @@ class InMemoryData:
         plans = [e for e in self._plans(principal, persona_id) if e.kind is LifeKind.PLAN]
         slot, write = rules.sleep_now(plans, zone=zone, now=change.at, reason=rules.check_plan_reason(change.reason))
         made: tuple[LifeEntry, bool] | None = None
-        if write is not None:
-            rules.check_himari_count(plans, None if slot is None else slot.entry_id, zone, change.at)
+        if write is not None:  # character-day §4.2: tonight's slot moved, never made (the keeper places it)
+            rules.check_himari_count(plans, slot.entry_id, zone, change.at)
             made = (rules.planned_entry(persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI,
-                                        change.at), slot is None)
+                                        change.at), False)
         state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
 
         def keep() -> LifeEntry | None:
@@ -1808,12 +1815,14 @@ class InMemoryData:
     def _sleeps_of(self, principal: PrincipalId, persona_id: int) -> list[SleepRecord]:
         return [s for owner, s in self._store.sleeps.values() if owner == principal and s.persona_id == persona_id]
 
-    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy) -> SleepRecord:
+    async def open_sleep(self, principal: PrincipalId, persona_id: int, *, at: datetime, how: FellBy,
+                         slot_id: int | None = None) -> SleepRecord:
         persona_id = rules.check_life_persona(persona_id)
         how = FellBy(how)
+        slot_id = rules.check_slot_ref(slot_id)
         if any(s.asleep for s in self._sleeps_of(principal, persona_id)):
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "it is asleep already")
-        sleep = SleepRecord(max(self._store.sleeps, default=0) + 1, persona_id, at, how)
+        sleep = SleepRecord(max(self._store.sleeps, default=0) + 1, persona_id, at, how, slot_id=slot_id)
         self._store.sleeps[sleep.sleep_id] = (principal, sleep)
         return sleep
 
@@ -1843,12 +1852,21 @@ class InMemoryData:
         return tuple(found[:max(0, limit)])
 
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
-                           before: DayBefore | None) -> None:
-        sleep = self._sleep(principal, sleep_id)
+                           before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
+        sleep = self._sleep(principal, sleep_id)  # every check before any change: one step, as SQLite's commit
         persona_id = rules.check_life_persona(persona_id)
+        if sleep.closed_day:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"the day was closed in sleep {sleep_id}")
+        conv = None if conversation_id is None else self._store._conversations.get(conversation_id)
+        closed = (conv is not None and conv.owner == principal and conv.day_session is not None
+                  and conv.closed_at is None)
+        if closed:
+            assert conv is not None
+            conv.closed_at = at
         self._store.sleeps[sleep.sleep_id] = (principal, replace(sleep, closed_day=True))
         state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
         self._store.day_states[(principal, persona_id)] = replace(state, last_closing_at=at, before=before)
+        return closed
 
     async def read_day_state(self, principal: PrincipalId, persona_id: int) -> DayState:
         persona_id = rules.check_life_persona(persona_id)
@@ -2081,7 +2099,7 @@ class InMemoryData:
                          interface: InterfaceSnapshot | None = None) -> ConversationEvent:
         rules.check_wake(reasons, device_id, keys, reminders)
         rules.check_interface(interface, MessageOrigin(OriginKind.DEVICE, device_id))
-        conv = self._conv(scope)
+        conv = self._writable(scope)
         for key in keys:
             if (scope.principal_id, key) in self._store.wake_keys:
                 raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"wake key {key!r} was taken")

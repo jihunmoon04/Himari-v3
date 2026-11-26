@@ -268,7 +268,7 @@ def test_the_schedule_is_written_moved_and_refused_with_the_schedules_own_senten
     assert (stale.status_code, error_code(stale)) == (409, "revision_conflict")
     for kind, at, words in (("sleep", "23:30", "A sleep slot is only moved, never made"),
                             ("sleep", "18:00", "A sleep slot starts between 21:00 and 05:00"),
-                            ("together", "18:00", "Only HIMARI writes a together slot")):
+                            ("together", "18:00", "Only HIMARI makes a together slot")):
         refused = server.post("/api/life/plans", {"day": tomorrow, "time": at, "minutes": 420, "plan_kind": kind,
                                                   "text": "x", "persona_id": None})
         assert (refused.status_code, error_code(refused)) == (409, "plan_refused"), kind

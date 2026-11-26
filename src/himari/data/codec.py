@@ -21,6 +21,7 @@ from himari.common import (
     CallId,
     CallRef,
     ContentBlock,
+    ConversationId,
     EventId,
     JsonValue,
     ModelToolResult,
@@ -370,7 +371,7 @@ def day_before(value: DayBefore | None) -> str | None:
         "kept": list(value.kept), "missed": list(value.missed),
         "fell_at": None if value.fell_at is None else value.fell_at.isoformat(),
         "how_fell": None if value.how_fell is None else value.how_fell.value, "delayed": value.delayed,
-        "sleep_id": value.sleep_id,
+        "sleep_id": value.sleep_id, "conversation_id": value.conversation_id,
     })
 
 
@@ -384,4 +385,6 @@ def day_before_from(text: str | None) -> DayBefore | None:
                      tuple(str(k) for k in data.get("kept", [])), tuple(str(m) for m in data.get("missed", [])),
                      None if fell is None else datetime.fromisoformat(str(fell)),
                      None if how is None else FellBy(str(how)), _optional_str(data.get("delayed")),
-                     sleep_id=_optional_int(data.get("sleep_id")))
+                     sleep_id=_optional_int(data.get("sleep_id")),
+                     conversation_id=None if (conv := _optional_str(data.get("conversation_id"))) is None
+                     else ConversationId(conv))
