@@ -742,6 +742,25 @@ Check(DaySession.Follow("w1", "d2", false, true, "") && !DaySession.Follow("w1",
 var dayClosed = new ApiException(HttpStatusCode.Conflict, "day_closed");
 Check(MessageFailures.Classify(dayClosed) == MessageFailure.Rejected && !MessageFailures.ReuseScreen(dayClosed),
     "a message to a closed day is refused unrecorded, and its screen is not sent again elsewhere");
+// review 6: a message HIMARI slept through (202, asleep "none") is recorded with no job — nothing is waited on, even
+// when the receipt names a job (an earlier one's)
+using (var dayReceipts = JsonDocument.Parse("[{\"running\":false,\"job_id\":null,\"asleep\":\"none\"},{\"running\":false,\"job_id\":\"j0\",\"asleep\":\"none\"},"
+    + "{\"running\":true,\"job_id\":\"j1\",\"asleep\":\"mumble\"},{\"running\":true,\"job_id\":\"j2\",\"asleep\":\"wake\"},"
+    + "{\"running\":true,\"job_id\":\"j3\",\"asleep\":null},{\"running\":true,\"job_id\":\"j4\"}]"))
+{
+    var receipt = dayReceipts.RootElement;
+    Check(DaySession.SleptThrough(receipt[0]) && DaySession.SleptThrough(receipt[1]), "slept through: shown sent, no reply waited on, whatever job the receipt names");
+    Check(!DaySession.SleptThrough(receipt[2]) && !DaySession.SleptThrough(receipt[3]) && !DaySession.SleptThrough(receipt[4])
+        && !DaySession.SleptThrough(receipt[5]) && !DaySession.SleptThrough(default),
+        "a mumble, a wake, awake, or an older server's receipt is answered as any message");
+}
+// review 8: an unsent message of a day now closed is sent again from anywhere — to today's session — and belongs to
+// today's once the app knows it; any other goes back only to the conversation it was written for
+Check(DaySession.CanRetry("d1", "d1", false) && !DaySession.CanRetry("d1", "w1", false) && DaySession.CanRetry("d1", "d2", true)
+    && DaySession.CanRetry("d1", "d1", true) && !DaySession.CanRetry(null, null, true),
+    "a closed day's unsent bubble is retried from anywhere (to today's); another only where it was written");
+Check(DaySession.Rebind("d1", true, "d2") == "d2" && DaySession.Rebind("w1", false, "d2") == "w1" && DaySession.Rebind(null, true, "d2") is null,
+    "once today's is known, a closed day's unsent message belongs to it; others keep their conversation");
 
 // V3-P90 §6.1, §5.3: the main task, and the games and videos that clearly end
 TaskTracker Run(TaskTracker tracker, DateTime from, int seconds, Func<int, string?> category, bool gameAlive = true,

@@ -197,17 +197,20 @@ public partial class MainWindow
             if (past.UnsentConversation is not { } conversation || past.UnsentNote is null || past.RetryButton is null) continue;
             if (past.Bubble.Visibility != Visibility.Visible) continue;
             bool here = conversation == currentConversation;
-            past.UnsentNote.Text = (!here ? "다른 대화에서 보내지 못한 메시지예요."
-                : unknownText?.Attempt == past ? "보냈는지 확인하지 못했어요." : "보내지 못했어요.")
+            // character-day §3.2: one written for a day now closed goes to today's session instead (SendMessageCore)
+            bool closedDay = ClosedDay(conversation);
+            past.UnsentNote.Text = (closedDay ? (unknownText?.Attempt == past ? "보냈는지 확인하지 못했어요." : DaySession.UnsentClosedNotice) + DaySession.RetryTodayNotice
+                : !here ? "다른 대화에서 보내지 못한 메시지예요." : unknownText?.Attempt == past ? "보냈는지 확인하지 못했어요." : "보내지 못했어요.")
                 + (first && hiddenUnsent > 0 ? $" 앞에 보내지 못한 메시지가 {hiddenUnsent}개 더 있어요." : "");
             first = false;
-            // It goes back to the conversation it was written for, never to another.
-            past.RetryButton.IsEnabled = here && connected && !sending;
+            // It goes back to the conversation it was written for, never to another (but a closed day's, to today's).
+            past.RetryButton.IsEnabled = DaySession.CanRetry(conversation, currentConversation, closedDay) && connected && !sending;
         }
     }
     private void RetryUnsent(PastBubble past)
     {
-        if (!sending && history.Contains(past) && past.UnsentConversation == currentConversation) SendMessageCore(past);
+        if (!sending && history.Contains(past) && DaySession.CanRetry(past.UnsentConversation, currentConversation, ClosedDay(past.UnsentConversation)))
+            SendMessageCore(past);
     }
 
     private void PlaceHistory()

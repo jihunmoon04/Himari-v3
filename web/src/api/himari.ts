@@ -89,7 +89,8 @@ export interface MemoryView {
 }
 
 export interface EventView {
-  sequence: number;
+  sequence: number; // a diary's is the event it follows: several diaries may share one (review 9)
+  id?: string; // a diary's own id (character-day §7, review 9): what tells one diary from another
   // user_message | assistant_final | assistant_tool_calls | tool_result | wake | wake_thought (character-mind §3.3:
   // a free wake HIMARI thought about and let pass; its thought is the owner's) | diary (character-day §7: the diary
   // HIMARI wrote in a day session's context, kept out of the conversation; the owner's) | …

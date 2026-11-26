@@ -139,10 +139,26 @@ describe("a day session (character-day §5.6, §7)", () => {
   it("shows the diary written from the session as its own folded line, after the turn it follows", () => {
     const items = toItems([
       event(5, "assistant_tool_calls", { run_id: "r", calls: [{ call_id: "c", tool_id: "schedule_read", arguments: {} }] }),
-      event(5, "diary", { created_at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." }),
+      event(5, "diary", { id: "lw_9", created_at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["work", "diary"]);
-    expect(items[1]).toEqual({ kind: "diary", key: "5:diary", at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." });
+    expect(items[1]).toEqual({ kind: "diary", key: "diary:lw_9", at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." });
+  });
+
+  it("keys each diary on its id, not the sequence it follows, and shows one that comes again once (review 9)", () => {
+    const items = toItems([
+      event(5, "user_message", { text: "잘 자" }),
+      event(5, "diary", { id: "lw_1", text: "첫 일기" }),
+      event(5, "diary", { id: "lw_2", text: "다음 일기" }), // the same sequence: nothing new between them
+      event(5, "diary", { id: "lw_1", text: "첫 일기" }), // the next page gave it again
+      event(6, "user_message", { text: "좋은 아침" }),
+    ]);
+    expect(items.map((item) => item.key)).toEqual(["5", "diary:lw_1", "diary:lw_2", "6"]);
+  });
+
+  it("tells diaries without an id (an older server) apart by order", () => {
+    const items = toItems([event(5, "diary", { text: "하나" }), event(5, "diary", { text: "둘" })]);
+    expect(items.map((item) => item.key)).toEqual(["5:diary:0", "5:diary:1"]);
   });
 });
 

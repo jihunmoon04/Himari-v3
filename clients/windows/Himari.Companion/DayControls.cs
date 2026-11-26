@@ -57,8 +57,9 @@ public partial class MainWindow
     private async Task DaySessionChanged(JsonElement data, ServerClient local, CancellationToken ct)
     {
         if (!serverDaySession || Str(data, "conversation") is not { } id) return;
-        if (Prop(data, "closed").ValueKind == JsonValueKind.True) { closedDays.Add(id); return; }
+        if (Prop(data, "closed").ValueKind == JsonValueKind.True) { closedDays.Add(id); UpdateUnsentBubbles(); return; }
         closedDays.Remove(id);
+        RebindClosedUnsent(id);  // today's: what a closed day did not take goes there
         string? before = currentConversation;
         bool follow = DaySession.Follow(before, id, before is not null && closedDays.Contains(before), targetNew: true, Input.Text);
         var list = await LoadConversations(local, ct);
@@ -78,19 +79,39 @@ public partial class MainWindow
         return DaySession.Follow(current, recent, current is not null && closedDays.Contains(current), targetNew: !listed, Input.Text);
     }
 
-    /// <summary>Whether the conversation shown is a closed day (a message cannot go there).</summary>
-    private bool ShownDayClosed => serverDaySession && currentConversation is not null && closedDays.Contains(currentConversation);
+    /// <summary>Whether <paramref name="id"/> is a day known closed (a message cannot go there).</summary>
+    private bool ClosedDay(string? id) => serverDaySession && id is not null && closedDays.Contains(id);
+
+    /// <summary>Whether the conversation shown is a closed day.</summary>
+    private bool ShownDayClosed => ClosedDay(currentConversation);
 
     /// <summary>§3.2: the day shown closed. Today's session opens at its first need — GET /api/device opens it and names
-    /// it (recent_conversation) — and the app goes there; the draft stays in the editor. True when today's is shown.</summary>
+    /// it (recent_conversation) — and the app goes there; the draft stays in the editor, and the unsent bubbles of closed
+    /// days move to today's (RebindClosedUnsent). True when today's is shown.</summary>
     private async Task<bool> OpenTodaySession(ServerClient local, CancellationToken ct)
     {
         var info = await local.SendAsync(System.Net.Http.HttpMethod.Get, "/api/device", null, ct);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return false;
         if (Str(Prop(info, "recent_conversation"), "id") is not { } recent) return false;
         closedDays.Remove(recent);  // the server's today is open, whatever was read before
+        RebindClosedUnsent(recent);
         if (recent != currentConversation) await RefreshConversations(recent, ct);
         return currentConversation == recent;
+    }
+
+    /// <summary>§3.2 (review 8): a message a closed day did not take can never go there — its unsent bubble belongs to
+    /// <paramref name="today"/>'s session from now on, and is sent again from there. Its unknown outcome, if any, is still
+    /// checked in the day it was sent to (UnknownText keeps that conversation).</summary>
+    private void RebindClosedUnsent(string today)
+    {
+        bool moved = false;
+        foreach (var past in history)
+        {
+            string? to = DaySession.Rebind(past.UnsentConversation, ClosedDay(past.UnsentConversation), today);
+            if (to == past.UnsentConversation) continue;
+            past.UnsentConversation = to; moved = true;
+        }
+        if (moved) UpdateUnsentBubbles();
     }
 
     /// <summary>A message refused for a closed day (409 <c>day_closed</c>): go to today's session, not waited on.</summary>
