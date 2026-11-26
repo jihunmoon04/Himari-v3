@@ -15,6 +15,7 @@ from testkit import SCOPE, data_for, new_store
 from himari.data.api import (
     DataError,
     DataErrorCode,
+    FellBy,
     LifeJob,
     LifeKind,
     LifeOrigin,
@@ -26,6 +27,7 @@ from himari.data.api import (
     PlanOp,
     PlanWrite,
     RawReceived,
+    WokeBy,
 )
 
 ALICE = SCOPE.principal_id
@@ -254,5 +256,27 @@ def test_a_skipped_write_is_final_and_tries_are_counted_from_a_moment() -> None:
         assert await data.life_attempts(ALICE, 1, "2026-11-25") == 3
         assert await data.life_attempts(ALICE, 1, "2026-11-25", since=at) == 1
         assert await data.life_attempts(ALICE, 1, "2026-11-25", job=LifeJob.AMEND, since=at) == 1
+
+    asyncio.run(scenario())
+
+
+def test_the_closing_names_the_day_session_it_closed_on_its_sleep() -> None:
+    """character-diary §5 (review 3, 1, v30): the sleep the day was closed in names the session it closed, so the
+    amend's cutoff is that sleep's fall however late the closing was looked at; none when no session was closed."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        session = await data.open_day_session(ALICE, "2026-11-25", "11월 25일 (수)")
+        fell = datetime(2026, 11, 25, 15, 30, tzinfo=UTC)
+        sleep = await data.open_sleep(ALICE, 1, at=fell, how=FellBy.SCHEDULE)
+        assert await data.note_closing(ALICE, 1, sleep.sleep_id, at=fell + timedelta(hours=9), before=None,
+                                       conversation_id=session)
+        closed = await data.current_sleep(ALICE, 1)
+        assert closed is not None and closed.closed_day and closed.closed_session == session
+        await data.end_sleep(ALICE, sleep.sleep_id, at=fell + timedelta(hours=8), how=WokeBy.SCHEDULE)
+        other = await data.open_sleep(ALICE, 1, at=fell + timedelta(days=1), how=FellBy.SCHEDULE)
+        assert not await data.note_closing(ALICE, 1, other.sleep_id, at=fell + timedelta(days=1, hours=3),
+                                           before=None, conversation_id=session)  # closed already
+        again = await data.current_sleep(ALICE, 1)
+        assert again is not None and again.closed_day and again.closed_session is None
 
     asyncio.run(scenario())

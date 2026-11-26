@@ -1901,7 +1901,8 @@ class InMemoryData:
         if closed:
             assert conv is not None
             conv.closed_at = at
-        self._store.sleeps[sleep.sleep_id] = (principal, replace(sleep, closed_day=True))
+        self._store.sleeps[sleep.sleep_id] = (principal, replace(sleep, closed_day=True,
+                                                                 closed_session=conversation_id if closed else None))
         state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
         self._store.day_states[(principal, persona_id)] = replace(state, last_closing_at=at, before=before)
         return closed

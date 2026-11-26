@@ -2712,6 +2712,9 @@ class SleepRecord(DeepFrozen):
     first_message_at: datetime | None = None  # §5.6: the messages received while asleep, from …
     last_message_at: datetime | None = None  # … to
     slot_id: int | None = None  # the sleep slot's entry id; None: it fell asleep with no slot
+    # character-diary §5 (review 3, 1): the day session the day's closing in this sleep closed (None: none, or a
+    # closing from before v30) — the amend's cutoff is this sleep's fall, whenever the closing was looked at
+    closed_session: ConversationId | None = None
 
     @property
     def asleep(self) -> bool:
@@ -2807,8 +2810,8 @@ class SleepStore(Protocol):
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
                            before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
         """§6: the day was closed in this sleep, all in one transaction — the open day session ``conversation_id``
-        (when given) closed at ``at``, the sleep says so, the keeper's last closing is ``at`` and the next session
-        is handed ``before``. Whether the session was closed now. NOT_FOUND: no such sleep;
+        (when given) closed at ``at``, the sleep says so (and names the session it closed: character-diary §5), the
+        keeper's last closing is ``at`` and the next session is handed ``before``. Whether the session was closed now. NOT_FOUND: no such sleep;
         INVALID_STATE_TRANSITION: the day was closed in it already (nothing written)."""
         ...
 

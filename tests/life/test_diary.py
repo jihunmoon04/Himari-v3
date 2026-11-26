@@ -79,7 +79,7 @@ def event(sequence: int, payload: object, kind: EventKind) -> ConversationEvent:
                              datetime(2026, 11, 25, 11, sequence, tzinfo=UTC))
 
 
-def session(day: str = "2026-11-25", limit: int | None = None) -> SessionInput:
+def session(day: str = "2026-11-25", limit: int | None = None, conv: ConversationId = CONV) -> SessionInput:
     """The day session's next turn as the Driver would compose it: its history, its model's options."""
     inputs = PromptInputs(
         instructions=COMPANION_BASE, tool_catalog=(), tool_executions=(), snapshot=None,
@@ -88,7 +88,7 @@ def session(day: str = "2026-11-25", limit: int | None = None) -> SessionInput:
         state_basis=PersistedStateBasis(2, 0, ()), observations={}, trigger_refs=(), system=LIVED,
         request_options=RequestOptions("deep", "high", session_key="s1", day_session=True, stream=True),
         now=NOW, time_zone="Asia/Seoul")
-    return SessionInput(CONV, day, inputs, limit)
+    return SessionInput(conv, day, inputs, limit)
 
 
 class Link:
@@ -854,5 +854,156 @@ def test_review2_5_the_recovery_tries_are_counted_by_the_store_whatever_else_was
                                                            job=LifeJob.WORLD, basis_at=seoul(26, 4, 0)))
         assert await writer.write(ME) is WriteOutcome.GAVE_UP
         assert len([w for w in await data.list_life_writes(ME, limit=200) if w.job is LifeJob.REVIEW]) == 6
+
+    asyncio.run(scenario())
+
+
+
+# --- the third review of H-86 (Codex, 2026-11-27): one regression each ------------------------------
+
+
+def told_by(data: InMemoryData, said: dict[ConversationId, Sequence[datetime]]) -> None:
+    """Each session's user messages after what the diary's request held (sequences from 10), at the times given."""
+    found = {conv: [ConversationEvent(EventId(f"{conv}-{i}"), conv, 10 + i, EventKind.USER_MESSAGE,
+                                      UserMessage((TextBlock("늦게 한 말"),)), 1, at) for i, at in enumerate(moments)]
+             for conv, moments in said.items()}
+
+    async def read_events(scope: TrustedScope, **more: Any) -> Sequence[ConversationEvent]:
+        after = int(more.get("after_sequence", 0))
+        return [e for e in found.get(scope.conversation_id, []) if e.sequence > after]
+
+    data.read_events = read_events  # type: ignore[method-assign]
+
+
+def test_review3_1_a_late_closing_cuts_the_amend_at_the_fall_of_the_sleep_it_named() -> None:
+    """Asleep from 00:30; the keeper, restarted, closes the day at 10:00 and records the wake at 08:10: the only
+    message after the diary came at 01:10, in the sleep — nothing new, no call (the closing named its sleep)."""
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, provider, writer, _ = kept(day_answer(), clock=clock)
+        real = await data.open_day_session(ME, "2026-11-25", "11월 25일 (수)")
+        writer._link = Link(session(conv=real), closed=session(conv=real))  # noqa: SLF001
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        assert (await data.list_life_writes(ME))[0].conversation_id == real
+        told_by(data, {real: [seoul(26, 1, 10)]})
+        sleep = await data.open_sleep(ME, NO_PERSONA, at=seoul(26, 0, 30), how=FellBy.SCHEDULE)
+        assert await data.note_closing(ME, NO_PERSONA, sleep.sleep_id, at=seoul(26, 10, 0), conversation_id=real,
+                                       before=DayBefore("2026-11-25", fell_at=seoul(26, 0, 30), conversation_id=real))
+        await data.end_sleep(ME, sleep.sleep_id, at=seoul(26, 8, 10), how=WokeBy.SCHEDULE)
+        closed = await data.current_sleep(ME, NO_PERSONA)
+        assert closed is not None and closed.closed_session == real
+        clock.now = seoul(26, 10, 1)
+        sent = len(provider.prepared_inputs)
+        assert await writer.amend(ME) is WriteOutcome.NOTHING and len(provider.prepared_inputs) == sent
+        assert (await data.list_life_writes(ME))[0].error == "skipped: nothing new after it"
+
+    asyncio.run(scenario())
+
+
+def test_review3_2_a_diary_settled_before_v30_is_never_amended() -> None:
+    """The v29 server settled the diary at once; after the upgrade its closed session with a late message gets a
+    terminal skip before the session is read."""
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, provider, writer, _ = kept(day_answer(), link=Link(session(), closed=session()), clock=clock)
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        settled = await data.begin_life_write(ME, LifeWriteStart(NO_PERSONA, "2026-11-25", "p", "m", b"{}", "j", 1,
+                                                                 job=LifeJob.SETTLE))
+        await data.record_life_write(settled, RawReceived(b"{}", "j"))
+        await data.apply_settle_write(settled, (), now=seoul(25, 22, 50))
+        said_events(data, seoul(25, 23, 10))
+        clock.now = seoul(26, 3, 31)
+        await closed_the_day(data)
+        read: list[object] = []
+        original = data.read_conversation
+
+        async def watched(scope: TrustedScope) -> Any:
+            read.append(scope)
+            return await original(scope)
+
+        data.read_conversation = watched  # type: ignore[method-assign]
+        sent = len(provider.prepared_inputs)
+        assert await writer.amend(ME) is WriteOutcome.NOTHING and len(provider.prepared_inputs) == sent
+        assert read == []  # decided before its conversation is read
+        assert (await data.list_life_writes(ME))[0].error == "skipped: settled before the amend"
+
+    asyncio.run(scenario())
+
+
+def test_review3_3_a_session_closed_days_after_its_diary_is_still_amended_and_one_never_closed_is_skipped() -> None:
+    async def scenario() -> None:
+        clock = Clock(seoul(25, 22, 40))
+        data, _, writer, _ = kept(day_answer(), amend_answer(), final('{"facts": []}'), clock=clock)
+        real = await data.open_day_session(ME, "2026-11-25", "11월 25일 (수)")
+        writer._link = Link(session(conv=real), closed=session(conv=real))  # noqa: SLF001
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        told_by(data, {real: [seoul(27, 23, 0)]})  # awake through the disrupted nights
+        sleep = await data.open_sleep(ME, NO_PERSONA, at=seoul(29, 0, 30), how=FellBy.SCHEDULE)
+        await data.note_closing(ME, NO_PERSONA, sleep.sleep_id, at=seoul(29, 3, 30), conversation_id=real,
+                                before=DayBefore("2026-11-25", fell_at=seoul(29, 0, 30), conversation_id=real))
+        clock.now = seoul(29, 3, 31)  # the 25th is four days back: found by its session's closing
+        assert await writer.amend(ME) is WriteOutcome.WRITTEN
+        assert await writer.settle(ME) is WriteOutcome.WRITTEN
+        assert jobs(await data.list_life_writes(ME)) == ["review", "amend", "settle"]
+        # a session that never closes: SETTLE_DAYS on, its diary's amend is skipped for good
+        clock.now = seoul(25, 22, 40)
+        data, provider, writer, _ = kept(day_answer(), link=Link(session(), closed=session()), clock=clock)
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        clock.now = seoul(27, 12, 0)
+        assert await writer.amend(ME) is WriteOutcome.NOTHING
+        assert not await data.life_done(ME, NO_PERSONA, "2026-11-25", LifeJob.AMEND)  # still waiting
+        clock.now = seoul(28, 0, 10)
+        assert await writer.amend(ME) is WriteOutcome.NOTHING
+        assert (await data.list_life_writes(ME))[0].error == "skipped: its day session never closed in time"
+
+    asyncio.run(scenario())
+
+
+def test_review3_4_an_amend_waiting_for_the_budget_never_holds_back_the_others_and_one_too_large_ends() -> None:
+    """The 25th's amend must wait for the daily budget: the 26th's (nothing new) is still skipped, so its facts
+    settle; a request that could never fit the daily budget is skipped for good."""
+    async def scenario() -> None:
+        older, newer = ConversationId("conv_a"), ConversationId("conv_b")
+        clock = Clock(seoul(25, 22, 40))
+        data, provider, writer, _ = kept(day_answer(), day_answer(), final('{"facts": []}'), clock=clock)
+        writer._link = Link(session(conv=older))  # noqa: SLF001
+        await tonight(data)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        first = await data.open_sleep(ME, NO_PERSONA, at=seoul(26, 0, 30), how=FellBy.SCHEDULE)
+        await data.note_closing(ME, NO_PERSONA, first.sleep_id, at=seoul(26, 3, 30), before=None)
+        await data.end_sleep(ME, first.sleep_id, at=seoul(26, 8, 10), how=WokeBy.SCHEDULE)
+        writer._link = Link(session(day="2026-11-26", conv=newer))  # noqa: SLF001
+        clock.now = seoul(26, 22, 40)
+        assert await writer.write(ME) is WriteOutcome.WRITTEN
+        second = await data.open_sleep(ME, NO_PERSONA, at=seoul(27, 0, 30), how=FellBy.SCHEDULE)
+        await data.note_closing(ME, NO_PERSONA, second.sleep_id, at=seoul(27, 3, 30), before=None)
+        closed_at = {older: seoul(26, 3, 30), newer: seoul(27, 3, 30)}
+
+        async def read_conversation(scope: TrustedScope) -> Any:
+            return SimpleNamespace(conversation_id=scope.conversation_id, closed_at=closed_at[scope.conversation_id])
+
+        data.read_conversation = read_conversation  # type: ignore[method-assign]
+        told_by(data, {older: [seoul(25, 23, 10)], newer: []})
+
+        async def spent(principal: PrincipalId, since: datetime) -> int:
+            return writer.settings.daily_tokens  # the day's budget is used up
+
+        data.life_usage = spent  # type: ignore[method-assign]
+        clock.now = seoul(27, 3, 31)
+        sent = len(provider.prepared_inputs)
+        assert await writer.amend(ME) is WriteOutcome.DEFERRED
+        assert await data.life_done(ME, NO_PERSONA, "2026-11-26", LifeJob.AMEND)  # skipped all the same
+        assert not await data.life_done(ME, NO_PERSONA, "2026-11-25", LifeJob.AMEND)
+        assert await writer.settle(ME) is WriteOutcome.DEFERRED  # the 26th's facts are next, budget allowing
+        assert all(w.job is not LifeJob.AMEND or w.status is LifeWriteStatus.SKIPPED
+                   for w in await data.list_life_writes(ME))
+        writer.settings = replace(writer.settings, daily_tokens=100)  # never enough for the 25th's amend
+        assert await writer.amend(ME) is WriteOutcome.NOTHING
+        assert (await data.list_life_writes(ME))[0].error == "skipped: too large for the daily budget"
+        assert len(provider.prepared_inputs) >= sent
 
     asyncio.run(scenario())

@@ -882,6 +882,7 @@ ALTER TABLE life_writes ADD COLUMN conversation_id TEXT;
 _V30_ADDITIONS = """
 ALTER TABLE life_writes ADD COLUMN basis_sequence INTEGER;
 ALTER TABLE life_writes ADD COLUMN basis_at TEXT;
+ALTER TABLE sleeps ADD COLUMN closed_session TEXT;
 """
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
@@ -1379,7 +1380,8 @@ def _sleep(row: sqlite3.Row) -> SleepRecord:
                        None if row["how_woke"] is None else WokeBy(row["how_woke"]), int(row["messages"]),
                        int(row["mumbles"]), int(row["count"]), _moment(row["count_at"]), bool(row["closed_day"]),
                        _moment(row["first_message_at"]), _moment(row["last_message_at"]),
-                       None if row["slot_id"] is None else int(row["slot_id"]))
+                       None if row["slot_id"] is None else int(row["slot_id"]),
+                       None if row["closed_session"] is None else ConversationId(row["closed_session"]))
 
 
 def _mood(persona_id: int, row: sqlite3.Row | None) -> HimariMood | None:
@@ -3417,7 +3419,8 @@ class SqliteData:
             closed = conversation_id is not None and tx.execute(
                 "UPDATE conversations SET closed_at=? WHERE conversation_id=? AND owner=? AND day_session IS NOT NULL"
                 " AND closed_at IS NULL", _timestamp(at), conversation_id, principal).rowcount == 1
-            tx.execute("UPDATE sleeps SET closed_day=1 WHERE sleep_id=?", sleep_id)
+            tx.execute("UPDATE sleeps SET closed_day=1, closed_session=? WHERE sleep_id=?",
+                       conversation_id if closed else None, sleep_id)
             state = self._day_state(tx, principal, persona_id)
             self._put_day_state(tx, principal, dataclasses.replace(state, last_closing_at=at, before=before))
             return closed

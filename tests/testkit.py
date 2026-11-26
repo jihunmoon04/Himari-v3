@@ -108,7 +108,8 @@ V29_UNDO = ("ALTER TABLE life_writes DROP COLUMN conversation_id", "DROP TABLE d
             "DROP INDEX sleeps_by_owner", "DROP TABLE sleeps", "DROP INDEX conversations_open_day",
             *(f"ALTER TABLE conversations DROP COLUMN {c}" for c in ("closed_at", "day_session")),
             *(f"ALTER TABLE life_entries DROP COLUMN {c}" for c in ("reason", "plan_state", "plan_kind", "minutes")))
-V30_UNDO = ("ALTER TABLE life_writes DROP COLUMN basis_at", "ALTER TABLE life_writes DROP COLUMN basis_sequence")
+V30_UNDO = ("ALTER TABLE sleeps DROP COLUMN closed_session", "ALTER TABLE life_writes DROP COLUMN basis_at",
+            "ALTER TABLE life_writes DROP COLUMN basis_sequence")
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")

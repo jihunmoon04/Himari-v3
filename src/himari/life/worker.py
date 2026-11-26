@@ -685,19 +685,32 @@ class LifeWriter:
         log.info("world %s made %d event(s) for %s", write_id, len(kept), written)
         return WriteOutcome.WRITTEN
 
-    def _dates(self, now: datetime) -> list[date]:
-        """character-diary §5, §6: the dates the amend and the facts look back over, the earliest first."""
+    async def _dates(self, principal: PrincipalId, persona_id: int, now: datetime,
+                     sleeps: Sequence[SleepRecord]) -> list[date]:
+        """character-diary §5, §6: the dates the amend and the facts look over, the earliest first — the last
+        SETTLE_DAYS, and (review 3, 3) the dates of the diaries written in the day sessions the recent closings closed
+        (``sleeps``), however late the closing came (within review.READ_DAYS)."""
         today = now.astimezone(self._zone).date()
-        return [today - timedelta(days=back) for back in range(SETTLE_DAYS, -1, -1)]
+        found = {today - timedelta(days=back) for back in range(SETTLE_DAYS + 1)}
+        for conversation in dict.fromkeys(s.closed_session for s in sleeps if s.closed_session is not None):
+            for write in await self._data.session_writes(principal, conversation):
+                if write.persona_id == persona_id and write.job is LifeJob.REVIEW \
+                        and write.status is LifeWriteStatus.APPLIED:
+                    day = date.fromisoformat(write.day)
+                    if day >= today - review.READ_DAYS:
+                        found.add(day)
+        return sorted(found)
 
     async def _amend_case(self, principal: PrincipalId, persona_id: int, day: date,
                           now: datetime) -> _AmendCase | tuple[str, ConversationId] | None:
         """character-diary §5, review 2 (1, 2): what ``day``'s diary written in a day session comes to, from what is
         stored for that diary itself (never the latest handoff): None — nothing to decide (no such diary, its amend
         decided already, or its session not closed yet); a reason with the session — decided without a call (its
-        session not readable: in the Trash; not the session's last diary; no diary; the user's; nothing new; its
-        tries spent); else the case to amend, from what its request was made of to HIMARI falling asleep in the sleep
-        that closed the session."""
+        facts settled already: a diary of before v30; its session not readable: in the Trash; its session still open
+        SETTLE_DAYS on; not the session's last diary; no diary; the user's; its tries spent; nothing new); else the case
+        to amend, from what its request was made of to HIMARI falling asleep in the sleep that closed the session
+        (the one the closing named, review 3, 1). Its tries are seen before the session's events are read, and only
+        the events after what its request held are read."""
         written = day.isoformat()
         write = await self._data.last_life_write(principal, persona_id, written, job=LifeJob.REVIEW)
         if write is None or write.status is not LifeWriteStatus.APPLIED or write.conversation_id is None \
@@ -706,6 +719,9 @@ class LifeWriter:
         if await self._data.life_done(principal, persona_id, written, LifeJob.AMEND):
             return None  # applied, or skipped for good
         conversation = write.conversation_id
+        if await self._data.life_done(principal, persona_id, written, LifeJob.SETTLE):
+            # review 3, 2: settled at once by a server from before (v29) — never rewritten under its facts
+            return "settled before the amend", conversation
         scope = TrustedScope(principal, conversation)
         try:
             summary = await self._data.read_conversation(scope)
@@ -713,15 +729,19 @@ class LifeWriter:
             if error.code not in (DataErrorCode.NOT_FOUND, DataErrorCode.NOT_AUTHORIZED):
                 raise
             return "its day session is not readable", conversation
-        if summary.closed_at is None:
-            return None  # its day is not closed yet
+        if summary.closed_at is None:  # its day is not closed yet — review 3, 3: not for ever
+            if day <= now.astimezone(self._zone).date() - timedelta(days=SETTLE_DAYS):
+                return "its day session never closed in time", conversation
+            return None
         diaries = [w for w in await self._data.session_writes(principal, conversation)
                    if w.persona_id == persona_id and w.job is LifeJob.REVIEW and w.status is LifeWriteStatus.APPLIED]
         if diaries and diaries[-1].write_id != write.write_id:
             return "not the last diary of its day session", conversation
         sleeps = await self._data.recent_sleeps(principal, persona_id, limit=SETTLE_SLEEPS)
-        closing = next((s for s in sleeps if s.fell_at <= summary.closed_at
-                        and (s.woke_at is None or s.woke_at >= summary.closed_at)), None)
+        closing = next((s for s in sleeps if s.closed_session == conversation), None)  # review 3, 1: as stored
+        if closing is None:  # a closing from before v30: the sleep its closing time falls in
+            closing = next((s for s in sleeps if s.fell_at <= summary.closed_at
+                            and (s.woke_at is None or s.woke_at >= summary.closed_at)), None)
         until = summary.closed_at if closing is None else closing.fell_at
         since = write.basis_at or write.finished_at  # what its request was made of (never its end)
         entries = await self._data.list_life(principal, persona_id, since=(day - timedelta(days=1)).isoformat(),
@@ -731,16 +751,16 @@ class LifeWriter:
             return "no diary", conversation
         if diary.origin is LifeOrigin.USER:
             return "the user's diary", conversation
-        try:
-            events = tuple(await self._data.read_events(scope))
+        if await self._data.life_attempts(principal, persona_id, written, job=LifeJob.AMEND) >= ATTEMPTS_PER_DAY:
+            return "given up after its tries", conversation  # review 3, 4: before reading the session
+        try:  # review 3, 4: only what came after what its request held
+            events = tuple(await self._data.read_events(scope, after_sequence=write.basis_sequence or 0))
         except DataError as error:
             if error.code not in (DataErrorCode.NOT_FOUND, DataErrorCode.NOT_AUTHORIZED):
                 raise
             return "its day session is not readable", conversation
         if not review.amend_due(events, entries, since, until, self._zone, after_sequence=write.basis_sequence):
             return "nothing new after it", conversation
-        if await self._data.life_attempts(principal, persona_id, written, job=LifeJob.AMEND) >= ATTEMPTS_PER_DAY:
-            return "given up after its tries", conversation
         return _AmendCase(written, write, conversation, since, until, diary, tuple(entries), events)
 
     async def _skip_amend(self, principal: PrincipalId, persona_id: int, day: str, reason: str,
@@ -757,19 +777,27 @@ class LifeWriter:
     async def _amend(self, principal: PrincipalId) -> WriteOutcome:
         """character-diary §5: each diary written in a day session gets its amend decided once its session closed —
         amended once in that session's context when something new came after it before HIMARI fell asleep, else
-        skipped for good with why (never the user's diary) — the earliest first, one call a round."""
+        skipped for good with why (never the user's diary) — the earliest first, one call a round. Review 3, 4: one
+        waiting for the daily budget never holds the others back (the later ones are still decided)."""
         now = self._clock()
         chosen = await self._persona(principal)
         persona_id = chosen.persona_id
-        for day in self._dates(now):
+        sleeps = await self._data.recent_sleeps(principal, persona_id, limit=SETTLE_SLEEPS)
+        deferred = False
+        for day in await self._dates(principal, persona_id, now, sleeps):
             found = await self._amend_case(principal, persona_id, day, now)
             if found is None:
                 continue
             if isinstance(found, tuple):
                 await self._skip_amend(principal, persona_id, day.isoformat(), found[0], found[1], now)
                 continue
-            return await self._amend_call(principal, chosen, found, now)
-        return WriteOutcome.NOTHING
+            outcome = await self._amend_call(principal, chosen, found, now)
+            if outcome is WriteOutcome.DEFERRED:
+                deferred = True
+                continue
+            if outcome is not WriteOutcome.NOTHING:
+                return outcome
+        return WriteOutcome.DEFERRED if deferred else WriteOutcome.NOTHING
 
     async def _amend_call(self, principal: PrincipalId, chosen: _Chosen, case: _AmendCase,
                           now: datetime) -> WriteOutcome:
@@ -795,15 +823,19 @@ class LifeWriter:
                                                                 for line in last_words(said, self._zone)])
                 asked = self._composer.self_input(await self._self_inputs(principal, chosen, options, now),
                                                   review.AMEND_TASK, data)
-            prepared = await self._prepared(principal, asked, review.AMEND_MAX_OUTPUT_TOKENS, now)
+            request = self._provider.prepare_native_request(asked)
         except (DataError, asyncio.CancelledError):
             raise
         except Exception as error:  # noqa: BLE001 — never pending for ever: a try, recorded
             return await self._uncomposed(principal, persona_id, case.day, LifeJob.AMEND, error, case.conversation,
                                           now)
-        if prepared is None:
+        reserve = reservation(request.body, review.AMEND_MAX_OUTPUT_TOKENS)
+        if reserve > self.settings.daily_tokens:  # review 3, 4: it could never fit: decided for good
+            await self._skip_amend(principal, persona_id, case.day, "too large for the daily budget",
+                                   case.conversation, now)
+            return WriteOutcome.NOTHING
+        if await self._data.life_usage(principal, self.budget_start(now)) + reserve > self.settings.daily_tokens:
             return WriteOutcome.DEFERRED
-        request, reserve = prepared
         write_id = await self._data.begin_life_write(principal, LifeWriteStart(
             persona_id, case.day, self._provider.provider_key, mind.model_id, request.body, request.content_type,
             reserve, job=LifeJob.AMEND, model_reason=mind.reason if session is None
@@ -833,7 +865,8 @@ class LifeWriter:
 
     async def _settle_dates(self, principal: PrincipalId, persona_id: int, now: datetime) -> list[str]:
         """§5.3, character-diary §6: the dates whose facts may be settled now, earliest first. With the day keeper:
-        every date of the last SETTLE_DAYS a closing has ended (a closing in a sleep of its night or later), each
+        every date the amend looks over (the last SETTLE_DAYS, and the dates of the diaries of the sessions the recent
+        closings closed: ``_dates``) that a closing has ended (a closing in a sleep of its night or later), each
         found from what is stored — not only the latest due one (a session over two nights ends both) — and, for a
         diary written in a day session, once its own amend is decided for good (applied or skipped; review 2, 1).
         Without it: the latest date whose diary is due."""
@@ -843,7 +876,7 @@ class LifeWriter:
         sleeps = await self._data.recent_sleeps(principal, persona_id, limit=SETTLE_SLEEPS)
         closed = [diary_of(s.fell_at, self._zone) for s in sleeps if s.closed_day]
         found: list[str] = []
-        for day in (d for d in self._dates(now) if any(c >= d for c in closed)):
+        for day in (d for d in await self._dates(principal, persona_id, now, sleeps) if any(c >= d for c in closed)):
             written = day.isoformat()
             if (not await self._data.life_done(principal, persona_id, written, LifeJob.REVIEW)
                     or await self._data.life_done(principal, persona_id, written, LifeJob.SETTLE)):
