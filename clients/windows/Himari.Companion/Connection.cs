@@ -454,13 +454,15 @@ public partial class MainWindow
     {
         if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
-        // character-day §3.2: the day shown is closed — today's session opens and the message (still in the editor) goes there
-        if (unsent is null && ShownDayClosed)
+        // character-day §3.2: the day is closed — today's session opens and the message goes there: the editor's (it stays
+        // in the editor meanwhile), or an unsent bubble's (review 8), which belongs to today's from then on (OpenTodaySession)
+        if (ClosedDay(unsent?.UnsentConversation ?? currentConversation))
         {
             try { await OpenTodaySession(client, connection.Token); }
             catch (Exception ex) { ShowError(ex); return; }
             if (!connected || client is null || connection is null || currentConversation is null) return;
-            if (ShownDayClosed) { Status.Text = DaySession.NoTodayNotice; return; }
+            if (unsent is not null && !history.Contains(unsent)) return;  // removed meanwhile
+            if (ShownDayClosed || (unsent is not null && unsent.UnsentConversation != currentConversation)) { Status.Text = DaySession.NoTodayNotice; return; }
         }
         string text = unsent?.Text ?? Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         bool wantsScreen = WantsScreen;
@@ -499,9 +501,11 @@ public partial class MainWindow
             if (unknownText is { } earlier)
             {
                 var check = await CheckUnknownText(true, ct);
-                // The earlier send of this same text was recorded after all: nothing to send or restore.
-                if (check == UnknownTextCheck.Confirmed && earlier.Conversation == context.ConversationId && earlier.Text == text
-                    && (unsent is not null ? earlier.Attempt == unsent : earlier.Attempt is null && earlier.Restored == context.InputRevision)) taken = true;
+                // The earlier send of this same text was recorded after all: nothing to send or restore. A bubble is its
+                // attempt wherever it now belongs (character-day §3.2: a closed day's moved to today's).
+                if (check == UnknownTextCheck.Confirmed && earlier.Text == text
+                    && (unsent is not null ? earlier.Attempt == unsent
+                        : earlier.Conversation == context.ConversationId && earlier.Attempt is null && earlier.Restored == context.InputRevision)) taken = true;
                 if (check != UnknownTextCheck.Clear) return;
             }
             if (unresolvedScreen is { } retry)
@@ -547,7 +551,9 @@ public partial class MainWindow
             catch (ApiException ex) when (ex.Code == "day_closed")
             {
                 // character-day §3.2, §18.11: the day closed before the message came, and nothing was recorded. The text
-                // returns to the editor (below), a screen taken for that day is dropped, and the app goes to today's.
+                // returns to an empty editor (below; it goes along to today's), or else stays as an unsent bubble that
+                // moves to today's session once the app knows it (review 8: never held by the closed day, a newer draft
+                // untouched); a screen taken for that day is dropped, and the app goes to today's.
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 if (screen is not null) { unresolvedScreen = null; localScreens.Remove(screen.FileId); submittedScreen = null; submittedConversation = null; }
                 closedDays.Add(context.ConversationId);
@@ -611,6 +617,19 @@ public partial class MainWindow
             {
                 if (ReferenceEquals(local, client)) generationState.OnStaleFailure(messageGeneration);
                 throw;
+            }
+            // character-day §5.5, §18.11 (review 6): HIMARI slept through it — recorded, and no job started. It shows as
+            // sent and the character stirs; no reply is waited on (no thinking, no progress), whatever job the receipt names.
+            if (DaySession.SleptThrough(response))
+            {
+                if (unsent is null && context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
+                if (context.IsCurrent(client, currentConversation, connected))
+                {
+                    ShowSentMessage(text);
+                    Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : JobOrigin.Status(wakeElsewhere, currentConversation, DaySession.SleptThroughNotice);
+                }
+                if (ReferenceEquals(local, client)) { animator.Stir(AnimationNow()); UpdateFrame(); }
+                return;
             }
             string? jobId = Str(response, "job_id");
             WaitForReply(local, context.ConversationId, jobId, beforeSequence);
