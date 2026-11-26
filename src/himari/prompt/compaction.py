@@ -291,8 +291,9 @@ def current_state(inputs: PromptInputs) -> CurrentStateProjection:
                                   mood=inputs.mood, himari_now=inputs.himari_now, weather=inputs.weather,
                                   # character-mind §6: told with the life, from the history as read
                                   recent_thoughts=() if inputs.life is None else recent_thoughts(inputs.events),
-                                  # character-day §8: the day session's
-                                  schedule=inputs.schedule, sleep=inputs.sleep, day_before=inputs.day_before)
+                                  # character-day §8: the day session's, on the server zone's clock
+                                  schedule=inputs.schedule, sleep=inputs.sleep, day_before=inputs.day_before,
+                                  schedule_zone=inputs.time_zone)
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:

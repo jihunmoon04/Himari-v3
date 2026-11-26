@@ -1245,20 +1245,21 @@ class Application:
         return await self.data.write_plan(principal, found.persona_id, plan, origin=LifeOrigin.USER,
                                           zone=self.time_zone, now=datetime.now(UTC))
 
-    async def session_diaries(self, scope: TrustedScope) -> tuple[tuple[datetime, str], ...]:
-        """§7, §18.11: the diaries written in this day session's context — when each was written and its text (as
-        the diary stands now; one deleted since is left out), oldest first. Authorizes like any read."""
+    async def session_diaries(self, scope: TrustedScope) -> tuple[tuple[str, datetime, str], ...]:
+        """§7, §18.11: the diaries written in this day session's context — each write's id (stable: the Web keys
+        on it), when it was written and its text (as the diary stands now; one deleted since is left out), oldest
+        first. Authorizes like any read."""
         summary = await self.data.read_conversation(scope)
         if summary.day_session is None:
             return ()
-        found: list[tuple[datetime, str]] = []
+        found: list[tuple[str, datetime, str]] = []
         for write in await self.data.session_writes(scope.principal_id, scope.conversation_id):
             if write.job is not LifeJob.REVIEW or write.finished_at is None or write.status.value != "applied":
                 continue
             diary = next((e for e in await self.data.list_life(scope.principal_id, write.persona_id, since=write.day)
                           if e.kind is LifeKind.DIARY and e.day == write.day), None)
             if diary is not None:
-                found.append((write.finished_at, diary.text))
+                found.append((write.write_id, write.finished_at, diary.text))
         return tuple(found)
 
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:

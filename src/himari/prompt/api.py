@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from enum import Enum
 from typing import Protocol
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from himari.common import (
     MOODS,
@@ -270,6 +270,9 @@ class CurrentStateProjection(DeepFrozen):
     schedule: tuple[LifeEntry, ...] | None = None
     sleep: SleepView | None = None
     day_before: DayBefore | None = None
+    # character-day §8: the zone the schedule's slots are dated in (the server's, IANA) — its entries are told on
+    # that clock, whatever zone ``now`` is shown in (the device's); None: ``now``'s
+    schedule_zone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1035,6 +1038,17 @@ def slot_data(entry: LifeEntry, zone: tzinfo) -> dict[str, object]:
     return item
 
 
+def schedule_clock(now: datetime, zone: str | None) -> datetime:
+    """character-day §8: ``now`` on the schedule's clock — the server's zone its slots are dated in; the device's
+    zone stays the user's (``now``, presence, time lines)."""
+    if zone is None:
+        return now
+    try:
+        return now.astimezone(ZoneInfo(zone))
+    except (ValueError, ZoneInfoNotFoundError):
+        return now
+
+
 def himari_schedule_data(slots: Sequence[LifeEntry], now: datetime) -> dict[str, object]:
     """§8: today's and tomorrow's slots (``now``'s date and zone), earliest first, the ones that no longer stand
     with their state and why."""
@@ -1673,13 +1687,14 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
         data["himari_mood"] = himari_mood_data(state.mood, state.now)
     if state.himari_now is not None:
         data["himari_now"] = himari_now_data(state.himari_now)
-    if state.now is not None:  # character-day §8: the day session's only
+    if state.now is not None:  # character-day §8: the day session's only, on the schedule's clock
+        clock = schedule_clock(state.now, state.schedule_zone)
         if state.schedule is not None:
-            data["himari_schedule"] = himari_schedule_data(state.schedule, state.now)
+            data["himari_schedule"] = himari_schedule_data(state.schedule, clock)
         if state.sleep is not None:
-            data["himari_sleep"] = himari_sleep_data(state.sleep, state.now)
+            data["himari_sleep"] = himari_sleep_data(state.sleep, clock)
         if state.day_before is not None:
-            data["himari_day"] = himari_day_data(state.day_before, state.now)
+            data["himari_day"] = himari_day_data(state.day_before, clock)
     if state.weather is not None:
         data["world"] = world_data(state.weather)
     data.update(turn_state_data(turn) or {})

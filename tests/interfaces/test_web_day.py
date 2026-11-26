@@ -287,7 +287,7 @@ def test_the_diary_written_in_the_day_session_is_a_line_of_its_timeline_for_the_
     assert [i["kind"] for i in items] == ["user_message", "assistant_final", "diary"]
     diary = items[-1]
     assert (diary["sequence"], diary["text"]) == (items[-2]["sequence"], "같이 이야기해서 좋은 하루였다.")
-    assert diary["created_at"]
+    assert diary["created_at"] and isinstance(diary["id"], str) and diary["id"]  # review 9: its write, stable
     me = server.paired()
     assert [i["kind"] for i in server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]] == [
         "user_message", "assistant_final"]  # the owner's Web only
@@ -373,3 +373,38 @@ def test_the_stream_tells_a_day_session_opened(server: Server) -> None:
         told.append((event.name, thaw(event.data)))
     title = session_title(datetime.now(ZoneInfo(server.app.time_zone)).date())
     assert ("day_session", {"conversation": cid, "title": title, "closed": False}) in told
+
+
+def test_a_diary_is_on_exactly_one_page_of_the_events_and_keyed_by_its_own_id(server: Server) -> None:
+    """§18.11 (review 9): message one, two diaries, message two — at any page size each diary comes once, after
+    message one, each with its own ``id`` (two diaries may share a ``sequence``), and the cursor never repeats one."""
+    cid = server.day()
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+    yesterday = (datetime.now(ZoneInfo(server.app.time_zone)).date() - timedelta(days=1)).isoformat()
+
+    async def diary(day: str, text: str) -> None:
+        data = server.app.data
+        write_id = await data.begin_life_write(OPERATOR, LifeWriteStart(
+            NO_PERSONA, day, "p", "m", b"{}", "j", 1, job=LifeJob.REVIEW, conversation_id=ConversationId(cid)))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+        await data.apply_life_write(write_id, LifePlan(text), now=datetime.now(UTC))
+
+    server.call(lambda: server.app.data.append_event(scope, UserMessage((TextBlock("하나"),))))
+    server.call(diary, yesterday, "어제 일기")
+    server.call(diary, today(server), "오늘 일기")
+    server.call(lambda: server.app.data.append_event(scope, UserMessage((TextBlock("둘"),))))
+    for limit in (1, 2, 3, 200):
+        seen: list[dict[str, Any]] = []
+        after = 0
+        for _ in range(10):
+            page = server.client.get(f"/api/conversations/{cid}/events?after={after}&limit={limit}").json()
+            if not page["items"] or page["last_sequence"] == after:
+                seen += page["items"]
+                break
+            seen += page["items"]
+            after = page["last_sequence"]
+        assert [(i["kind"], i.get("text")) for i in seen] == [
+            ("user_message", "하나"), ("diary", "어제 일기"), ("diary", "오늘 일기"), ("user_message", "둘")], limit
+        diaries = [i for i in seen if i["kind"] == "diary"]
+        assert len({d["id"] for d in diaries}) == 2 and {d["sequence"] for d in diaries} == {seen[0]["sequence"]}

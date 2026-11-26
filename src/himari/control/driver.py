@@ -747,7 +747,9 @@ class Driver:
         if turn:
             self._turn_half[scope.conversation_id] = half
         sleep = dataclasses.replace(day.sleep, state=SleepState.HALF_ASLEEP) if half else day.sleep
-        today = None if inputs.now is None else inputs.now.date()
+        # the schedule's today and tomorrow on the server zone's clock (its slots' dates), never the device's
+        now = inputs.now if inputs.now is None or self._zone is None else inputs.now.astimezone(self._zone)
+        today = None if now is None else now.date()
         shown = {today.isoformat(), (today + timedelta(days=1)).isoformat()} if today is not None else set()
         schedule = tuple(e for e in inputs.life or () if e.kind is LifeKind.PLAN and e.day in shown)
         options = dataclasses.replace(inputs.request_options, half_asleep=half)

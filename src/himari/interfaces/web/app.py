@@ -1696,30 +1696,29 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise ApiError(409, "not_in_trash", "Move the conversation to the trash first.") from None
 
     async def diary_items(application: Application, scope: TrustedScope, events: Sequence[ConversationEvent],
-                          after: int, through: int | None) -> list[dict[str, Any]]:
-        """character-day §7, §18.11: the diaries written in this day session's context that fall on this page —
-        each after the last event before it (the page whose events reach past it, or the last page)."""
+                          after: int, cursor: int, full: bool) -> list[dict[str, Any]]:
+        """character-day §7, §18.11: the diaries written in this day session's context that this page owns — each
+        belongs after the last event written before it (its ``sequence``; 0 before any), and to the one page whose
+        range from ``after`` (exclusive) to ``cursor`` holds that event: never on two pages, never on none.
+        ``events``: the page's events as read (``full``: as many as asked, more may follow); ``id``: the diary's
+        write, stable."""
         found = await application.session_diaries(scope)
-        if not found:
+        if not found or (after > 0 and not events):
             return []
-        before_page: datetime | None = None
-        if after > 0:
-            previous = await application.data.read_events(scope, after_sequence=after - 1, limit=1)
-            before_page = previous[0].created_at if previous else None
+        following = next((e for e in events if e.sequence > cursor), None)  # the first event of a later page
+        if following is None and full:
+            more = await application.data.read_events(scope, after_sequence=cursor, limit=1)
+            following = more[0] if more else None
         items: list[dict[str, Any]] = []
-        for at, text in found:
-            earlier = [e for e in events if e.created_at <= at]
-            if earlier:
-                if through is not None and all(e.created_at <= at for e in events):
-                    continue  # a later page's
-                sequence = earlier[-1].sequence
-            elif after > 0 and before_page is not None and before_page <= at:
-                sequence = after  # between the last page and this one
-            elif after == 0:
-                sequence = 0
-            else:
-                continue
-            items.append({"sequence": sequence, "kind": "diary", "created_at": _time(at), "text": text})
+        for write_id, at, text in found:
+            if after > 0 and events[0].created_at > at:
+                continue  # it follows an event of an earlier page
+            if following is not None and following.created_at <= at:
+                continue  # it follows an event of a later page
+            sequence = max((e.sequence for e in events if e.created_at <= at and e.sequence <= cursor),
+                           default=after)
+            items.append({"id": write_id, "sequence": sequence, "kind": "diary", "created_at": _time(at),
+                          "text": text})
         return items
 
     @app.get("/api/conversations/{conversation_id}/events")
@@ -1729,7 +1728,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         if after < 0 or not 1 <= limit <= MAX_EVENTS_PAGE:
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
         application, scope = himari(request), scope_of(conversation_id, who)
-        events = await application.data.read_events(scope, after_sequence=after, limit=limit)
+        events = read = await application.data.read_events(scope, after_sequence=after, limit=limit)
         # character-mind §3.3 (review 2): the page's sequence range, as read (before anything is left out)
         through = events[-1].sequence if len(events) == limit else None
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
@@ -1755,10 +1754,14 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             # page starts after the last row given (an event or a wake's line)
             items += [wake_thought_view(w) for w in await application.data.wake_thoughts(
                 scope, after=after, through=through, limit=limit)]
-            # character-day §7, §18.11: a diary written in this day session's context, a folded line where it was
-            # written (after the last event before it)
-            items += await diary_items(application, scope, events, after, through)
             items = sorted(items, key=lambda item: int(item["sequence"]))[:limit]
+            cursor = items[-1]["sequence"] if items else after
+            # character-day §7, §18.11: a diary written in this day session's context, a folded line after the
+            # last event before it, on the one page that holds that event (beside ``limit``: never cut, never
+            # given twice); the cursor stays the last event's (or wake line's)
+            diaries = await diary_items(application, scope, read, after, int(cursor), len(read) == limit)
+            items = sorted(items + diaries, key=lambda item: (int(item["sequence"]), item["kind"] == "diary"))
+            return {"items": items, "last_sequence": cursor}
         return {"items": items, "last_sequence": items[-1]["sequence"] if items else after}
 
     @app.get("/api/conversations/{conversation_id}/live")

@@ -229,3 +229,32 @@ def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> N
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_try_while_himari_sleeps_is_the_operators_override_a_half_asleep_turn(tmp_path: Path) -> None:
+    """character-day §9, §19.1 (review 15): the scheduler opens nothing but a reminder while HIMARI sleeps; the
+    operator's Try is a deliberate override — it opens in the day session, and the turn is half asleep (no Tool, one
+    Run) and leaves the sleep unbroken."""
+    async def scenario() -> None:
+        from himari.data.api import NO_PERSONA, FellBy
+        from himari.life import keeper as day_keeper
+
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("음… 왜…"),))], companion=True)
+        app = await opened(tmp_path, adapter, proactive=ON, companion=True, life=True)
+        try:
+            await current_device(app)
+            day = await app.day_session(ME)
+            assert day is not None
+            await app.data.open_sleep(ME, NO_PERSONA, at=day_keeper.wall_clock(), how=FellBy.SCHEDULE)
+            conversation, status = await app.try_wake(ME)
+            assert conversation == day.conversation_id and status.wake_id is not None
+            scope = TrustedScope(ME, conversation)
+            done = await app.runner.wait(scope)
+            assert done.result is not None and done.result.state is DriveState.COMPLETED
+            sent = adapter.prepared_inputs[-1]
+            assert sent.request_options.half_asleep and sent.tool_catalog == ()
+            assert (await app.data.current_sleep(ME, NO_PERSONA)).asleep  # type: ignore[union-attr]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

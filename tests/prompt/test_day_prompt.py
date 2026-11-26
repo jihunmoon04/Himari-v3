@@ -172,3 +172,19 @@ def test_a_together_wake_names_its_slot_as_read_now() -> None:
     assert '"slot": {"id": 3, "minutes": 120, "start": "03:00", "text": "방송 같이 보기"}' in wake_text(
         wake, {}, life={3: promise})
     assert '"deleted": true' in wake_text(wake, {}, life={})
+
+
+def test_the_schedule_and_sleep_are_told_on_the_server_zones_clock_not_the_devices() -> None:
+    """§8 (review 10): at 00:30 in Seoul on a Los Angeles device, today is Seoul's (the slots' dates) — ``now`` stays
+    the device's."""
+    la = timezone(timedelta(hours=-8))
+    seoul_now = datetime(2026, 11, 27, 0, 30, tzinfo=SEOUL)
+    slots = (SLEEP, slot(3, "2026-11-27", "15:00", 120, PlanKind.TOGETHER, "게임"),
+             slot(4, "2026-11-28", "10:00", 60, PlanKind.OWN, "산책"))
+    last = SleepRecord(5, 1, datetime(2026, 11, 26, 15, 15, tzinfo=UTC), FellBy.SCHEDULE)
+    data = state_data(current_state(inputs(now=seoul_now.astimezone(la), schedule=slots,
+                                           sleep=SleepView(SleepState.ASLEEP, tonight=SLEEP, last=last))))
+    assert [s["id"] for s in data["himari_schedule"]["today"]] == [1, 3]  # type: ignore[index]
+    assert [s["id"] for s in data["himari_schedule"]["tomorrow"]] == [4]  # type: ignore[index]
+    assert data["himari_sleep"]["last"]["fell_asleep"] == "2026-11-27T00:15+09:00"  # type: ignore[index]
+    assert data["now"].endswith("-08:00")
