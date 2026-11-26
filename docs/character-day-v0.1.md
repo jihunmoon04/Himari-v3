@@ -407,3 +407,175 @@
 | D10 | 다음 세션을 여는 때 | 처음 필요할 때(앱 접속, 첫 메시지, 첫 wake). 빈 세션을 만들지 않는다 |
 | D11 | 모델 | 모든 일은 deepseek 1017, 예비 luna(답이 하나도 없이 실패했을 때만), Web에는 둘만. luna 반려 표시 켬 |
 | D12 | 앱의 잠 | 입력 없음은 사용자 자리 비움. 캐릭터의 잠은 서버가 정한다 |
+
+## 18. 구현 계약 (구현 전에 정한 것, 2026-11-26)
+
+코드를 읽고 설계를 자리에 맞췄다. 구현이 이것과 다르게 가야 하면 §19에 적고 바꾼다.
+
+### 18.1 층
+
+- 새 패키지는 만들지 않는다. 다른 패키지는 `himari.<pkg>.api`와 `common`만 import하므로(층 규칙), **여러 곳이 쓰는 타입**(잠 상태, 메시지 답 방식, 일정 칸 종류)은 `data/api.py`에 둔다.
+- **잠과 일정표의 순수 규칙**은 `life/day.py`(새것, 입출력 없음)이다. 기본 잠 칸 놓기, 잠 상태 계산, 깨우기 셈, 정리 조건, 약속 놓침이 여기 있다.
+- **일정표 한계 검사**는 Data가 쓸 때 한다(`data/rules.py`, Data 안쪽). Tool, Web, 삶 작업, 하루 지기가 모두 Data를 거쳐 쓰므로 한 곳에서 막힌다. 거부는 `DataError`이고 메시지는 모델이 읽고 고칠 수 있는 영어 한 문장이다.
+- **하루 지기**(`life/keeper.py`의 `DayKeeper`, 새것)가 상태를 넘긴다. 잠들기와 일어나기, 칸 놓기, 약속 놓침, 정리 시작을 맡는다. `bootstrap`이 붙인다.
+  - Control은 `life`를 import할 수 없다. 그래서 Driver는 `control/api.py`의 포트 `DayGate`(Protocol)로만 묻고, `bootstrap`이 `DayKeeper`로 채운다. 9단계 `MindLink`와 같은 방식이다.
+  - 먼저 말 걸기 규칙(`proactive`, 순수)은 `Situation`에 들어온 값만 본다.
+
+### 18.2 Data (스키마 v29)
+
+| 자리 | 바꿈 |
+| --- | --- |
+| `life_entries` | `minutes INTEGER`, `plan_kind TEXT`, `plan_state TEXT`, `reason TEXT`. 업그레이드 때 `plan` 행은 `minutes=60`, `arc_id`가 있으면 `work`, 없으면 `own` |
+| `LifeEntry` | `minutes: int \| None`, `plan_kind: PlanKind \| None`(`sleep`·`work`·`together`·`own`), `plan_state: PlanState \| None`(`cancelled`·`missed`), `reason: str \| None` |
+| `LifeOrigin` | `HIMARI = "himari"`(대화 중 Tool) |
+| `LifeStore` | `write_plan(principal, persona_id, PlanWrite, *, origin, zone, now) -> LifeEntry`(새로 쓰기와 고치기, `PlanWrite`는 `entry_id`·`day`·`time_of_day`·`minutes`·`kind`·`text`·`arc_id`·`reason`), `cancel_plan(…, entry_id, reason, *, origin, now)`, `mark_plan_missed(…)`. `list_life`는 지금처럼 주되 취소·놓친 칸은 7일 동안 함께 준다. 지금 `edit_life`·`retire_life`는 일정이면 이 한계를 거친다(잠 칸은 지울 수 없음) |
+| `conversations` | `day_session TEXT`(연 날짜 `YYYY-MM-DD`, 하루 세션만), `closed_at TEXT`. 열린 하루 세션은 사용자마다 하나(부분 유일 색인). `ConversationSummary`에 `day_session`·`closed_at` |
+| 하루 세션 | `open_day_session(principal, day, title, now)`, `current_day_session(principal)`, `close_day_session(principal, conversation_id, now)` |
+| `sleeps`(새 표) | 한 번 잔 것 한 줄: `sleep_id`, `owner`, `persona_id`, `fell_at`, `how_fell`(`schedule`·`tool`·`missed`), `woke_at`, `how_woke`(`schedule`·`user`), `messages`, `mumbles`, `count`(지금 깨우기 셈), `count_at`(마지막 셈 시각), `closed_day`(이 잠에서 정리했나) |
+| 잠 상태 | `SleepStore`: `open_sleep`, `current_sleep`, `end_sleep`, `count_wake`, `recent_sleeps(limit)`, `note_closing`. 하루 지기의 작은 상태(`sleep_requested_at`, `woken_at`, `last_closing_at`)는 `day_state`(새 표, 사용자·페르소나마다 한 줄) |
+| `UserMessage` | `while_asleep: AsleepAnswer \| None = None`(`none` 답 없음·`mumble`·`wake`). 코덱의 선택 칸이라 옛 기록은 `None` |
+| `life_writes` | `conversation_id TEXT`(세션 문맥에서 쓴 일기의 그 세션) |
+| Run의 모델 | 새 칸이 없다. Run은 이미 보낸 모델(`model_id`)을 남기므로 예비 모델로 답한 것이 보인다 |
+
+In-memory 저장소도 같게 한다.
+
+### 18.3 순수 규칙 (`life/day.py`)
+
+- `place_sleep(night, rng) -> (time_of_day, minutes)`: 23:00–02:00 10분 단위, 끝 07:00–10:00, 시작 + 5시간보다 이르면 그때, 끝 12:00 상한.
+- `sleep_view(now, slot, sleep, state) -> SleepView`(`data/api.py` 타입). 상태(`awake`·`drowsy`·`asleep`·`half_asleep`), 깊은 잠인지, 잠 칸까지 남은 분, 오늘 밤 칸, 마지막 잠 요약, 자는 동안 받은 메시지 수와 시각 범위가 들어간다.
+- `answer_message(view, sleep, now) -> AsleepAnswer | None`: 깨어 있으면 `None`. 아니면 §5.5 표(깊은 잠 3, 얕은 잠 2, 10분 초기화)를 따른다. 쿡 찌르기도 같은 셈이다.
+- `due(now, slot, sleep, state, running) -> list[Transition]`: 다음을 낸다.
+  - 잠들기: 칸 시작, Tool, 약속 놓침. 일이 돌고 있으면(`running`) 기다린다.
+  - 칸 끝의 일어나기.
+  - 깨운 뒤 20분 조용하면 다시 잠들기.
+  - 칸 끝까지 1시간 안에 깨우면 그날 일어나기(칸 끝을 지금으로).
+  - 약속 놓침.
+  - 정리 시작(깨지 않은 3시간, 지난 정리 뒤 36시간이면 1시간).
+- 모두 시계와 난수를 인자로 받는다.
+
+### 18.4 Control
+
+- **`DayGate`**(포트):
+  - `answer(scope, origin) -> AsleepAnswer | None`: 하루 세션이 아니면 `None`. 메시지를 받을 때 셈을 기록하고 답 방식을 돌려준다.
+  - `view(scope) -> SleepView | None`: 턴의 Current State용.
+  - `day_session(scope) -> bool`.
+- **메시지 받기**(`runner.submit` → `driver.accept`):
+  - 답 방식이 `none`이면 메시지를 `while_asleep=none`으로 기록하고 **일을 시작하지 않는다.** `JobStatus`는 지금 닫힌 대화에서 받은 입력처럼 "받았고 답 없음"이다.
+  - `mumble`이면 반쯤 깬 턴이다. Run은 1번이고 Tool은 없다.
+  - `wake`면 보통 턴이다.
+  - 답 없는 사용자 메시지가 이어지는 대화 기록은 지금도 생기는 모양이다(닫힌 대화에서 받은 입력). Composer가 그대로 그린다.
+- **`RequestOptions`**:
+  - `day_session: bool`. 참이면 `capabilities`에 `"day_session"`이 들어가고, 일정표 Tool은 `requires="day_session"`이다.
+  - `half_asleep: bool`. 참이면 Tool 목록이 비고 `SLEEP_RULE`의 반쯤 깬 문장이 적용된다.
+- **Tool 문맥**의 `persona_id`는 9단계처럼 Driver가 넣는다.
+- **예비 모델**(§10): `_run_loop`에서 `NativeNoResponse`이고 `retryable(error_code)`이면 그 턴의 남은 Run을 예비 모델로 한다. 단 예비 모델이 설정되어 있고, 지금 모델이 예비 모델이 아니고, 이 턴에서 아직 넘어가지 않았을 때만이다.
+  - 실패한 Run은 지금처럼 기록에 남는다.
+  - 예비 모델은 내놓은 모델(`ModelCatalog`)에 있어야 한다.
+  - `retryable`은 `provider/api.py`의 순수 함수다. `connect_failed:*`, `http_408`, `http_429`, `http_5xx`, `provider_error_*`가 참이다.
+- 하루 세션의 닫힌 대화에 온 메시지는 Application이 거부한다(`409 day_closed`).
+
+### 18.5 Prompt
+
+- `PromptInputs`에 `schedule: tuple[LifeEntry, ...] | None`(오늘·내일, 취소·놓침 포함), `sleep: SleepView | None`, `day_before: DayBefore | None`을 더한다. 모두 하루 세션에서만 채운다.
+- runtime state에 `himari_schedule`, `himari_sleep`, `himari_day`(`before`)를 둔다. `himari_now.asleep`은 `SleepView`에서 온다. 하루 세션이 아니면 `asleep`이 없다.
+- 시스템 글: `SCHEDULE_RULE`, `SLEEP_RULE`은 반려 절의 `LIFE_RULE` 다음에 두고, `day_session`일 때만 넣는다. `LIFE_RULE`의 "asleep이면 짧게, 막 깬 듯이" 문장은 `SLEEP_RULE`로 옮긴다.
+- 자는 동안 받은 사용자 메시지는 시각 줄을 늘 달고, 그 줄에 "(while you slept)"를 붙인다. `TIME_NOTE`에 한 구절을 더한다.
+- 일기 입력: `SelfComposer.session_input(inputs, task, data)`. 하루 세션의 다음 턴 입력(대화 기록과 압축 요약 포함, Tool 없음) 맨 끝에 일기 과제와 자료를 사용자 차례로 붙인다.
+
+### 18.6 Tool (`tool/schedule.py`, 새것)
+
+- `schedule_read`, `schedule_write`, `schedule_cancel`, `go_to_sleep`이다(§4.3). 모두 `requires="day_session"`이고 `persona_id`가 없으면 거부한다.
+- 쓰기는 지금 Tool처럼 `ToolOutcome`의 효과로 Data에 간다. `origin=himari`이다.
+- 하루 20번 한도는 `origin=himari`로 오늘(사용자 자정부터) 고쳐진 칸의 수로 센다.
+- `go_to_sleep`은 두 가지를 한다. 오늘 밤 칸의 시작을 지금(10분 단위로 올림)으로 옮기고, `day_state.sleep_requested_at`을 쓴다. 하루 지기는 그 턴의 일이 끝나면 잠들게 한다(`how_fell=tool`).
+
+### 18.7 Life
+
+| 파일 | 하는 일 |
+| --- | --- |
+| `life/day.py`(새것, 순수) | §18.3 |
+| `life/keeper.py`(새것) | `DayKeeper`. 주기 일 `day`(60초)와 일의 끝에서 사람마다 `due`를 적용한다. 잠 기록, 칸 놓기, 놓침, 하루 세션 닫기, 정리를 맡는다. 바뀌면 콜백으로 알린다(스트림 `himari_sleep`, `day_session`). `DayGate`를 채운다. 쿡 찌르기도 받는다 |
+| `life/worker.py` | 아래 |
+| `life/world.py` | 때: 그 날짜(사용자 시간대)에 정리가 있었으면 그 뒤, 없으면 12:00 뒤. 쓰는 때(22:00) 전까지. 조용한 시간 인자를 없앤다 |
+| `life/work.py` | 작업 시간 = 칸의 `minutes`(없으면 60). `WORK_MINUTES`는 기본값으로만 남는다 |
+| `life/review.py` | 입력의 `quiet_hours` → `sleep`(오늘 밤 칸). 일정 답에 `minutes`(선택, 기본 60)를 받는다. 잠 칸과 겹치는 일정은 **그 일정만** 버리고 기록한다(답 전체를 버리지 않음). 세션 문맥이면 오늘의 `episodes`를 뺀다 |
+
+- **일기 때**(`write_at` 22:00): 그 시각 전에 잠들었으면 잠들 때다. 하루 지기가 잠들기를 적용하면서 `worker.write(principal)`을 깨운다.
+- **일기 입력:** `MindLink.session_input(principal)`(새것, `bootstrap`)이 하루 세션의 다음 턴 입력을 준다. Driver에 `turn_inputs(scope) -> PromptInputs`(다음 턴이 볼 것, 예산 맞추기 전)를 열어 그것을 쓴다.
+  - 하루 세션이 없거나, 입력이 모델 문맥 예산을 넘거나, 실패하면 지금처럼 대화 기록 없는 혼자 하는 호출로 쓴다.
+  - 쓴 세션은 `life_writes.conversation_id`에 남는다.
+- **혼자 하는 호출의 모델:** `mind_model`은 하루 세션의 모델이다. 하루 세션이 없으면 기본 모델이다. 자유 wake 갈래는 없앤다.
+- **예비 모델:** 같은 일·날짜(작업은 칸)의 바로 앞 시도가 답 없이 끝났고 `retryable`이면, 이번 시도는 예비 모델로 한다. 다음 회차(10분)에 넘어간다.
+
+### 18.8 Memory
+
+- 닫힌 하루 세션은 조용한 시간(10분)을 기다리지 않고 바로 정리 대상이다(`memory_due`에 `closed_at`).
+- 예비 모델은 삶 작업과 같은 방식이다(바로 앞 시도가 답 없이 끝났으면 예비).
+- 잠꼬대 답과 자는 동안 받은 메시지도 지금처럼 입력에 들어간다. 다른 처리는 없다.
+
+### 18.9 먼저 말 걸기
+
+- `Situation.himari_asleep: bool | None`. `None`이면 삶이 꺼진 것이고 조용한 시간을 쓴다. 참이면 `REMINDER` 말고는 `himari_asleep`으로 막는다.
+- **`REMINDER`는 자는 중에도 연다.** 그 wake 턴은 `half_asleep`이고 잠을 끊지 않는다.
+- **`WakeKind.TOGETHER`**(새 계기): `together` 칸이 시작한 지 10분 안이고 그 칸의 wake가 아직 없을 때 연다. 키는 `together:<entry_id>`이다.
+  - 막는 것: 기기, 일, 기기 자리 비움, 사용자 조용히, 말하는 중(`TALKING`, 이미 와 있음).
+  - 간격, 하루 횟수, 답 없는 wake로는 막지 않는다.
+- **wake가 가는 대화**는 하루 세션이다(없으면 연다). `recent_companion_conversation`을 쓰던 곳(`scheduler recent`, `mind_model`, `remarks`, `try_wake`, `device_state`)을 모두 바꾼다.
+
+### 18.10 Bootstrap과 설정
+
+- `Application.day_session(principal, *, open=True)`: 열린 하루 세션, 없으면 연다. 제목은 "11월 27일 (금)"이다. 반려 기본 모델을 쓰는 대화로 만든다.
+- `DayKeeper`를 붙인다. ticker `day`(60초), runner의 일 끝 리스너가 그 사람을 다시 보게 한다. 정리 콜백은 기억 정리 깨우기와 삶 작업 깨우기다.
+- **스트림 이벤트**(Web과 기기 모두): `himari_sleep {sleep}`, `day_session {conversation, title, closed}`.
+- **`HIMARI_BACKUP_MODEL`**(새 설정): `HIMARI_MODELS`에 있어야 한다. 없으면 시작을 거부한다. 비우면 예비 없음이다.
+- `openai/gpt-6-luna`의 능력에 `companion=True`, `free_wake=True`를 켠다(소유자 결정 2026-11-26).
+- 운영 설정(배포 때)은 이렇게 바꾼다.
+  - `HIMARI_MODEL=deepseek/deepseek-v4.1-flash-1017`
+  - `HIMARI_MODELS=deepseek/deepseek-v4.1-flash-1017=low,openai/gpt-6-luna`
+  - `HIMARI_BACKUP_MODEL=openai/gpt-6-luna`
+  - 기억 작업 모델과 반려 기본 모델은 그대로 둔다.
+
+### 18.11 Web API
+
+| 자리 | 바꿈 |
+| --- | --- |
+| `GET /api/conversations` | 항목에 `day_session`(날짜 또는 null), `closed`(bool) |
+| `POST /api/conversations/{id}/messages` | 닫힌 하루 세션이면 `409 day_closed`. 답 없이 받은 메시지는 `202`에 `{"asleep": "none"}` |
+| 대화 이벤트 | 사용자 메시지에 `while_asleep`(주인 Web만). 하루 세션에는 `diary` 항목(`life_writes`에서, 주인 Web만, 시각 순서로 끼움, 9단계 `wake_thought`와 같은 방식) |
+| `GET /api/life` | 일정 항목에 `minutes`·`plan_kind`·`plan_state`·`reason`. `sleep`: 지금 `SleepView`. `sleeps`: 최근 14번 |
+| `POST /api/life/plans`, `PUT /api/life/plans/{id}` | 일정 쓰기와 고치기(`origin=user`). 한계 거부는 `409 plan_refused`와 그 메시지 |
+| `DELETE /api/life/{id}` | 잠 칸이면 `409 plan_refused` |
+| `POST /api/device/poke` | 자는 HIMARI 쿡 찌르기. `{"answer": "none"\|"mumble"\|"wake"\|null}` |
+| `GET /api/device`, `hello` | `recent_conversation` = 하루 세션. `himari: {"sleep": …}`. `features.day_session: 1` |
+
+### 18.12 Web 화면
+
+- **대화 목록:** 하루 세션에 날짜 제목과 "하루" 표시를 단다. 닫힌 세션은 입력란을 막고 "닫힌 하루"라고 보인다.
+- **타임라인:** 사용자 메시지의 "자는 동안"(잠꼬대·깨움·답 없음을 구분), 접힌 "일기를 씀" 줄을 보인다.
+- **Settings → HIMARI:**
+  - 일정 묶음을 **일정표**로 바꾼다. 7일, 종류 표시, 시작과 길이, 취소·놓침과 이유, 쓰기·고치기·지우기를 둔다. 잠 칸은 옮기기만 된다.
+  - 그 아래에 **잠 기록**을 둔다.
+  - 지금 상태 줄에 `SleepView`를 보인다.
+- 스트림 `himari_sleep`, `day_session`을 받아 다시 읽는다.
+
+### 18.13 Windows 앱
+
+- `SleepPolicy`는 자리 비움만 계산하고 서버에 지금처럼 보낸다. 캐릭터 애니메이션의 잠(`SetSleeping`)은 서버의 `himari.sleep`(`asleep`·`half_asleep`)으로만 켠다. `drowsy`면 가끔 하품한다.
+- 서버가 `features.day_session`을 말하지 않으면 지금 동작 그대로다(옛 서버).
+- 자는 HIMARI를 클릭하면 `POST /api/device/poke`다. 자리 비움을 푸는 동작(`WakeNow`)은 그대로 한다.
+- "새 대화" 단추를 숨긴다(`day_session`일 때). 대화는 `recent_conversation`과 `day_session` 이벤트를 따른다.
+- 계약 시험(`Himari.Companion.ContractTests`)을 고친다.
+
+### 18.14 구현 순서
+
+서버(Python, Web API 포함)와 화면(Web, Windows)을 두 갈래로 나눈다. 화면 갈래는 §18.11의 모양에 맞춰 만들고, 서버 갈래에 합친다. 단계마다 전체 시험을 돌린다.
+
+1. **Data v29**와 타입, 일정표 한계(`data/rules.py`), In-memory 저장소.
+2. **순수 규칙** `life/day.py`와 시험.
+3. **일정표 Tool**, `RequestOptions.day_session`, Prompt(`himari_schedule`·`himari_sleep`·규칙).
+4. **하루 세션과 잠:** `DayKeeper`, `DayGate`, 메시지 받기의 답 방식, 반쯤 깬 턴, 쿡 찌르기, 스트림, 하루 세션으로 바꾼 wake와 기기.
+5. **삶:** 세션 문맥 일기, 세계 때, 작업 길이, 하루 돌아보기 일정, 기억 정리의 닫힌 세션, 먼저 말 걸기(`himari_asleep`, `TOGETHER`, 자는 중 미리 알림).
+6. **모델:** `retryable`, Driver와 삶·기억의 예비 모델, `HIMARI_BACKUP_MODEL`, luna 능력.
+7. **Web API** 마무리.
+8. (화면 갈래) **Web 화면, Windows 앱.**
+9. 실제 모델 확인(§16), 문서(이 문서 §19, 결정 기록, 로드맵, status).
