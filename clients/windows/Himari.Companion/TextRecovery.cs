@@ -12,9 +12,10 @@ internal static class TextRecovery
             var page = await server.SendAsync(System.Net.Http.HttpMethod.Get, "/api/conversations/" + Uri.EscapeDataString(conversation) + $"/events?after={after}&limit=100", null, ct);
             var items = page.GetProperty("items").EnumerateArray().ToArray();
             if (items.Any(x => Matches(x, text, deviceId, boundary))) return true;
-            if (items.Length < 100) return false;
-            var seq = items[^1].GetProperty("sequence");
-            if (seq.ValueKind != JsonValueKind.Number || !seq.TryGetInt32(out int next) || next <= after) return false;
+            // character-day second review P2 6: the next page by what the server says of this one, never by its rows
+            int lastRow = items.Length > 0 && items[^1].ValueKind == JsonValueKind.Object && items[^1].TryGetProperty("sequence", out var seq)
+                && seq.ValueKind == JsonValueKind.Number && seq.TryGetInt32(out int last) ? last : after;
+            if (EventPages.Next(page, items.Length, lastRow, 100) is not { } next || next <= after) return false;
             after = next;
         }
     }

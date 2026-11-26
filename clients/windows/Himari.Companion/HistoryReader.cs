@@ -37,9 +37,26 @@ internal static class HistoryReader
                 }
             }
             progress?.Invoke(text.ToString());
-            if (count < 100) return text.ToString();
-            if (last <= after) throw new JsonException("Events page did not advance");
-            after = last;
+            if (EventPages.Next(page, count, last, 100) is not { } next) return text.ToString();
+            if (next <= after) throw new JsonException("Events page did not advance");
+            after = next;
         }
+    }
+}
+
+/// <summary>character-day second review P2 6: where the next page of a conversation's events starts — by what the server
+/// says of its page, never by the rows it shows (a wake not shown yet is read but left out).</summary>
+internal static class EventPages
+{
+    /// <summary>The next page's <c>after</c>, or null when <paramref name="page"/> was the last. The server says
+    /// <c>more</c> (its page stopped at its limit) and <c>last_sequence</c> (past the events it read, shown or not). An
+    /// older server says no <c>more</c>: then a page of <paramref name="limit"/> rows may have more, after its last row
+    /// (<paramref name="lastRow"/>), and a shorter one was the last.</summary>
+    internal static int? Next(JsonElement page, int rows, int lastRow, int limit)
+    {
+        var more = page.ValueKind == JsonValueKind.Object && page.TryGetProperty("more", out var told) ? told : default;
+        if (more.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return rows >= limit ? lastRow : (int?)null;
+        if (more.ValueKind == JsonValueKind.False) return null;
+        return page.TryGetProperty("last_sequence", out var cursor) && cursor.ValueKind == JsonValueKind.Number && cursor.TryGetInt32(out int next) ? next : lastRow;
     }
 }

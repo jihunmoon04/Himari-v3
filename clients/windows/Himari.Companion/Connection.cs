@@ -454,24 +454,43 @@ public partial class MainWindow
     {
         if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
+        // Where the message goes, fixed here: never whatever is selected once an await has passed (second review P1 4).
+        string target = currentConversation;
         // character-day §3.2: the day is closed — today's session opens and the message goes there: the editor's (it stays
         // in the editor meanwhile), or an unsent bubble's (review 8), which belongs to today's from then on (OpenTodaySession)
-        if (ClosedDay(unsent?.UnsentConversation ?? currentConversation))
+        if (ClosedDay(unsent?.UnsentConversation ?? target))
         {
-            try { await OpenTodaySession(client, connection.Token); }
-            catch (Exception ex) { ShowError(ex); return; }
-            if (!connected || client is null || connection is null || currentConversation is null) return;
+            var originClient = client; var originConnection = connection;
+            (string? Today, bool Closing) rollover;
+            try { rollover = await OpenTodaySession(originClient, originConnection.Token); }
+            catch (Exception ex) { if (ReferenceEquals(originClient, client)) ShowError(ex); return; }
+            // P1 4: only to the session resolved, still the one shown, on the client and connection the send began on;
+            // anything else (another conversation picked meanwhile, a reconnect) stops it here, the draft untouched.
+            // P2 5: a day still closing is waited out, never sent to again.
+            if (!connected || client is null || connection is null || rollover.Today is not { } today
+                || !DaySession.Verified(today, currentConversation, originClient, client, originConnection, connection))
+            {
+                if (connected && ReferenceEquals(originClient, client) && ReferenceEquals(originConnection, connection))
+                    Status.Text = rollover.Closing ? DaySession.ClosingNotice : rollover.Today is null ? DaySession.NoTodayNotice : DaySession.MovedNotice;
+                return;
+            }
             if (unsent is not null && !history.Contains(unsent)) return;  // removed meanwhile
-            if (ShownDayClosed || (unsent is not null && unsent.UnsentConversation != currentConversation)) { Status.Text = DaySession.NoTodayNotice; return; }
+            if (unsent is not null && unsent.UnsentConversation != today) { Status.Text = DaySession.NoTodayNotice; return; }
+            target = today;
         }
         string text = unsent?.Text ?? Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         bool wantsScreen = WantsScreen;
         if (length > 32000 || (length == 0 && !wantsScreen && unresolvedScreen is null)) { Status.Text = "메시지를 입력하거나 화면 첨부를 선택해 주세요 (최대 32,000자)."; return; }
-        if (unresolvedScreen is { } unresolved && (unresolved.Conversation != currentConversation || unresolved.Text != text)) { Status.Text = "이전 화면 메시지의 전송 여부를 먼저 확인해 주세요. 원래 대화와 입력으로 돌아가 다시 보내기를 누르세요."; return; }
+        if (unresolvedScreen is { } unresolved && (unresolved.Conversation != target || unresolved.Text != text)) { Status.Text = "이전 화면 메시지의 전송 여부를 먼저 확인해 주세요. 원래 대화와 입력으로 돌아가 다시 보내기를 누르세요."; return; }
         if (!messageSend.TryEnter()) return;
-        if (screenOnce) { screenOnce = false; UpdateScreenButton(); }  // §7.3: it goes with this message, then the button lets go
-        var local = client; var ct = connection.Token;
-        var context = new SendContext(local, currentConversation, inputRevision);
+        // §7.3: the screen button goes with this message, then lets go — but comes back if a closing day refused it (P2 8)
+        bool hadScreenOnce = screenOnce, keepScreenChoice = false;
+        if (screenOnce) { screenOnce = false; UpdateScreenButton(); }
+        var local = client; var line = connection; var ct = line.Token;
+        // second review P1 4: every await below is followed, before anything goes out, by this: the same client and
+        // connection the send began on (its conversation is fixed in the context, never re-read from the selection)
+        bool SameLine() => connected && ReferenceEquals(local, client) && ReferenceEquals(line, connection);
+        var context = new SendContext(local, target, inputRevision);
         // What is on screen moves up into the stack; the new message comes in below it.
         frozenSent = null; FreezeThrough(long.MaxValue);
         // Sending before any layout: the six-bubble limit never trims the message on its way.
@@ -519,6 +538,7 @@ public partial class MainWindow
                 {
                     Status.Text = "화면을 캡처하고 있습니다…";
                     var captured = await CaptureScreenAsync(ct);
+                    if (!SameLine()) { keepScreenChoice = true; return; }
                     Status.Text = "화면을 캡처해 업로드 중입니다…";
                     var upload = await local.UploadScreenAsync(context.ConversationId, captured.Bytes, captured.ContentType, ct);
                     if (recoveryOwner?.SameDevice(local) != true) return;
@@ -527,6 +547,15 @@ public partial class MainWindow
                     localScreens[fileId] = screen;
                 }
                 catch (OperationCanceledException) { throw; }
+                catch (ApiException ex) when (ex.Code == "day_closed")
+                {
+                    // second review P2 8: the day closed before the screen came (nothing staged): the same rollover as a
+                    // refused message — the text comes back (finally), a screen-only draft keeps its screen button
+                    if (recoveryOwner?.SameDevice(local) != true) return;
+                    keepScreenChoice = true;
+                    ClosedDayRefused(context, local, null);
+                    return;
+                }
                 catch (Exception) { screenFailed = true; if (length == 0) { Status.Text = "화면을 보내지 못했습니다. 다시 시도해 주세요."; return; } }
             }
             if (screen is not null || localScreens.Count > 0) pendingScreenConversation = context.ConversationId;
@@ -537,6 +566,9 @@ public partial class MainWindow
             var before = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
             var seq = Prop(Prop(before, "conversation"), "last_sequence");
             if (seq.ValueKind == JsonValueKind.Number) seq.TryGetInt32(out beforeSequence);
+            // second review P1 4: posted only on the client it began with (to its own target, fixed above); after a
+            // reconnect meanwhile nothing goes, and the text comes back (finally) with the screen button
+            if (!SameLine()) { keepScreenChoice = true; return; }
             string? messageGeneration = generationState.ActiveGeneration;
             var messageBody = ConnectionGenerationState.BuildMessageBody(text, screen?.FileId, messageGeneration);
             JsonElement response;
@@ -553,12 +585,11 @@ public partial class MainWindow
                 // character-day §3.2, §18.11: the day closed before the message came, and nothing was recorded. The text
                 // returns to an empty editor (below; it goes along to today's), or else stays as an unsent bubble that
                 // moves to today's session once the app knows it (review 8: never held by the closed day, a newer draft
-                // untouched); a screen taken for that day is dropped, and the app goes to today's.
+                // untouched); a screen taken for that day is dropped (the screen button comes back), and the app goes to
+                // today's once the server names a different open session (second review P2 5).
                 if (recoveryOwner?.SameDevice(local) != true) return;
-                if (screen is not null) { unresolvedScreen = null; localScreens.Remove(screen.FileId); submittedScreen = null; submittedConversation = null; }
-                closedDays.Add(context.ConversationId);
-                if (context.IsCurrent(client, currentConversation, connected)) Status.Text = DaySession.ClosedNotice;
-                _ = FollowToday(local);
+                keepScreenChoice = true;
+                ClosedDayRefused(context, local, screen);
                 return;
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
@@ -657,6 +688,9 @@ public partial class MainWindow
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
             sending = false; messageSend.Exit();
             if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId, attemptUnknown, unsent is not null);
+            // second review P2 8, P1 4: nothing went — a closed day refused it, or the connection changed — so the screen
+            // button (a screen-only draft's only part) is as it was before the send
+            if (!taken && keepScreenChoice && hadScreenOnce && !screenOnce) { screenOnce = true; UpdateScreenButton(); }
             // A bubble that fell due while it was held for the send expires now, not at the next event.
             if (history.Any(past => past.Due)) ExpireBubbles();
             UpdateBubblePresentation();
