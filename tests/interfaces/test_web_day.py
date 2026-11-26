@@ -37,6 +37,8 @@ from himari.data.api import (  # noqa: E402
     PlanKind,
     PlanWrite,
     RawReceived,
+    WakeKind,
+    WakeReason,
 )
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import event_stream  # noqa: E402
@@ -223,6 +225,69 @@ def test_a_day_fenced_for_its_closing_takes_no_new_message(server: Server) -> No
     assert server.post(f"/api/conversations/{other}/messages", {"text": "여기는?"}).status_code == 202
 
 
+def test_a_closed_or_fenced_day_takes_no_upload(server: Server) -> None:
+    """§3.2 (second review 8): a device's screen sent to a day closed, or fenced for its closing, is 409
+    ``day_closed`` before any byte is kept — nothing is staged."""
+    me = server.paired()
+    cid = server.day()
+    keeper = server.app.keeper
+    assert keeper is not None
+    keeper._fenced[OPERATOR] = ConversationId(cid)  # noqa: SLF001 — as the keeper fences it at the closing hour
+    keeper.busy = lambda scope: True
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    fenced = server.device.post(f"/api/conversations/{cid}/uploads", content=png,
+                                headers={**me, "content-type": "image/png"})
+    assert (fenced.status_code, error_code(fenced)) == (409, "day_closed")
+    keeper._fenced.pop(OPERATOR)  # noqa: SLF001
+    server.call(lambda: server.app.data.close_day_session(OPERATOR, ConversationId(cid), datetime.now(UTC)))
+    closed = server.device.post(f"/api/conversations/{cid}/uploads", content=png,
+                                headers={**me, "content-type": "image/png"})
+    assert (closed.status_code, error_code(closed)) == (409, "day_closed")
+    assert server.call(lambda: server.app.data.count_staged(TrustedScope(OPERATOR, ConversationId(cid)))) == 0
+
+
+def test_a_hidden_wake_never_stalls_the_events_pages_nor_hides_the_diary_after_it(server: Server) -> None:
+    """§18.11 (second review 6): a free wake not shown yet, then a diary — the page that holds only the hidden wake
+    still moves on (``last_sequence`` past it, ``more``) and gives the diary that follows it; at any page size each
+    row comes once, and reading on while ``more`` reaches the end."""
+    cid = server.day()
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+    free = (WakeReason(WakeKind.FREE, group="work", minutes=16, step=1),)
+
+    async def diary(text: str) -> None:
+        data = server.app.data
+        write_id = await data.begin_life_write(OPERATOR, LifeWriteStart(
+            NO_PERSONA, today(server), "p", "m", b"{}", "j", 1, job=LifeJob.REVIEW, conversation_id=ConversationId(cid)))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+        await data.apply_life_write(write_id, LifePlan(text), now=datetime.now(UTC))
+
+    server.call(lambda: server.app.data.append_event(scope, UserMessage((TextBlock("하나"),))))
+    wake = server.call(lambda: server.app.data.begin_wake(scope, free, "d1"))
+    server.call(diary, "오늘 일기")
+    server.call(lambda: server.app.data.append_event(scope, UserMessage((TextBlock("둘"),))))
+    assert server.call(lambda: server.app.data.unshown_wakes(scope)) == frozenset({wake.sequence})
+    hidden = server.client.get(f"/api/conversations/{cid}/events?after={wake.sequence - 1}&limit=1").json()
+    assert [(i["kind"], i["sequence"]) for i in hidden["items"]] == [("diary", wake.sequence)]
+    assert (hidden["last_sequence"], hidden["more"]) == (wake.sequence, True)
+    for limit in (1, 2, 3, 200):
+        seen: list[dict[str, Any]] = []
+        after = 0
+        for _ in range(10):
+            page = server.client.get(f"/api/conversations/{cid}/events?after={after}&limit={limit}").json()
+            seen += page["items"]
+            if not page["more"]:
+                break
+            assert page["last_sequence"] > after, limit  # never stalls
+            after = page["last_sequence"]
+        else:
+            raise AssertionError(f"no end at limit {limit}")
+        assert [(i["kind"], i.get("text")) for i in seen] == [
+            ("user_message", "하나"), ("diary", "오늘 일기"), ("user_message", "둘")], limit
+    last = server.client.get(f"/api/conversations/{cid}/events?after=0&limit=200").json()
+    assert (last["last_sequence"], last["more"]) == (wake.sequence + 1, False)
+
+
 def test_a_sleeping_himari_meets_messages_with_nothing_then_a_mumble_then_waking(server: Server) -> None:
     """§5.5: deep sleep — the first message is only recorded (202 ``asleep: none``, no job, nothing to continue),
     the second gets a half-asleep turn with no Tools, the third wakes it; the events say how each was met."""
@@ -338,6 +403,14 @@ def test_the_schedule_is_written_moved_and_refused_with_the_schedules_own_senten
     assert "sleep slot" in over.json()["error"]["message"]
     entries = {e["id"]: e for e in server.client.get("/api/life").json()["entries"]}
     assert (entries[sleep_id]["plan_kind"], entries[sleep_id]["minutes"]) == ("sleep", 480)
+    # second review 7: a moved sleep slot keeps its text (times only); an own slot never becomes together
+    renamed = server.client.put(f"/api/life/plans/{sleep_id}", headers=SEND, json={
+        "day": tomorrow, "time": "00:30", "minutes": 480, "plan_kind": "sleep", "text": "밤샘", "revision": 1})
+    assert renamed.status_code == 200 and (renamed.json()["text"], renamed.json()["minutes"]) == ("잠", 480)
+    together = server.client.put(f"/api/life/plans/{slot['id']}", headers=SEND, json={
+        "day": tomorrow, "time": "16:00", "minutes": 60, "plan_kind": "together", "text": "산책", "revision": 2})
+    assert (together.status_code, error_code(together)) == (409, "plan_refused")
+    assert "Only HIMARI makes a together slot" in together.json()["error"]["message"]
     assert server.client.delete(f"/api/life/{slot['id']}?revision=2", headers=SEND).status_code == 204
 
 

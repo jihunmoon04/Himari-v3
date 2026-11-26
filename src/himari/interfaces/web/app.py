@@ -1749,20 +1749,33 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         memory = await application.memory_lines(scope, results) if results else {}
         # character-mind §3.2: a device never gets a thought
         items = [event_view(e, models, files, presented, memory, device=by.device is not None) for e in events]
+        full = len(read) == limit  # as many events as asked: more may follow
+        lines_full = False  # as many wake lines as asked: more may follow too
         if by.device is None:  # §3.3 (review P1-5): a free wake that thought and passed: its thought, the owner's
-            # review 2: only those within the page's range, merged in order, the page held to ``limit``; the next
-            # page starts after the last row given (an event or a wake's line)
-            items += [wake_thought_view(w) for w in await application.data.wake_thoughts(
-                scope, after=after, through=through, limit=limit)]
-            items = sorted(items, key=lambda item: int(item["sequence"]))[:limit]
-            cursor = items[-1]["sequence"] if items else after
+            # review 2: only those within the page's range, merged in order
+            lines = await application.data.wake_thoughts(scope, after=after, through=through, limit=limit)
+            lines_full = len(lines) == limit
+            items = sorted(items + [wake_thought_view(w) for w in lines], key=lambda item: int(item["sequence"]))
+        # character-day review 9, second review 6: the page is the range of events it consumed, whatever is shown
+        # of it — rows held to ``limit`` (cut: the range ends at the last row given), else to the last event read
+        # (one not shown yet too: a page of hidden events still moves on), and on the last page past every wake
+        # line too. ``more``: the range stopped at ``limit`` (rows, events or wake lines); read on from
+        # ``last_sequence`` — never stop at a page with fewer rows shown.
+        cut = len(items) > limit
+        if cut:
+            items = items[:limit]
+            cursor = int(items[-1]["sequence"])
+        elif full:
+            cursor = read[-1].sequence
+        else:
+            cursor = max([after] + [e.sequence for e in read] + [int(i["sequence"]) for i in items])
+        if by.device is None:
             # character-day §7, §18.11: a diary written in this day session's context, a folded line after the
-            # last event before it, on the one page that holds that event (beside ``limit``: never cut, never
-            # given twice); the cursor stays the last event's (or wake line's)
-            diaries = await diary_items(application, scope, read, after, int(cursor), len(read) == limit)
+            # last event before it (shown or not), on the one page whose range holds that event (beside ``limit``:
+            # never cut, never given twice)
+            diaries = await diary_items(application, scope, read, after, cursor, full)
             items = sorted(items + diaries, key=lambda item: (int(item["sequence"]), item["kind"] == "diary"))
-            return {"items": items, "last_sequence": cursor}
-        return {"items": items, "last_sequence": items[-1]["sequence"] if items else after}
+        return {"items": items, "last_sequence": cursor, "more": cut or full or lines_full}
 
     @app.get("/api/conversations/{conversation_id}/live")
     async def read_live(conversation_id: str, request: Request,
