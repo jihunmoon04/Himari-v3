@@ -1817,6 +1817,12 @@ SLEEP_ENDS_FROM = time(5, 0)  # §4.4: a sleep slot ends from 05:00 ...
 SLEEP_ENDS_BY = time(12, 0)  # ... to 12:00 the morning after
 MAX_HIMARI_PLAN_WRITES = 20  # §4.4: slots HIMARI's Tools may change a day (from the user's midnight)
 MAX_PLAN_REASON_CHARS = 200  # §4.1: why a slot was moved or cancelled, one line in HIMARI's voice
+# character-diary §3, §16.2: the night's diary slot — placed by the keeper, only moved by HIMARI and the user
+DIARY_TEXT = "일기 쓰기"
+DIARY_MINUTES = 30
+MIN_DIARY_MINUTES = 10
+MAX_DIARY_MINUTES = 60
+DIARY_EARLIEST = time(18, 0)  # the diary slot of date D starts from D 18:00, and ends before D's night's sleep slot
 
 
 class LifeKind(Enum):
@@ -1855,6 +1861,7 @@ class PlanKind(Enum):
     WORK = "work"  # work time for a project (``arc_id``)
     TOGETHER = "together"  # a time set with the user (only HIMARI's Tools write one)
     OWN = "own"  # something HIMARI does alone
+    DIARY = "diary"  # character-diary §3: the night's diary slot — one a night, placed by the keeper, only moved
 
 
 class PlanState(Enum):
@@ -1936,6 +1943,11 @@ class LifeEntry(DeepFrozen):
         """character-day §4.4: a live sleep slot."""
         return self.live_plan and self.plan_kind is PlanKind.SLEEP
 
+    @property
+    def diary_slot(self) -> bool:
+        """character-diary §3: a live diary slot."""
+        return self.live_plan and self.plan_kind is PlanKind.DIARY
+
 
 def plan_kind_of(entry: LifeEntry) -> PlanKind:
     """character-day §4.1: a plan's kind — as stored, else (a plan from before v29) a work plan with a project,
@@ -1968,11 +1980,24 @@ def night_of(start: datetime) -> date | None:
     return None
 
 
+def diary_night(start: datetime) -> date | None:
+    """character-diary §3: the night a diary slot starting at ``start`` (its own zone) belongs to — D from D 18:00
+    (DIARY_EARLIEST) to D+1 05:00 (inclusive: before a sleep slot starting as late as it may), None in the day
+    between."""
+    clock = start.timetz().replace(tzinfo=None)
+    if clock >= DIARY_EARLIEST:
+        return start.date()
+    if clock <= NIGHT_ENDS:
+        return start.date() - timedelta(days=1)
+    return None
+
+
 @dataclass(frozen=True)
 class PlanWrite(DeepFrozen):
     """character-day §4.3, §18.2: a slot to write — new (``entry_id`` None) or a change of a live one (a move
     too). ``time_of_day`` HH:MM, ``minutes`` MIN_PLAN_MINUTES..MAX_PLAN_MINUTES, ``reason`` why it was moved or
-    changed (HIMARI's line; None keeps the slot's). A ``sleep`` slot is only ever changed by HIMARI or the user."""
+    changed (HIMARI's line; None keeps the slot's). A ``sleep`` slot is only ever changed by HIMARI or the user;
+    character-diary §3: so is a ``diary`` slot (moved only, its kind and text kept)."""
 
     day: str
     time_of_day: str
@@ -2104,7 +2129,7 @@ class WorkDraft(DeepFrozen):
 class WorldEvent(DeepFrozen):
     """character-mind §7: one thing the world made happen to HIMARI, checked by the life module."""
 
-    time_of_day: str  # HH:MM, outside the quiet hours
+    time_of_day: str  # HH:MM, at any hour (character-diary §7: in HIMARI's sleep, only what happens without it)
     text: str  # one sentence, at most MAX_EVENT_CHARS
 
 
@@ -2187,8 +2212,11 @@ class LifeStore(Protocol):
         revision + 1; its kind stays a sleep slot's) — within the schedule's limits, read in ``zone`` (the
         user's) at ``now``: PLAN_REFUSED with one English sentence the model can act on (a sleep slot only
         changed, one a night, from 21:00 to 05:00 and ending 05:00 to 12:00 after 5 to 11 hours; no other slot
-        over a live sleep slot; dated today to SCHEDULE_DAYS on; never a slot already past; MAX_HIMARI_PLAN_WRITES
-        a day for HIMARI). The keeper (origin WRITER) places and adjusts sleep slots with the shape's checks only.
+        over a live sleep slot — character-diary §16.2: but a sleep slot may cover the diary slot; a diary slot
+        only moved, its kind never changed, one a night, from 18:00 and ending before that night's sleep slot,
+        MIN_DIARY_MINUTES to MAX_DIARY_MINUTES; dated today to SCHEDULE_DAYS on; never a slot already past;
+        MAX_HIMARI_PLAN_WRITES a day for HIMARI). The keeper (origin WRITER) places and adjusts sleep slots and
+        places diary slots with the shape's checks only.
         NOT_FOUND: no live plan of the persona; INVALID_ARGUMENT, TOO_LARGE: the shape (as a plan's text,
         MAX_PLAN_REASON_CHARS for the reason)."""
         ...
@@ -2196,7 +2224,8 @@ class LifeStore(Protocol):
     async def cancel_plan(self, principal: PrincipalId, entry_id: int, reason: str, *, origin: LifeOrigin,
                           zone: str, now: datetime) -> LifeEntry:
         """character-day §4.3: a live slot cancelled with why (kept, ``cancelled``): PLAN_REFUSED for a sleep
-        slot or one past, and past MAX_HIMARI_PLAN_WRITES for HIMARI; NOT_FOUND: no live plan."""
+        or a diary slot (character-diary §3) or one past, and past MAX_HIMARI_PLAN_WRITES for HIMARI; NOT_FOUND: no
+        live plan."""
         ...
 
     async def mark_plan_missed(self, principal: PrincipalId, entry_id: int, *, now: datetime) -> LifeEntry:
@@ -2213,6 +2242,7 @@ class LifeJob(Enum):
     WORLD = "world"  # §7: what happens to HIMARI today (the memory model)
     WORK_START = "work_start"  # §4.4: a work plan's start: the concept and a draft (a self run)
     WORK_END = "work_end"  # §4.4: its end, the piece (character-work §4: the worker's call)
+    AMEND = "amend"  # character-diary §5: the diary amended as the day session closes (a self run in that session)
 
 
 WORK_JOBS = frozenset({LifeJob.WORK_START, LifeJob.WORK_END})  # the jobs of a work plan (``plan_id``)
@@ -2234,6 +2264,10 @@ class LifeWriteStart(DeepFrozen):
     model_reason: str | None = None
     # character-day §7: the day session a diary was written in the context of (None: a self run with no history)
     conversation_id: ConversationId | None = None
+    # character-diary §5, §16.4: what a diary's request was made of — the day session's last event sequence it held
+    # and the moment its life data was read up to (what comes after is the amend's)
+    basis_sequence: int | None = None
+    basis_at: datetime | None = None
 
 
 class LifeWriteStatus(Enum):
@@ -2243,6 +2277,9 @@ class LifeWriteStatus(Enum):
     APPLIED = "applied"
     FAILED = "failed"  # no usable answer (``error`` says why)
     INTERRUPTED = "interrupted"  # the process ended before it was done
+    # character-diary §5, §6: decided without a call, for good (``error`` says why: an amend with nothing new, of the
+    # user's diary, of a session in the Trash, given up…) — as final as APPLIED
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -2267,6 +2304,8 @@ class LifeWrite(DeepFrozen):
     model_reason: str | None = None  # §4.1: why its model was chosen
     thought: str | None = None  # §4.1: a self run's thought, kept with it (never shown, never told again)
     conversation_id: ConversationId | None = None  # character-day §7: the day session it was written in
+    basis_sequence: int | None = None  # character-diary §5: the session's last event its request held
+    basis_at: datetime | None = None  # and the moment its life data was read up to
 
 
 class LifeWriteLog(Protocol):
@@ -2278,8 +2317,10 @@ class LifeWriteLog(Protocol):
         ...
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
-                            job: LifeJob = LifeJob.REVIEW) -> int:
-        """The writes of ``job`` made for this persona and date, whatever came of them (character-mind §14.2)."""
+                            job: LifeJob = LifeJob.REVIEW, since: datetime | None = None) -> int:
+        """The writes of ``job`` made for this persona and date, whatever came of them (character-mind §14.2);
+        character-diary §5: with ``since``, only those whose request was made of data read from then on
+        (``basis_at``)."""
         ...
 
     async def work_attempts(self, principal: PrincipalId, plan_id: int, *, job: LifeJob = LifeJob.WORK_END) -> int:
@@ -2287,7 +2328,8 @@ class LifeWriteLog(Protocol):
         ...
 
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
-        """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED."""
+        """character-mind §14.2: whether a write of ``job`` for this persona and date was APPLIED (character-diary
+        §5: or SKIPPED — decided for good without a call)."""
         ...
 
     async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
@@ -2337,6 +2379,17 @@ class LifeWriteLog(Protocol):
         The entries written. INVALID_STATE_TRANSITION unless RECEIVED."""
         ...
 
+    async def apply_life_amend(self, write_id: str, day: str, text: str | None, *, mood: str | None = None,
+                               mood_reason: str | None = None, now: datetime) -> LifeEntry | None:
+        """character-diary §5, §16.2, one transaction: an AMEND write's answer on the persona's diary of ``day`` (the
+        write's date) read again now — the user's diary (origin USER), or none, is left alone, the mood too; else
+        ``text`` (None: nothing to add) rewrites it (origin WRITER, revision + 1, its source the write) and the mood
+        (a name in MOOD_NAMES other than "neutral", with why) is kept at ``now`` as the review's is. The write
+        APPLIED either way. The diary as rewritten, else None. INVALID_ARGUMENT when the write is not an AMEND's
+        of ``day``, the text out of shape (TOO_LARGE past MAX_DIARY_CHARS); INVALID_STATE_TRANSITION unless
+        RECEIVED."""
+        ...
+
     async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
         """character-mind §7, one transaction: a WORLD write's events as entries of kind EVENT on its date
         (origin WRITER, its source the write), each one line of at most MAX_EVENT_CHARS with its time;
@@ -2378,6 +2431,11 @@ class LifeWriteLog(Protocol):
         """A write not yet APPLIED, FAILED or INTERRUPTED becomes FAILED with why."""
         ...
 
+    async def skip_life_write(self, write_id: str, reason: str) -> None:
+        """character-diary §5, §6: a PREPARED write (never sent) becomes SKIPPED with why, charged nothing — its job is
+        decided for that date for good. INVALID_STATE_TRANSITION unless PREPARED."""
+        ...
+
     async def interrupt_life_writes(self) -> int:
         """At startup: every write left PREPARED, DISPATCHED or RECEIVED becomes
         INTERRUPTED (one never sent is charged nothing); how many."""
@@ -2388,7 +2446,8 @@ class LifeWriteLog(Protocol):
         ...
 
     async def session_writes(self, principal: PrincipalId, conversation_id: ConversationId) -> tuple[LifeWrite, ...]:
-        """character-day §7, §18.11: the writes made in a day session's context (its diaries), oldest first."""
+        """character-day §7, §18.11: the writes made in a day session's context (its diaries and, character-diary §5,
+        their amends), oldest first."""
         ...
 
 
@@ -2653,6 +2712,9 @@ class SleepRecord(DeepFrozen):
     first_message_at: datetime | None = None  # §5.6: the messages received while asleep, from …
     last_message_at: datetime | None = None  # … to
     slot_id: int | None = None  # the sleep slot's entry id; None: it fell asleep with no slot
+    # character-diary §5 (review 3, 1): the day session the day's closing in this sleep closed (None: none, or a
+    # closing from before v30) — the amend's cutoff is this sleep's fall, whenever the closing was looked at
+    closed_session: ConversationId | None = None
 
     @property
     def asleep(self) -> bool:
@@ -2748,8 +2810,8 @@ class SleepStore(Protocol):
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
                            before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
         """§6: the day was closed in this sleep, all in one transaction — the open day session ``conversation_id``
-        (when given) closed at ``at``, the sleep says so, the keeper's last closing is ``at`` and the next session
-        is handed ``before``. Whether the session was closed now. NOT_FOUND: no such sleep;
+        (when given) closed at ``at``, the sleep says so (and names the session it closed: character-diary §5), the
+        keeper's last closing is ``at`` and the next session is handed ``before``. Whether the session was closed now. NOT_FOUND: no such sleep;
         INVALID_STATE_TRANSITION: the day was closed in it already (nothing written)."""
         ...
 

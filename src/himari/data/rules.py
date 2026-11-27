@@ -13,6 +13,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from himari.common import ContentBlock, ConversationId, FrozenMap, TextBlock, split_marks, tool_id_problem
 from himari.data.api import (
     DEFAULT_PLAN_MINUTES,
+    DIARY_EARLIEST,
+    MAX_DIARY_MINUTES,
+    MIN_DIARY_MINUTES,
+    diary_night,
     MAX_HIMARI_PLAN_WRITES,
     MAX_PLAN_MINUTES,
     MAX_PLAN_REASON_CHARS,
@@ -732,6 +736,8 @@ def check_editable(entry: LifeEntry) -> None:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a kept thought is only deleted")
     if entry.kind is LifeKind.PLAN and entry.plan_kind is PlanKind.SLEEP:
         raise _refused("A sleep slot is only moved (its date, start and length), on the schedule.")
+    if entry.kind is LifeKind.PLAN and entry.plan_kind is PlanKind.DIARY:  # character-diary §3
+        raise _refused("A diary slot is only moved (its date, start and length), on the schedule.")
 
 
 def live_thought(entry: LifeEntry, now: datetime) -> bool:
@@ -1214,6 +1220,12 @@ def writer_mood(plan: LifePlan, now: datetime) -> HimariMood | None:
     return check_mood(0, plan.mood, MoodSource.WRITER, plan.mood_at or now, plan.mood_reason)
 
 
+def amend_mood(mood: str | None, reason: str | None, now: datetime) -> HimariMood | None:
+    """character-diary §5: an amend's mood (None: unchanged), as the writer's at ``now`` (its persona set by the
+    write)."""
+    return None if mood is None else check_mood(0, mood, MoodSource.WRITER, now, reason)
+
+
 def kept_mood(stored: HimariMood | None, new: HimariMood) -> HimariMood:
     """§2: the newer of the two; one set after ``new`` stays."""
     return stored if stored is not None and stored.set_at > new.set_at else new
@@ -1290,6 +1302,49 @@ def sleep_slot_of(entries: Iterable[LifeEntry], night: date, zone: tzinfo, *,
     return None
 
 
+def diary_slot_of(entries: Iterable[LifeEntry], night: date, zone: tzinfo, *,
+                  besides: int | None = None) -> LifeEntry | None:
+    """character-diary §3: the live diary slot of ``night`` among ``entries`` (one besides ``besides``), if any."""
+    for entry in entries:
+        span = plan_span(entry, zone)
+        if entry.diary_slot and entry.entry_id != besides and span is not None and diary_night(span[0]) == night:
+            return entry
+    return None
+
+
+def _diary_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence[LifeEntry], *, origin: LifeOrigin,
+                  zone: tzinfo, start: datetime, end: datetime) -> PlanWrite:
+    """character-diary §3, §16.2: a diary slot as ``origin`` writes it — only the keeper (WRITER) makes one; HIMARI
+    and the user only move it (its text kept); one a night, starting from DIARY_EARLIEST of its night and ending
+    before that night's sleep slot starts, MIN_DIARY_MINUTES to MAX_DIARY_MINUTES long; moved, it stays in its
+    night."""
+    night = diary_night(start)
+    if before is None and origin is not LifeOrigin.WRITER:
+        tonight = None if night is None else diary_slot_of(plans, night, zone)
+        raise _refused("A diary slot is only moved, never made" + (
+            f": change that night's (id {tonight.entry_id}) instead." if tonight is not None else "."))
+    if before is not None:
+        plan = dataclasses.replace(plan, text=before.text)  # moved: its times only, as a sleep slot's
+    if night is None:
+        raise _refused(f"A diary slot starts between {DIARY_EARLIEST:%H:%M} and {NIGHT_ENDS:%H:%M}.")
+    if not MIN_DIARY_MINUTES <= plan.minutes <= MAX_DIARY_MINUTES:
+        raise _refused(f"A diary slot is {MIN_DIARY_MINUTES} to {MAX_DIARY_MINUTES} minutes long.")
+    other = diary_slot_of(plans, night, zone, besides=None if before is None else before.entry_id)
+    if other is not None:
+        raise _refused(f"That night has its diary slot already {_slot_words(other, zone)}.")
+    if before is not None:
+        span = plan_span(before, zone)
+        if span is not None and diary_night(span[0]) != night:
+            raise _refused(f"A diary slot stays in its night (from {diary_night(span[0])} "
+                           f"{DIARY_EARLIEST:%H:%M} until that night's sleep).")
+    sleep = sleep_slot_of(plans, night, zone)
+    sleep_span = None if sleep is None else plan_span(sleep, zone)
+    if sleep is not None and sleep_span is not None and end > sleep_span[0]:
+        raise _refused(f"A diary slot ends before that night's sleep slot {_slot_words(sleep, zone)} starts; move "
+                       "the sleep slot first.")
+    return plan
+
+
 def sleep_refusal(start: datetime, minutes: int) -> str | None:
     """§4.4: why a sleep slot from ``start`` (its zone) for ``minutes`` is out of its limits, or None."""
     night = night_of(start)
@@ -1322,10 +1377,12 @@ def _counted(plans: Sequence[LifeEntry], entry_id: int | None, origin: LifeOrigi
 
 
 def _uncovered(start: datetime, end: datetime, plans: Sequence[LifeEntry], zone: tzinfo, now: datetime) -> None:
-    """§4.4: a sleep slot over [start, end) covers no live slot not over yet (whoever writes it: the keeper too)."""
+    """§4.4: a sleep slot over [start, end) covers no live slot not over yet (whoever writes it: the keeper too) —
+    character-diary §16.2: but the diary slot (an earlier sleep is never held back by it: the diary is then
+    written as HIMARI falls asleep)."""
     for other in plans:
         span = plan_span(other, zone)
-        if other.live_plan and other.plan_kind is not PlanKind.SLEEP and span is not None \
+        if other.live_plan and other.plan_kind not in (PlanKind.SLEEP, PlanKind.DIARY) and span is not None \
                 and _overlaps((start, end), span) and span[1] > now:
             raise _refused(f"Your sleep would cover the slot \"{other.text}\" {_slot_words(other, zone)}; move "
                            "or cancel that first.")
@@ -1344,6 +1401,12 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
     start, end = _span(plan.day, plan.time_of_day, plan.minutes, zone)
     if before is not None and (before.plan_kind is PlanKind.SLEEP) != (plan.kind is PlanKind.SLEEP):
         raise _refused("A sleep slot stays a sleep slot, and no other slot becomes one.")
+    if before is not None and (before.plan_kind is PlanKind.DIARY) != (plan.kind is PlanKind.DIARY):
+        raise _refused("A diary slot stays a diary slot, and no other slot becomes one.")  # character-diary §3
+    if plan.kind is PlanKind.DIARY:
+        plan = _diary_limits(plan, before, plans, origin=origin, zone=zone, start=start, end=end)
+        if origin is LifeOrigin.WRITER:  # the keeper places it by its own rules (character-diary §3)
+            return plan
     if plan.kind is PlanKind.SLEEP and before is not None:
         plan = dataclasses.replace(plan, text=before.text)  # character-day second review 7: moved, times only
         if asleep_in and end < now:
@@ -1367,8 +1430,8 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
         if origin is LifeOrigin.WRITER:  # the keeper's own rules place and move it; it never covers a live slot
             _uncovered(start, end, plans, zone, now)
             return plan
-    elif origin is LifeOrigin.WRITER:
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the keeper writes sleep slots only")
+    elif origin is LifeOrigin.WRITER and plan.kind is not PlanKind.DIARY:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the keeper writes sleep and diary slots only")
     _counted(plans, None if before is None else before.entry_id, origin, zone, now)
     if before is not None and (span := plan_span(before, zone)) is not None and span[1] <= now:
         raise _refused(f"That slot is over {_slot_words(before, zone)}; it cannot be changed.")
@@ -1415,9 +1478,12 @@ def planned_entry(persona_id: int, plan: PlanWrite, before: LifeEntry | None, or
 
 def check_cancel(before: LifeEntry, plans: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo,
                  now: datetime) -> None:
-    """§4.3: a live slot may be cancelled — never a sleep slot, never one over; HIMARI's within its day's count."""
+    """§4.3: a live slot may be cancelled — never a sleep slot (character-diary §3: nor a diary slot), never one
+    over; HIMARI's within its day's count."""
     if before.plan_kind is PlanKind.SLEEP:
         raise _refused("A sleep slot cannot be cancelled or deleted; move it instead.")
+    if before.plan_kind is PlanKind.DIARY:
+        raise _refused("The diary is never skipped: a diary slot cannot be cancelled or deleted; move it instead.")
     span = plan_span(before, zone)
     if span is not None and span[1] <= now:
         raise _refused(f"That slot is over {_slot_words(before, zone)}; it cannot be changed.")
@@ -1430,9 +1496,11 @@ def check_himari_count(plans: Sequence[LifeEntry], entry_id: int | None, zone: t
 
 
 def check_retire(entry: LifeEntry) -> None:
-    """§4.2: a sleep slot is never deleted, only moved (PLAN_REFUSED)."""
+    """§4.2: a sleep slot is never deleted, only moved (PLAN_REFUSED); character-diary §3: nor a diary slot."""
     if entry.kind is LifeKind.PLAN and entry.plan_kind is PlanKind.SLEEP:
         raise _refused("A sleep slot cannot be cancelled or deleted; move it instead.")
+    if entry.kind is LifeKind.PLAN and entry.plan_kind is PlanKind.DIARY:
+        raise _refused("The diary is never skipped: a diary slot cannot be cancelled or deleted; move it instead.")
 
 
 def live_plan_of(entry: LifeEntry, persona_id: int | None = None) -> LifeEntry:
@@ -1477,9 +1545,9 @@ def sleep_now(plans: Sequence[LifeEntry], *, zone: tzinfo, now: datetime,
     end = min(max(wanted, first), last, morning_by)
     end = max(end, datetime.combine(night + timedelta(days=1), SLEEP_ENDS_FROM, tzinfo=zone))
     minutes = int((end - start).total_seconds() // 60)
-    for other in plans:
+    for other in plans:  # character-diary §16.2: the diary slot never holds the sleep back
         other_span = plan_span(other, zone)
-        if other.live_plan and other.plan_kind is not PlanKind.SLEEP and other_span is not None \
+        if other.live_plan and other.plan_kind not in (PlanKind.SLEEP, PlanKind.DIARY) and other_span is not None \
                 and _overlaps((start, end), other_span) and other_span[1] > now:
             raise _refused(f"You have the slot \"{other.text}\" {_slot_words(other, zone)} tonight; cancel or move "
                            "it before you sleep.")

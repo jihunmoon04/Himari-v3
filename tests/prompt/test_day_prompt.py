@@ -36,6 +36,7 @@ from himari.prompt.api import (
     ASLEEP_MARK,
     BOND_RULE,
     DAY_SESSION,
+    LIFE_ABOUT,
     LIFE_RULE,
     SCHEDULE_RULE,
     SLEEP_RULE,
@@ -188,3 +189,53 @@ def test_the_schedule_and_sleep_are_told_on_the_server_zones_clock_not_the_devic
     assert [s["id"] for s in data["himari_schedule"]["tomorrow"]] == [4]  # type: ignore[index]
     assert data["himari_sleep"]["last"]["fell_asleep"] == "2026-11-27T00:15+09:00"  # type: ignore[index]
     assert str(data["now"]).endswith("-08:00")
+
+
+# --- character-diary v0.1 §7, §8, §16.5 -------------------------------------------------------
+
+
+def life_event(entry_id: int, day: str, at: str, text: str) -> LifeEntry:
+    return LifeEntry(entry_id, 1, LifeKind.EVENT, day, text, LifeOrigin.WRITER, 1, AT, AT, time_of_day=at)
+
+
+def test_what_happened_while_himari_slept_is_told_once_it_woke_marked_so() -> None:
+    """§7: the last sleep's events (its date may be another) marked while_asleep — never while it sleeps (a mumble's
+    turn too); today's passed ones as before, each once."""
+    morning = datetime(2026, 11, 27, 9, 30, tzinfo=SEOUL)
+    life = (life_event(1, "2026-11-26", "23:50", "고양이가 창가에 왔다."), life_event(2, "2026-11-27", "03:00", "밤새 비가 왔다."),
+            life_event(3, "2026-11-27", "09:00", "택배가 왔다."), life_event(4, "2026-11-27", "15:00", "아직."),
+            life_event(5, "2026-11-26", "15:00", "어제 낮 일."))
+    last = SleepRecord(5, 1, datetime(2026, 11, 26, 23, 40, tzinfo=SEOUL), FellBy.SCHEDULE,
+                       datetime(2026, 11, 27, 8, 0, tzinfo=SEOUL), WokeBy.SCHEDULE)
+    awake = state_data(current_state(inputs(now=morning, life=life, sleep=SleepView(SleepState.AWAKE, last=last))))
+    assert awake["himari_life"]["events"] == [  # type: ignore[index]
+        {"date": "2026-11-26", "time": "23:50", "text": "고양이가 창가에 왔다.", "while_asleep": True},
+        {"time": "03:00", "text": "밤새 비가 왔다.", "while_asleep": True},
+        {"time": "09:00", "text": "택배가 왔다."}]
+    for state in (SleepState.ASLEEP, SleepState.HALF_ASLEEP):  # review P1-5: nothing of the sleep under way
+        still = replace(last, woke_at=None, how_woke=None)
+        told = state_data(current_state(inputs(now=morning, life=life, sleep=SleepView(state, last=still))))
+        assert "himari_life" not in told  # every event of today came after it fell asleep at 23:40
+        early = (life_event(6, "2026-11-27", "07:00", "새벽 택배."),)
+        mumbling = replace(still, fell_at=datetime(2026, 11, 27, 8, 0, tzinfo=SEOUL))
+        told = state_data(current_state(inputs(now=morning, life=(*life, *early),
+                                               sleep=SleepView(state, last=mumbling))))
+        assert [e["text"] for e in told["himari_life"]["events"]] == [  # type: ignore[index]
+            "밤새 비가 왔다.", "새벽 택배."]  # before it fell asleep at 08:00; 09:00 is in the sleep
+    outside = state_data(current_state(inputs(day=False, now=morning, life=life)))  # no day session: no sleep
+    assert [e["text"] for e in outside["himari_life"]["events"]] == ["밤새 비가 왔다.", "택배가 왔다."]  # type: ignore[index]
+    assert "while_asleep" in LIFE_RULE
+
+
+def test_the_diaries_are_whole_days_and_the_rest_of_the_life_is_apart_from_the_user() -> None:
+    """§8: days may tell of what was done with the user; nothing else in himari_life was; the diary slot is moved,
+    never cancelled, and today's diary is not there before it."""
+    assert "records of whole days" in LIFE_ABOUT and "apart from the user" in LIFE_ABOUT
+    assert "himari_life.days are your diaries, records of whole days" in LIFE_RULE
+    assert "never make up things you did together" in LIFE_RULE
+    assert "diary slot" in SCHEDULE_RULE and "never cancel it" in SCHEDULE_RULE
+    assert "no diary of today yet" in SCHEDULE_RULE
+    diary = slot(9, "2026-11-27", "22:30", 30, PlanKind.DIARY, "일기 쓰기")
+    data = himari_schedule_data((SLEEP, diary), NOW)
+    assert data["tomorrow"][-1] == {"id": 9, "kind": "diary", "text": "일기 쓰기", "start": "22:30",  # type: ignore[index]
+                                    "end": "23:00", "minutes": 30}

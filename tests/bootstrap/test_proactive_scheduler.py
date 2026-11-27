@@ -27,7 +27,7 @@ from himari.provider.api import NormalizedFinal
 from himari.provider.scripted import ScriptedAdapter
 
 ME = PrincipalId("operator")
-ON = ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None)
+ON = ProactiveSettings(enabled=True)
 
 
 def answers(*texts: str) -> ScriptedAdapter:

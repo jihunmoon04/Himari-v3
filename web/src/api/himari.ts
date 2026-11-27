@@ -35,6 +35,8 @@ export interface ConversationSummary {
 
 /** character-day §5.5: how HIMARI, asleep, took a message — no answer, a mumble, or woken by it. */
 export type AsleepAnswer = "none" | "mumble" | "wake";
+/** character-diary §4, §5: a diary written (its evening draft) or added to (when its day session closed). */
+export type DiaryStep = "write" | "amend";
 
 export interface Job {
   running: boolean;
@@ -111,6 +113,9 @@ export interface EventView {
   images?: FileView[]; // and its images
   memory?: MemoryView | null; // what a memory call changed
   while_asleep?: AsleepAnswer | null; // character-day §5.6: a user message HIMARI got asleep, and how (the owner's)
+  // character-diary §10: a diary's step — written in the evening, or added to when the session closed (no text shown);
+  // an older server does not say (a write)
+  step?: DiaryStep;
 }
 
 export interface EventsPage {

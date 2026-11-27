@@ -142,7 +142,19 @@ describe("a day session (character-day §5.6, §7)", () => {
       event(5, "diary", { id: "lw_9", created_at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["work", "diary"]);
-    expect(items[1]).toEqual({ kind: "diary", key: "diary:lw_9", at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다." });
+    expect(items[1]).toEqual({ kind: "diary", key: "diary:lw_9", at: "2026-11-26T13:00:00Z", text: "오늘은 방송을 같이 봤다.",
+      step: "write" }); // an older server's diary, without a step, is a write
+  });
+
+  it("shows what was added to the diary when the session closed as a line without its text (character-diary §10)", () => {
+    const items = toItems([
+      event(5, "diary", { id: "lw_9", created_at: "2026-11-26T13:00:00Z", text: "저녁 일기.", step: "write" }),
+      event(8, "user_message", { text: "잘 자" }),
+      event(8, "diary", { id: "lw_12", created_at: "2026-11-26T18:00:00Z", text: "저녁 일기. 밤에 더 얘기했다.", step: "amend" }),
+    ]);
+    expect(items.map((item) => item.key)).toEqual(["diary:lw_9", "8", "diary:lw_12"]);
+    expect(items[0]).toMatchObject({ kind: "diary", step: "write", text: "저녁 일기." });
+    expect(items[2]).toEqual({ kind: "diary", key: "diary:lw_12", at: "2026-11-26T18:00:00Z", text: "", step: "amend" });
   });
 
   it("keys each diary on its id, not the sequence it follows, and shows one that comes again once (review 9)", () => {

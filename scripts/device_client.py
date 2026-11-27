@@ -364,8 +364,10 @@ def self_test() -> int:
                                         NormalizedFinal((TextBlock(SEEN),))],
                                        streaming=True, piece_delay=0.01, first_delay=0.5, image_input=True,
                                        screen_tool=True, companion=True)
+            # HIMARI's life off: its day keeper runs on the real clock, and at night the try wake would be a
+            # half-asleep turn without Tools (character-day §5.5)
             application = await Application.open(root, provider, model_id="scripted-model", sandbox=False,
-                                                 proactive=ProactiveSettings(enabled=True))
+                                                 proactive=ProactiveSettings(enabled=True), life=False)
             opened["app"], opened["loop"] = application, asyncio.get_running_loop()
             return application
 

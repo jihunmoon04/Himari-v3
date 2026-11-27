@@ -1,4 +1,4 @@
-"""Live check of HIMARI's day (character-day v0.1 §16): opt-in, ``HIMARI_LIVE=1`` plus the key. Four scenes, once
+"""Live check of HIMARI's day (character-day v0.1 §16): opt-in, ``HIMARI_LIVE=1`` plus the key. Five scenes, once
 each, on ``HIMARI_LIVE_DAY_MODEL`` (default deepseek/deepseek-v4.1-flash-1017), through the real Driver with the
 schedule Tools on an in-memory store; a day gate stands in for the day keeper (it says how HIMARI sleeps), and the
 Driver's and the Tools' clocks are held at the scene's time on today's date in Seoul.
@@ -10,6 +10,8 @@ Driver's and the Tools' clocks are held at the scene's time on today's date in S
    short line, no Tool offered; then a waking turn answers the message that woke it.
 4. The diary in the day session's context: after the day's talk, the diary's request (the session's own, the task
    last) answers a thought and the JSON, passes the review's checks and carries something of that talk.
+5. The amend (character-diary §5): the user spoke after the diary; the amend's request in the session's context
+   answers the whole diary again, keeping what was written and carrying the later talk.
 
 Checks are mechanical (the calls made, the slots kept, the shape); whether it is like a person is the owner's to
 judge (roadmap §10). With ``HIMARI_LIVE_DAY_OUT`` set to a file, every answer is appended as one JSON line.
@@ -38,6 +40,7 @@ from himari.data.api import (
     DayBefore,
     FellBy,
     LifeEntry,
+    LifeKind,
     LifeOrigin,
     MessageOrigin,
     OriginKind,
@@ -262,5 +265,42 @@ def test_the_diary_in_the_day_sessions_context_carries_the_days_talk() -> None:
                {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens})
         assert plan.diary
         assert any(word in plan.diary for word in ("발표", "떡볶이")), plan.diary  # the day's talk is in it
+
+    asyncio.run(scenario())
+
+
+def test_the_amend_carries_on_the_diary_with_the_talk_after_it_and_keeps_what_was_written() -> None:
+    """character-diary §5, §14: the diary was written at 22:00; the user spoke after it; as the session closes the
+    amend's request (the session's own, AMEND_TASK last) answers the whole diary again, keeping what was there and
+    carrying the later talk."""
+    async def scenario() -> None:
+        day = today()
+        gate = Gate(SleepView(SleepState.AWAKE))
+        rt = runtime(gate, at(day, "20:00"))
+        await rt.driver.drive(SCOPE, said("오늘 회사에서 발표 드디어 끝났어! 부장님이 잘했대"))
+        written = "오늘은 사용자가 회사 발표를 무사히 끝냈다고 했다. 부장님께 칭찬도 받았다니 나까지 뿌듯했다."
+        rt.driver._clock = lambda: at(day, "23:10")  # noqa: SLF001 — after the diary
+        await rt.driver.drive(SCOPE, said("근데 나 다음 주에 이직 면접도 있어… 좀 떨린다"))
+        fell = at(day + timedelta(days=1), "00:30")
+        rt.driver._clock = lambda: at(day + timedelta(days=1), "03:30")  # noqa: SLF001
+        gate.shown = SleepView(SleepState.ASLEEP, last=SleepRecord(1, NO_PERSONA, fell, FellBy.SCHEDULE))
+        inputs = await rt.driver.turn_inputs(SCOPE)
+        options = replace(inputs.request_options, max_output_tokens=review.AMEND_MAX_OUTPUT_TOKENS, stream=False)
+        diary = LifeEntry(1, NO_PERSONA, LifeKind.DIARY, day.isoformat(), written, LifeOrigin.WRITER, 1,
+                          at(day, "22:00"), at(day, "22:00"))
+        data = review.amend_data(diary, (), since=at(day, "22:00"), until=fell, zone=SEOUL)
+        asked = Composer().session_input(replace(inputs, request_options=options), review.AMEND_TASK, data)
+        provider = OpenRouterAdapter(KEY)
+        outcome = await provider.invoke_prepared(provider.prepare_native_request(asked))
+        assert isinstance(outcome, NativeReceived), outcome
+        output = provider.normalize(outcome)
+        assert isinstance(output, NormalizedFinal)
+        thought, body = review.self_answer(review.answer_text(output.blocks))
+        plan = review.parse_amend(body)
+        usage = outcome.usage
+        record("amend", thought=thought, diary=plan.diary, mood=plan.mood, usage=None if usage is None else
+               {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens})
+        assert plan.diary, "something came after the diary: it is carried on"
+        assert "발표" in plan.diary and "면접" in plan.diary, plan.diary  # kept, and carried on
 
     asyncio.run(scenario())

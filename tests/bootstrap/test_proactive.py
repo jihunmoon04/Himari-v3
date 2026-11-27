@@ -5,13 +5,13 @@ wakes it cut."""
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from himari.bootstrap.application import Application
-from himari.bootstrap.proactive import ProactiveRefused, parse_quiet, wake_outcome
+from himari.bootstrap.proactive import ProactiveRefused, wake_outcome
 from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.control.api import DriveResult, DriveState, JobStatus
 from himari.data.api import EventKind, MessageOrigin, OriginKind, WakeKind, WakeReason, WakeStatus
@@ -161,13 +161,11 @@ def test_how_a_wake_ends(status: JobStatus | None, after: list[str], outcome: Wa
     assert wake_outcome(status, events) == outcome
 
 
-def test_quiet_hours_parse() -> None:
-    assert parse_quiet(None) == (time(23, 0), time(8, 0))
-    assert parse_quiet("") == (None, None)
-    assert parse_quiet("22:30-07:00") == (time(22, 30), time(7, 0))
-    for wrong in ("22:30", "late-early"):
-        with pytest.raises(ValueError):
-            parse_quiet(wrong)
+def test_there_are_no_quiet_hours_to_parse() -> None:
+    """character-diary §9: the setting and its parser are gone."""
+    import himari.bootstrap.proactive as proactive
+
+    assert not hasattr(proactive, "parse_quiet")
 
 
 def test_only_a_checked_model_speaks_first(tmp_path: Path) -> None:

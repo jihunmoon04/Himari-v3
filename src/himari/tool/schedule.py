@@ -6,6 +6,9 @@ schedule's limits and writes in the same transaction as the result that reports 
 limits comes back as the call's failure with Data's sentence, so the model can fix it and call again ("It overlaps
 your sleep slot (01:10–08:40, id 12); move the sleep slot first."). The persona is the one the Driver gives the call's
 context, never one the model names; without one the life is not kept here and every call fails.
+
+character-diary §3: the night's ``diary`` slot is only moved (``schedule_write`` with its id), never made or
+cancelled; Data refuses the rest with its sentence.
 """
 
 from __future__ import annotations
@@ -115,7 +118,8 @@ class ScheduleRead(_Schedule):
     definition = _definition(
         SCHEDULE_READ,
         "Read your own schedule from today for a number of days (1 to 7): each slot's id, date, start and end, kind "
-        "(sleep, work, together, own) and text, with the cancelled and missed ones and why. Today and tomorrow are "
+        "(sleep, work, together, own, diary) and text, with the cancelled and missed ones and why. Today and "
+        "tomorrow are "
         "in the runtime state already: read for the days after.",
         {"days": {"type": "integer", "minimum": 1, "maximum": SCHEDULE_DAYS}}, ["days"], EffectProfile.READ)
 
@@ -143,7 +147,8 @@ class ScheduleWrite(_Schedule):
         "Write a slot of your schedule, or change one (give its id; a move too). date is YYYY-MM-DD (today to 7 days "
         "on), start HH:MM, minutes its length. kind: together (a time set with the user), own (something you do "
         "alone), work (time on an open project: give its arc id), sleep (your sleep slot: only moved, from 21:00 to "
-        "05:00, 5 to 11 hours, ending by 12:00). Nothing may lie over your sleep slot: move the sleep first. When you "
+        "05:00, 5 to 11 hours, ending by 12:00), diary (your diary time: only moved, 10 to 60 minutes, ending before "
+        "your sleep slot). Nothing may lie over your sleep slot: move the sleep first. When you "
         "move or change a slot, give reason, one line in your own words.",
         {"id": {"type": ["integer", "string", "null"], "description": "The slot to change; leave it out for a new one."},
          "date": {"type": "string", "description": "YYYY-MM-DD, of its start."},
@@ -195,8 +200,8 @@ class ScheduleWrite(_Schedule):
 class ScheduleCancel(_Schedule):
     definition = _definition(
         SCHEDULE_CANCEL,
-        "Cancel a slot of your schedule (not your sleep: move that instead), with your reason in one line. It stays "
-        "in the schedule as cancelled.",
+        "Cancel a slot of your schedule (not your sleep or your diary slot: move those instead), with your reason in "
+        "one line. It stays in the schedule as cancelled.",
         {"id": {"type": ["integer", "string"]}, "reason": {"type": "string"}}, ["id", "reason"],
         EffectProfile.SCOPED_WRITE)
 

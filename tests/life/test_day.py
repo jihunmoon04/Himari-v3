@@ -349,3 +349,51 @@ def test_a_session_is_titled_by_its_date_and_weekday() -> None:
     assert day.session_title(date(2026, 11, 27)) == "11월 27일 (금)"
     assert plan_span(SLEEP, SEOUL) == (at("2026-11-27 00:30"), at("2026-11-27 08:10"))
     assert day.tonight([SLEEP, NEXT], at("2026-11-27 09:00"), SEOUL) == NEXT
+
+
+# --- character-diary v0.1 §3, §16.3: placing the diary slot --------------------------------------
+
+
+def test_the_diary_slot_is_drawn_from_21_00_to_forty_minutes_before_the_sleep() -> None:
+    night = date(2026, 11, 26)
+    sleep = at("2026-11-27 00:30")
+    starts = set()
+    for seed in range(60):
+        placed = day.place_diary(night, sleep, Random(seed), SEOUL, at("2026-11-26 12:00"))
+        assert placed is not None and placed.minutes == 30
+        starts.add((placed.day, placed.time_of_day))
+    assert min(starts) == ("2026-11-26", "21:00") and max(starts) == ("2026-11-26", "23:50")
+    assert all(t[1].endswith("0") for t in starts)  # ten-minute steps
+    late = day.place_diary(date(2026, 11, 26), at("2026-11-27 02:00"), Random(1), SEOUL, at("2026-11-26 12:00"))
+    assert late is not None and at(f"{late.day} {late.time_of_day}") <= at("2026-11-27 01:20")  # past midnight
+
+
+def test_with_an_early_sleep_the_diary_slot_is_forty_minutes_before_it_never_before_18_00() -> None:
+    night = date(2026, 11, 26)
+    placed = day.place_diary(night, at("2026-11-26 21:30"), Random(0), SEOUL, at("2026-11-26 12:00"))
+    assert placed == day.PlacedSlot("2026-11-26", "20:50", 30)
+    early = day.place_diary(night, at("2026-11-26 18:20"), Random(0), SEOUL, at("2026-11-26 12:00"))
+    assert early is None  # 18:00 at the earliest ends at 18:30, after the sleep
+    assert day.place_diary(night, at("2026-11-26 18:40"), Random(0), SEOUL, at("2026-11-26 12:00")) == \
+        day.PlacedSlot("2026-11-26", "18:00", 30)
+
+
+def test_the_diary_slot_is_never_placed_in_the_past_and_none_without_room() -> None:
+    night = date(2026, 11, 26)
+    sleep = at("2026-11-27 00:30")
+    for seed in range(20):  # from now on (rounded up to ten minutes)
+        placed = day.place_diary(night, sleep, Random(seed), SEOUL, at("2026-11-26 23:31:05"))
+        assert placed is not None and "23:40" <= placed.time_of_day <= "23:50"
+    squeezed = day.place_diary(night, sleep, Random(0), SEOUL, at("2026-11-26 23:55"))
+    assert squeezed == day.PlacedSlot("2026-11-27", "00:00", 30)  # past the drawn range: now, if it fits
+    assert day.place_diary(night, sleep, Random(0), SEOUL, at("2026-11-27 00:05")) is None  # no room left
+    assert day.place_diary(night, sleep, Random(0), SEOUL, at("2026-11-27 01:00")) is None  # the sleep came
+
+
+def test_the_diary_slot_of_a_night_is_found_by_its_start() -> None:
+    diary = plan(5, "2026-11-26 23:00", 30, PlanKind.DIARY)
+    after_midnight = plan(6, "2026-11-28 00:10", 30, PlanKind.DIARY)  # the night of 11-27
+    assert day.diary_of_night([diary, after_midnight, SLEEP], date(2026, 11, 26), SEOUL) == diary
+    assert day.diary_of_night([diary, after_midnight], date(2026, 11, 27), SEOUL) == after_midnight
+    gone = plan(7, "2026-11-26 23:00", 30, PlanKind.DIARY, state=PlanState.CANCELLED)
+    assert day.diary_of_night([gone], date(2026, 11, 26), SEOUL) is None

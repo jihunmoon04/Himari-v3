@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from himari.common import PrincipalId, TextBlock, TokenUsage
+from himari.common import ConversationId, PrincipalId, TextBlock, TokenUsage
 from himari.data.api import (
     NEW_ARC,
     NO_PERSONA,
@@ -209,7 +209,7 @@ class Link:
         self.asked.append((since, until))
         return self.said
 
-    async def session_input(self, principal: PrincipalId) -> None:
+    async def session_input(self, principal: PrincipalId, conversation_id: ConversationId | None = None) -> None:
         return None  # character-day §7: no day session
 
 

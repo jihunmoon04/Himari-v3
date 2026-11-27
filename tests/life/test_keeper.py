@@ -241,9 +241,34 @@ def test_the_nights_with_no_slot_get_one_placed() -> None:
         keeper = DayKeeper(data, time_zone=ZONE, clock=lambda: at("2026-11-26 12:00"), rng=Random(3))
         await keeper.look(ME)
         slots = [e for e in await data.list_life(ME, 0) if e.kind is LifeKind.PLAN]
-        assert len(slots) == 2 and all(e.plan_kind is PlanKind.SLEEP and e.origin is LifeOrigin.WRITER for e in slots)
+        sleeps = [e for e in slots if e.plan_kind is PlanKind.SLEEP]
+        diaries = [e for e in slots if e.plan_kind is PlanKind.DIARY]  # character-diary §3: one beside each
+        assert len(sleeps) == 2 and len(diaries) == 2 and all(e.origin is LifeOrigin.WRITER for e in slots)
+        assert all(e.text == "일기 쓰기" and e.minutes == 30 for e in diaries)
         await keeper.look(ME)  # never twice
-        assert len([e for e in await data.list_life(ME, 0) if e.kind is LifeKind.PLAN]) == 2
+        assert len([e for e in await data.list_life(ME, 0) if e.kind is LifeKind.PLAN]) == 4
+
+    asyncio.run(scenario())
+
+
+def test_a_night_whose_sleep_slot_is_there_gets_its_diary_slot_while_there_is_room() -> None:
+    """character-diary §3, §16.4: the day it was deployed — the nights' sleep slots are there with no diary slot:
+    tonight's is placed from now on, 40 minutes before the sleep at the latest; once no room is left before the sleep
+    (or the night is past), none."""
+    async def scenario() -> None:
+        clock = Clock("2026-11-26 22:50")
+        keeper, data, scope, told = await kept(clock)
+        await keeper.ensure_slots(ME)
+        diaries = sorted((e for e in await data.list_life(ME, 0, since="2026-11-26") if e.diary_slot),
+                         key=lambda e: e.day or "")
+        assert [(e.day, e.origin) for e in diaries] == [("2026-11-26", LifeOrigin.WRITER),
+                                                        ("2026-11-27", LifeOrigin.WRITER)]
+        tonight = diaries[0]
+        assert tonight.time_of_day is not None and "22:50" <= tonight.time_of_day <= "23:50"  # sleep 00:30 - 40m
+        later = Clock("2026-11-27 00:10")  # 20 minutes before the sleep: no room for 30 minutes
+        keeper, data, scope, told = await kept(later)
+        await keeper.look(ME)
+        assert [e.day for e in await data.list_life(ME, 0, since="2026-11-26") if e.diary_slot] == ["2026-11-27"]
 
     asyncio.run(scenario())
 

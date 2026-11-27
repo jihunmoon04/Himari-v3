@@ -5,7 +5,7 @@ what HIMARI is doing now comes from its timed plans and the quiet hours."""
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -65,15 +65,21 @@ def test_an_answers_last_mood_is_kept_for_the_persona_and_told_to_the_next_turn(
     asyncio.run(scenario())
 
 
-def test_what_himari_is_doing_comes_from_a_timed_plan_or_the_quiet_hours(tmp_path: Path) -> None:
+def test_what_himari_is_doing_comes_from_a_timed_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.life.keeper import DayKeeper
+
+    async def no_diary_slot(*args: object) -> None:
+        return None  # the keeper's clock is held at noon, the plan is now: its diary slot could hold the hour
+
+    monkeypatch.setattr(DayKeeper, "_place_diary", no_diary_slot)
+
     async def scenario() -> None:
         zone = ZoneInfo("Asia/Seoul")
         local = datetime.now(UTC).astimezone(zone)
         start = (local - timedelta(minutes=10)).replace(second=0, microsecond=0)
-        quiet = ProactiveSettings(quiet_start=time(0, 0), quiet_end=time(0, 0))  # empty: never asleep
-        adapter = ScriptedAdapter([said("응.")])
+        adapter = ScriptedAdapter([said("응.")])  # character-diary §9: no quiet hours, never asleep by the clock
         app = await Application.open(tmp_path / "data", adapter, model_id="scripted-model", sandbox=False,
-                                     cleanup_seconds=None, time_zone="Asia/Seoul", proactive=quiet)
+                                     cleanup_seconds=None, time_zone="Asia/Seoul", proactive=ProactiveSettings())
         try:
             write_id = await app.data.begin_life_write(ME, LifeWriteStart(
                 NO_PERSONA, (start.date() - timedelta(days=1)).isoformat(), "openrouter", "m", b"{}",

@@ -111,8 +111,11 @@ export function toItems(events: readonly EventView[], conversation?: string | nu
           diaries.add(event.id);
         }
         closeWork();
+        // character-diary §10: an addition shows as a line only (the write's text is the diary as it is now); an
+        // older server's diary, without a step, is a write
+        const step = event.step === "amend" ? "amend" : "write";
         items.push({ kind: "diary", key: event.id ? `diary:${event.id}` : `${key}:diary:${unnamed++}`,
-          at: event.created_at, text: event.text ?? "" });
+          at: event.created_at, text: step === "amend" ? "" : event.text ?? "", step });
         break;
       }
       default:

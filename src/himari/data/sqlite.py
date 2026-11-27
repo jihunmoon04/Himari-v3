@@ -223,7 +223,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -876,12 +876,21 @@ CREATE TABLE day_state (
 ) STRICT;
 ALTER TABLE life_writes ADD COLUMN conversation_id TEXT;
 """
+# v30 (character-diary v0.1 §11, §16.2): a plan may be the night's diary slot (plan_kind 'diary') and a life write
+# the diary's amend (job 'amend') — both free text, the version keeps an older server from reading them; a diary's
+# write keeps what its request was made of (the session's last event, the moment its data was read up to, §5).
+_V30_ADDITIONS = """
+ALTER TABLE life_writes ADD COLUMN basis_sequence INTEGER;
+ALTER TABLE life_writes ADD COLUMN basis_at TEXT;
+ALTER TABLE sleeps ADD COLUMN closed_session TEXT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
               _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS, _V25_ADDITIONS,
-              _V26_ADDITIONS, _V27_ADDITIONS, _V28_ADDITIONS, _V29_ADDITIONS)  # what each version from v3 added
+              _V26_ADDITIONS, _V27_ADDITIONS, _V28_ADDITIONS, _V29_ADDITIONS,
+              _V30_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1371,7 +1380,8 @@ def _sleep(row: sqlite3.Row) -> SleepRecord:
                        None if row["how_woke"] is None else WokeBy(row["how_woke"]), int(row["messages"]),
                        int(row["mumbles"]), int(row["count"]), _moment(row["count_at"]), bool(row["closed_day"]),
                        _moment(row["first_message_at"]), _moment(row["last_message_at"]),
-                       None if row["slot_id"] is None else int(row["slot_id"]))
+                       None if row["slot_id"] is None else int(row["slot_id"]),
+                       None if row["closed_session"] is None else ConversationId(row["closed_session"]))
 
 
 def _mood(persona_id: int, row: sqlite3.Row | None) -> HimariMood | None:
@@ -1395,7 +1405,8 @@ def _life_write(row: sqlite3.Row) -> LifeWrite:
                      None if usage is None else usage[0], None if usage is None else usage[1], row["error"],
                      datetime.fromisoformat(row["created_at"]), _moment(row["finished_at"]), row["plan_id"],
                      LifeJob(row["job"]), row["model_reason"], row["thought"],
-                     None if row["conversation_id"] is None else ConversationId(row["conversation_id"]))
+                     None if row["conversation_id"] is None else ConversationId(row["conversation_id"]),
+                     row["basis_sequence"], _moment(row["basis_at"]))
 
 
 def _memory(row: sqlite3.Row) -> Memory:
@@ -2969,10 +2980,15 @@ class SqliteData:
             return tuple(PrincipalId(r["owner"]) for r in rows)
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
-                            job: LifeJob = LifeJob.REVIEW) -> int:
+                            job: LifeJob = LifeJob.REVIEW, since: datetime | None = None) -> int:
         with self._tx() as tx:
-            row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?",
-                         principal, persona_id, day, LifeJob(job).value)
+            if since is None:
+                row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?",
+                             principal, persona_id, day, LifeJob(job).value)
+            else:  # character-diary §5: timestamps are fixed-width UTC text, so text order is time order
+                row = tx.one("SELECT COUNT(*) AS n FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?"
+                             " AND basis_at IS NOT NULL AND basis_at >= ?", principal, persona_id, day,
+                             LifeJob(job).value, _timestamp(since))
             assert row is not None
             return int(row["n"])
 
@@ -2997,7 +3013,8 @@ class SqliteData:
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
         with self._tx() as tx:
             return tx.one("SELECT 1 FROM life_writes WHERE owner=? AND persona_id=? AND day=? AND job=?"
-                          " AND status='applied' LIMIT 1", principal, persona_id, day, LifeJob(job).value) is not None
+                          " AND status IN ('applied', 'skipped') LIMIT 1", principal, persona_id, day,
+                          LifeJob(job).value) is not None
 
     async def note_life_thought(self, write_id: str, thought: str) -> None:
         thought = rules.check_thought_note(thought)
@@ -3031,12 +3048,15 @@ class SqliteData:
                 write_id = tx.new_id("lwrite")
                 tx.execute("INSERT INTO life_writes (write_id, owner, persona_id, day, status, provider_key, model_id,"
                            " reserved_tokens, charged_tokens, usage, raw_request_body, raw_request_content_type,"
-                           " error, created_at, finished_at, plan_id, job, model_reason, thought, conversation_id)"
-                           " VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL, ?)",
+                           " error, created_at, finished_at, plan_id, job, model_reason, thought, conversation_id,"
+                           " basis_sequence, basis_at)"
+                           " VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, ?, ?, ?, NULL, ?,"
+                           " ?, ?)",
                            write_id, principal, persona_id, day, start.provider_key, start.model_id,
                            start.reserved_tokens, start.reserved_tokens, start.body, start.content_type,
                            _timestamp(datetime.now(UTC)), start.plan_id, job.value, start.model_reason,
-                           start.conversation_id)
+                           start.conversation_id, start.basis_sequence,
+                           None if start.basis_at is None else _timestamp(start.basis_at))
                 return write_id
         except sqlite3.Error as error:
             raise DataError(DataErrorCode.RAW_PERSISTENCE_UNAVAILABLE, type(error).__name__) from error
@@ -3125,6 +3145,32 @@ class SqliteData:
             tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
                        write_id)
             return tuple(written)
+
+    async def apply_life_amend(self, write_id: str, day: str, text: str | None, *, mood: str | None = None,
+                               mood_reason: str | None = None, now: datetime) -> LifeEntry | None:
+        diary = None if text is None else rules.check_life_text(LifeKind.DIARY, text)
+        kept_mood = rules.amend_mood(mood, mood_reason, now)
+        with self._tx() as tx:
+            row = self._life_write_row(tx, write_id)
+            if row["status"] != "received":
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row['status']}")
+            if row["job"] != LifeJob.AMEND.value or str(row["day"]) != day:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not an amend of {day}")
+            principal, persona_id = PrincipalId(row["owner"]), int(row["persona_id"])
+            found = tx.one(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
+                           " AND kind='diary' AND day=? AND retired_at IS NULL", principal, persona_id, day)
+            before = None if found is None else _life_entry(found)
+            written = None
+            if before is not None and before.origin is not LifeOrigin.USER:  # character-diary §5: the user's stays
+                if diary is not None:
+                    written = self._rewrite_life(tx, principal, dataclasses.replace(
+                        before, text=diary, origin=LifeOrigin.WRITER, revision=before.revision + 1, updated_at=now,
+                        source=write_id))
+                if kept_mood is not None:
+                    self._keep_mood(tx, principal, dataclasses.replace(kept_mood, persona_id=persona_id))
+            tx.execute("UPDATE life_writes SET status='applied', finished_at=? WHERE write_id=?", _timestamp(now),
+                       write_id)
+            return written
 
     async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
         checked = [rules.check_world_event(event) for event in events]
@@ -3254,6 +3300,14 @@ class SqliteData:
                        " WHERE write_id=? AND status IN ('prepared', 'dispatched', 'received')",
                        error[:200], _timestamp(datetime.now(UTC)), write_id)
 
+    async def skip_life_write(self, write_id: str, reason: str) -> None:
+        with self._tx() as tx:
+            self._life_write_row(tx, write_id)
+            if tx.execute("UPDATE life_writes SET status='skipped', error=?, finished_at=?, charged_tokens=0"
+                          " WHERE write_id=? AND status='prepared'", f"skipped: {reason}"[:200],
+                          _timestamp(datetime.now(UTC)), write_id).rowcount != 1:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is not prepared")
+
     async def interrupt_life_writes(self) -> int:
         with self._tx() as tx:
             return tx.execute("UPDATE life_writes SET status='interrupted', error='interrupted', finished_at=?,"
@@ -3365,7 +3419,8 @@ class SqliteData:
             closed = conversation_id is not None and tx.execute(
                 "UPDATE conversations SET closed_at=? WHERE conversation_id=? AND owner=? AND day_session IS NOT NULL"
                 " AND closed_at IS NULL", _timestamp(at), conversation_id, principal).rowcount == 1
-            tx.execute("UPDATE sleeps SET closed_day=1 WHERE sleep_id=?", sleep_id)
+            tx.execute("UPDATE sleeps SET closed_day=1, closed_session=? WHERE sleep_id=?",
+                       conversation_id if closed else None, sleep_id)
             state = self._day_state(tx, principal, persona_id)
             self._put_day_state(tx, principal, dataclasses.replace(state, last_closing_at=at, before=before))
             return closed

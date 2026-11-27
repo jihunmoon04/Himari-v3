@@ -3,8 +3,9 @@
 It runs as the server's periodic job ``day`` (every DAY_SECONDS, ``bootstrap.schedule``) and again for a principal
 whenever a job of theirs ends (so HIMARI falls asleep right after the answer that said good night), for each
 principal who sent a message in the last ACTIVE_DAYS, for the persona chosen now: it applies what ``day.due`` says —
-places the nights' sleep slots (origin WRITER), marks a promise the user never came to missed (and lets HIMARI fall
-asleep waiting for it), lets it fall asleep (its slot came, go_to_sleep was asked, it dozes off after being woken),
+places the nights' sleep slots (origin WRITER) and, beside each, the night's diary slot (character-diary §3; also for
+a night whose sleep slot is there already, while there is room before it), marks a promise the user never came to
+missed (and lets HIMARI fall asleep waiting for it), lets it fall asleep (its slot came, go_to_sleep was asked, it dozes off after being woken),
 wakes it at the end of the slot it sleeps in, and closes the day after enough unbroken sleep (§6). A closing never
 cuts a job of the day session: the session is fenced first (no new message, Run, wake or compaction is taken), the job
 settles, and the next look closes it — the session, the sleep's mark and what it hands the next in one commit; then
@@ -15,8 +16,9 @@ It is also the Driver's ``DayGate`` (filled in by the composition root: Control 
 the day session counts against a sleeping HIMARI and is met with nothing, a mumble or its waking (§5.5); a poke of
 the app's character counts the same; work is admitted only to a day session that is neither closed nor fenced. Each
 principal's work here is one at a time (a lock). What changed is told through callbacks (``on_sleep``: the sleep
-state for the event stream; ``on_session``: a session closed; ``on_asleep``: it fell asleep — the diary may be due
-before 22:00, §7).
+state for the event stream; ``on_session``: a session closed; ``on_asleep``: it fell asleep — the diary is written
+as it falls asleep when its slot has not come yet, character-diary §4; ``on_closed``: the day closed — the passes,
+the world and the diary's amend, character-diary §5).
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from zoneinfo import ZoneInfo
 
 from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.data.api import (
+    DIARY_TEXT,
     NO_PERSONA,
     AsleepAnswer,
     ConversationEvent,
@@ -296,7 +299,8 @@ class DayKeeper:
 
     async def ensure_slots(self, principal: PrincipalId) -> None:
         """§4.2: tonight's and the next night's sleep slots, placed now when missing (the keeper's rule, on first
-        need: a turn of the day session starts with them); an overdue scheduled wake recorded first."""
+        need: a turn of the day session starts with them), each with its diary slot (character-diary §3); an overdue
+        scheduled wake recorded first."""
         async with self._lock(principal):
             persona_id = await self._persona(principal)
             now = self._clock()
@@ -312,11 +316,26 @@ class DayKeeper:
                     except DataError as error:
                         log.warning("the day keeper could not place a slot for %s: %s", principal, error)
                     plans = await self._plans(principal, persona_id, now)
+            await self._place_diaries(principal, persona_id, now, plans)
+
+    async def _place_diaries(self, principal: PrincipalId, persona_id: int, now: datetime,
+                             plans: Sequence[LifeEntry]) -> None:
+        """character-diary §3, §16.4: tonight's and the next night's diary slots beside their sleep slots, placed now
+        when missing (the day it was deployed: a night with its sleep slot already), tonight's only while there is
+        room from now on."""
+        night = day.current_night(now.astimezone(self._zone))
+        for wanted in (night, night + timedelta(days=1)):
+            if day.diary_of_night(plans, wanted, self._zone) is not None:
+                continue
+            try:
+                await self._place_diary(principal, persona_id, wanted, plans, now)
+            except DataError as error:
+                log.warning("the day keeper could not place a diary slot for %s: %s", principal, error)
 
     async def _place(self, principal: PrincipalId, persona_id: int, night: date, plans: Sequence[LifeEntry],
                      now: datetime) -> None:
-        busy = [s for e in plans if e.live_plan and e.plan_kind is not PlanKind.SLEEP
-                and (s := plan_span(e, self._zone)) is not None]
+        busy = [s for e in plans if e.live_plan and e.plan_kind not in (PlanKind.SLEEP, PlanKind.DIARY)
+                and (s := plan_span(e, self._zone)) is not None]  # character-diary §16.2: the sleep may cover it
         placed = day.place_sleep(night, self._rng, self._zone, busy)
         if placed is None:  # §19.1: the night is full of slots — none until room is made (looked at again each time)
             if (principal, night) not in self._unplaced:
@@ -326,6 +345,24 @@ class DayKeeper:
         self._unplaced.discard((principal, night))
         await self._data.write_plan(principal, persona_id, PlanWrite(
             placed.day, placed.time_of_day, placed.minutes, PlanKind.SLEEP, SLEEP_TEXT),
+            origin=LifeOrigin.WRITER, zone=self.time_zone, now=now)
+        await self._place_diary(principal, persona_id, night, await self._plans(principal, persona_id, now), now)
+
+    async def _place_diary(self, principal: PrincipalId, persona_id: int, night: date, plans: Sequence[LifeEntry],
+                           now: datetime) -> None:
+        """character-diary §3: the night's diary slot beside its sleep slot (origin WRITER), unless it has one, has no
+        sleep slot, or no room is left before the sleep (that night it writes the diary as it falls asleep)."""
+        if day.diary_of_night(plans, night, self._zone) is not None:
+            return
+        slot = day.slot_of_night(plans, night, self._zone)
+        span = None if slot is None else plan_span(slot, self._zone)
+        if span is None:
+            return
+        placed = day.place_diary(night, span[0], self._rng, self._zone, now)
+        if placed is None:
+            return
+        await self._data.write_plan(principal, persona_id, PlanWrite(
+            placed.day, placed.time_of_day, placed.minutes, PlanKind.DIARY, DIARY_TEXT),
             origin=LifeOrigin.WRITER, zone=self.time_zone, now=now)
 
     # --- applying what is due ------------------------------------------------------------------
@@ -363,6 +400,9 @@ class DayKeeper:
                     sleep = await self._data.current_sleep(principal, persona_id)
                     state = await self._data.read_day_state(principal, persona_id)
                     plans = await self._plans(principal, persona_id, now)
+            if any(t.step is Step.PLACE for t in found):
+                plans = await self._plans(principal, persona_id, now)
+            await self._place_diaries(principal, persona_id, now, plans)  # character-diary §3: a night with no diary
             view = day.sleep_view(now, day.tonight(plans, now, self._zone), sleep, state, self._zone)
             self._tell(principal, view.state)
         for scope_closed in closed:  # outside the lock: the passes and the world take their time

@@ -230,7 +230,7 @@ def test_wakes_select_the_latest_compatible_user_conversation(
         app = await Application.open(tmp_path / "app", provider, model_id="standard-model",
                                      models=(("standard-model", None), ("companion-model", None)), sandbox=False,
                                      cleanup_seconds=None,
-                                     proactive=ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None),
+                                     proactive=ProactiveSettings(enabled=True),
                                      life=False)  # character-day: with a life, wakes go to the day session
         try:
             await app.ticker.close()  # drive the scheduler explicitly; no wall-clock job may race this test

@@ -1542,10 +1542,11 @@ class InMemoryData:
                                      for e in conv.events)}))
 
     async def life_attempts(self, principal: PrincipalId, persona_id: int, day: str, *,
-                            job: LifeJob = LifeJob.REVIEW) -> int:
+                            job: LifeJob = LifeJob.REVIEW, since: datetime | None = None) -> int:
         return sum(1 for w in self._store.life_writes.values()
                    if w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
-                   and w.record.job is job)
+                   and w.record.job is job and (since is None or (w.record.basis_at is not None
+                                                                  and w.record.basis_at >= since)))
 
     async def last_life_write(self, principal: PrincipalId, persona_id: int, day: str, *, job: LifeJob,
                               plan_id: int | None = None) -> LifeWrite | None:
@@ -1561,7 +1562,7 @@ class InMemoryData:
 
     async def life_done(self, principal: PrincipalId, persona_id: int, day: str, job: LifeJob) -> bool:
         return any(w.owner == principal and w.record.persona_id == persona_id and w.record.day == day
-                   and w.record.job is job and w.record.status is LifeWriteStatus.APPLIED
+                   and w.record.job is job and w.record.status in (LifeWriteStatus.APPLIED, LifeWriteStatus.SKIPPED)
                    for w in self._store.life_writes.values())
 
     async def note_life_thought(self, write_id: str, thought: str) -> None:
@@ -1589,7 +1590,8 @@ class InMemoryData:
         self._store.life_writes[write_id] = _LifeWrite(principal, LifeWrite(
             write_id, persona_id, day, LifeWriteStatus.PREPARED, start.provider_key, start.model_id,
             start.reserved_tokens, start.reserved_tokens, None, None, None, datetime.now(UTC), None, start.plan_id,
-            job, start.model_reason, conversation_id=start.conversation_id), start.body)
+            job, start.model_reason, conversation_id=start.conversation_id, basis_sequence=start.basis_sequence,
+            basis_at=start.basis_at), start.body)
         return write_id
 
     async def mark_life_write_dispatched(self, write_id: str) -> None:
@@ -1672,6 +1674,30 @@ class InMemoryData:
             self._keep_mood(principal, replace(mood, persona_id=persona_id))
         row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
         return tuple(written)
+
+    async def apply_life_amend(self, write_id: str, day: str, text: str | None, *, mood: str | None = None,
+                               mood_reason: str | None = None, now: datetime) -> LifeEntry | None:
+        diary = None if text is None else rules.check_life_text(LifeKind.DIARY, text)
+        kept_mood = rules.amend_mood(mood, mood_reason, now)
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.RECEIVED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        if row.record.job is not LifeJob.AMEND or row.record.day != day:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{write_id} is not an amend of {day}")
+        principal, persona_id = row.owner, row.record.persona_id
+        before = next((e for (owner, _), (e, retired) in self._store.life.items()
+                       if owner == principal and retired is None and e.persona_id == persona_id
+                       and e.kind is LifeKind.DIARY and e.day == day), None)
+        written = None
+        if before is not None and before.origin is not LifeOrigin.USER:  # character-diary §5: the user's stays
+            if diary is not None:
+                written = self._put_life(principal, replace(before, text=diary, origin=LifeOrigin.WRITER,
+                                                            revision=before.revision + 1, updated_at=now,
+                                                            source=write_id))
+            if kept_mood is not None:
+                self._keep_mood(principal, replace(kept_mood, persona_id=persona_id))
+        row.record = replace(row.record, status=LifeWriteStatus.APPLIED, finished_at=now)
+        return written
 
     async def add_events(self, write_id: str, events: Sequence[WorldEvent], *, now: datetime) -> tuple[LifeEntry, ...]:
         checked = [rules.check_world_event(event) for event in events]
@@ -1786,6 +1812,13 @@ class InMemoryData:
     async def fail_life_write(self, write_id: str, error: str) -> None:
         self._end_write(self._life_write(write_id), LifeWriteStatus.FAILED, error)
 
+    async def skip_life_write(self, write_id: str, reason: str) -> None:
+        row = self._life_write(write_id)
+        if row.record.status is not LifeWriteStatus.PREPARED:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{write_id} is {row.record.status.value}")
+        row.record = replace(row.record, status=LifeWriteStatus.SKIPPED, error=f"skipped: {reason}"[:200],
+                             charged_tokens=0, finished_at=datetime.now(UTC))
+
     async def interrupt_life_writes(self) -> int:
         open_ = [w for w in self._store.life_writes.values()
                  if w.record.status in (LifeWriteStatus.PREPARED, LifeWriteStatus.DISPATCHED, LifeWriteStatus.RECEIVED)]
@@ -1868,7 +1901,8 @@ class InMemoryData:
         if closed:
             assert conv is not None
             conv.closed_at = at
-        self._store.sleeps[sleep.sleep_id] = (principal, replace(sleep, closed_day=True))
+        self._store.sleeps[sleep.sleep_id] = (principal, replace(sleep, closed_day=True,
+                                                                 closed_session=conversation_id if closed else None))
         state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
         self._store.day_states[(principal, persona_id)] = replace(state, last_closing_at=at, before=before)
         return closed

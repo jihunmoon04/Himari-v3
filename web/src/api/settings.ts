@@ -60,8 +60,9 @@ export type ThoughtAbout = "user" | "self" | "work" | "intent";
 export type LifeOrigin = "writer" | "conversation" | "user" | "himari";
 // character-day §4.1: a schedule slot's kind (sleep: the night's sleep; work: a project's, with arc_id; together: a
 // time agreed with the user; own: something on its own), and a slot no longer alive (cancelled by HIMARI, or a
-// together slot the user did not come to)
-export type PlanKind = "sleep" | "work" | "together" | "own";
+// together slot the user did not come to). character-diary §3: diary, the night's diary time — one a night, placed by
+// the server; it only moves (never made, deleted or turned into another kind, nor another kind into it).
+export type PlanKind = "sleep" | "diary" | "work" | "together" | "own";
 export type PlanState = "cancelled" | "missed";
 
 export interface LifeEntry {

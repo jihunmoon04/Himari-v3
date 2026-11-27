@@ -618,8 +618,7 @@ def test_quiet_is_the_users_for_every_device(server: Server) -> None:
 def test_speaking_first_routes_are_the_operators(server: Server) -> None:
     server.sign_in()
     status = server.client.get("/api/proactive").json()
-    assert status == {"enabled": False, "told": "off (HIMARI_PROACTIVE=0)", "current_device": None,
-                      "quiet_hours": "23:00-08:00"}
+    assert status == {"enabled": False, "told": "off (HIMARI_PROACTIVE=0)", "current_device": None}  # no quiet hours
     refused = server.client.post("/api/proactive/try", headers=SEND)
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "proactive_off"
     token = server.paired()
@@ -644,14 +643,23 @@ def test_a_wake_is_shown_as_a_line_with_its_reasons() -> None:
         {"kind": "returned", "away_minutes": 240, "via": "unlock"}]}
 
 
+def test_the_quiet_hours_setting_is_no_longer_read_and_the_start_says_so() -> None:
+    """character-diary §9: HIMARI_PROACTIVE_QUIET is ignored (any value, empty too) and flagged for one startup
+    warning; unset, nothing is said."""
+    base = {"HIMARI_WEB_ALLOWED_HOSTS": "localhost", "HIMARI_DATA_ROOT": "/tmp/x", "HIMARI_MODEL": "m"}
+    assert not WebConfig.from_env(base).proactive_quiet_ignored
+    for value in ("23:00-08:00", "", "late"):
+        config = WebConfig.from_env({**base, "HIMARI_PROACTIVE_QUIET": value})
+        assert config.proactive_quiet_ignored and config.proactive == WebConfig.from_env(base).proactive
+
+
 def test_speaking_first_settings_from_the_environment() -> None:
     base = {"HIMARI_WEB_ALLOWED_HOSTS": "localhost", "HIMARI_DATA_ROOT": "/tmp/x", "HIMARI_MODEL": "m"}
     off = WebConfig.from_env(base).proactive
     assert not off.enabled and (off.gap_minutes, off.daily, off.ended_minutes, off.return_hours) == (15, 10, 60, 1)
-    on = WebConfig.from_env({**base, "HIMARI_PROACTIVE": "1", "HIMARI_PROACTIVE_QUIET": "",
-                             "HIMARI_PROACTIVE_GAP_MINUTES": "45"}).proactive
-    assert on.enabled and on.quiet_start is None and on.gap_minutes == 45
-    for name, bad in (("HIMARI_PROACTIVE_QUIET", "late"), ("HIMARI_PROACTIVE_FREE_DAILY", "99"),
+    on = WebConfig.from_env({**base, "HIMARI_PROACTIVE": "1", "HIMARI_PROACTIVE_GAP_MINUTES": "45"}).proactive
+    assert on.enabled and on.gap_minutes == 45 and on.describe() == "on (gap 45m, free every 30m, 10 a day)"
+    for name, bad in (("HIMARI_PROACTIVE_FREE_DAILY", "99"),
                       ("HIMARI_PROACTIVE_FREE_MINUTES", "soon"), ("HIMARI_PROACTIVE_FREE_MINUTES", "1441")):
         with pytest.raises(WebConfigError):
             WebConfig.from_env({**base, name: bad})

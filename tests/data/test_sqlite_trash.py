@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from testkit import FAKE, V17_UNDO, V20_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, V26_UNDO, V27_UNDO, V28_UNDO, V29_UNDO, SCOPE, V15_UNDO, text_result, user
+from testkit import FAKE, V17_UNDO, V20_UNDO, V21_UNDO, V22_UNDO, V23_UNDO, V24_UNDO, V25_UNDO, V26_UNDO, V27_UNDO, V28_UNDO, V29_UNDO, V30_UNDO, SCOPE, V15_UNDO, text_result, user
 
 from himari.common import CallId, CallRef, ConversationId, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
@@ -136,7 +136,7 @@ def v6_database(path: Path) -> None:
     store.close()
     conn = sqlite3.connect(path, isolation_level=None)
     try:
-        for statement in (*V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO, *V20_UNDO, *V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
+        for statement in (*V30_UNDO, *V29_UNDO, *V28_UNDO, *V27_UNDO, *V26_UNDO, *V25_UNDO, *V24_UNDO, *V23_UNDO, *V22_UNDO, *V21_UNDO, *V20_UNDO, *V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
                           "DROP TABLE devices", "DROP INDEX bindings_by_workspace", "DROP TABLE workspaces",
                           "DROP TABLE event_text", "DROP TABLE memory_ids", "DROP INDEX memories_by_source",
                           "DROP TABLE memories",

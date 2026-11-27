@@ -1,10 +1,11 @@
 """HIMARI's life (character-life v0.1 §3, character-mind v0.1 §4): the settings the composition root fills in.
 
 The life runs (``worker.LifeWriter``) look, each round, at each active principal's chosen persona: the work at its
-work plans (character-work §4), the day's review once a day after the write time in the server's zone (the diary,
-plans, a project's start or end and the mood: HIMARI's own self run, character-mind §4.3) and the facts its diary
-settles (§5.3). They run from the server's periodic jobs (``bootstrap.schedule``), never as a Conversation's Run,
-and never import Control. A self run uses the model of the conversation a wake would go to when it is checked for
+work plans (character-work §4), the day's review once a day when its diary slot starts (character-diary §4; or as
+HIMARI falls asleep, or with no slot that night the write time in the server's zone: the diary, plans, a project's
+start or end and the mood: HIMARI's own self run, character-mind §4.3), the diary's amend as the day session closes
+(character-diary §5) and the facts its diary settles (§5.3) once the day is closed. They run from the server's
+periodic jobs (``bootstrap.schedule``), never as a Conversation's Run, and never import Control. A self run uses the model of the conversation a wake would go to when it is checked for
 free wakes (``MindLink``, given by the composition root), else the memory passes' model (one the Provider declares
 checked for them, H-60); every other call uses the memory model. All share one daily token budget.
 """
@@ -19,7 +20,8 @@ from typing import Protocol
 from himari.common import ConversationId, DeepFrozen, PrincipalId
 from himari.prompt.api import PromptInputs
 
-DEFAULT_WRITE_AT = time(22, 0)  # §3: HIMARI_LIFE_WRITE_AT, in the server's zone
+DEFAULT_WRITE_AT = time(22, 0)  # §3: HIMARI_LIFE_WRITE_AT, in the server's zone (character-diary §16.1: a night
+# with no diary slot)
 DEFAULT_DAILY_TOKENS = 200_000  # HIMARI_LIFE_DAILY_TOKENS, per principal and day
 ATTEMPTS_PER_DAY = 3  # §3: calls tried for one job, persona and date (a work plan's: the plan), whatever came of them
 ACTIVE_DAYS = timedelta(days=7)  # a principal who sent no message this long gets no new days
@@ -40,6 +42,9 @@ class LifeSettings(DeepFrozen):
     backup_effort: str | None = None
     default_model_id: str | None = None  # §10: a self run's model with no day session (None: the memory model)
     default_effort: str | None = None
+    # character-diary §6: the day keeper runs (HIMARI sleeps and its days close): a diary's facts are settled once its
+    # day was closed and amended; False (no keeper): right after the diary
+    keeper: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,9 @@ class MindLink(Protocol):
         what they said while HIMARI worked."""
         ...
 
-    async def session_input(self, principal: PrincipalId) -> SessionInput | None:
+    async def session_input(self, principal: PrincipalId,
+                            conversation_id: ConversationId | None = None) -> SessionInput | None:
         """character-day §7, §18.7: the open day session's next turn as it would be composed now; None: no day
-        session open (or it cannot be read now)."""
+        session open (or it cannot be read now). character-diary §5, §16.4: with ``conversation_id``, that day
+        session of the principal's, closed too (read only); None when it is no day session of theirs."""
         ...

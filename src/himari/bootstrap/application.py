@@ -700,14 +700,6 @@ class DayClosed(RuntimeError):
     """character-day §3.2: a message to a day session that is closed (only read now)."""
 
 
-def quiet_hours(settings: ProactiveSettings) -> tuple[time, time] | None:
-    """character-state §3 (S2): HIMARI's sleeping hours are speaking first's quiet hours
-    (HIMARI_PROACTIVE_QUIET, whether or not HIMARI speaks first); None: no quiet hours."""
-    if settings.quiet_start is None or settings.quiet_end is None:
-        return None
-    return settings.quiet_start, settings.quiet_end
-
-
 def world_weather(location: tuple[float, float] | None, *, life: bool, companion: bool) -> str:
     """character-world §2: whether the weather is read, as told at startup."""
     if location is None:
@@ -1073,10 +1065,16 @@ class Application:
             # character-mind §4.1: a self run has a turn's system text (as build_runtime fills it in) and
             # chooses its model through the application (the conversation a wake would go to)
             # character-day §13: no quiet hours: the day's sleep (its slots) is what the work and the world keep out of
-            application.life_writer = LifeWriter(runtime.data, provider, writing, weather=weather, topics=topics,
+            # character-diary §6: with the day keeper, the facts wait for the day's closing and its amend
+            application.life_writer = LifeWriter(runtime.data, provider,
+                                                 replace(writing, keeper=application.keeper is not None),
+                                                 weather=weather, topics=topics,
                                                  composer=Composer(), instructions=base, link=application,
                                                  system=replace(system, memory=memory, turn_guidance=True,
                                                                 life=True))
+            # character-diary §10 (review P2-11): a diary or its amend applied — the open timeline reads it again
+            application.life_writer.on_diary = lambda principal, conversation: hub.publish(
+                principal, "conversation", {"conversation": conversation})
             await application.life_writer.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
@@ -1115,10 +1113,22 @@ class Application:
         choice = await self.model_choice(TrustedScope(principal, session.conversation_id))
         return MindModel(choice.model_id, choice.effort, "the day session's model")
 
-    async def session_input(self, principal: PrincipalId) -> SessionInput | None:
+    async def session_input(self, principal: PrincipalId,
+                            conversation_id: ConversationId | None = None) -> SessionInput | None:
         """character-day §7, §18.7 (MindLink): the open day session's next turn as it would be composed now, and
-        its model's ceiling; None without one."""
-        session = await self.day_session(principal, open=False)
+        its model's ceiling; None without one. character-diary §5, §16.4: with ``conversation_id``, that day session
+        of the principal's, closed too (only read); None when it is none of theirs or no day session."""
+        if conversation_id is None:
+            session = await self.day_session(principal, open=False)
+        else:
+            try:
+                session = await self.data.read_conversation(TrustedScope(principal, conversation_id))
+            except DataError as error:
+                if error.code not in (DataErrorCode.NOT_FOUND, DataErrorCode.NOT_AUTHORIZED):
+                    raise
+                return None
+            if session.day_session is None:
+                return None
         if session is None:
             return None
         scope = TrustedScope(principal, session.conversation_id)
@@ -1199,14 +1209,17 @@ class Application:
         task.add_done_callback(self._day_tasks.discard)
 
     async def _day_closed(self, principal: PrincipalId, closed: TrustedScope | None) -> None:
-        """§6 steps 3 and 4: the closed session read by the memory passes at once, and the world's new day."""
+        """§6 steps 3 and 4: the closed session read by the memory passes at once, and the world's new day;
+        character-diary §5, §16.4: the closed session's diary amended (the writer knows whether anything is new)."""
         if closed is not None and self.memory_passes is not None:
             self._spawn(self.memory_passes.read(closed), f"memory-pass-{closed.conversation_id}")
         if self.life_writer is not None:
             self._spawn(self.life_writer.world(principal), f"world-{principal}")
+            self._spawn(self.life_writer.amend(principal), f"amend-{principal}")
 
     def _fell_asleep(self, principal: PrincipalId) -> None:
-        """§7: asleep before 22:00, the diary is written as it falls asleep (the writer knows whether it is due)."""
+        """character-diary §4: asleep before its diary slot (or, with none, before the write time), the diary is
+        written as it falls asleep (the writer knows whether it is due)."""
         if self.life_writer is not None:
             self._spawn(self.life_writer.write(principal), f"diary-{principal}")
 
@@ -1251,21 +1264,27 @@ class Application:
         return await self.data.write_plan(principal, found.persona_id, plan, origin=LifeOrigin.USER,
                                           zone=self.time_zone, now=datetime.now(UTC))
 
-    async def session_diaries(self, scope: TrustedScope) -> tuple[tuple[str, datetime, str], ...]:
+    async def session_diaries(self, scope: TrustedScope) -> tuple[tuple[str, datetime, str, str], ...]:
         """§7, §18.11: the diaries written in this day session's context — each write's id (stable: the Web keys
-        on it), when it was written and its text (as the diary stands now; one deleted since is left out), oldest
-        first. Authorizes like any read."""
+        on it), when it was written, its text (as the diary stands now; one deleted since is left out) and its step,
+        oldest first: ``write`` (the diary written), character-diary §10, §16.7: ``amend`` (added to as the session
+        closed: only an amend that rewrote the diary). Authorizes like any read."""
         summary = await self.data.read_conversation(scope)
         if summary.day_session is None:
             return ()
-        found: list[tuple[str, datetime, str]] = []
+        found: list[tuple[str, datetime, str, str]] = []
         for write in await self.data.session_writes(scope.principal_id, scope.conversation_id):
-            if write.job is not LifeJob.REVIEW or write.finished_at is None or write.status.value != "applied":
+            if write.job not in (LifeJob.REVIEW, LifeJob.AMEND) or write.finished_at is None \
+                    or write.status.value != "applied":
                 continue
             diary = next((e for e in await self.data.list_life(scope.principal_id, write.persona_id, since=write.day)
                           if e.kind is LifeKind.DIARY and e.day == write.day), None)
-            if diary is not None:
-                found.append((write.write_id, write.finished_at, diary.text))
+            if diary is None:
+                continue
+            if write.job is LifeJob.REVIEW:
+                found.append((write.write_id, write.finished_at, diary.text, "write"))
+            elif diary.source == write.write_id:
+                found.append((write.write_id, write.finished_at, diary.text, "amend"))
         return tuple(found)
 
     async def remarks(self, principal: PrincipalId, since: datetime, until: datetime) -> tuple[str, ...]:
@@ -2110,7 +2129,7 @@ class Application:
 
     async def try_wake(self, principal: PrincipalId) -> tuple[ConversationId, JobStatus]:
         """§11: open a TRY wake now in the most recent companion conversation, spoken on the
-        current device — past the user's quiet, the quiet hours, gap and daily
+        current device — past the user's quiet, gap and daily
         limit (and the ten minutes after a message), never while a job runs or
         in a conversation that is not settled. ProactiveRefused."""
         if not (self.proactive.enabled and self.companion_enabled):
@@ -2132,11 +2151,9 @@ class Application:
 
     async def proactive_status(self, principal: PrincipalId) -> dict[str, object]:
         """§11: the switch, where HIMARI would speak now, today's count, the next loop and the last look."""
-        quiet = self.proactive
         status: dict[str, object] = {"enabled": self.proactive.enabled and self.companion_enabled,
-                                     "told": self.proactive.describe(), "current_device": self.presence.current(principal),
-                                     "quiet_hours": None if quiet.quiet_start is None or quiet.quiet_end is None
-                                     else f"{quiet.quiet_start:%H:%M}-{quiet.quiet_end:%H:%M}"}
+                                     "told": self.proactive.describe(),
+                                     "current_device": self.presence.current(principal)}
         if self.scheduler is not None:
             status.update(await self.scheduler.status(principal))
         return status
