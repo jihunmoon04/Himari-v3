@@ -3054,6 +3054,9 @@ class SqliteData:
         plan = rules.check_plan_limits(plan, before, plans, [e for e in entries if e.kind is LifeKind.ARC],
                                        origin=origin, zone=where, now=now, asleep_in=asleep_in,
                                        routine=self._routine_of(tx, principal, before))
+        if before is None and plan.routine_id is not None:  # character-routine §13.2: the keeper's, checked
+            rules.check_routine_slot(plan, self._routine_of(tx, principal, rules.planned_entry(
+                persona_id, plan, None, origin, now)), persona_id)
         made = rules.planned_entry(persona_id, plan, before, origin, now)
         return self._new_life(tx, principal, made) if before is None else self._rewrite_life(tx, principal, made)
 

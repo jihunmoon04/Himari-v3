@@ -115,7 +115,8 @@ def _steps(first: datetime, last: datetime) -> list[datetime]:
 
 def place_sleep(night: date, rng: Random, zone: tzinfo,
                 busy: Sequence[tuple[datetime, datetime]] = (), *,
-                starts: tuple[time, time] = SLEEP_STARTS, ends: tuple[time, time] = SLEEP_ENDS) -> PlacedSleep | None:
+                starts: tuple[time, time] = SLEEP_STARTS, ends: tuple[time, time] = SLEEP_ENDS,
+                now: datetime | None = None) -> PlacedSleep | None:
     """§5.2, §4.4: the night's sleep slot — a start drawn from 23:00 to 02:00 and an end from 07:00 to 10:00 (ten-
     minute steps), the end at least MIN_SLEEP_MINUTES after the start and by 12:00. ``busy``: the night's other
     slots, which it never covers: a start that would is pushed after them (in ten minutes, to 05:00 at the latest),
@@ -123,7 +124,8 @@ def place_sleep(night: date, rng: Random, zone: tzinfo,
     When no span within the limits fits (a slot over 05:00 leaves none), the same search with the end allowed before
     05:00 (it gets up for that slot); None: not even that (the night stays without a slot until room is made).
     character-routine §13.2: ``starts`` and ``ends`` are the sleep routine's ranges (a start from 21:00 is on the
-    night's date, one before 05:00 on the morning's)."""
+    night's date, one before 05:00 on the morning's); ``now`` (review P1-2): never a start before it (in ten
+    minutes) — a night already begun gets a start from now on."""
     morning = night + timedelta(days=1)
 
     def on_night(at: time) -> datetime:
@@ -144,8 +146,13 @@ def place_sleep(night: date, rng: Random, zone: tzinfo,
         end = min(max(wanted_end, start + least), cap)
         return end if end >= start + least and (end >= ends_from or not strict) else None
 
+    floor = None if now is None else _ceil_up(now.astimezone(zone))
+    if floor is not None and drawn < floor:
+        drawn = floor
     later = _steps(drawn, datetime.combine(morning, NIGHT_ENDS, tzinfo=zone))
-    earlier = list(reversed(_steps(datetime.combine(night, NIGHT_STARTS, tzinfo=zone), drawn)))[1:]
+    earlier = [s for s in reversed(_steps(datetime.combine(night, NIGHT_STARTS, tzinfo=zone), drawn))][1:]
+    if floor is not None:
+        earlier = [s for s in earlier if s >= floor]
     for strict in (True, False):
         for start in later + earlier:
             end = fit(start, strict)

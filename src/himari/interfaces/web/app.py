@@ -2115,6 +2115,9 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             return ApiError(409, "routine_refused", error.message or "That routine is past the limits.")
         if error.code is DataErrorCode.LIMIT_EXCEEDED:
             return ApiError(409, "limit_exceeded", error.message or "Too many routines.")
+        if error.code in (DataErrorCode.TOO_LARGE, DataErrorCode.INVALID_ARGUMENT):  # review P2-5: its own words
+            code = "too_large" if error.code is DataErrorCode.TOO_LARGE else "invalid_routine"
+            return ApiError(422, code, (error.message or "That routine is out of shape.").capitalize() + ".")
         return life_refused(error)
 
     @app.get("/api/routines")

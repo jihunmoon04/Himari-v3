@@ -1523,6 +1523,9 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
     if origin is LifeOrigin.HIMARI and before is not None and routine is not None:
         _himari_may(routine, cancel=False)
         plan = dataclasses.replace(plan, kind=before.plan_kind or plan.kind, text=before.text, arc_id=before.arc_id)
+        if routine.builtin is None and plan.day != before.day:  # review P2-2: never two of a day's routine
+            raise _refused(f"This slot is your routine \"{routine.name}\" of {before.day}: move it within that day"
+                           + (", or cancel it." if routine.himari is RoutineSay.MOVE_CANCEL else "."))
     if before is not None and (before.plan_kind is PlanKind.SLEEP) != (plan.kind is PlanKind.SLEEP):
         raise _refused("A sleep slot stays a sleep slot, and no other slot becomes one.")
     if before is not None and (before.plan_kind is PlanKind.DIARY) != (plan.kind is PlanKind.DIARY):
@@ -1771,10 +1774,12 @@ def checked_routine(write: object, before: Routine | None, live: Sequence[Routin
                            f"{MAX_SLEEP_MINUTES // 60} hours apart.")
         return dataclasses.replace(before, start_from=start_from, start_to=start_to, end_from=end_from,
                                    end_to=end_to, revision=revision, updated_at=now)
-    minutes_min = _whole(write.minutes_min, MIN_PLAN_MINUTES, MAX_PLAN_MINUTES,
-                         f"A routine is {MIN_PLAN_MINUTES} to {MAX_PLAN_MINUTES} minutes long.")
+    minutes_min = _whole(write.minutes_min, 10, MAX_PLAN_MINUTES,
+                         f"A routine is 10 to {MAX_PLAN_MINUTES} minutes long.")
     minutes_max = _whole(write.minutes_max, minutes_min, MAX_PLAN_MINUTES,
                          "A routine's longest length is at least its shortest.")
+    if minutes_min % 10 or minutes_max % 10:  # review P2-3: in ten minutes, as every range
+        raise _refused("A routine's lengths are in ten minutes.")
     if builtin is RoutineBuiltin.DIARY:
         assert before is not None
         if not (f"{DIARY_EARLIEST:%H:%M}" <= start_from):
@@ -1824,7 +1829,11 @@ def routine_slots_to_clear(routine: Routine, plans: Sequence[LifeEntry], zone: t
         span = plan_span(entry, zone)
         return entry.live_plan and entry.origin is LifeOrigin.WRITER and span is not None and span[0] > now
 
-    mine = [e for e in plans if e.routine_id == routine.routine_id and unmoved(e)]
+    kind = {RoutineBuiltin.SLEEP: PlanKind.SLEEP, RoutineBuiltin.DIARY: PlanKind.DIARY}.get(routine.builtin) \
+        if routine.builtin is not None else None
+    # review P2-1: a built-in's also the unmoved slots of its kind placed with no routine (before v31, or before it)
+    mine = [e for e in plans if unmoved(e) and (e.routine_id == routine.routine_id
+                                                or (kind is not None and e.routine_id is None and e.plan_kind is kind))]
     if routine.builtin is RoutineBuiltin.SLEEP:
         mine += [e for e in plans if e.plan_kind is PlanKind.DIARY and unmoved(e) and e not in mine]
     return mine
@@ -1840,3 +1849,15 @@ def routine_cancelled(slot: LifeEntry, now: datetime) -> LifeEntry:
     """§13.1: a slot of a routine turned off or deleted, cancelled (by the keeper) with ROUTINE_OFF_REASON."""
     return dataclasses.replace(slot, plan_state=PlanState.CANCELLED, reason=ROUTINE_OFF_REASON,
                                origin=LifeOrigin.WRITER, revision=slot.revision + 1, updated_at=now)
+
+
+def check_routine_slot(plan: PlanWrite, routine: Routine | None, persona_id: int) -> None:
+    """§13.2 (review P2-4): a slot the keeper writes for a routine — the routine live, the persona's, of the slot's
+    kind and (one of the owner's) on that day; INVALID_ARGUMENT otherwise (the keeper logs it and goes on)."""
+    if plan.routine_id is None:
+        return
+    kind = {RoutineBuiltin.SLEEP: PlanKind.SLEEP, RoutineBuiltin.DIARY: PlanKind.DIARY}.get(routine.builtin) \
+        if routine is not None and routine.builtin is not None else PlanKind.OWN
+    if routine is None or routine.persona_id != persona_id or plan.kind is not kind or (
+            routine.builtin is None and not routine.on(date.fromisoformat(plan.day))):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"routine {plan.routine_id} is not on that day for the persona")

@@ -1544,6 +1544,9 @@ class InMemoryData:
         plan = rules.check_plan_limits(plan, before, [e for e in entries if e.kind is LifeKind.PLAN],
                                        [e for e in entries if e.kind is LifeKind.ARC], origin=origin, zone=where,
                                        now=now, asleep_in=asleep_in, routine=self._routine_of(principal, before))
+        if before is None and plan.routine_id is not None:  # character-routine §13.2: the keeper's, checked
+            rules.check_routine_slot(plan, self._routine_of(principal, rules.planned_entry(
+                persona_id, plan, None, origin, now)), persona_id)
         return rules.planned_entry(persona_id, plan, before, origin, now), before is None
 
     def _keep_planned(self, principal: PrincipalId, planned: tuple[LifeEntry, bool]) -> LifeEntry:

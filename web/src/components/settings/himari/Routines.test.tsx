@@ -120,6 +120,6 @@ describe("the Routines", () => {
     living({ ...aLife(), entries: [{ ...entry(50, "plan", "2026-11-26", "저녁 먹는 중", "writer"), time: "23:50",
       minutes: 40, plan_kind: "own", routine: { id: 3, name: "저녁 식사", trial: true, himari: "move_cancel" } }] });
     await shown();
-    expect(part("Schedule").getByLabelText("Routine").textContent).toBe("저녁 식사 · trial");
+    expect(part("Schedule").getByTitle("Routine").textContent).toBe("저녁 식사 · trial");
   });
 });

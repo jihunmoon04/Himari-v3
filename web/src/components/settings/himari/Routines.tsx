@@ -15,6 +15,7 @@ import { toast } from "@/features/toast";
 import { field, Group, KEY, refused, useUnsaved, why } from "./shared";
 
 export const ROUTINES_KEY = ["settings", "routines"];
+const PLACED_AGAIN_MS = 3000;
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const STATES: Record<RoutineState, string> = { trial: "Trial", fixed: "Fixed", off: "Off" };
 const SAYS: Record<RoutineSay, string> = {
@@ -100,6 +101,8 @@ function Editor({ routine, revision, data, onDone }: {
       setSaving(false);
       void client.invalidateQueries({ queryKey: ROUTINES_KEY });
       void client.invalidateQueries({ queryKey: KEY });
+      // review P2-5: the server places the slots again within a moment; read the schedule once more then
+      setTimeout(() => void client.invalidateQueries({ queryKey: KEY }), PLACED_AGAIN_MS);
     }
   };
   const time = (label: string, value: string, change: (value: string) => void) => (
@@ -112,7 +115,7 @@ function Editor({ routine, revision, data, onDone }: {
   const minutes = (label: string, value: string, change: (value: string) => void) => (
     <label className="flex items-center gap-1 text-xs text-muted">
       {label}
-      <input type="number" step={5} min={builtin === "diary" ? 10 : 5} max={builtin === "diary" ? 60 : 720}
+      <input type="number" step={10} min={10} max={builtin === "diary" ? 60 : 720}
         aria-label={label} value={value} readOnly={saving} onChange={(event) => change(event.target.value)}
         className={`${field} w-20`} />
     </label>
@@ -166,6 +169,7 @@ function Editor({ routine, revision, data, onDone }: {
                 <input type="number" min={1} max={limits.trial_days} aria-label="Trial days" value={form.days}
                   readOnly={saving} onChange={(event) => set({ days: event.target.value })} className={`${field} w-16`} />
                 days{days >= 1 ? ` (until ${addDays(today, days - 1)})` : ""}
+                {routine?.trial_ended && form.days === start.days && " · ended: change the days to try it again"}
               </label>
             )}
             <label className="flex items-center gap-1">

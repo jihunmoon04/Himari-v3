@@ -340,7 +340,7 @@ export function SlotRow({ entry, locked = false, project, onEdit, onDelete }: {
           <span className={cn("text-xs text-muted", gone && "line-through")}>{spanOf(entry)}</span>
           {entry.plan_state && <span className="text-xs text-wait">{STATES[entry.plan_state]}</span>}
           {entry.routine && ( // character-routine §13.4: placed for a routine
-            <span className="text-xs text-muted" aria-label="Routine">
+            <span className="text-xs text-muted" title="Routine">
               {entry.routine.name}{entry.routine.trial ? " · trial" : ""}
             </span>
           )}
