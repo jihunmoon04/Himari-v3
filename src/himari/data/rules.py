@@ -673,6 +673,10 @@ def check_life_persona(persona_id: object) -> int:
     return persona_id
 
 
+# character-routine §9.1: the entries a date's record holds (list_life_days)
+DAY_KINDS = frozenset({LifeKind.PLAN, LifeKind.DIARY, LifeKind.WORK, LifeKind.EVENT})
+
+
 def order_life(entries: Iterable[LifeEntry]) -> tuple[LifeEntry, ...]:
     """Facts first (the user's, then newest), then the arcs (character-world §4: the open
     ones, newest start first, then the closed ones, newest end first), then the dated

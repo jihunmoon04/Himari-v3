@@ -54,6 +54,7 @@ const router = createBrowserRouter(
         { path: "trash", element: <Trash /> },
         { path: "settings", element: <Settings /> },
         { path: "settings/:section", element: <Settings /> },
+        { path: "settings/:section/:tab", element: <Settings /> }, // character-routine §9.2: HIMARI's tabs
         { path: "*", element: <Navigate to="/" replace /> },
       ],
     },

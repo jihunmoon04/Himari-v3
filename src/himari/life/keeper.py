@@ -69,7 +69,7 @@ log = logging.getLogger(__name__)
 
 DAY_SECONDS = 60.0  # §18.7: the keeper's period
 READ_BACK = timedelta(days=2)  # the schedule it reads, from this before today (a night begun yesterday)
-SLEEPS_SHOWN = 14  # §12: the latest sleeps the Web shows
+SLEEPS_SHOWN = 14  # the latest sleeps read for the handoff (the Web reads its own: character-routine §9.1)
 SLEEP_TEXT = "잠"  # a placed sleep slot's text
 
 
@@ -187,9 +187,6 @@ class DayKeeper:
         return day.sleep_view(now, day.tonight(plans, now, self._zone),
                               await self._data.current_sleep(principal, persona_id),
                               await self._data.read_day_state(principal, persona_id), self._zone)
-
-    async def recent_sleeps(self, principal: PrincipalId) -> tuple[SleepRecord, ...]:
-        return await self._data.recent_sleeps(principal, await self._persona(principal), limit=SLEEPS_SHOWN)
 
     # --- DayGate (control.api) -----------------------------------------------------------------
 

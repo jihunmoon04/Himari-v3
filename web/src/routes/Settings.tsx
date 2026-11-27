@@ -1,6 +1,7 @@
 // Settings (V3-P102 W6c): one page, a section per kind, chosen on the left (above on a phone). character-settings §2:
 // what HIMARI remembers is split by where it came from — HIMARI (its own life, apart from the user) and You and HIMARI
-// (from talking with the user: the bond, the notes about the user, the moments together).
+// (from talking with the user: the bond, the notes about the user, the moments together). character-routine §9.2: only
+// HIMARI has tabs (/settings/himari/<tab>, read by its section); a tab named for another section is dropped.
 import { Navigate, NavLink, useParams } from "react-router";
 import { PageHeader } from "@/components/Shell";
 import { BondSettings } from "@/components/settings/Bond";
@@ -22,11 +23,16 @@ const SECTIONS = [
 
 // character-settings §2: where the sections before it went
 const MOVED: Record<string, string> = { life: "himari", memory: "together" };
+const TABBED = "himari";
 
 export function Settings() {
-  const section = useParams().section ?? "instructions";
+  const params = useParams();
+  const section = params.section ?? "instructions";
   const moved = Object.hasOwn(MOVED, section) ? MOVED[section] : undefined; // not /settings/constructor (review)
-  if (moved) return <Navigate to={`/settings/${moved}`} replace />;
+  if (moved) {
+    return <Navigate to={`/settings/${moved}${moved === TABBED && params.tab ? `/${params.tab}` : ""}`} replace />;
+  }
+  if (params.tab !== undefined && section !== TABBED) return <Navigate to={`/settings/${section}`} replace />;
   const shown = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
   return (
     <>

@@ -59,10 +59,11 @@ export function slotsByDay(entries: readonly LifeEntry[]): { day: string; slots:
     .map(([day, slots]) => ({ day, slots: slots.sort((a, b) => (a.time ?? "").localeCompare(b.time ?? "")) }));
 }
 
-/** A day's heading: its date, and "today" or "tomorrow" when it is. */
+/** A day's heading: its date, and "today", "tomorrow" or "yesterday" when it is. */
 export function dayLabel(day: string, today: string): string {
   if (day === today) return `${day} · today`;
   if (day === addDays(today, 1)) return `${day} · tomorrow`;
+  if (day === addDays(today, -1)) return `${day} · yesterday`;
   return day;
 }
 
@@ -103,5 +104,77 @@ export function sleepNote(sleep: SleepRecord): string {
   if (sleep.messages) parts.push(`${sleep.messages} ${sleep.messages === 1 ? "message" : "messages"}`
     + `${sleep.mumbles ? `, ${sleep.mumbles} ${sleep.mumbles === 1 ? "mumble" : "mumbles"}` : ""}`);
   if (sleep.closed_day) parts.push("closed the day");
+  return parts.join(" · ");
+}
+
+// --- character-routine §9.2: the Records tab, a line a day -------------------------------------------------------
+
+/** A date's weekday, short: "Thu". */
+export function weekdayOf(day: string): string {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year ?? 1970, (month ?? 1) - 1, date ?? 1).toLocaleDateString("en", { weekday: "short" });
+}
+
+/** One date of HIMARI's record: its diary, events, slots and work pieces (each by start) and the sleeps that fell
+ *  then (earliest first). */
+export interface DayRecord {
+  day: string;
+  diary: LifeEntry[];
+  events: LifeEntry[];
+  slots: LifeEntry[];
+  pieces: LifeEntry[];
+  sleeps: SleepRecord[];
+}
+
+/** The record by date, newest first, from today back: the dated entries (each once, whichever read brought it) and
+ *  the sleeps by the date they fell (the server's ``day``; else on this browser's clock). Nothing after today (the
+ *  Schedule tab has it). */
+export function recordDays(entries: readonly LifeEntry[], sleeps: readonly SleepRecord[], today: string): DayRecord[] {
+  const days = new Map<string, DayRecord>();
+  const of = (day: string) => {
+    let found = days.get(day);
+    if (!found) {
+      found = { day, diary: [], events: [], slots: [], pieces: [], sleeps: [] };
+      days.set(day, found);
+    }
+    return found;
+  };
+  const seen = new Set<number>();
+  for (const entry of entries) {
+    if (!entry.day || entry.day > today || seen.has(entry.id)) continue;
+    const group = entry.kind === "diary" ? "diary" : entry.kind === "event" ? "events" : entry.kind === "plan" ? "slots"
+      : entry.kind === "work" ? "pieces" : null;
+    if (group === null) continue;
+    seen.add(entry.id);
+    of(entry.day)[group].push(entry);
+  }
+  const slept = new Set<string>();
+  for (const sleep of sleeps) {
+    const key = sleep.id != null ? String(sleep.id) : sleep.fell_at;
+    const day = sleep.day ?? localDay(new Date(sleep.fell_at));
+    if (slept.has(key) || day > today) continue;
+    slept.add(key);
+    of(day).sleeps.push(sleep);
+  }
+  const byTime = (a: { time?: string | null }, b: { time?: string | null }) => (a.time ?? "").localeCompare(b.time ?? "");
+  return [...days.values()]
+    .sort((a, b) => b.day.localeCompare(a.day))
+    .map((record) => ({
+      ...record, events: record.events.sort(byTime), slots: record.slots.sort(byTime),
+      pieces: record.pieces.sort(byTime),
+      sleeps: record.sleeps.sort((a, b) => a.fell_at.localeCompare(b.fell_at)),
+    }));
+}
+
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** A date's line: "2026-11-26 (Thu) · diary · 2 events · 3 slots · sleep" — only what the date holds. */
+export function recordLine(record: DayRecord, today: string): string {
+  const parts = [`${record.day} (${weekdayOf(record.day)})${record.day === today ? " · today" : ""}`];
+  if (record.diary.length) parts.push("diary");
+  if (record.events.length) parts.push(count(record.events.length, "event", "events"));
+  if (record.slots.length) parts.push(count(record.slots.length, "slot", "slots"));
+  if (record.pieces.length) parts.push(count(record.pieces.length, "piece", "pieces"));
+  if (record.sleeps.length) parts.push(record.sleeps.length === 1 ? "sleep" : `${record.sleeps.length} sleeps`);
   return parts.join(" · ");
 }

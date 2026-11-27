@@ -77,12 +77,13 @@ export function usePrincipalEvents(enabled: boolean) {
         return;
       }
       if (event === "himari_sleep") { // character-day §18.12: HIMARI fell asleep, woke, got drowsy
-        void client.invalidateQueries({ queryKey: ["settings", "life"] });
+        // (only the life itself: the older records' pages are not read again for it — character-routine §9.2)
+        void client.invalidateQueries({ queryKey: ["settings", "life"], exact: true });
         return;
       }
       // day_session (character-day §18.12): a day session opened or closed — the list, that conversation (its
       // composer closes with it) and the sleep log are read again
-      if (event === "day_session") void client.invalidateQueries({ queryKey: ["settings", "life"] });
+      if (event === "day_session") void client.invalidateQueries({ queryKey: ["settings", "life"], exact: true });
       if (event === "hello") {
         // (re)connected: nothing is replayed, so whatever is open is read again
         refresh(null);

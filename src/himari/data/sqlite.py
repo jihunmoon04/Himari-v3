@@ -2799,6 +2799,20 @@ class SqliteData:
             # character-mind §5.2: a kept thought is listed until it expires
             return rules.order_life(e for e in map(_life_entry, rows) if rules.live_thought(e, at))
 
+    async def list_life_days(self, principal: PrincipalId, persona_id: int, *, until: str, since: str | None = None,
+                             limit: int | None = None) -> tuple[LifeEntry, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        until = rules.check_life_day(until)
+        since = None if since is None else rules.check_life_day(since)
+        kinds = sorted(kind.value for kind in rules.DAY_KINDS)
+        with self._tx() as tx:  # in list_life's order, so a limit reads only that many rows (review 1)
+            rows = tx.all(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
+                          f" AND retired_at IS NULL AND kind IN ({', '.join('?' for _ in kinds)})"
+                          " AND day IS NOT NULL AND day < ? AND (? IS NULL OR day >= ?)"
+                          " ORDER BY day DESC, kind='diary' DESC, entry_id DESC LIMIT ?",
+                          principal, persona_id, *kinds, until, since, since, -1 if limit is None else max(0, limit))
+        return rules.order_life(map(_life_entry, rows))
+
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         persona_id = rules.check_life_persona(persona_id)
         text = rules.check_life_text(LifeKind.FACT, text)
@@ -3409,6 +3423,16 @@ class SqliteData:
             return tuple(_sleep(r) for r in tx.all(
                 "SELECT * FROM sleeps WHERE owner=? AND persona_id=? ORDER BY sleep_id DESC LIMIT ?", principal,
                 rules.check_life_persona(persona_id), max(0, limit)))
+
+    async def list_sleeps(self, principal: PrincipalId, persona_id: int, *, since: datetime | None = None,
+                          until: datetime | None = None, limit: int | None = None) -> tuple[SleepRecord, ...]:
+        start = None if since is None else _timestamp(since)
+        end = None if until is None else _timestamp(until)
+        with self._tx() as tx:
+            return tuple(_sleep(r) for r in tx.all(
+                "SELECT * FROM sleeps WHERE owner=? AND persona_id=? AND (? IS NULL OR fell_at >= ?)"
+                " AND (? IS NULL OR fell_at < ?) ORDER BY fell_at DESC, sleep_id DESC LIMIT ?", principal,
+                rules.check_life_persona(persona_id), start, start, end, end, -1 if limit is None else max(0, limit)))
 
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
                            before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:
