@@ -184,7 +184,7 @@ def test_himari_changes_at_most_twenty_slots_a_day_each_counted_once() -> None:
         again = await data.write_plan(ALICE, 1, slot("2026-11-28", "18:00", 30, text="다시", entry_id=made[0].entry_id),
                                       origin=LifeOrigin.HIMARI, zone=ZONE, now=NOW)  # the same slot again: counted
         assert again.revision == 2
-        with refused(DataErrorCode.PLAN_REFUSED, f"changed {MAX_HIMARI_PLAN_WRITES} slots today"):
+        with refused(DataErrorCode.PLAN_REFUSED, f"changed {MAX_HIMARI_PLAN_WRITES} slots and projects today"):
             await data.write_plan(ALICE, 1, slot("2026-11-28", "19:00", 30), origin=LifeOrigin.HIMARI, zone=ZONE,
                                   now=NOW)
         await data.write_plan(ALICE, 1, slot("2026-11-28", "19:00", 30), origin=LifeOrigin.USER, zone=ZONE,

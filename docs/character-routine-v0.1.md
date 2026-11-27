@@ -242,3 +242,31 @@
   - 프롬프트(arcs의 id, `PROJECT_RULE`은 하루 세션만).
 - **검사와 Web:** 엄격 mypy, `check_imports`, 영향 받는 묶음. Web typecheck·lint·vitest.
 - **검수:** Claude(Orca 작업자).
+
+## 12. 2단계 구현에서 정한 것
+
+1. **Tool의 바꾸기는 `PlanChange`로 간다.** 계약대로 `PlanOp.PROJECT_START`·`PROJECT_UPDATE`·`PROJECT_END`와 `PlanChange.project`(`ProjectWrite`)를 쓴다. 디스패처와 커밋 길(같은 트랜잭션, "Not written: …")은 손대지 않았다.
+2. **검사 하나:**
+   - `rules.check_project_write`(모양)와 `rules.project_changed`(한계)를 네 길이 함께 쓴다. 길마다 저장소에서 부르는 곳은 이렇다.
+     - Tool: 메모리 `_stage_plan_change`, SQLite `_apply_plan_change`.
+     - 일기: `_move_arc`.
+     - Web: `end_project`.
+   - 작품의 `done`은 `rules.worked_on`이 같은 `project_end_refusal`을 본다.
+   - 지금 쓰지 않는 `arc_starts`는 지웠다.
+3. **20번 셈에 닫힌 프로젝트도 든다.** `_plans`가 열린 프로젝트만이 아니라 지워지지 않은 모든 프로젝트를 읽는다(오늘 닫은 것도 세려고). 프로젝트를 쓰는 검사는 모두 `arc_open`을 본다. 작품이 HIMARI가 시작한 프로젝트의 "지금까지"를 고쳐도 그 프로젝트가 오늘 셈에 든다(`updated_at`). 셈은 항목마다 한 번이라 많아야 하나다.
+4. **누가 바꿨나(origin):**
+   - 일기가 끝낸 프로젝트의 origin은 이제 `writer`다(전에는 그대로 두었다).
+   - 소유자가 고친 프로젝트는 누가 끝내도 `user`로 남는다(제목·목표가 소유자의 것이라).
+5. **날짜:**
+   - Tool의 시작·끝 날짜는 `life_day`다. 서버 시간대로, 05:00 전이면 전날이다.
+   - 일기는 그 일기의 날짜를 쓴다. 작품은 그 칸의 날짜다.
+   - "시작한 날"의 비교는 `day <= 시작일`이다. 늦게 적용된 일기가 시작보다 앞선 날짜로 끝내는 것도 막는다.
+6. **없는 프로젝트**는 `NOT_FOUND` "There is no open project N."이다. 끝난 것, 다른 페르소나의 것, 지운 것이 모두 여기에 든다. Tool 설명이 id는 `himari_life.arcs`에 있다고 알린다.
+7. **`himari_life.arcs`의 `id`·`started`는 모든 세션에 보낸다.** 하루 세션이 아닌 곳에서도 같은 모양이라 상태 블록의 키가 한 번 바뀐다.
+8. **Web:**
+   - 열린 프로젝트 아래에 "End project"가 있다. 누르면 맺음 한 줄을 받는 폼이 열린다. 한 번에 하나만 열리고, 다른 편집은 잠긴다.
+   - 끝내기 전에 "다시 열 수 없다"고 묻는다.
+   - 버전이 충돌하면 쓴 맺음을 남긴다.
+   - 프로젝트의 마지막 이유가 "Why: …"로 보인다. HIMARI가 시작한 것은 "by HIMARI"다.
+   - 끝난 프로젝트에는 버튼이 없다.
+9. 실제 모델로 Tool을 불러 본 적은 없다. 써 보면서 본다.

@@ -41,7 +41,8 @@ def test_the_state_carries_the_projects_so_far_and_the_newest_two_pieces_of_two_
     long = "가" * (WORK_TEXT_CHARS + 50)
     life = himari_life_data((ARC, piece(3, 50), piece(4, 30), piece(5, 2, long), piece(6, 1)), NOW)
     assert life is not None
-    assert life["arcs"] == [{"title": "블랙홀 전자포", "goal": "설정집 한 권", "so_far": "포신과 냉각부까지."}]
+    assert life["arcs"] == [{"id": 1, "title": "블랙홀 전자포", "goal": "설정집 한 권", "started": "2026-11-20",
+                             "so_far": "포신과 냉각부까지."}]
     assert life["work"] == [
         {"title": "조각 6", "project": "블랙홀 전자포", "date": "2026-11-25", "text": "본문"},  # whole: no summary
         {"title": "조각 5", "summary": "요약 5", "project": "블랙홀 전자포", "date": "2026-11-25"}]

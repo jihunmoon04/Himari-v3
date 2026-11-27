@@ -3,7 +3,9 @@
 // and a piece's title, summary and text edited; the worker and the next work time.
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { editLife } from "@/api/settings";
+import { ApiError } from "@/api/client";
+import { editLife, endProject } from "@/api/settings";
+import { toast } from "@/features/toast";
 import { aLife, entry, living, onThursday, part, shownAt } from "./testing";
 
 vi.mock("@/api/settings", async (importOriginal) => ({
@@ -12,6 +14,7 @@ vi.mock("@/api/settings", async (importOriginal) => ({
   readLifeHistory: vi.fn(),
   editLife: vi.fn(async () => ({})),
   deleteLife: vi.fn(async () => undefined),
+  endProject: vi.fn(async () => ({})),
 }));
 vi.mock("@/features/toast", () => ({ toast: vi.fn() }));
 
@@ -102,6 +105,53 @@ describe("the Projects tab", () => {
     });
     await shown();
     expect(within(part("Open projects").getByLabelText("Project 블랙홀 전자포")).getByText("포신 끝.")).toBeTruthy();
+  });
+
+  it("ends an open project with a one-line ending, from the revision opened, and says why it was last changed",
+    async () => {
+      living({
+        ...aLife(),
+        entries: [
+          { ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "himari", 3), title: "그림 연습", status: "open",
+            end_day: null, reason: "대화하다가 그리고 싶어졌어." },
+          { ...entry(10, "arc", "2026-11-01", "매일 십 분", "writer", 2), title: "우쿨렐레", status: "closed",
+            end_day: "2026-11-20", ending: "한 곡을 끝까지 쳤다." },
+        ],
+      });
+      await shown();
+      const project = within(part("Open projects").getByLabelText("Project 그림 연습"));
+      expect(project.getByText("Why: 대화하다가 그리고 싶어졌어.")).toBeTruthy();
+      expect(project.getByText("since 2026-11-10 · open · by HIMARI")).toBeTruthy();
+      expect(within(part("Closed projects").getByLabelText("Project 우쿨렐레"))
+        .queryByRole("button", { name: "End project" })).toBeNull(); // a closed one is never ended again
+      fireEvent.click(project.getByRole("button", { name: "End project" }));
+      expect(project.getAllByRole("button", { name: "Edit" }).every((b) => (b as HTMLButtonElement).disabled))
+        .toBe(true); // one editor at a time
+      const ending = screen.getByLabelText("Ending") as HTMLInputElement;
+      expect(ending.maxLength).toBe(200);
+      fireEvent.change(ending, { target: { value: " 한 장 다 그렸다. " } });
+      vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+      fireEvent.click(screen.getByRole("button", { name: "End project" }));
+      expect(endProject).not.toHaveBeenCalled(); // asked first
+      vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+      fireEvent.click(screen.getByRole("button", { name: "End project" }));
+      await waitFor(() => expect(endProject).toHaveBeenCalledWith(11, "한 장 다 그렸다.", 3));
+      await waitFor(() => expect(screen.queryByLabelText("Ending")).toBeNull());
+    });
+
+  it("keeps the ending when the project was changed elsewhere", async () => {
+    vi.mocked(endProject).mockRejectedValueOnce(new ApiError(409, "revision_conflict", "changed"));
+    living({
+      ...aLife(),
+      entries: [{ ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "writer"), title: "그림 연습", status: "open" }],
+    });
+    await shown();
+    fireEvent.click(screen.getByRole("button", { name: "End project" }));
+    fireEvent.change(screen.getByLabelText("Ending"), { target: { value: "끝." } });
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "End project" }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringMatching(/changed elsewhere/), "error"));
+    expect((screen.getByLabelText("Ending") as HTMLInputElement).value).toBe("끝.");
   });
 
   it("says when there are no projects and the worker is off", async () => {

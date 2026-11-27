@@ -34,6 +34,7 @@ from himari.prompt.api import (
     FREE_SCREEN_RULE,
     PROACTIVE_RULE,
     PROGRESS_NOTE,
+    PROJECT_RULE,
     SCHEDULE_RULE,
     SLEEP_RULE,
     SCREEN_MOVE_NOTE,
@@ -150,7 +151,8 @@ def companion_section(screen_points: bool, proactive: bool = False, free: bool =
     free_lines = (free_rule, *((FREE_SCREEN_RULE,) if screen_tool else ()),
                   *((ANNIVERSARY_RULE, WORK_RULE) if life else ())) if free else ()
     speaking = (SPEAKING_RULE, PROACTIVE_RULE, *free_lines) if proactive else (SPEAKING_RULE,)
-    lived = (LIFE_RULE, *((SCHEDULE_RULE, SLEEP_RULE) if day else ()), BOND_RULE, MOOD_RULE) if life else ()
+    day_rules = (SCHEDULE_RULE, SLEEP_RULE, PROJECT_RULE) if day else ()  # character-routine §11.3: projects last
+    lived = (LIFE_RULE, *day_rules, BOND_RULE, MOOD_RULE) if life else ()
     talking = TALKING_RULE + (" " + WORK_TALK_NOTE if life else "")  # character-mind §4.4
     return "\n".join((COMPANION_HEAD, PERSONA_RULE, THINK_RULE, *lived, talking,
                       *speaking, EXPRESSION_RULE, ACTIVITY_RULE, screens))

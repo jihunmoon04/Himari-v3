@@ -30,6 +30,7 @@ from himari.tool.dispatcher import Dispatcher
 from himari.tool.images import StoredResultImages
 from himari.tool.conversation_search import conversation_search_tools
 from himari.tool.memory import memory_tools
+from himari.tool.project import project_tools
 from himari.tool.schedule import schedule_tools
 from himari.tool.screen import ScreenTool
 from himari.tool.registry import ToolRegistry
@@ -109,6 +110,8 @@ def build_runtime(
                                        if memory else ()),
                              # character-day §4.3: HIMARI's schedule Tools, offered in the day session only
                              *(schedule_tools(data, time_zone=time_zone or "UTC") if lived else ()),
+                             # character-routine §11.2: and its project Tools, right after them
+                             *(project_tools(time_zone=time_zone or "UTC") if lived else ()),
                              *(conversation_search_tools(data, compacted_through) if conversation_search else ()),
                              *((ScreenTool(screen),) if screen is not None else ())],
                             allow_require_user=allow_require_user_tools)

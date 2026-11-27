@@ -11,7 +11,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 
 from himari.common import (
     AttachmentRef,
@@ -36,12 +36,15 @@ from himari.data.api import (
     DayBefore,
     DayState,
     FellBy,
+    PROJECT_OPS,
     PlanChange,
     PlanKind,
     PlanOp,
     PlanState,
     PlanWrite,
+    ProjectWrite,
     SleepRecord,
+    life_day,
     WokeBy,
     ALREADY_SENT,
     EventPage,
@@ -1408,10 +1411,34 @@ class InMemoryData:
     # --- the schedule (character-day v0.1 §4, §18.2) ---------------------------------------------
 
     def _plans(self, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
-        """Every plan of the persona not retired (cancelled and missed too), and its open arcs."""
+        """Every plan of the persona not retired (cancelled and missed too), and its arcs (character-routine
+        §11.1: the closed ones too, for HIMARI's day count)."""
         return [e for (owner, _), (e, retired) in self._store.life.items()
                 if owner == principal and retired is None and e.persona_id == persona_id
-                and (e.kind is LifeKind.PLAN or e.arc_open)]
+                and e.kind in (LifeKind.PLAN, LifeKind.ARC)]
+
+    def _project(self, principal: PrincipalId, persona_id: int, op: PlanOp, write: object, origin: LifeOrigin,
+                 zone: tzinfo, now: datetime, *, day: str | None = None, source: str | None = None) -> LifeEntry:
+        """character-routine §11.1: the project change to keep (``rules.project_changed``); nothing is changed yet."""
+        persona_id = rules.check_life_persona(persona_id)
+        checked = rules.check_project_write(op, write, origin)
+        return rules.project_changed(op, checked, self._plans(principal, persona_id), persona_id=persona_id,
+                                     origin=origin, day=day or life_day(now, zone), zone=zone, now=now,
+                                     source=source)
+
+    def _keep_project(self, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
+        return self._new_life(principal, entry) if entry.entry_id == 0 else self._put_life(principal, entry)
+
+    async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, *, expected_revision: int,
+                          zone: str, now: datetime) -> LifeEntry:
+        entry = self._live_entry(principal, entry_id)
+        if not entry.arc_open:
+            raise DataError(DataErrorCode.NOT_FOUND, f"There is no open project {entry_id}.")
+        if expected_revision != entry.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+        return self._keep_project(principal, self._project(
+            principal, entry.persona_id, PlanOp.PROJECT_END, ProjectWrite(entry_id, ending=ending), LifeOrigin.USER,
+            rules.check_zone(zone), now))
 
     def _planned(self, principal: PrincipalId, persona_id: int, plan: PlanWrite, origin: LifeOrigin, zone: str,
                  now: datetime) -> tuple[LifeEntry, bool]:
@@ -1440,8 +1467,8 @@ class InMemoryData:
         if why is None:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a cancelled slot says why")
         before = rules.live_plan_of(self._live_entry(principal, entry_id), persona_id)
-        plans = [e for e in self._plans(principal, before.persona_id) if e.kind is LifeKind.PLAN]
-        rules.check_cancel(before, plans, origin=origin, zone=rules.check_zone(zone), now=now)
+        rules.check_cancel(before, self._plans(principal, before.persona_id), origin=origin,
+                           zone=rules.check_zone(zone), now=now)
         return replace(before, plan_state=PlanState.CANCELLED, reason=why, origin=origin,
                        revision=before.revision + 1, updated_at=now)
 
@@ -1459,13 +1486,18 @@ class InMemoryData:
             cancelled = self._cancelled(principal, change.entry_id, change.reason, LifeOrigin.HIMARI, change.zone,
                                         change.at, rules.check_life_persona(change.persona_id))
             return lambda: self._put_life(principal, cancelled)
+        if change.op in PROJECT_OPS:  # character-routine §11.1
+            project = self._project(principal, change.persona_id, change.op, change.project, LifeOrigin.HIMARI,
+                                    rules.check_zone(change.zone), change.at)
+            return lambda: self._keep_project(principal, project)
         persona_id = rules.check_life_persona(change.persona_id)
         zone = rules.check_zone(change.zone)
-        plans = [e for e in self._plans(principal, persona_id) if e.kind is LifeKind.PLAN]
+        entries = self._plans(principal, persona_id)
+        plans = [e for e in entries if e.kind is LifeKind.PLAN]
         slot, write = rules.sleep_now(plans, zone=zone, now=change.at, reason=rules.check_plan_reason(change.reason))
         made: tuple[LifeEntry, bool] | None = None
         if write is not None:  # character-day §4.2: tonight's slot moved, never made (the keeper places it)
-            rules.check_himari_count(plans, slot.entry_id, zone, change.at)
+            rules.check_himari_count(entries, slot.entry_id, zone, change.at)
             made = (rules.planned_entry(persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI,
                                         change.at), False)
         state = self._store.day_states.get((principal, persona_id), DayState(persona_id))
@@ -1746,22 +1778,19 @@ class InMemoryData:
     def _move_arc(self, principal: PrincipalId, persona_id: int, day: str, move: ArcMove, write_id: str,
                   now: datetime) -> tuple[int | None, LifeEntry | None]:
         """character-world §4: as SqliteData._move_arc."""
-        arcs = self._open_arcs(principal, persona_id)
-        if move.op is ArcOp.START:
-            if not rules.arc_starts(move, arcs):
-                return None, None
-            assert move.goal is not None
-            started = self._new_life(principal, LifeEntry(0, persona_id, LifeKind.ARC, day, move.goal,
-                                                          LifeOrigin.WRITER, 1, now, now, source=write_id,
-                                                          title=move.title))
-            return started.entry_id, started
-        target = rules.arc_moved(move, arcs)
-        if target is None:
-            return None, None
         if move.op is ArcOp.ADVANCE:
-            return target.entry_id, None
-        return target.entry_id, self._put_life(principal, replace(target, revision=target.revision + 1,
-                                                                  updated_at=now, end_day=day, ending=move.ending))
+            target = rules.arc_moved(move, self._open_arcs(principal, persona_id))
+            return (None, None) if target is None else (target.entry_id, None)
+        op, write = rules.arc_project_write(move)
+        try:
+            made = self._project(principal, persona_id, op, write, LifeOrigin.WRITER, UTC, now, day=day,
+                                 source=write_id)
+        except DataError as error:
+            if error.code not in (DataErrorCode.PLAN_REFUSED, DataErrorCode.NOT_FOUND):
+                raise
+            return None, None
+        kept = self._keep_project(principal, made)
+        return kept.entry_id, kept
 
     def _open_arcs(self, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
         return [e for (owner, _), (e, retired) in self._store.life.items()
