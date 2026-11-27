@@ -40,6 +40,7 @@ from himari.data.api import (  # noqa: E402
     ThoughtOp,
     WokeBy,
     WorkPiece,
+    life_day,
 )
 from himari.interfaces.web import app as web  # noqa: E402
 
@@ -156,6 +157,50 @@ def test_an_arc_is_seen_with_its_title_and_status_and_its_title_and_goal_are_edi
     long = server.client.put(f"/api/life/{arc['id']}", json={"text": "g", "title": "x" * (MAX_ARC_TITLE_CHARS + 1),
                                                              "revision": edited.json()["revision"]}, headers=SEND)
     assert (long.status_code, error_code(long)) == (422, "too_large")
+
+
+def test_the_user_ends_an_open_project_from_the_revision_shown(server: Server) -> None:
+    """character-routine §11.4: ended with its one-line ending (kept as the user's, the day it started too); a
+    change since, a closed or unknown project, an ending too long or blank are refused."""
+    async def written() -> None:
+        assert server.application is not None
+        data = server.application.data
+        for day, title in (("2099-01-01", "그림 연습"), ("2099-01-02", "우쿨렐레")):
+            write_id = await data.begin_life_write(ME, LifeWriteStart(0, day, "p", "m", b"{}", "j", 1))
+            await data.mark_life_write_dispatched(write_id)
+            await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+            await data.apply_life_write(write_id, LifePlan(f"{day}의 일기.",
+                                                           arc=ArcMove(ArcOp.START, title=title, goal="천천히")),
+                                        now=datetime.now(UTC))
+
+    server.client.portal.call(written)  # type: ignore[union-attr]
+    arcs = {e["title"]: e for e in server.client.get("/api/life").json()["entries"] if e["kind"] == "arc"}
+    arc = arcs["그림 연습"]
+    stale = server.client.post(f"/api/life/arcs/{arc['id']}/end", json={"ending": "끝.", "revision": 2},
+                               headers=SEND)
+    assert (stale.status_code, error_code(stale)) == (409, "revision_conflict")
+    long = server.client.post(f"/api/life/arcs/{arc['id']}/end",
+                              json={"ending": "x" * (MAX_ARC_CHARS + 1), "revision": 1}, headers=SEND)
+    assert (long.status_code, error_code(long)) == (422, "too_large")
+    ended = server.client.post(f"/api/life/arcs/{arc['id']}/end", json={"ending": " 다 그렸다. ", "revision": 1},
+                               headers=SEND)
+    assert ended.status_code == 200
+    body = ended.json()
+    assert server.application is not None
+    assert (body["status"], body["ending"], body["origin"], body["revision"], body["end_day"]) == (
+        "closed", "다 그렸다.", "user", 2,  # never dated before its start (this one starts in 2099)
+        max("2099-01-01", life_day(datetime.now(UTC), ZoneInfo(server.application.time_zone))))
+    again = server.client.post(f"/api/life/arcs/{arc['id']}/end", json={"ending": "또.", "revision": 2},
+                               headers=SEND)
+    assert again.status_code == 404
+    unknown = server.client.post("/api/life/arcs/999/end", json={"ending": "끝.", "revision": 1}, headers=SEND)
+    assert unknown.status_code == 404
+    other = arcs["우쿨렐레"]
+    blank = server.client.post(f"/api/life/arcs/{other['id']}/end", json={"ending": "  ", "revision": 1},
+                               headers=SEND)
+    assert blank.status_code == 422
+    unsigned = server.client.post(f"/api/life/arcs/{other['id']}/end", json={"ending": "끝.", "revision": 1})
+    assert unsigned.status_code in (401, 403)  # no allowed origin header
 
 
 def test_a_project_shows_its_so_far_its_pieces_and_the_next_work_plan(server: Server) -> None:

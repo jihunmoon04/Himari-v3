@@ -53,7 +53,7 @@ import sqlite3
 import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 
 from himari.common import (
     AttachmentRef,
@@ -80,12 +80,15 @@ from himari.data.api import (
     DayBefore,
     DayState,
     FellBy,
+    PROJECT_OPS,
     PlanChange,
     PlanKind,
     PlanOp,
     PlanState,
     PlanWrite,
+    ProjectWrite,
     SleepRecord,
+    life_day,
     WokeBy,
     ALREADY_SENT,
     SEARCH_KINDS,
@@ -2850,10 +2853,34 @@ class SqliteData:
     # --- the schedule (character-day v0.1 §4, §18.2) ---------------------------------------------
 
     def _plans(self, tx: _Tx, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
-        """Every plan of the persona not retired (cancelled and missed too), and its open arcs."""
+        """Every plan of the persona not retired (cancelled and missed too), and its arcs (character-routine
+        §11.1: the closed ones too, for HIMARI's day count)."""
         return [_life_entry(r) for r in tx.all(
             f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=? AND retired_at IS NULL"
-            " AND (kind='plan' OR (kind='arc' AND end_day IS NULL))", principal, persona_id)]
+            " AND kind IN ('plan', 'arc')", principal, persona_id)]
+
+    def _change_project(self, tx: _Tx, principal: PrincipalId, persona_id: int, op: PlanOp, write: object,
+                        origin: LifeOrigin, zone: tzinfo, now: datetime, *, day: str | None = None,
+                        source: str | None = None) -> LifeEntry:
+        """character-routine §11.1: one project change (``rules.project_changed``), kept."""
+        persona_id = rules.check_life_persona(persona_id)
+        checked = rules.check_project_write(op, write, origin)
+        made = rules.project_changed(op, checked, self._plans(tx, principal, persona_id), persona_id=persona_id,
+                                     origin=origin, day=day or life_day(now, zone), zone=zone, now=now,
+                                     source=source)
+        return self._new_life(tx, principal, made) if made.entry_id == 0 else self._rewrite_life(tx, principal, made)
+
+    async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, *, expected_revision: int,
+                          zone: str, now: datetime) -> LifeEntry:
+        with self._tx() as tx:
+            entry = self._live_entry(tx, principal, entry_id)
+            if not entry.arc_open:
+                raise DataError(DataErrorCode.NOT_FOUND, f"There is no open project {entry_id}.")
+            if expected_revision != entry.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {entry.revision}")
+            return self._change_project(tx, principal, entry.persona_id, PlanOp.PROJECT_END,
+                                        ProjectWrite(entry_id, ending=ending), LifeOrigin.USER,
+                                        rules.check_zone(zone), now)
 
     def _write_plan(self, tx: _Tx, principal: PrincipalId, persona_id: int, plan: PlanWrite, origin: LifeOrigin,
                     zone: str, now: datetime) -> LifeEntry:
@@ -2879,8 +2906,8 @@ class SqliteData:
         if why is None:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a cancelled slot says why")
         before = rules.live_plan_of(self._live_entry(tx, principal, entry_id), persona_id)
-        plans = [e for e in self._plans(tx, principal, before.persona_id) if e.kind is LifeKind.PLAN]
-        rules.check_cancel(before, plans, origin=origin, zone=rules.check_zone(zone), now=now)
+        rules.check_cancel(before, self._plans(tx, principal, before.persona_id), origin=origin,
+                           zone=rules.check_zone(zone), now=now)
         return self._rewrite_life(tx, principal, dataclasses.replace(
             before, plan_state=PlanState.CANCELLED, reason=why, origin=origin, revision=before.revision + 1,
             updated_at=now))
@@ -2897,13 +2924,17 @@ class SqliteData:
         if change.op is PlanOp.CANCEL:
             return self._cancel_plan(tx, principal, change.entry_id, change.reason, LifeOrigin.HIMARI, change.zone,
                                      change.at, rules.check_life_persona(change.persona_id))
+        if change.op in PROJECT_OPS:  # character-routine §11.1
+            return self._change_project(tx, principal, change.persona_id, change.op, change.project,
+                                        LifeOrigin.HIMARI, rules.check_zone(change.zone), change.at)
         persona_id = rules.check_life_persona(change.persona_id)
         zone = rules.check_zone(change.zone)
-        plans = [e for e in self._plans(tx, principal, persona_id) if e.kind is LifeKind.PLAN]
+        entries = self._plans(tx, principal, persona_id)
+        plans = [e for e in entries if e.kind is LifeKind.PLAN]
         slot, write = rules.sleep_now(plans, zone=zone, now=change.at, reason=rules.check_plan_reason(change.reason))
         made = slot
         if write is not None:  # character-day §4.2: tonight's slot moved, never made (the keeper places it)
-            rules.check_himari_count(plans, slot.entry_id, zone, change.at)
+            rules.check_himari_count(entries, slot.entry_id, zone, change.at)
             made = self._rewrite_life(tx, principal, rules.planned_entry(
                 persona_id, rules.check_plan_write(write), slot, LifeOrigin.HIMARI, change.at))
         state = self._day_state(tx, principal, persona_id)  # second review 1: bound to the slot it moved
@@ -3231,22 +3262,18 @@ class SqliteData:
         wrote (a start or a close; an advance writes none), or (None, None) when the move is left
         out — a start past MAX_OPEN_ARCS or titled as an open arc, or a move of what is not an
         open arc of the persona."""
-        arcs = self._open_arcs(tx, principal, persona_id)
-        if move.op is ArcOp.START:
-            if not rules.arc_starts(move, arcs):
-                return None, None
-            assert move.goal is not None
-            started = self._new_life(tx, principal, LifeEntry(
-                0, persona_id, LifeKind.ARC, day, move.goal, LifeOrigin.WRITER, 1, now, now, source=write_id,
-                title=move.title))
-            return started.entry_id, started
-        target = rules.arc_moved(move, arcs)
-        if target is None:
-            return None, None
         if move.op is ArcOp.ADVANCE:
-            return target.entry_id, None
-        return target.entry_id, self._rewrite_life(tx, principal, dataclasses.replace(
-            target, revision=target.revision + 1, updated_at=now, end_day=day, ending=move.ending))
+            target = rules.arc_moved(move, self._open_arcs(tx, principal, persona_id))
+            return (None, None) if target is None else (target.entry_id, None)
+        op, write = rules.arc_project_write(move)  # character-routine §11.1: the Tools' change, origin WRITER
+        try:
+            kept = self._change_project(tx, principal, persona_id, op, write, LifeOrigin.WRITER, UTC, now,
+                                        day=day, source=write_id)
+        except DataError as error:
+            if error.code not in (DataErrorCode.PLAN_REFUSED, DataErrorCode.NOT_FOUND):
+                raise
+            return None, None
+        return kept.entry_id, kept
 
     def _open_arcs(self, tx: _Tx, principal: PrincipalId, persona_id: int) -> list[LifeEntry]:
         return [_life_entry(r) for r in tx.all(

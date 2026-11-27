@@ -811,7 +811,10 @@ def himari_life_data(entries: Sequence[LifeEntry], now: datetime | None = None,
         size = len(entry.title or "") + len(entry.text) + len(entry.so_far or "")
         if size > room:
             continue
-        arcs.append({"title": entry.title, "goal": entry.text, **({"so_far": entry.so_far} if entry.so_far else {})})
+        # character-routine §11.3: with its id (the project Tools and work slots name it) and the day it started
+        arcs.append({"id": entry.entry_id, "title": entry.title, "goal": entry.text,
+                     **({"started": entry.day} if entry.day else {}),
+                     **({"so_far": entry.so_far} if entry.so_far else {})})
         room -= size
     titles = {e.entry_id: e.title for e in entries if e.kind is LifeKind.ARC}
     pieces = sorted((e for e in entries if e.kind is LifeKind.WORK and not e.draft  # a draft is himari_now's
@@ -1325,6 +1328,16 @@ SCHEDULE_RULE = (
     "words. A <wake> reason \"together\" means such a time has come: start it with them. The diary slot is when you "
     "write today's diary: you may move it, never cancel it, and until it comes there is no diary of today yet. Keep "
     "the schedule quietly: do not read it out or talk about the tools."
+)
+# character-routine §11.3: after SCHEDULE_RULE and SLEEP_RULE, in the day session only. Projects are HIMARI's own to
+# start, change and end with the project Tools; the diary may still move them too.
+PROJECT_RULE = (
+    "- Your projects: himari_life.arcs are your open projects, things you make yourself over weeks, out of who you "
+    "are — never out of the user's own matters. When something you want to make comes up, in a conversation or on "
+    "your own, start it with project_start (at most 2 open) and give it time in your schedule with schedule_write "
+    "(kind work, its id: schedule_read shows a project you just started). Change a title or goal with "
+    "project_update; when one reaches its end, end it with project_end and a one-line ending (not on the day it "
+    "started). Always give your reason in your own words, and do not talk about the tools."
 )
 # §5, §8: right after SCHEDULE_RULE. The asleep half of what LIFE_RULE used to say lives here (§8).
 SLEEP_RULE = (

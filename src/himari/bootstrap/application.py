@@ -1283,6 +1283,15 @@ class Application:
         return await self.data.write_plan(principal, found.persona_id, plan, origin=LifeOrigin.USER,
                                           zone=self.time_zone, now=datetime.now(UTC))
 
+    async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, revision: int) -> LifeEntry:
+        """character-routine §11.4: the user ends an open project of the chosen persona, at the revision the page
+        read (the day it started does not hold the user back)."""
+        found = next((e for e in (await self.life(principal))[1] if e.entry_id == entry_id), None)
+        if found is None or not found.arc_open:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no open project {entry_id}")
+        return await self.data.end_project(principal, entry_id, ending, expected_revision=revision,
+                                           zone=self.time_zone, now=datetime.now(UTC))
+
     async def session_diaries(self, scope: TrustedScope) -> tuple[tuple[str, datetime, str, str], ...]:
         """§7, §18.11: the diaries written in this day session's context — each write's id (stable: the Web keys
         on it), when it was written, its text (as the diary stands now; one deleted since is left out) and its step,

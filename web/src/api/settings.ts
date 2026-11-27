@@ -56,7 +56,7 @@ export const choosePersona = (personaId: number | null, revision: number) =>
 export type LifeKind = "fact" | "plan" | "diary" | "arc" | "work" | "thought" | "event";
 export type ThoughtAbout = "user" | "self" | "work" | "intent";
 // the story writer, a conversation, the user; himari: HIMARI itself in a day session, by its schedule Tool
-// (character-day §4.1)
+// (character-day §4.1) or its project Tool (character-routine §11.2)
 export type LifeOrigin = "writer" | "conversation" | "user" | "himari";
 // character-day §4.1: a schedule slot's kind (sleep: the night's sleep; work: a project's, with arc_id; together: a
 // time agreed with the user; own: something on its own), and a slot no longer alive (cancelled by HIMARI, or a
@@ -96,7 +96,7 @@ export interface LifeEntry {
   minutes?: number | null;
   plan_kind?: PlanKind | null;
   plan_state?: PlanState | null;
-  reason?: string | null;
+  reason?: string | null; // character-routine §11.4: also why a project was last started, changed or ended
 }
 
 /** character-day §5.1: HIMARI's sleep now (the server keeps it), for the persona in use. */
@@ -196,6 +196,10 @@ export const editLife = (id: number, text: string, revision: number, title?: str
     text, revision, ...(title === undefined ? {} : { title }), ...(summary === undefined ? {} : { summary }),
   });
 export const deleteLife = (id: number, revision: number) => del<void>(`/api/life/${id}?revision=${revision}`);
+/** character-routine §11.4: the user ends an open project with its one-line ending (from the revision the page read;
+ * the day it started does not hold the user back). */
+export const endProject = (id: number, ending: string, revision: number) =>
+  post<LifeEntry>(`/api/life/arcs/${id}/end`, { ending, revision });
 /** character-day §18.11: a schedule slot written or edited (moved); one past the limits (the sleep slot's range, an
  * overlap with it, seven days) is refused with ``plan_refused`` and says why. ``personaId`` as for a fact. */
 export const addPlan = (plan: PlanInput, personaId: number | null) =>

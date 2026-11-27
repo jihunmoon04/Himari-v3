@@ -275,7 +275,8 @@ def test_the_input_holds_the_weather_the_topics_and_the_open_arcs_with_the_days_
     assert data["topics"] == ["첫 눈 소식", "새 영화 개봉"]
     bare = request_data((), (), day=DAY, now=NOW, zone=SEOUL)
     assert "weather" not in bare and "topics" not in bare
-    for said in ("weather", "topics", "politics", "never state as fact", "at most one move a day", "at most 2 open"):
+    for said in ("weather", "topics", "politics", "never state as fact", "at most one move in this answer",
+                 "at most 2 open", "never close one that started today"):
         assert said in WRITER_INSTRUCTIONS
     assert '"arc"' in WRITER_INSTRUCTIONS and '"move": "advance", "id"' in WRITER_INSTRUCTIONS
 

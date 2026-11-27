@@ -168,3 +168,120 @@
    - 30일보다 오래된 열린 프로젝트의 작품은 기록이 아니라 Projects에만 보인다(Show older가 그 날짜에 닿을 때까지).
    - 저장하지 않은 고침이 있으면 탭을 옮길 때 묻는다. Today는 지금 자고 있는 어젯밤 잠 칸도 보인다. `days`가 틀리면 언제나 400 `invalid_argument`.
    - `sleeps (owner, persona_id, fell_at)` 색인은 스키마 판을 올려야 해서 두지 않았다(잠은 수백 행).
+
+## 11. 2단계 구현 계약: 프로젝트 Tool (2026-11-27)
+
+소유자가 "병합하고 2단계도 진행해줘"라고 한 뒤 쓴다. 스키마는 바뀌지 않는다(v30 그대로).
+
+### 11.1 Data: 프로젝트 바꾸기 하나
+
+- **바꾸기 셋:** 시작(제목, 목표), 고치기(제목·목표 중 하나 이상), 끝내기(한 줄 맺음). 모두 이유 한 줄(`reason`, 프로젝트 항목의 `reason` 칸, HIMARI의 것만 필수)을 가질 수 있다.
+- **같은 동작 하나**(`rules`의 검사와 두 저장소의 적용)를 이 넷이 쓴다.
+  - Tool: origin `himari`. 거부는 문장으로 돌려준다.
+  - 일기 JSON의 `arc`: 시작과 끝, origin `writer`. 거부되면 그 움직임만 빠지고 일기는 남는다(지금처럼).
+  - 작품의 `done`: 거부되면 끝내기만 빠진다. 작품과 "지금까지"는 남는다.
+  - Web 끝내기: origin `user`.
+- **프로젝트의 날**(`life_day(now, zone)`, 새 도움 함수): 사용자 시간대 날짜. 05:00(`NIGHT_ENDS`) 전이면 전날이다. 하루 세션이 자정을 넘겨도 그날로 센다. 일기와 작품은 지금처럼 자기 날짜를 쓴다.
+- **한계(규칙):**
+  1. 열린 프로젝트는 최대 2개. 같은 제목(접어서 비교)의 열린 프로젝트가 있으면 시작을 거부한다.
+  2. **시작한 날에는 끝낼 수 없다**(HIMARI·일기·작품). "프로젝트마다 하루에 시작·끝 한 번"(R6)을 이렇게 센다. 그래서 하루 시작은 최대 2번이고, 끝은 전날까지 시작한 것만 된다. 소유자(Web)는 이 한계를 받지 않는다.
+  3. HIMARI의 Tool 바꾸기는 일정표 Tool과 같은 셈(`MAX_HIMARI_PLAN_WRITES` 20)에 든다. `himari_writes_today`가 오늘 HIMARI가 바꾼 칸과 프로젝트를 함께 센다(항목마다 한 번).
+  4. 소유자가 고친 프로젝트(origin `user`)의 제목·목표를 HIMARI는 바꾸지 못한다. 끝낼 수는 있다.
+  5. 끝난 프로젝트는 다시 열지 않고 고치지 않는다(Tool). 소유자의 Web 고치기는 지금처럼 된다.
+- **거부 문장**(`PLAN_REFUSED`, 일정표 Tool처럼 "Not written: …"으로 보인다). 예:
+  - "You have 2 open projects already; end one, or start this later."
+  - "A project titled "…" is open already (id N)."
+  - "Project N started today; carry it on and end it on another day."
+  - "The user wrote this project's title and goal; leave them as they are."
+  - 없는 프로젝트는 `NOT_FOUND` "There is no open project N; your open projects are in himari_life.arcs."
+- **Tool의 바꾸기는 그 호출의 결과와 같은 트랜잭션**에서 적용한다. 일정표 Tool의 `PlanChange` 길을 그대로 쓴다: `PlanOp`에 `PROJECT_START`·`PROJECT_UPDATE`·`PROJECT_END`를 더하고 `PlanChange.project`(새 `ProjectWrite`: `entry_id`, `title`, `goal`, `ending`, `reason`)를 둔다. 디스패처의 거부 처리는 그대로 쓴다.
+
+### 11.2 Tool (`src/himari/tool/project.py`, `requires="day_session"`, 일정표 Tool 바로 뒤)
+
+| Tool | 입력 | 결과 |
+| --- | --- | --- |
+| `project_start` | `title`, `goal`, `reason` | "Started project "…". Its id shows in himari_life.arcs; give it time with schedule_write (kind work)." |
+| `project_update` | `id`, `title?`, `goal?`, `reason` | "Changed project N." |
+| `project_end` | `id`, `ending`, `reason` | "Ended project N." |
+
+- 길이 한계는 지금 값이다(제목 `MAX_ARC_TITLE_CHARS`, 목표·맺음 `MAX_ARC_CHARS`). 페르소나는 Driver가 준 것이고, 없으면 실패한다("Your projects are not kept here.").
+- "지금까지"는 Tool로 고치지 않는다(작품이 쓴다).
+
+### 11.3 프롬프트
+
+- `himari_life.arcs` 항목에 `id`와 `started`를 더한다(모든 세션).
+- **새 `PROJECT_RULE`**(하루 세션만, `SCHEDULE_RULE`·`SLEEP_RULE` 뒤): 프로젝트는 네가 몇 주에 걸쳐 만드는 것이다(네 자신에게서 나온 것; 사용자의 일이나 이야기로 만들지 않는다).
+  - 대화 중이든 혼자든 만들고 싶은 게 생기면 project_start로 시작하고, 프로젝트 시간을 schedule_write(kind work, 그 id)로 잡는다.
+  - 제목·목표는 project_update로 고치고, 끝에 닿으면 project_end로 한 줄 맺음을 남긴다(시작한 날에는 못 끝낸다).
+  - 언제나 네 말로 된 이유를 쓴다. 도구 이야기는 하지 않는다.
+- **일기 지시(`life/review.py`)**: "Make at most one move a day"를 "이 답에서 움직임은 최대 하나"로 바꾼다. 다음을 더한다:
+  - 오늘 Tool로 이미 시작하거나 바꿨을 수 있다(열린 프로젝트의 `started`를 보라).
+  - 오늘 시작한 프로젝트는 오늘 끝내지 않는다.
+  - 열린 것이 없을 때 오늘 하나 시작하는 규칙은 그대로 둔다.
+- Tool 설명은 영어, 일정표 Tool처럼 짧게 쓴다.
+
+### 11.4 Web
+
+- **새 `POST /api/life/arcs/{entry_id}/end`**, 본문 `{ending, revision}` → 200 항목(`life_entry_view`). origin은 `user`, `end_day`는 서버 시간대의 `life_day`다. 오류는 `life_refused`로 낸다(버전 충돌, 없음, 길이).
+- **Projects 탭:**
+  - 열린 프로젝트마다 "End" 버튼이 있다. 맺음 한 줄을 받고 확인한 뒤 위 API를 부른다.
+  - 프로젝트의 마지막 이유(`reason`)가 있으면 한 줄로 보인다.
+  - 누가 시작했는지(origin)가 지금 보이지 않으면 작게 더한다.
+- 다른 탭은 그대로다.
+
+### 11.5 확인
+
+- **서버 테스트:**
+  - rules 단위(한계 다섯, 거부 문장).
+  - 메모리·SQLite 같음.
+  - Tool 셋(성공, 거부, 페르소나 없음).
+  - 일기의 시작·끝이 같은 검사를 지나는 것(시작한 날 끝 → 빠짐).
+  - 작품 `done`의 거부.
+  - 20번 셈에 프로젝트가 드는 것.
+  - Web 끝내기.
+  - 프롬프트(arcs의 id, `PROJECT_RULE`은 하루 세션만).
+- **검사와 Web:** 엄격 mypy, `check_imports`, 영향 받는 묶음. Web typecheck·lint·vitest.
+- **검수:** Claude(Orca 작업자).
+
+## 12. 2단계 구현에서 정한 것
+
+1. **Tool의 바꾸기는 `PlanChange`로 간다.** 계약대로 `PlanOp.PROJECT_START`·`PROJECT_UPDATE`·`PROJECT_END`와 `PlanChange.project`(`ProjectWrite`)를 쓴다. 디스패처와 커밋 길(같은 트랜잭션, "Not written: …")은 손대지 않았다.
+2. **검사 하나:**
+   - `rules.check_project_write`(모양)와 `rules.project_changed`(한계)를 네 길이 함께 쓴다. 길마다 저장소에서 부르는 곳은 이렇다.
+     - Tool: 메모리 `_stage_plan_change`, SQLite `_apply_plan_change`.
+     - 일기: `_move_arc`.
+     - Web: `end_project`.
+   - 작품의 `done`은 `rules.worked_on`이 같은 `project_end_refusal`을 본다.
+   - 지금 쓰지 않는 `arc_starts`는 지웠다.
+3. **20번 셈에 닫힌 프로젝트도 든다.** `_plans`가 열린 프로젝트만이 아니라 지워지지 않은 모든 프로젝트를 읽는다(오늘 닫은 것도 세려고). 프로젝트를 쓰는 검사는 모두 `arc_open`을 본다. 작품이 HIMARI가 시작한 프로젝트의 "지금까지"를 고쳐도 그 프로젝트가 오늘 셈에 든다(`updated_at`). 셈은 항목마다 한 번이라 많아야 하나다.
+4. **누가 바꿨나(origin):**
+   - 일기가 끝낸 프로젝트의 origin은 이제 `writer`다(전에는 그대로 두었다).
+   - 소유자가 고친 프로젝트는 누가 끝내도 `user`로 남는다(제목·목표가 소유자의 것이라).
+5. **날짜:**
+   - Tool의 시작·끝 날짜는 `life_day`다. 서버 시간대로, 05:00 전이면 전날이다.
+   - 일기는 그 일기의 날짜를 쓴다. 작품은 그 칸의 날짜다.
+   - "시작한 날"의 비교는 `day <= 시작일`이다. 늦게 적용된 일기가 시작보다 앞선 날짜로 끝내는 것도 막는다.
+6. **없는 프로젝트**는 `NOT_FOUND` "There is no open project N."이다. 끝난 것, 다른 페르소나의 것, 지운 것이 모두 여기에 든다. Tool 설명이 id는 `himari_life.arcs`에 있다고 알린다.
+7. **`himari_life.arcs`의 `id`·`started`는 모든 세션에 보낸다.** 하루 세션이 아닌 곳에서도 같은 모양이라 상태 블록의 키가 한 번 바뀐다.
+8. **Web:**
+   - 열린 프로젝트 아래에 "End project"가 있다. 누르면 맺음 한 줄을 받는 폼이 열린다. 한 번에 하나만 열리고, 다른 편집은 잠긴다.
+   - 끝내기 전에 "다시 열 수 없다"고 묻는다.
+   - 버전이 충돌하면 쓴 맺음을 남긴다.
+   - 프로젝트의 마지막 이유가 "Why: …"로 보인다. HIMARI가 시작한 것은 "by HIMARI"다.
+   - 끝난 프로젝트에는 버튼이 없다.
+9. 실제 모델로 Tool을 불러 본 적은 없다. 써 보면서 본다.
+10. **검수(Claude, 2026-11-27) 뒤:** P1 2개, P2 6개를 찾았다. 모두 고쳤고, P2-6은 받아들였다.
+    - P1:
+      - 일기 지시 문구를 확인하는 테스트가 옛 문장을 보고 있었다.
+      - **같은 턴에 시작한 프로젝트의 id를 HIMARI가 알 길이 없었다.** `himari_life`는 턴이 시작될 때 읽는다. 그래서 `schedule_read`가 열린 프로젝트를 id와 함께 지금 읽어 보인다. `project_start`의 결과와 `PROJECT_RULE`은 "id는 schedule_read로 읽고, 다음 턴부터는 himari_life.arcs에 있다"고 말한다.
+    - 고친 P2:
+      - 이름을 바꿀 때도 다른 열린 프로젝트의 제목(접어서 비교)을 쓸 수 없다.
+      - **작품의 날은 그 칸이 시작한 하루**(`plan_life_day`)다. 00:00–05:00에 시작한 칸은 전날로 센다. 그래서 자정 넘은 프로젝트 시간이 시작한 날 프로젝트를 끝내지 못한다.
+      - 끝내기의 이유는 그 끝내기의 것이다. 소유자와 일기의 끝은 이유가 없으니 빈칸이 된다. Web은 "Why:"를 HIMARI가 마지막으로 바꾼 프로젝트에만 보인다.
+      - Projects 탭:
+        - 끝내던 프로젝트가 다른 곳에서 닫히면 폼이 닫히고 잠금도 풀린다.
+        - 버전이 충돌한 뒤에는 쓴 맺음을 그대로 두고, 다음 시도는 지금 보이는 판으로 끝낸다.
+        - 프로젝트마다 버튼 이름이 다르다("End project <제목>").
+      - 맺음은 한 줄로 접는다. 소유자의 끝 날짜는 시작일보다 앞서지 않는다.
+      - Tool 설명에 이유의 길이 한계를 적었다.
+    - 받아들인 것(P2-6): HIMARI가 소유자의 프로젝트를 끝내면 origin이 `user`로 남아 20번 셈에 들지 않는다. 열린 것이 둘뿐이라 많아야 둘이다.

@@ -25,11 +25,14 @@ from himari.data.api import (
     MIN_SLEEP_MINUTES,
     NIGHT_ENDS,
     NIGHT_STARTS,
+    PROJECT_OPS,
     SCHEDULE_DAYS,
     SLEEP_ENDS_BY,
     SLEEP_ENDS_FROM,
     PlanKind,
+    PlanOp,
     PlanWrite,
+    ProjectWrite,
     SleepRecord,
     night_of,
     plan_span,
@@ -1175,9 +1178,22 @@ def work_entry(plan: LifeEntry, project: LifeEntry, piece: WorkPiece, write_id: 
 
 def worked_on(project: LifeEntry, plan: LifeEntry, piece: WorkPiece, now: datetime) -> LifeEntry:
     """§3, §4: the project after a piece — its "so far" rewritten and, with ``done``, closed on
-    the plan's day with that ending (its title and goal stay, the user's too)."""
+    the plan's day with that ending (its title and goal stay, the user's too). character-routine §11.1: never on
+    the day it started (``project_end_refusal``): then the piece and the "so far" stay and the project stays open."""
     worked = dataclasses.replace(project, so_far=piece.so_far, revision=project.revision + 1, updated_at=now)
-    return worked if piece.done is None else dataclasses.replace(worked, end_day=plan.day, ending=piece.done)
+    day = plan_life_day(plan)
+    if piece.done is None or project_end_refusal(project, day, LifeOrigin.WRITER) is not None:
+        return worked
+    return dataclasses.replace(worked, end_day=day, ending=piece.done)
+
+
+def plan_life_day(plan: LifeEntry) -> str:
+    """character-routine §11.1 (review P2-2): the life day of a slot's start — its date, the day before when it starts
+    before NIGHT_ENDS (as ``life_day``; the slot's date and time are the user's already)."""
+    day = plan.day or ""
+    if day and plan.time_of_day and plan.time_of_day < f"{NIGHT_ENDS:%H:%M}":
+        return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    return day
 
 
 def _so_far(text: object) -> str:
@@ -1211,10 +1227,88 @@ def arc_moved(move: ArcMove, arcs: Sequence[LifeEntry]) -> LifeEntry | None:
     return next((a for a in arcs if a.entry_id == move.entry_id and a.arc_open), None)
 
 
-def arc_starts(move: ArcMove, arcs: Sequence[LifeEntry]) -> bool:
-    """§4 (W3): a START fits — fewer than MAX_OPEN_ARCS open arcs, none titled the same (folded)."""
-    open_ = [a for a in arcs if a.arc_open]
-    return len(open_) < MAX_OPEN_ARCS and all(fold(a.title or "") != fold(move.title or "") for a in open_)
+# --- HIMARI's projects (character-routine v0.1 §11.1) --------------------------------------------
+
+
+def check_project_write(op: object, write: object, origin: LifeOrigin) -> ProjectWrite:
+    """§11.1: a project change as kept — a start's title and goal, an update's project and new title and/or goal,
+    an end's project and ending, each with its reason (one line; HIMARI's must say it)."""
+    if op not in PROJECT_OPS:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a project change")
+    if not isinstance(write, ProjectWrite):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a project change carries its project")
+    reason = check_plan_reason(write.reason)
+    if reason is None and origin is LifeOrigin.HIMARI:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a project change says why")
+    if op is PlanOp.PROJECT_START:
+        return ProjectWrite(title=check_arc_title(write.title), goal=check_life_text(LifeKind.ARC, write.goal),
+                            reason=reason)
+    if isinstance(write.entry_id, bool) or not isinstance(write.entry_id, int):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a project change names its project")
+    if op is PlanOp.PROJECT_UPDATE:
+        if write.title is None and write.goal is None:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "an update changes the title or the goal")
+        return ProjectWrite(write.entry_id, title=None if write.title is None else check_arc_title(write.title),
+                            goal=None if write.goal is None else check_life_text(LifeKind.ARC, write.goal),
+                            reason=reason)
+    ending = check_life_text(LifeKind.ARC, write.ending)  # review P2-7: one line, as the spec says
+    return ProjectWrite(write.entry_id, ending=" ".join(ending.split()), reason=reason)
+
+
+def project_end_refusal(project: LifeEntry, day: str, origin: LifeOrigin) -> str | None:
+    """§11.1 (R6): a project is never ended on the day it started (nor before it) — but by the user."""
+    if origin is LifeOrigin.USER or day > (project.day or ""):
+        return None
+    return f"Project {project.entry_id} started today; carry it on and end it on another day."
+
+
+def project_changed(op: PlanOp, write: ProjectWrite, entries: Sequence[LifeEntry], *, persona_id: int,
+                    origin: LifeOrigin, day: str, zone: tzinfo, now: datetime,
+                    source: str | None = None) -> LifeEntry:
+    """§11.1: the one project change the Tools, the diary and the Web make — ``write`` checked
+    (``check_project_write``) against the persona's ``entries`` (its plans and arcs: the open ones and, for HIMARI's
+    day count, the ones it closed), by ``origin`` on ``day``. The project as kept: a new one (id 0, given as it is
+    inserted) or the open one changed (revision + 1). PLAN_REFUSED with the sentence, or NOT_FOUND."""
+    open_ = [a for a in entries if a.arc_open and a.persona_id == persona_id]
+    same = None if write.title is None else next(
+        (a for a in open_ if fold(a.title or "") == fold(write.title) and a.entry_id != write.entry_id), None)
+    if op is PlanOp.PROJECT_START:
+        if len(open_) >= MAX_OPEN_ARCS:
+            raise _refused(f"You have {MAX_OPEN_ARCS} open projects already; end one, or start this later.")
+        if same is not None:
+            raise _refused(f"A project titled \"{same.title}\" is open already (id {same.entry_id}).")
+        _counted(entries, None, origin, zone, now)
+        assert write.goal is not None
+        return LifeEntry(0, persona_id, LifeKind.ARC, day, write.goal, origin, 1, now, now, source=source,
+                         title=write.title, reason=write.reason)
+    target = next((a for a in open_ if a.entry_id == write.entry_id), None)
+    if target is None:
+        raise DataError(DataErrorCode.NOT_FOUND, f"There is no open project {write.entry_id}.")
+    if op is PlanOp.PROJECT_UPDATE:
+        if origin is LifeOrigin.HIMARI and target.origin is LifeOrigin.USER:
+            raise _refused("The user wrote this project's title and goal; leave them as they are.")
+        if same is not None:  # review P2-1: a rename never takes another open project's title
+            raise _refused(f"A project titled \"{same.title}\" is open already (id {same.entry_id}).")
+        _counted(entries, target.entry_id, origin, zone, now)
+        return dataclasses.replace(target, title=write.title or target.title, text=write.goal or target.text,
+                                   origin=origin, reason=write.reason or target.reason,
+                                   revision=target.revision + 1, updated_at=now)
+    refusal = project_end_refusal(target, day, origin)
+    if refusal is not None:
+        raise _refused(refusal)
+    _counted(entries, target.entry_id, origin, zone, now)
+    # review P2-5: the reason kept is the end's own (None for the user's and the diary's, which say none); P2-7: the
+    # user's end is never dated before the start
+    return dataclasses.replace(target, end_day=max(day, target.day or day), ending=write.ending, reason=write.reason,
+                               origin=target.origin if target.origin is LifeOrigin.USER else origin,
+                               revision=target.revision + 1, updated_at=now)
+
+
+def arc_project_write(move: ArcMove) -> tuple[PlanOp, ProjectWrite]:
+    """§11.1: a diary's START or CLOSE as the same change the Tools make (no reason: the diary says it)."""
+    if move.op is ArcOp.START:
+        return PlanOp.PROJECT_START, ProjectWrite(title=move.title, goal=move.goal)
+    return PlanOp.PROJECT_END, ProjectWrite(move.entry_id, ending=move.ending)
 
 
 def writer_mood(plan: LifePlan, now: datetime) -> HimariMood | None:
@@ -1363,10 +1457,11 @@ def sleep_refusal(start: datetime, minutes: int) -> str | None:
     return None
 
 
-def himari_writes_today(plans: Iterable[LifeEntry], zone: tzinfo, now: datetime) -> set[int]:
-    """§4.4: the slots HIMARI's Tools changed since the user's midnight (each slot once)."""
+def himari_writes_today(entries: Iterable[LifeEntry], zone: tzinfo, now: datetime) -> set[int]:
+    """§4.4: the slots HIMARI's Tools changed since the user's midnight (each slot once) — character-routine
+    §11.1: and its projects (arcs), on the same count."""
     midnight = datetime.combine(now.astimezone(zone).date(), time(), tzinfo=zone)
-    return {e.entry_id for e in plans if e.kind is LifeKind.PLAN and e.origin is LifeOrigin.HIMARI
+    return {e.entry_id for e in entries if e.kind in (LifeKind.PLAN, LifeKind.ARC) and e.origin is LifeOrigin.HIMARI
             and e.updated_at >= midnight}
 
 
@@ -1376,8 +1471,8 @@ def _counted(plans: Sequence[LifeEntry], entry_id: int | None, origin: LifeOrigi
         return
     changed = himari_writes_today(plans, zone, now)
     if entry_id not in changed and len(changed) >= MAX_HIMARI_PLAN_WRITES:
-        raise _refused(f"You have changed {MAX_HIMARI_PLAN_WRITES} slots today; leave the schedule as it is "
-                       "until tomorrow.")
+        raise _refused(f"You have changed {MAX_HIMARI_PLAN_WRITES} slots and projects today; leave them as they "
+                       "are until tomorrow.")
 
 
 def _uncovered(start: datetime, end: datetime, plans: Sequence[LifeEntry], zone: tzinfo, now: datetime) -> None:
@@ -1436,7 +1531,7 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
             return plan
     elif origin is LifeOrigin.WRITER and plan.kind is not PlanKind.DIARY:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "the keeper writes sleep and diary slots only")
-    _counted(plans, None if before is None else before.entry_id, origin, zone, now)
+    _counted([*plans, *arcs], None if before is None else before.entry_id, origin, zone, now)
     if before is not None and (span := plan_span(before, zone)) is not None and span[1] <= now:
         raise _refused(f"That slot is over {_slot_words(before, zone)}; it cannot be changed.")
     if not local.date() <= date.fromisoformat(plan.day) <= local.date() + timedelta(days=SCHEDULE_DAYS):
@@ -1483,7 +1578,7 @@ def planned_entry(persona_id: int, plan: PlanWrite, before: LifeEntry | None, or
 def check_cancel(before: LifeEntry, plans: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo,
                  now: datetime) -> None:
     """§4.3: a live slot may be cancelled — never a sleep slot (character-diary §3: nor a diary slot), never one
-    over; HIMARI's within its day's count."""
+    over; HIMARI's within its day's count (``plans``: the persona's plans and arcs, for it)."""
     if before.plan_kind is PlanKind.SLEEP:
         raise _refused("A sleep slot cannot be cancelled or deleted; move it instead.")
     if before.plan_kind is PlanKind.DIARY:

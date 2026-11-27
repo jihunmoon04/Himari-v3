@@ -1980,6 +1980,14 @@ def night_of(start: datetime) -> date | None:
     return None
 
 
+def life_day(now: datetime, zone: tzinfo) -> str:
+    """character-routine §11.1: the day (YYYY-MM-DD) a moment belongs to in HIMARI's life — the user's date in
+    ``zone``, the day before until NIGHT_ENDS (a day session past midnight is still that day's)."""
+    local = now.astimezone(zone)
+    return (local.date() - timedelta(days=1) if local.timetz().replace(tzinfo=None) < NIGHT_ENDS
+            else local.date()).isoformat()
+
+
 def diary_night(start: datetime) -> date | None:
     """character-diary §3: the night a diary slot starting at ``start`` (its own zone) belongs to — D from D 18:00
     (DIARY_EARLIEST) to D+1 05:00 (inclusive: before a sleep slot starting as late as it may), None in the day
@@ -2015,6 +2023,26 @@ class PlanOp(Enum):
     WRITE = "write"  # schedule_write: a slot written or changed
     CANCEL = "cancel"  # schedule_cancel: a slot cancelled with why
     SLEEP_NOW = "sleep_now"  # go_to_sleep: tonight's sleep slot starts now; HIMARI sleeps once the turn ends
+    # character-routine §11.1: the project Tools, on the same path (checked and kept with the call's result)
+    PROJECT_START = "project_start"
+    PROJECT_UPDATE = "project_update"
+    PROJECT_END = "project_end"
+
+
+PROJECT_OPS = frozenset({PlanOp.PROJECT_START, PlanOp.PROJECT_UPDATE, PlanOp.PROJECT_END})
+
+
+@dataclass(frozen=True)
+class ProjectWrite(DeepFrozen):
+    """character-routine §11.1: one change of a project (an arc) — a start with its ``title`` and ``goal``; an update
+    of ``entry_id`` with a new ``title`` and/or ``goal``; an end of ``entry_id`` with its one-line ``ending``.
+    ``reason``: why, one line (HIMARI's must say it)."""
+
+    entry_id: int | None = None
+    title: str | None = None
+    goal: str | None = None
+    ending: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2022,7 +2050,7 @@ class PlanChange(DeepFrozen):
     """character-day §18.6: one schedule Tool's change, checked and written by Data with the call's result
     (origin HIMARI) — for the persona the Driver gave the call (never one the model names), read in ``zone`` at
     ``at``: WRITE carries ``write``; CANCEL ``entry_id`` and ``reason``; SLEEP_NOW ``reason`` (go_to_sleep also
-    marks the keeper's ``sleep_requested_at``)."""
+    marks the keeper's ``sleep_requested_at``). character-routine §11.1: a PROJECT_* op carries ``project``."""
 
     op: PlanOp
     persona_id: int
@@ -2031,6 +2059,7 @@ class PlanChange(DeepFrozen):
     write: PlanWrite | None = None
     entry_id: int | None = None
     reason: str | None = None
+    project: ProjectWrite | None = None
 
 
 class LifeChangeOp(Enum):
@@ -2239,6 +2268,13 @@ class LifeStore(Protocol):
     async def mark_plan_missed(self, principal: PrincipalId, entry_id: int, *, now: datetime) -> LifeEntry:
         """character-day §5.4: a live ``together`` slot the user never came to (``missed``, by the keeper).
         NOT_FOUND: no live plan; INVALID_ARGUMENT: not a ``together`` slot."""
+        ...
+
+    async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, *, expected_revision: int,
+                          zone: str, now: datetime) -> LifeEntry:
+        """character-routine §11.4: the user ends an open project (origin kept as the user's) on ``life_day`` in
+        ``zone``, with its one-line ending. NOT_FOUND: no open project; VERSION_CONFLICT; TOO_LARGE past
+        MAX_ARC_CHARS; INVALID_ARGUMENT: no ending."""
         ...
 
 

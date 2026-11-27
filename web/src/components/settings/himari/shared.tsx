@@ -27,7 +27,7 @@ export const ORIGINS: Record<LifeOrigin, string> = {
   writer: "written by the story writer",
   conversation: "from a conversation",
   user: "yours",
-  himari: "by HIMARI", // character-day §4.2: its schedule Tool, in a day session
+  himari: "by HIMARI", // character-day §4.2: its schedule Tool, in a day session (character-routine §11.2: or project)
 };
 export const NAMES: Record<LifeKind, string> = {
   fact: "fact", plan: "slot", diary: "diary entry", arc: "arc", work: "work piece", thought: "kept thought",
@@ -162,6 +162,9 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
         ) : <p className="whitespace-pre-wrap break-words">{entry.text}</p>}
         {entry.kind === "arc" && entry.so_far && <p className="mt-1 text-muted">So far: {entry.so_far}</p>}
         {entry.kind === "arc" && entry.ending && <p className="mt-1 text-muted">Ending: {entry.ending}</p>}
+        {entry.kind === "arc" && entry.origin === "himari" && entry.reason && (
+          <p className="mt-1 text-muted">Why: {entry.reason}</p>
+        )}
         <p className="mt-1 text-xs text-faint">
           {thought ? `${entry.about ? `${ABOUT[entry.about] ?? entry.about} · ` : ""}kept ${clock(entry.created_at)}`
             + `${entry.expires_at ? ` · until ${clock(entry.expires_at)}` : ""} · ` : ""}

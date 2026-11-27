@@ -118,9 +118,9 @@ class ScheduleRead(_Schedule):
     definition = _definition(
         SCHEDULE_READ,
         "Read your own schedule from today for a number of days (1 to 7): each slot's id, date, start and end, kind "
-        "(sleep, work, together, own, diary) and text, with the cancelled and missed ones and why. Today and "
-        "tomorrow are "
-        "in the runtime state already: read for the days after.",
+        "(sleep, work, together, own, diary) and text, with the cancelled and missed ones and why; and your open "
+        "projects with their ids (one you started just now too). Today and tomorrow are in the runtime state "
+        "already: read for the days after, or for a project's id.",
         {"days": {"type": "integer", "minimum": 1, "maximum": SCHEDULE_DAYS}}, ["days"], EffectProfile.READ)
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
@@ -131,13 +131,13 @@ class ScheduleRead(_Schedule):
             return _failed(f"days is 1 to {SCHEDULE_DAYS}")
         local = self._clock().astimezone(self._zone)
         first, last = local.date().isoformat(), (local.date() + timedelta(days=days - 1)).isoformat()
-        slots = sorted((e for e in await self._store.list_life(ctx.scope.principal_id, ctx.persona_id, since=first,
-                                                                now=self._clock())
-                        if e.kind is LifeKind.PLAN and first <= (e.day or "") <= last),
+        entries = await self._store.list_life(ctx.scope.principal_id, ctx.persona_id, since=first, now=self._clock())
+        slots = sorted((e for e in entries if e.kind is LifeKind.PLAN and first <= (e.day or "") <= last),
                        key=lambda e: (e.day or "", e.time_of_day or "", e.entry_id))
-        if not slots:
-            return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Nothing from {first} to {last}."), raw_result={"ids": []})
-        return ToolOutcome(ToolStatus.SUCCEEDED, _text("\n".join(slot_line(e, self._zone) for e in slots)),
+        # character-routine §11.2 (review P1-2): read now, so a project started this turn shows with its id
+        projects = [f"project id {e.entry_id} · {e.title} · since {e.day}" for e in entries if e.arc_open]
+        lines = [*(slot_line(e, self._zone) for e in slots)] or [f"Nothing from {first} to {last}."]
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text("\n".join([*lines, *projects])),
                            raw_result={"ids": [e.entry_id for e in slots]})
 
 

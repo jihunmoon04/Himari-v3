@@ -38,6 +38,7 @@ from himari.prompt.api import (
     DAY_SESSION,
     LIFE_ABOUT,
     LIFE_RULE,
+    PROJECT_RULE,
     SCHEDULE_RULE,
     SLEEP_RULE,
     PromptInputs,
@@ -80,9 +81,11 @@ def inputs(*, day: bool = True, **more: object) -> PromptInputs:
 
 def test_the_day_sessions_rules_follow_the_life_rule_there_only() -> None:
     composed = "\n\n".join(system_text(inputs()))
-    assert f"{LIFE_RULE}\n{SCHEDULE_RULE}\n{SLEEP_RULE}\n{BOND_RULE}" in composed
+    assert f"{LIFE_RULE}\n{SCHEDULE_RULE}\n{SLEEP_RULE}\n{PROJECT_RULE}\n{BOND_RULE}" in composed
     other = "\n\n".join(system_text(inputs(day=False)))
     assert SCHEDULE_RULE not in other and SLEEP_RULE not in other and "himari_schedule" not in other
+    assert PROJECT_RULE not in other  # character-routine §11.3: the project Tools are the day session's only
+    assert "project_start" in PROJECT_RULE and "not on the day it started" in PROJECT_RULE
     assert "himari_schedule" in principle_section(False, life=True, day=True)
     assert "together" in SCHEDULE_RULE and "never drop" in SCHEDULE_RULE and "go_to_sleep" in SLEEP_RULE
     assert "half_asleep" in SLEEP_RULE and "one short line" in SLEEP_RULE

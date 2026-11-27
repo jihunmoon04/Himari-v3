@@ -71,7 +71,8 @@ def test_a_hidden_line_waits_for_its_stage_and_is_told_without_its_mark() -> Non
 
 def test_the_open_arcs_are_in_himari_life_by_title_and_goal() -> None:
     life = himari_life_data((arc(1, "그림 연습", "풍경화 한 장"), arc(2, "옛 일", "끝난 것", "2026-11-20")), NOW)
-    assert life is not None and life["arcs"] == [{"title": "그림 연습", "goal": "풍경화 한 장"}]  # open ones only
+    assert life is not None and life["arcs"] == [  # open ones only, with the id the Tools name (character-routine)
+        {"id": 1, "title": "그림 연습", "goal": "풍경화 한 장", "started": "2026-11-10"}]
     assert himari_life_data((arc(2, "옛 일", "끝난 것", "2026-11-20"),), NOW) is None
     many = tuple(arc(n, "제목" * 5, "목표" * 90) for n in range(12))
     told = himari_life_data(many, NOW)

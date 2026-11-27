@@ -38,6 +38,7 @@ from himari.data.api import (
 from himari.prompt.api import SystemSpec
 from himari.provider.api import NativeNoResponse, retryable
 from himari.provider.scripted import ScriptedAdapter
+from himari.tool.project import PROJECT_END, PROJECT_START, PROJECT_TOOL_IDS
 from himari.tool.schedule import GO_TO_SLEEP, SCHEDULE_TOOL_IDS, SCHEDULE_WRITE
 
 ZONE = "Asia/Seoul"
@@ -126,13 +127,13 @@ def test_a_waking_is_an_ordinary_turn_with_the_schedule_tools_offered_only_in_th
         await rt.driver.accept(SCOPE, said("일어나!"))  # type: ignore[attr-defined]
         assert (await rt.driver.resume(SCOPE)).state is DriveState.COMPLETED  # type: ignore[attr-defined]
         asked = adapter.prepared_inputs[0]
-        assert SCHEDULE_TOOL_IDS <= {d.tool_id for d in asked.tool_catalog}
+        assert SCHEDULE_TOOL_IDS | PROJECT_TOOL_IDS <= {d.tool_id for d in asked.tool_catalog}
         assert asked.request_options.day_session and not asked.request_options.half_asleep
         assert asked.current_state.schedule == () and asked.current_state.sleep == SleepView(SleepState.AWAKE)
         rt, adapter = day_runtime(Gate(day=False), [final("응")])
         await rt.driver.drive(SCOPE, said("안녕"))  # type: ignore[attr-defined]
         asked = adapter.prepared_inputs[0]
-        assert not SCHEDULE_TOOL_IDS & {d.tool_id for d in asked.tool_catalog}
+        assert not (SCHEDULE_TOOL_IDS | PROJECT_TOOL_IDS) & {d.tool_id for d in asked.tool_catalog}
         assert asked.current_state.sleep is None and not asked.request_options.day_session
 
     asyncio.run(scenario())
@@ -161,6 +162,35 @@ def test_a_schedule_write_is_kept_with_its_result_and_a_refusal_is_said_to_the_m
         promise = next(e for e in plans if e.plan_kind is PlanKind.TOGETHER)
         assert (promise.day, promise.time_of_day, promise.minutes, promise.origin) == (
             tomorrow, "15:00", 90, LifeOrigin.HIMARI)
+
+    asyncio.run(scenario())
+
+
+def test_himari_starts_a_project_in_a_turn_and_a_refusal_is_said_so_it_can_fix_it() -> None:
+    """character-routine §11.2: the project Tools' changes are kept with the call's result (origin HIMARI); one past
+    the limits fails with Data's sentence."""
+    async def scenario() -> None:
+        rt, adapter = day_runtime(Gate(), [
+            calls((PROJECT_START, {"title": "그림 연습", "goal": "풍경화 한 장", "reason": "얘기하다 그리고 싶어졌어"}),
+                  (PROJECT_START, {"title": " 그림 연습 ", "goal": "또", "reason": "다시"})),
+            final("해 볼게."),
+            calls((PROJECT_END, {"id": 1, "ending": "끝.", "reason": "질렸어"})),
+            final("음.")])
+        result = await rt.driver.drive(SCOPE, said("그림 그려 볼래?"))  # type: ignore[attr-defined]
+        assert result.state is DriveState.COMPLETED
+        started, again = await rt.data.read_tool_executions(SCOPE, result.run_ids[0])  # type: ignore[attr-defined]
+        assert started.status.value == "succeeded" and again.status.value == "failed"
+        assert again.model_result is not None
+        assert again.model_result.blocks[0].text.startswith('Not written: A project titled "그림 연습" is open already')
+        (arc,) = [e for e in await rt.data.list_life(SCOPE.principal_id, 0)  # type: ignore[attr-defined]
+                  if e.kind is LifeKind.ARC]
+        assert (arc.title, arc.text, arc.origin, arc.reason, arc.arc_open) == (
+            "그림 연습", "풍경화 한 장", LifeOrigin.HIMARI, "얘기하다 그리고 싶어졌어", True)
+        assert arc.entry_id == 1  # as the script's end names it
+        result = await rt.driver.drive(SCOPE, said("벌써 끝?"))  # type: ignore[attr-defined]
+        (ended,) = await rt.data.read_tool_executions(SCOPE, result.run_ids[0])  # type: ignore[attr-defined]
+        assert ended.status.value == "failed" and ended.model_result is not None
+        assert f"Project {arc.entry_id} started today" in ended.model_result.blocks[0].text
 
     asyncio.run(scenario())
 

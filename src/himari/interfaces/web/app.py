@@ -492,6 +492,11 @@ class LifeEditBody(_Body):
     summary: str | None = None  # a work piece's one line; null or left out: kept
 
 
+class ProjectEndBody(_Body):  # character-routine §11.4
+    ending: str  # one line, at most MAX_ARC_CHARS (Data checks it)
+    revision: int = Field(ge=1)  # the revision the page read
+
+
 type PlanKindName = Literal["sleep", "work", "together", "own", "diary"]  # PlanKind's values (character-diary §10)
 
 
@@ -1091,7 +1096,8 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
             "created_at": _time(entry.created_at), "updated_at": _time(entry.updated_at)}
     if entry.kind is LifeKind.ARC:  # character-world §4: its title, open or closed, and how it ended
         view |= {"title": entry.title, "status": "open" if entry.arc_open else "closed", "end_day": entry.end_day,
-                 "ending": entry.ending, "so_far": entry.so_far}  # character-work §3: where the project stands
+                 "ending": entry.ending, "so_far": entry.so_far,  # character-work §3: where the project stands
+                 "reason": entry.reason}  # character-routine §11.4: why it was last started, changed or ended
     elif entry.kind is LifeKind.WORK:  # character-work §4: a piece, its project and its plan
         view |= {"title": entry.title, "summary": entry.summary, "arc_id": entry.arc_id, "plan_id": entry.plan_id,
                  "draft": entry.draft}  # character-mind §4.4: begun at the start step, not finished yet
@@ -2047,6 +2053,15 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         """§18.11: a slot changed or moved by the user (a sleep slot only moved); it becomes the user's."""
         try:
             return life_entry_view(await himari(request).edit_plan(who, plan_write(body, entry_id), body.revision))
+        except DataError as error:
+            raise life_refused(error) from None
+
+    @app.post("/api/life/arcs/{entry_id}/end")
+    async def end_project(entry_id: int, body: ProjectEndBody, request: Request,
+                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """character-routine §11.4: the user ends an open project (kept as the user's) with its one-line ending."""
+        try:
+            return life_entry_view(await himari(request).end_project(who, entry_id, body.ending, body.revision))
         except DataError as error:
             raise life_refused(error) from None
 
