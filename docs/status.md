@@ -18,7 +18,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 ## 지금 동작하는 기능
 
 - **대화와 실행:** Run = LLM 호출 1회, 한 턴은 `HIMARI_MAX_RUNS`(기본 12)에서 멈추고 Continue로 잇는다. 취소, 문맥 압축(자동·수동), 대화별 모델·추론 강도, OpenRouter 스트리밍, 원본 요청·응답 보존. 묻는 것은 답의 글로 한다. → [control-prompt-provider](control-prompt-provider-v0.1.md), [conversation-model](conversation-model-v0.1.md), [streaming](streaming-v0.1.md)
-- **Data:** SQLite(WAL) 하나, 스키마 v29, 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
+- **Data:** SQLite(WAL) 하나, 스키마 v30, 올리기 전 백업, 휴지통과 30일 뒤 영구 삭제. → [data-contract-v0.2](data-contract-v0.2.md), [conversation-delete](conversation-delete-v0.1.md)
 - **프롬프트:** 캐시 우선 순서, 반려 켬/끔 두 바탕 글, "지시는 시스템 글과 사용자 메시지뿐" 원칙, Current State(지금 시각·기기·활동·기억), 작업 진행 줄. → [prompt-composition](prompt-composition.md), [prompt-cleanup](prompt-cleanup-v0.1.md), [interface-capabilities](interface-capabilities-v0.1.md), [work-progress](work-progress-v0.1.md)
 - **파일:** 대화 폴더(`<데이터 폴더>/conversations/<id>`) 안에서만 읽고 쓰는 파일 Tool, 올리기·내려받기와 `present_file`, 이미지 입력, `read_document`(PDF·DOCX·XLSX·PPTX·HWPX, server sandbox). → [server-slim](server-slim-v0.1.md), [file-upload-download](file-upload-download-v0.1.md), [images](images-v0.1.md), [documents](documents-v0.1.md)
 - **MCP:** Streamable HTTP 서버, 허용 목록의 Tool, 대화별 켬/끔과 Settings의 기본값, 서버 안내문·리소스 Tool·`/` 프롬프트. → [mcp-context](mcp-context-v0.1.md), [mcp-defaults](mcp-defaults-v0.1.md)
@@ -36,12 +36,13 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 - **대화 프롬프트 고침(2026-11-26 배포):** `LIFE_RULE`은 자유롭게 꺼내되 "매 답마다는 아니고, 사용자가 자기 이야기를 할 땐 그 이야기에 머문다", 상한에 안 맞는 긴 정사·일기·일정·줄거리·관계 항목 하나가 뒤의 것을 막지 않음, 글 전체가 보이는 최신 조각은 요약을 빼고 보낸다.
 - **마음(2026-11-26 배포, H-84):** 반려 답 앞의 생각 `[[think]]`(보이지 않고 대화 기록에도 안 들어감, Web에서 주인만 접어 봄), 남긴 생각(삶 항목 `thought`, `himari_mind`), 하루 돌아보기와 작업 두 단계를 대화 모델의 혼자 하는 호출로, 세계 작가(아침의 사건 `event`), 정사 추리기, `memory_search`의 `life`, Settings → HIMARI의 Events·Thoughts. 스키마 v28. → [character-mind](character-mind-v0.1.md)
 - **하루(2026-11-26 배포, H-85):** 앱 대화는 날짜 이름의 하루 세션(사용자마다 하나, 잠 정리 때 닫혀 읽기 전용), HIMARI가 Tool(`schedule_read`·`schedule_write`·`schedule_cancel`·`go_to_sleep`)로 고치는 일정표(잠·작업·약속·혼자 하는 일, 길이·취소·놓침·이유), 서버가 가진 잠(하루 지기 `life/keeper.py`: 무작위 잠 칸, 칸대로 잠들고 깸, 메시지·쿡 찌르기로 깨우기, 깨지 않은 3시간 뒤 정리), 세션 문맥에서 쓰는 일기, 정리 뒤(없으면 정오) 세계, 예비 모델 `HIMARI_BACKUP_MODEL`, luna 반려 표시. 스키마 v29(이 브랜치). → [character-day](character-day-v0.1.md)
+- **일기와 하루의 끝(2026-11-27 배포, H-86):** 일정표의 `diary` 칸(하루 지기가 저녁에 놓고 HIMARI는 옮기기만), 그 칸에서 쓰는 그날 하루 전체의 일기, 잠 정리 때의 보완(`amend`, 결과를 남기고 정사 추리기가 기다림), 하루 중 언제든 일어나는 세계의 사건(`while_asleep`), 조용한 시간 없앰. 스키마 v30. → [character-diary](character-diary-v0.1.md)
 - **Web·CLI:** React Web(대화, 설정, 휴지통, `/` 프롬프트, 초안 보존), CLI는 `himari proactive`·`himari memory`만. → [web-console](web-console-v0.1.md) §4·§7(hub 부분 제외)
 
 ## 운영
 
 - 운영 서버: `rabbithole`. 서버는 loopback에 바인딩하고 TLS reverse proxy 뒤에 있다.
-- 마지막 배포: **캐릭터 로드맵 10단계 하루**(v3 #254, `b9ce44a`), 2026-11-26 21:42 KST. 스키마 v29, 모델 deepseek 1017 하나와 예비 luna. [기록](deployments/2026-11-26-v3-day.md)
+- 마지막 배포: **일기와 하루의 끝**(10단계 고침, v3 #256, `2d52ff6`), 2026-11-27 09:16 KST. 스키마 v30, 조용한 시간 없앰. [기록](deployments/2026-11-27-v3-diary.md)
 - DB 스키마: **v27**(v22 삶, v23 관계, v24 상태, v25 세계, v26 작업, v27 페르소나 항목. 2026-11-25 v21에서 v25로, 같은 날 v26으로, 2026-11-26 v27로 올렸다). 대화 폴더는 `/srv/himari-v3/conversations`. MCP 서버는 `exa`(HTTP) 하나. `himari-runner`는 없다.
 - 2026-11-23~24 배포 기록: [V3-P106](deployments/2026-11-23-v3-p106.md)(작업 에이전트 기능 걷어 냄, hub 퇴역), [V3-P107](deployments/2026-11-24-v3-p107.md)(먼저 말 걸기 간략화), [V3-P108](deployments/2026-11-24-v3-p108.md)(페르소나, v20), [V3-P109](deployments/2026-11-24-v3-p109.md)(서버 줄이기), [H-75](deployments/2026-11-24-v3-h75.md)(옛 추상 정리, v21), [페르소나 규칙](deployments/2026-11-25-v3-persona-rules.md)(2026-11-25), [캐릭터 1~5단계](deployments/2026-11-25-v3-character.md)(2026-11-25, v25).
 - 운영 서버에 남긴 것: 옛 대화 폴더 `/home/coder/HIMARI/conversations`, 옛 릴리스와 DB `.bak` 파일. 되돌릴 일이 없으면 소유자가 지운다.
@@ -76,7 +77,7 @@ HIMARI v3는 **Windows 반려 에이전트의 서버 쪽 두뇌**다. 대화·�
 4. **상태와 몸:** 이어지는 기분, 하루 리듬, 앱에서 페르소나 바꾸기. **2026-11-25 배포(앱은 다시 빌드해야 함), 써 보기가 남음**([character-state](character-state-v0.1.md)). 이벤트 그림·애니메이션, 페르소나별 그림은 그림이 생기면 한다.
 5. **세계:** 날씨·화제, 몇 주짜리 줄거리, 숨긴 뒷이야기. **2026-11-25 배포(날씨는 위치 설정 전까지 꺼짐), 써 보기가 남음**([character-world](character-world-v0.1.md)).
 
-로드맵 1~6단계가 모두 2026-11-25 배포되었다(v21 → v26). 7·8단계는 2026-11-26 배포되었다(v27), 9단계도 같은 날(v28). 10단계 **하루**(하루 세션, 일정표, 잠, 모델 정리)도 같은 날 배포되었다(v29, [character-day](character-day-v0.1.md), [기록](deployments/2026-11-26-v3-day.md)). 다음은 소유자가 써 보며 고치기다.
+로드맵 1~6단계가 모두 2026-11-25 배포되었다(v21 → v26). 7·8단계는 2026-11-26 배포되었다(v27), 9단계도 같은 날(v28). 10단계 **하루**(하루 세션, 일정표, 잠, 모델 정리)도 같은 날 배포되었다(v29, [character-day](character-day-v0.1.md), [기록](deployments/2026-11-26-v3-day.md)). 다음 날 아침 그 고침 **일기와 하루의 끝**을 배포했다(v30, [character-diary](character-diary-v0.1.md), [기록](deployments/2026-11-27-v3-diary.md)). 다음은 소유자가 써 보며 고치기다.
 
 6. **작업:** 프로젝트·작업자·조각, `work_done`, 자유 wake와 답 없는 wake 고침, 작가 고침. **2026-11-25 배포(v26)**([character-work](character-work-v0.1.md)).
 7. **페르소나 항목:** 14칸, 저장할 때 글을 만듦, `persona_makes`. **2026-11-26 배포(v27)**([character-persona-fields](character-persona-fields-v0.1.md)).
