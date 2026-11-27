@@ -168,3 +168,77 @@
    - 30일보다 오래된 열린 프로젝트의 작품은 기록이 아니라 Projects에만 보인다(Show older가 그 날짜에 닿을 때까지).
    - 저장하지 않은 고침이 있으면 탭을 옮길 때 묻는다. Today는 지금 자고 있는 어젯밤 잠 칸도 보인다. `days`가 틀리면 언제나 400 `invalid_argument`.
    - `sleeps (owner, persona_id, fell_at)` 색인은 스키마 판을 올려야 해서 두지 않았다(잠은 수백 행).
+
+## 11. 2단계 구현 계약: 프로젝트 Tool (2026-11-27)
+
+소유자가 "병합하고 2단계도 진행해줘"라고 한 뒤 쓴다. 스키마는 바뀌지 않는다(v30 그대로).
+
+### 11.1 Data: 프로젝트 바꾸기 하나
+
+- **바꾸기 셋:** 시작(제목, 목표), 고치기(제목·목표 중 하나 이상), 끝내기(한 줄 맺음). 모두 이유 한 줄(`reason`, 프로젝트 항목의 `reason` 칸, HIMARI의 것만 필수)을 가질 수 있다.
+- **같은 동작 하나**(`rules`의 검사와 두 저장소의 적용)를 이 넷이 쓴다.
+  - Tool: origin `himari`. 거부는 문장으로 돌려준다.
+  - 일기 JSON의 `arc`: 시작과 끝, origin `writer`. 거부되면 그 움직임만 빠지고 일기는 남는다(지금처럼).
+  - 작품의 `done`: 거부되면 끝내기만 빠진다. 작품과 "지금까지"는 남는다.
+  - Web 끝내기: origin `user`.
+- **프로젝트의 날**(`life_day(now, zone)`, 새 도움 함수): 사용자 시간대 날짜. 05:00(`NIGHT_ENDS`) 전이면 전날이다. 하루 세션이 자정을 넘겨도 그날로 센다. 일기와 작품은 지금처럼 자기 날짜를 쓴다.
+- **한계(규칙):**
+  1. 열린 프로젝트는 최대 2개. 같은 제목(접어서 비교)의 열린 프로젝트가 있으면 시작을 거부한다.
+  2. **시작한 날에는 끝낼 수 없다**(HIMARI·일기·작품). "프로젝트마다 하루에 시작·끝 한 번"(R6)을 이렇게 센다. 그래서 하루 시작은 최대 2번이고, 끝은 전날까지 시작한 것만 된다. 소유자(Web)는 이 한계를 받지 않는다.
+  3. HIMARI의 Tool 바꾸기는 일정표 Tool과 같은 셈(`MAX_HIMARI_PLAN_WRITES` 20)에 든다. `himari_writes_today`가 오늘 HIMARI가 바꾼 칸과 프로젝트를 함께 센다(항목마다 한 번).
+  4. 소유자가 고친 프로젝트(origin `user`)의 제목·목표를 HIMARI는 바꾸지 못한다. 끝낼 수는 있다.
+  5. 끝난 프로젝트는 다시 열지 않고 고치지 않는다(Tool). 소유자의 Web 고치기는 지금처럼 된다.
+- **거부 문장**(`PLAN_REFUSED`, 일정표 Tool처럼 "Not written: …"으로 보인다). 예:
+  - "You have 2 open projects already; end one, or start this later."
+  - "A project titled "…" is open already (id N)."
+  - "Project N started today; carry it on and end it on another day."
+  - "The user wrote this project's title and goal; leave them as they are."
+  - 없는 프로젝트는 `NOT_FOUND` "There is no open project N; your open projects are in himari_life.arcs."
+- **Tool의 바꾸기는 그 호출의 결과와 같은 트랜잭션**에서 적용한다. 일정표 Tool의 `PlanChange` 길을 그대로 쓴다: `PlanOp`에 `PROJECT_START`·`PROJECT_UPDATE`·`PROJECT_END`를 더하고 `PlanChange.project`(새 `ProjectWrite`: `entry_id`, `title`, `goal`, `ending`, `reason`)를 둔다. 디스패처의 거부 처리는 그대로 쓴다.
+
+### 11.2 Tool (`src/himari/tool/project.py`, `requires="day_session"`, 일정표 Tool 바로 뒤)
+
+| Tool | 입력 | 결과 |
+| --- | --- | --- |
+| `project_start` | `title`, `goal`, `reason` | "Started project "…". Its id shows in himari_life.arcs; give it time with schedule_write (kind work)." |
+| `project_update` | `id`, `title?`, `goal?`, `reason` | "Changed project N." |
+| `project_end` | `id`, `ending`, `reason` | "Ended project N." |
+
+- 길이 한계는 지금 값이다(제목 `MAX_ARC_TITLE_CHARS`, 목표·맺음 `MAX_ARC_CHARS`). 페르소나는 Driver가 준 것이고, 없으면 실패한다("Your projects are not kept here.").
+- "지금까지"는 Tool로 고치지 않는다(작품이 쓴다).
+
+### 11.3 프롬프트
+
+- `himari_life.arcs` 항목에 `id`와 `started`를 더한다(모든 세션).
+- **새 `PROJECT_RULE`**(하루 세션만, `SCHEDULE_RULE`·`SLEEP_RULE` 뒤): 프로젝트는 네가 몇 주에 걸쳐 만드는 것이다(네 자신에게서 나온 것; 사용자의 일이나 이야기로 만들지 않는다).
+  - 대화 중이든 혼자든 만들고 싶은 게 생기면 project_start로 시작하고, 프로젝트 시간을 schedule_write(kind work, 그 id)로 잡는다.
+  - 제목·목표는 project_update로 고치고, 끝에 닿으면 project_end로 한 줄 맺음을 남긴다(시작한 날에는 못 끝낸다).
+  - 언제나 네 말로 된 이유를 쓴다. 도구 이야기는 하지 않는다.
+- **일기 지시(`life/review.py`)**: "Make at most one move a day"를 "이 답에서 움직임은 최대 하나"로 바꾼다. 다음을 더한다:
+  - 오늘 Tool로 이미 시작하거나 바꿨을 수 있다(열린 프로젝트의 `started`를 보라).
+  - 오늘 시작한 프로젝트는 오늘 끝내지 않는다.
+  - 열린 것이 없을 때 오늘 하나 시작하는 규칙은 그대로 둔다.
+- Tool 설명은 영어, 일정표 Tool처럼 짧게 쓴다.
+
+### 11.4 Web
+
+- **새 `POST /api/life/arcs/{entry_id}/end`**, 본문 `{ending, revision}` → 200 항목(`life_entry_view`). origin은 `user`, `end_day`는 서버 시간대의 `life_day`다. 오류는 `life_refused`로 낸다(버전 충돌, 없음, 길이).
+- **Projects 탭:**
+  - 열린 프로젝트마다 "End" 버튼이 있다. 맺음 한 줄을 받고 확인한 뒤 위 API를 부른다.
+  - 프로젝트의 마지막 이유(`reason`)가 있으면 한 줄로 보인다.
+  - 누가 시작했는지(origin)가 지금 보이지 않으면 작게 더한다.
+- 다른 탭은 그대로다.
+
+### 11.5 확인
+
+- **서버 테스트:**
+  - rules 단위(한계 다섯, 거부 문장).
+  - 메모리·SQLite 같음.
+  - Tool 셋(성공, 거부, 페르소나 없음).
+  - 일기의 시작·끝이 같은 검사를 지나는 것(시작한 날 끝 → 빠짐).
+  - 작품 `done`의 거부.
+  - 20번 셈에 프로젝트가 드는 것.
+  - Web 끝내기.
+  - 프롬프트(arcs의 id, `PROJECT_RULE`은 하루 세션만).
+- **검사와 Web:** 엄격 mypy, `check_imports`, 영향 받는 묶음. Web typecheck·lint·vitest.
+- **검수:** Claude(Orca 작업자).
