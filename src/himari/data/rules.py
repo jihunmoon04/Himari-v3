@@ -1181,9 +1181,19 @@ def worked_on(project: LifeEntry, plan: LifeEntry, piece: WorkPiece, now: dateti
     the plan's day with that ending (its title and goal stay, the user's too). character-routine §11.1: never on
     the day it started (``project_end_refusal``): then the piece and the "so far" stay and the project stays open."""
     worked = dataclasses.replace(project, so_far=piece.so_far, revision=project.revision + 1, updated_at=now)
-    if piece.done is None or project_end_refusal(project, plan.day or "", LifeOrigin.WRITER) is not None:
+    day = plan_life_day(plan)
+    if piece.done is None or project_end_refusal(project, day, LifeOrigin.WRITER) is not None:
         return worked
-    return dataclasses.replace(worked, end_day=plan.day, ending=piece.done)
+    return dataclasses.replace(worked, end_day=day, ending=piece.done)
+
+
+def plan_life_day(plan: LifeEntry) -> str:
+    """character-routine §11.1 (review P2-2): the life day of a slot's start — its date, the day before when it starts
+    before NIGHT_ENDS (as ``life_day``; the slot's date and time are the user's already)."""
+    day = plan.day or ""
+    if day and plan.time_of_day and plan.time_of_day < f"{NIGHT_ENDS:%H:%M}":
+        return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    return day
 
 
 def _so_far(text: object) -> str:
@@ -1241,7 +1251,8 @@ def check_project_write(op: object, write: object, origin: LifeOrigin) -> Projec
         return ProjectWrite(write.entry_id, title=None if write.title is None else check_arc_title(write.title),
                             goal=None if write.goal is None else check_life_text(LifeKind.ARC, write.goal),
                             reason=reason)
-    return ProjectWrite(write.entry_id, ending=check_life_text(LifeKind.ARC, write.ending), reason=reason)
+    ending = check_life_text(LifeKind.ARC, write.ending)  # review P2-7: one line, as the spec says
+    return ProjectWrite(write.entry_id, ending=" ".join(ending.split()), reason=reason)
 
 
 def project_end_refusal(project: LifeEntry, day: str, origin: LifeOrigin) -> str | None:
@@ -1259,10 +1270,11 @@ def project_changed(op: PlanOp, write: ProjectWrite, entries: Sequence[LifeEntry
     day count, the ones it closed), by ``origin`` on ``day``. The project as kept: a new one (id 0, given as it is
     inserted) or the open one changed (revision + 1). PLAN_REFUSED with the sentence, or NOT_FOUND."""
     open_ = [a for a in entries if a.arc_open and a.persona_id == persona_id]
+    same = None if write.title is None else next(
+        (a for a in open_ if fold(a.title or "") == fold(write.title) and a.entry_id != write.entry_id), None)
     if op is PlanOp.PROJECT_START:
         if len(open_) >= MAX_OPEN_ARCS:
             raise _refused(f"You have {MAX_OPEN_ARCS} open projects already; end one, or start this later.")
-        same = next((a for a in open_ if fold(a.title or "") == fold(write.title or "")), None)
         if same is not None:
             raise _refused(f"A project titled \"{same.title}\" is open already (id {same.entry_id}).")
         _counted(entries, None, origin, zone, now)
@@ -1275,6 +1287,8 @@ def project_changed(op: PlanOp, write: ProjectWrite, entries: Sequence[LifeEntry
     if op is PlanOp.PROJECT_UPDATE:
         if origin is LifeOrigin.HIMARI and target.origin is LifeOrigin.USER:
             raise _refused("The user wrote this project's title and goal; leave them as they are.")
+        if same is not None:  # review P2-1: a rename never takes another open project's title
+            raise _refused(f"A project titled \"{same.title}\" is open already (id {same.entry_id}).")
         _counted(entries, target.entry_id, origin, zone, now)
         return dataclasses.replace(target, title=write.title or target.title, text=write.goal or target.text,
                                    origin=origin, reason=write.reason or target.reason,
@@ -1283,7 +1297,9 @@ def project_changed(op: PlanOp, write: ProjectWrite, entries: Sequence[LifeEntry
     if refusal is not None:
         raise _refused(refusal)
     _counted(entries, target.entry_id, origin, zone, now)
-    return dataclasses.replace(target, end_day=day, ending=write.ending, reason=write.reason or target.reason,
+    # review P2-5: the reason kept is the end's own (None for the user's and the diary's, which say none); P2-7: the
+    # user's end is never dated before the start
+    return dataclasses.replace(target, end_day=max(day, target.day or day), ending=write.ending, reason=write.reason,
                                origin=target.origin if target.origin is LifeOrigin.USER else origin,
                                revision=target.revision + 1, updated_at=now)
 

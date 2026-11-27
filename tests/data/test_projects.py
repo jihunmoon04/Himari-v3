@@ -119,6 +119,11 @@ def test_the_limits_are_said_in_sentences() -> None:
         start(data, "우쿨렐레")
         with refused(DataErrorCode.PLAN_REFUSED, "You have 2 open projects already"):
             start(data, "세 번째")
+        with refused(DataErrorCode.PLAN_REFUSED, f"A project titled \"그림 연습\" is open already (id {first.entry_id})"):
+            change(data, PlanOp.PROJECT_UPDATE, ProjectWrite(first.entry_id + 1, title=" 그림 연습", reason="같게"))
+        same = change(data, PlanOp.PROJECT_UPDATE, ProjectWrite(first.entry_id, title="그림 연습", goal="한 장",
+                                                                reason="그대로"))  # its own title: fine
+        assert same is not None and same.text == "한 장"
         with refused(DataErrorCode.PLAN_REFUSED, f"Project {first.entry_id} started today"):
             change(data, PlanOp.PROJECT_END, ProjectWrite(first.entry_id, ending="끝.", reason="질렸어"))
         with refused(DataErrorCode.NOT_FOUND, "There is no open project 99"):
@@ -160,12 +165,15 @@ def test_the_user_ends_a_project_any_day_from_the_revision_read() -> None:
             await data.end_project(ALICE, made.entry_id, "끝.", expected_revision=2, zone=ZONE, now=NOW)
         ended = await data.end_project(ALICE, made.entry_id, " 그만뒀다. ", expected_revision=1, zone=ZONE, now=NOW)
         assert (ended.end_day, ended.ending, ended.origin, ended.reason) == (  # the day it started: fine for the user
-            "2026-11-26", "그만뒀다.", LifeOrigin.USER, "해 보고 싶어서")
+            "2026-11-26", "그만뒀다.", LifeOrigin.USER, None)  # review P2-5: HIMARI's start reason is not the end's
         with refused(DataErrorCode.NOT_FOUND):
             await data.end_project(ALICE, made.entry_id, "또.", expected_revision=2, zone=ZONE, now=NOW)
+        other = start(data, "우쿨렐레")
         with refused(DataErrorCode.INVALID_ARGUMENT):
-            await data.end_project(ALICE, start(data, "우쿨렐레").entry_id, " ", expected_revision=1, zone=ZONE,
-                                   now=NOW)
+            await data.end_project(ALICE, other.entry_id, " ", expected_revision=1, zone=ZONE, now=NOW)
+        early = await data.end_project(ALICE, other.entry_id, "그만\n뒀다.", expected_revision=1, zone=ZONE,
+                                       now=NOW - timedelta(days=3))  # review P2-7: never dated before the start
+        assert (early.end_day, early.ending) == ("2026-11-26", "그만 뒀다.")  # and one line
 
     asyncio.run(scenario())
 
@@ -180,8 +188,8 @@ def test_the_diary_makes_the_same_change_and_a_refused_move_is_left_out() -> Non
         (third,) = await diary(data, "2026-11-26", ArcMove(ArcOp.START, title="세 번째", goal="g"))
         assert third.arc_id is None  # two open already
         closed, last = await diary(data, "2026-11-27", ArcMove(ArcOp.CLOSE, entry_id=made.entry_id, ending="다 그렸다."))
-        assert (closed.entry_id, closed.end_day, closed.ending, closed.origin, closed.arc_open) == (
-            made.entry_id, "2026-11-27", "다 그렸다.", LifeOrigin.WRITER, False)
+        assert (closed.entry_id, closed.end_day, closed.ending, closed.origin, closed.arc_open, closed.reason) == (
+            made.entry_id, "2026-11-27", "다 그렸다.", LifeOrigin.WRITER, False, None)
         assert last.arc_id == made.entry_id
         began, _ = await diary(data, "2026-11-28", ArcMove(ArcOp.START, title="작곡 노트", goal="매일 한 곡"))
         assert (began.day, began.origin, began.reason) == ("2026-11-28", LifeOrigin.WRITER, None)
@@ -198,6 +206,11 @@ def test_a_piece_never_finishes_a_project_on_the_day_it_started() -> None:
     assert (same_day.so_far, same_day.end_day, same_day.ending, same_day.arc_open) == ("so far", None, None, True)
     later = rules.worked_on(project, dataclasses.replace(plan, day="2026-11-27"), piece, NOW)
     assert (later.end_day, later.ending) == ("2026-11-27", "끝났다.")
+    past_midnight = rules.worked_on(project, dataclasses.replace(plan, day="2026-11-27", time_of_day="00:30"), piece,
+                                    NOW)  # review P2-2: 00:30 on 11-27 is still the day of 11-26
+    assert past_midnight.end_day is None and past_midnight.arc_open
+    morning = rules.worked_on(project, dataclasses.replace(plan, day="2026-11-27", time_of_day="05:00"), piece, NOW)
+    assert morning.end_day == "2026-11-27"
 
 
 def test_himaris_project_changes_count_with_its_slots() -> None:
@@ -216,5 +229,24 @@ def test_himaris_project_changes_count_with_its_slots() -> None:
                                   origin=LifeOrigin.HIMARI, zone=ZONE, now=NOW)
         again = change(data, PlanOp.PROJECT_UPDATE, ProjectWrite(made.entry_id, goal="한 장", reason="r"))
         assert again is not None and again.revision == 3  # the same project again: already counted
+
+    asyncio.run(scenario())
+
+
+def test_schedule_read_shows_a_project_started_this_turn_with_its_id() -> None:
+    """Review P1-2: himari_life is read as the turn begins; schedule_read reads now, so the id is there."""
+    from himari.common import CallId
+    from himari.tool.api import ToolContext, ToolInvocation
+    from himari.tool.schedule import ScheduleRead
+
+    async def scenario() -> None:
+        data = data_for(new_store())
+        made = start(data, "그림 연습")
+        tool = ScheduleRead(data, time_zone=ZONE, clock=lambda: NOW)
+        outcome = await tool.run(ToolInvocation(tool.definition.tool_id, CallId("c0"), {"days": 2}),
+                                 ToolContext(SCOPE, persona_id=1))
+        text = outcome.model_result.blocks[0].text  # type: ignore[union-attr]
+        assert text.splitlines() == ["Nothing from 2026-11-26 to 2026-11-27.",
+                                     f"project id {made.entry_id} · 그림 연습 · since 2026-11-26"]
 
     asyncio.run(scenario())

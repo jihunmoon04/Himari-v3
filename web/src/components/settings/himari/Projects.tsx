@@ -15,25 +15,29 @@ import {
 
 const ARC_CHARS = 200; // as the server's, when it does not say
 
-/** character-routine §11.4: the ending of an open project, from the revision it was opened with. */
+/** character-routine §11.4: the ending of an open project, from the revision it was opened with; after a change made
+ *  elsewhere (409), from the project as it is now shown (review P2-4: the ending typed is kept for that). */
 function EndForm({ project, revision, max, onDone }: {
   project: LifeEntry; revision: number; max: number; onDone: () => void;
 }) {
   const client = useQueryClient();
   const [ending, setEnding] = useState("");
   const [saving, setSaving] = useState(false);
+  const [base, setBase] = useState<number | null>(revision); // null: the revision shown now
   useUnsaved(ending.trim() !== "");
   const end = async () => {
     if (!window.confirm(`End "${project.title ?? ""}"? It cannot be opened again.`)) return;
     setSaving(true);
     try {
-      await endProject(project.id, ending.trim(), revision);
+      await endProject(project.id, ending.trim(), base ?? project.revision);
       toast(`Ended the project. ${NEXT_TURN}`);
       onDone();
     } catch (failure) {
-      toast(refused(failure, "revision_conflict")
-        ? "The project was changed elsewhere since you opened it; it was not ended. Your ending is still here; "
-          + "cancel to see the project as it is now."
+      const conflict = refused(failure, "revision_conflict");
+      if (conflict) setBase(null);
+      toast(conflict
+        ? "The project was changed elsewhere since you opened it; it was not ended. Your ending is still here: look "
+          + "at the project as it is now, and end it again to end it as it is."
         : why(failure, "Could not end the project."), "error");
     } finally {
       setSaving(false);
@@ -70,7 +74,10 @@ function ProjectBlock({ project, pieces, editing, locked, limits, ending, onEnd,
         <EndForm project={project} revision={ending} max={limits.arc_chars ?? ARC_CHARS} onDone={onEnded} />
       )}
       {open && ending === null && (
-        <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEnd}>End project</Button>
+        <Button variant="ghost" className="px-2 py-0.5 text-xs" disabled={locked} onClick={onEnd}
+          aria-label={`End project ${project.title ?? ""}`}>
+          End project
+        </Button>
       )}
       {!project.so_far && open && <p className="text-sm text-muted">Nothing made yet.</p>}
       {pieces.length > 0 && (
@@ -87,8 +94,10 @@ function ProjectBlock({ project, pieces, editing, locked, limits, ending, onEnd,
 export function ProjectsTab({ life }: { life: Life }) {
   const editing = useEditing();
   // character-routine §11.4: the project being ended (one at a time, as an editor) and the revision it was opened at
-  const [ending, setEnding] = useState<{ id: number; revision: number } | null>(null);
+  const [chosen, setEnding] = useState<{ id: number; revision: number } | null>(null);
   const { entries, limits, work } = life;
+  // review P2-3: closed or gone meanwhile (by the diary, a piece, elsewhere): the form is gone and nothing stays locked
+  const ending = chosen && entries.some((entry) => entry.id === chosen.id && entry.status === "open") ? chosen : null;
   const { titles, projectOf } = projectsOf(entries);
   const locked = editing.busy || editing.open !== null || ending !== null;
   // the pieces as listed (newest first); one of a project not listed goes last

@@ -123,8 +123,8 @@ describe("the Projects tab", () => {
       expect(project.getByText("Why: 대화하다가 그리고 싶어졌어.")).toBeTruthy();
       expect(project.getByText("since 2026-11-10 · open · by HIMARI")).toBeTruthy();
       expect(within(part("Closed projects").getByLabelText("Project 우쿨렐레"))
-        .queryByRole("button", { name: "End project" })).toBeNull(); // a closed one is never ended again
-      fireEvent.click(project.getByRole("button", { name: "End project" }));
+        .queryByRole("button", { name: /End project/ })).toBeNull(); // a closed one is never ended again
+      fireEvent.click(project.getByRole("button", { name: "End project 그림 연습" }));
       expect(project.getAllByRole("button", { name: "Edit" }).every((b) => (b as HTMLButtonElement).disabled))
         .toBe(true); // one editor at a time
       const ending = screen.getByLabelText("Ending") as HTMLInputElement;
@@ -139,19 +139,50 @@ describe("the Projects tab", () => {
       await waitFor(() => expect(screen.queryByLabelText("Ending")).toBeNull());
     });
 
-  it("keeps the ending when the project was changed elsewhere", async () => {
-    vi.mocked(endProject).mockRejectedValueOnce(new ApiError(409, "revision_conflict", "changed"));
-    living({
-      ...aLife(),
-      entries: [{ ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "writer"), title: "그림 연습", status: "open" }],
+  it("keeps the ending when the project was changed elsewhere, and ends it as it is now on the next try",
+    async () => {
+      vi.mocked(endProject).mockRejectedValueOnce(new ApiError(409, "revision_conflict", "changed"));
+      const project = { ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "writer"), title: "그림 연습", status: "open" as const };
+      living({ ...aLife(), entries: [project] });
+      await shown();
+      fireEvent.click(screen.getByRole("button", { name: "End project 그림 연습" }));
+      fireEvent.change(screen.getByLabelText("Ending"), { target: { value: "끝." } });
+      living({ ...aLife(), entries: [{ ...project, text: "인물화 한 장", revision: 2 }] }); // changed elsewhere
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      fireEvent.click(screen.getByRole("button", { name: "End project" }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringMatching(/changed elsewhere/), "error"));
+      expect(endProject).toHaveBeenLastCalledWith(11, "끝.", 1);
+      expect((screen.getByLabelText("Ending") as HTMLInputElement).value).toBe("끝.");
+      await waitFor(() => expect(screen.getByText("인물화 한 장")).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "End project" }));
+      await waitFor(() => expect(endProject).toHaveBeenLastCalledWith(11, "끝.", 2));
     });
+
+  it("lets go of the ending when the project is closed elsewhere meanwhile", async () => {
+    const project = { ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "writer"), title: "그림 연습", status: "open" as const };
+    const fact = entry(5, "fact", null, "고양이를 무서워한다.", "conversation");
+    living({ ...aLife(), entries: [project, fact] });
     await shown();
-    fireEvent.click(screen.getByRole("button", { name: "End project" }));
+    fireEvent.click(screen.getByRole("button", { name: "End project 그림 연습" }));
     fireEvent.change(screen.getByLabelText("Ending"), { target: { value: "끝." } });
+    vi.mocked(endProject).mockRejectedValueOnce(new ApiError(404, "not_found", "gone"));
+    living({ ...aLife(), entries: [{ ...project, status: "closed", end_day: "2026-11-26", ending: "일기가 끝냈다.",
+      revision: 2 }] }); // the diary closed it meanwhile
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: "End project" }));
-    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringMatching(/changed elsewhere/), "error"));
-    expect((screen.getByLabelText("Ending") as HTMLInputElement).value).toBe("끝.");
+    await waitFor(() => expect(screen.queryByLabelText("Ending")).toBeNull());
+    expect(within(part("Closed projects").getByLabelText("Project 그림 연습"))
+      .getAllByRole("button", { name: "Edit" }).every((b) => !(b as HTMLButtonElement).disabled)).toBe(true);
+  });
+
+  it("shows why only for what HIMARI last did", async () => {
+    living({
+      ...aLife(),
+      entries: [{ ...entry(11, "arc", "2026-11-10", "풍경화 한 장", "user", 2), title: "그림 연습", status: "closed",
+        end_day: "2026-11-20", ending: "그만뒀다.", reason: "얘기하다 그리고 싶어졌어." }],
+    });
+    await shown();
+    expect(screen.queryByText(/^Why:/)).toBeNull();
   });
 
   it("says when there are no projects and the worker is off", async () => {

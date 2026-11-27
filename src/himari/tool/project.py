@@ -15,7 +15,14 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 
 from himari.common import JsonValue, ModelToolResult, TextBlock, ToolId
-from himari.data.api import MAX_ARC_CHARS, MAX_ARC_TITLE_CHARS, PlanChange, PlanOp, ProjectWrite
+from himari.data.api import (
+    MAX_ARC_CHARS,
+    MAX_ARC_TITLE_CHARS,
+    MAX_PLAN_REASON_CHARS,
+    PlanChange,
+    PlanOp,
+    ProjectWrite,
+)
 from himari.tool.api import (
     EffectProfile,
     ToolContext,
@@ -31,7 +38,8 @@ PROJECT_END = ToolId("project_end")
 PROJECT_TOOL_IDS = frozenset({PROJECT_START, PROJECT_UPDATE, PROJECT_END})
 DAY_SESSION = "day_session"  # the capability they require (prompt.api.DAY_SESSION)
 NOT_KEPT = "Your projects are not kept here."
-_REASON = {"type": "string", "description": "Why, one line in your own words."}
+_REASON = {"type": "string",
+           "description": f"Why, one line in your own words (at most {MAX_PLAN_REASON_CHARS} characters)."}
 
 
 def _text(message: str, *, error: bool = False) -> ModelToolResult:
@@ -99,8 +107,9 @@ class ProjectStart(_Project):
         if reason is None:
             return _failed("reason is one line: why you start it")
         return ToolOutcome(ToolStatus.SUCCEEDED,
-                           _text(f"Started project \"{title}\". Its id shows in himari_life.arcs; give it time with "
-                                 "schedule_write (kind work)."),
+                           _text(f"Started project \"{title}\". To give it time now, read its id with "
+                                 "schedule_read, then schedule_write (kind work); from your next turn it is in "
+                                 "himari_life.arcs too."),
                            raw_result={"start": {"title": title, "goal": goal, "reason": reason}},
                            plan_change=self._change(ctx, PlanOp.PROJECT_START,
                                                     ProjectWrite(title=title, goal=goal, reason=reason)))

@@ -188,7 +188,8 @@ def test_the_user_ends_an_open_project_from_the_revision_shown(server: Server) -
     body = ended.json()
     assert server.application is not None
     assert (body["status"], body["ending"], body["origin"], body["revision"], body["end_day"]) == (
-        "closed", "다 그렸다.", "user", 2, life_day(datetime.now(UTC), ZoneInfo(server.application.time_zone)))
+        "closed", "다 그렸다.", "user", 2,  # never dated before its start (this one starts in 2099)
+        max("2099-01-01", life_day(datetime.now(UTC), ZoneInfo(server.application.time_zone))))
     again = server.client.post(f"/api/life/arcs/{arc['id']}/end", json={"ending": "또.", "revision": 2},
                                headers=SEND)
     assert again.status_code == 404

@@ -162,7 +162,9 @@ function Row({ entry, locked, onEdit, onDelete, project }: {
         ) : <p className="whitespace-pre-wrap break-words">{entry.text}</p>}
         {entry.kind === "arc" && entry.so_far && <p className="mt-1 text-muted">So far: {entry.so_far}</p>}
         {entry.kind === "arc" && entry.ending && <p className="mt-1 text-muted">Ending: {entry.ending}</p>}
-        {entry.kind === "arc" && entry.reason && <p className="mt-1 text-muted">Why: {entry.reason}</p>}
+        {entry.kind === "arc" && entry.origin === "himari" && entry.reason && (
+          <p className="mt-1 text-muted">Why: {entry.reason}</p>
+        )}
         <p className="mt-1 text-xs text-faint">
           {thought ? `${entry.about ? `${ABOUT[entry.about] ?? entry.about} · ` : ""}kept ${clock(entry.created_at)}`
             + `${entry.expires_at ? ` · until ${clock(entry.expires_at)}` : ""} · ` : ""}
