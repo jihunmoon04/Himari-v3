@@ -109,7 +109,7 @@
 | **3** | **반복 일정**(§3). 스키마 v31(`routines`, `life_entries.routine_id`), 하루 지기가 잠·일기를 반복 일정으로 놓도록 일반화, 칸 규칙을 "HIMARI가" 칸으로 일반화, 일정 탭의 반복 일정 편집 | 큼 | 가장 크고 잠·일기 코드를 건드린다. 1·2가 자리 잡은 뒤에 한다 |
 | 4(나중) | 반복 일정에 하는 일 붙이기(§8) | — | 써 보고 정한다 |
 
-## 7. 정한 것(권고안, 소유자 확인 전)
+## 7. 정한 것(권고안. 소유자가 1–2단계로 R2·R4–R9를, 2026-11-27 "둘다 괜찮아"로 R1·R3를 확인)
 
 | | 무엇 | 권고 |
 | --- | --- | --- |
@@ -285,3 +285,73 @@
       - 맺음은 한 줄로 접는다. 소유자의 끝 날짜는 시작일보다 앞서지 않는다.
       - Tool 설명에 이유의 길이 한계를 적었다.
     - 받아들인 것(P2-6): HIMARI가 소유자의 프로젝트를 끝내면 origin이 `user`로 남아 20번 셈에 들지 않는다. 열린 것이 둘뿐이라 많아야 둘이다.
+
+## 13. 3단계 구현 계약: 반복 일정 (2026-11-27)
+
+소유자가 R1(반복 일정은 소유자만 만든다)과 R3(잠·일기는 끌 수 없고 범위·길이만 고친다)를 확인하고 "3단계 진행할까"라고 한 뒤 쓴다. **스키마 v31.**
+
+### 13.1 Data
+
+- **표 `routines`**(페르소나마다, 주인마다 번호): `routine_id`, `owner`, `persona_id`, `name`(한 줄, 40자), `text`(칸에 쓰는 HIMARI 말투 한 줄, 100자), `builtin`(`sleep`·`diary`·없음), `start_from`·`start_to`(HH:MM), `minutes_min`·`minutes_max`, `end_from`·`end_to`(잠만), `weekdays`(월=1 … 일=64의 비트, 1–127), `state`(`trial`·`fixed`·`off`), `trial_until`(YYYY-MM-DD, 실험만), `himari`(`move`·`move_cancel`·`none`), `revision`, `created_at`, `updated_at`, `retired_at`.
+- **`life_entries.routine_id`**(새 칸): 하루 지기가 반복 일정으로 놓은 칸이 그 반복 일정을 안다. 잠·일기 칸도 기본 반복 일정의 id를 갖는다(옛 칸은 빈칸).
+- **기본 반복 일정**: 잠과 일기다. 페르소나마다 처음 읽을 때 만든다(`routines_of`가 없으면 넣는다).
+  - 첫 값은 지금 코드에 박힌 값이다. 잠은 시작 23:00–02:00, 끝 07:00–10:00. 일기는 21:00부터 잠 40분 전까지, 30분.
+  - 둘 다 `fixed`, 매일, HIMARI는 `move`다.
+  - 소유자가 고칠 수 있는 것은 범위와 길이뿐이다. 이름·말투 한 줄·요일·상태·HIMARI 칸은 고칠 수 없고, 지울 수도 없다.
+- **한계(규칙):**
+  - 잠: 시작 범위는 21:00–05:00 안(자정을 넘어도 된다), 끝 범위는 05:00–12:00 안이다. 가장 이른 시작과 가장 늦은 끝 사이가 5–11시간이 될 수 있어야 한다.
+  - 일기: 시작은 18:00 뒤, 길이는 10–60분이다. 끝(잠 40분 전)은 고칠 수 없다.
+  - 내 반복 일정:
+    - 종류는 `own`이다. 시작 범위는 같은 날 안에서 `from <= to`다. 길이는 `MIN_PLAN_MINUTES`–`MAX_PLAN_MINUTES`이고 `min <= max`다.
+    - 실험 기간은 1–60일이고 기본 7일이다(`trial_until` = 오늘 + 기간 − 1).
+  - 페르소나마다 20개(기본 포함)까지다.
+  - 범위는 모두 10분 단위다.
+- **실험이 끝나면** `trial_until`이 지난 실험 일정은 "끔"과 같다(읽을 때 계산한다. 따로 쓰지 않는다). Web은 "trial ended"로 보인다.
+- **바꾸기**는 `add_routine`, `edit_routine`(revision), `retire_routine`(revision, 기본은 거부)이다. 같은 트랜잭션에서 그 반복 일정이 놓은 칸을 정리한다. 대상은 하루 지기가 놓은 그대로(origin `writer`)이고 아직 시작하지 않은 칸이다.
+  - **고치기:** 그 칸을 지운다(retire). 하루 지기가 새 값으로 다시 놓는다. 잠 칸을 지우면 일기 칸도 함께 지운다.
+  - **끄기·지우기:** 그 칸을 취소한다(이유 "반복 일정을 껐다", origin `writer`).
+  - HIMARI나 소유자가 옮긴 칸은 그대로 둔다.
+- **칸의 "HIMARI가"**(rules, origin HIMARI만): `routine_id`가 있는 칸은 그 반복 일정의 `himari`를 따른다.
+  - `none`: 옮기지도 취소하지도 못한다. 거부 문장: "This slot is your routine "…": the user set it, so leave it as it is."
+  - `move`: 옮기기만 된다. 취소는 거부한다: "… you may move it, not cancel it."
+  - `move_cancel`: 둘 다 된다.
+  - 어느 경우든 HIMARI는 그 칸의 종류와 말투 한 줄을 바꾸지 못한다(잠 칸처럼 시간만).
+  - 지워진 반복 일정의 칸은 보통 칸이다.
+- **읽기에 붙는 표시:** `list_life`와 일정 읽기가 칸마다 `routine`(이름, 실험 여부, HIMARI 칸)을 붙인다. 저장하지 않는 읽기 값이다.
+
+### 13.2 하루 지기(`life/keeper.py`, `life/day.py`)
+
+- `ensure_slots`가 잠·일기 칸을 그 기본 반복 일정의 값으로 놓는다(`place_sleep`·`place_diary`가 범위를 인자로 받는다. 기본값은 지금 상수). 놓은 칸에 `routine_id`를 단다.
+- **내 반복 일정의 칸**도 같은 때(오늘과 내일, 처음 필요할 때) 놓는다. 대상은 켜진 것(고정, 또는 그날이 `trial_until` 안인 실험)과 그 요일인 날이다.
+  - 그날 그 `routine_id`의 칸이 이미 있으면(취소된 것도) 놓지 않는다.
+  - 시작은 범위 안 10분 단위에서 무작위다. 오늘이면 지금 뒤만 고른다. 길이도 범위 안 10분 단위에서 무작위다.
+  - 잠 칸과 겹치지 않는 시작만 고른다. 다른 칸과는 겹쳐도 된다. 고를 것이 없으면 그날은 놓지 않는다.
+  - origin `writer`, 종류 `own`, 말투는 반복 일정의 `text`다.
+- Data 규칙: 하루 지기(`writer`)가 쓸 수 있는 칸은 잠·일기와 **`routine_id`가 있는 `own`**이다.
+
+### 13.3 프롬프트
+
+- `himari_schedule`의 칸에 `routine`(이름)이 붙는다. 실험이면 `trial: true`, HIMARI 칸이 `move`·`none`이면 `himari: "move only"`·`"leave"`가 붙는다.
+- `SCHEDULE_RULE`에 한 문장을 더한다: routine이 붙은 칸은 네 생활 습관이다. 허락된 만큼만 옮기거나 거르고, 그럴 때는 이유를 쓴다.
+- `schedule_read`의 줄에도 같은 표시가 붙는다.
+
+### 13.4 Web
+
+- API(주인만, 고른 페르소나):
+  - `GET /api/routines` → `{routines: [...], persona, limits}`
+  - `POST /api/routines`(`persona_id`)
+  - `PUT /api/routines/{id}`(`revision`)
+  - `DELETE /api/routines/{id}?revision=`
+  - 거부는 `routine_refused` 409(규칙 문장), 길이는 422, 버전은 409 `revision_conflict`다.
+- **Schedule 탭의 "Routines" 묶음**(일정표 아래):
+  - 목록: 이름, 시간 범위, 길이, 요일, 상태(실험이면 끝나는 날, 끝났으면 "trial ended"), HIMARI 칸.
+  - 기본 둘(Sleep, Diary)은 맨 위에 두고 범위·길이만 고친다.
+  - 내 반복 일정은 만들기·고치기·끄기·지우기가 된다. 상태는 Trial(기간 날 수)·Fixed·Off에서 고른다.
+  - 놓인 칸은 일정표에 반복 일정 이름과 "trial" 표시로 보인다.
+- **Instructions 화면**에 한 줄을 더한다: "Times written here do not put anything on HIMARI's schedule; use Settings → HIMARI → Schedule → Routines."
+
+### 13.5 확인
+
+- **서버 테스트:** 표·올리기(v30→v31 백업과 건수), 기본 반복 일정, 한계, 바꾸기와 칸 정리, 하루 지기의 놓기(요일, 실험 끝, 겹침, 이미 있음), HIMARI 칸 규칙, 프롬프트 표시, Web API.
+- **검사와 Web:** 엄격 mypy, `check_imports`. Web typecheck·lint·vitest.
+- **검수:** Claude(Orca 작업자).
