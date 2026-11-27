@@ -43,6 +43,10 @@ from himari.data.api import (
     PlanState,
     PlanWrite,
     ProjectWrite,
+    Routine,
+    RoutineBuiltin,
+    RoutineState,
+    RoutineWrite,
     SleepRecord,
     life_day,
     WokeBy,
@@ -311,6 +315,8 @@ class InMemoryStore:
         # state per principal and persona
         self.sleeps: dict[int, tuple[PrincipalId, SleepRecord]] = {}
         self.day_states: dict[tuple[PrincipalId, int], DayState] = {}
+        # character-routine §13.1: (owner, routine_id) -> (routine, retired at)
+        self.routines: dict[tuple[PrincipalId, int], tuple[Routine, datetime | None]] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -1358,8 +1364,10 @@ class InMemoryData:
         at = now or datetime.now(UTC)
         open_arcs = {e.entry_id for (owner, _), (e, retired) in self._store.life.items()
                      if owner == principal and retired is None and e.arc_open}
+        marks = {r.routine_id: rules.routine_mark(r, at.date()) for r in self._routines(principal, persona_id)}
         return rules.order_life(
-            e for (owner, _), (e, retired) in self._store.life.items()
+            e if e.routine_id not in marks else replace(e, routine=marks[e.routine_id])
+            for (owner, _), (e, retired) in self._store.life.items()
             if owner == principal and retired is None and e.persona_id == persona_id and e.kind is not LifeKind.BOND
             and rules.live_thought(e, at)  # character-mind §5.2: until it expires
             and (e.kind in (LifeKind.FACT, LifeKind.THOUGHT) or since is None or (e.day or "") >= since
@@ -1429,6 +1437,87 @@ class InMemoryData:
     def _keep_project(self, principal: PrincipalId, entry: LifeEntry) -> LifeEntry:
         return self._new_life(principal, entry) if entry.entry_id == 0 else self._put_life(principal, entry)
 
+    # --- routines (character-routine v0.1 §13.1): as SqliteData's -----------------------------------
+
+    def _routines(self, principal: PrincipalId, persona_id: int) -> list[Routine]:
+        return sorted((r for (owner, _), (r, retired) in self._store.routines.items()
+                       if owner == principal and retired is None and r.persona_id == persona_id),
+                      key=rules.routine_order)
+
+    def _routine_of(self, principal: PrincipalId, slot: LifeEntry | None) -> Routine | None:
+        if slot is None or slot.routine_id is None:
+            return None
+        found = self._store.routines.get((principal, slot.routine_id))
+        return None if found is None or found[1] is not None else found[0]
+
+    def _put_routine(self, principal: PrincipalId, routine: Routine) -> Routine:
+        if routine.routine_id == 0:
+            last = max((rid for owner, rid in self._store.routines if owner == principal), default=0)
+            routine = replace(routine, routine_id=last + 1)
+        self._store.routines[(principal, routine.routine_id)] = (routine, None)
+        return routine
+
+    def _ensured_routines(self, principal: PrincipalId, persona_id: int, now: datetime) -> list[Routine]:
+        have = {r.builtin for r in self._routines(principal, persona_id)}
+        for builtin in RoutineBuiltin:
+            if builtin not in have:
+                self._put_routine(principal, rules.builtin_routine(builtin, persona_id, now))
+        return self._routines(principal, persona_id)
+
+    def _live_routine(self, principal: PrincipalId, routine_id: object) -> Routine:
+        found = None if isinstance(routine_id, bool) or not isinstance(routine_id, int) else \
+            self._store.routines.get((principal, routine_id))
+        if found is None or found[1] is not None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no routine {routine_id}")
+        return found[0]
+
+    def _routine_slots(self, principal: PrincipalId, routine: Routine, *, zone: str,
+                       now: datetime) -> list[LifeEntry]:
+        plans = [e for e in self._plans(principal, routine.persona_id) if e.kind is LifeKind.PLAN]
+        return rules.routine_slots_to_clear(routine, plans, rules.check_zone(zone), now)
+
+    def _clear_routine_slots(self, principal: PrincipalId, slots: Sequence[LifeEntry], *, cancel: bool,
+                             now: datetime) -> None:
+        for slot in slots:
+            if cancel:
+                self._put_life(principal, rules.routine_cancelled(slot, now))
+            else:
+                self._retire_life(principal, slot, now)
+
+    async def routines_of(self, principal: PrincipalId, persona_id: int, *, now: datetime) -> tuple[Routine, ...]:
+        return tuple(self._ensured_routines(principal, rules.check_life_persona(persona_id), now))
+
+    async def add_routine(self, principal: PrincipalId, persona_id: int, routine: RoutineWrite, *, zone: str,
+                          now: datetime) -> Routine:
+        persona_id = rules.check_life_persona(persona_id)
+        today = now.astimezone(rules.check_zone(zone)).date()
+        live = self._ensured_routines(principal, persona_id, now)
+        return self._put_routine(principal, rules.checked_routine(routine, None, live, persona_id=persona_id,
+                                                                  today=today, now=now))
+
+    async def edit_routine(self, principal: PrincipalId, routine_id: int, routine: RoutineWrite, *,
+                           expected_revision: int, zone: str, now: datetime) -> Routine:
+        today = now.astimezone(rules.check_zone(zone)).date()
+        before = self._live_routine(principal, routine_id)
+        if expected_revision != before.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the routine is at revision {before.revision}")
+        after = rules.checked_routine(routine, before, (), persona_id=before.persona_id, today=today, now=now)
+        slots = self._routine_slots(principal, after, zone=zone, now=now)  # all checked before any change
+        self._put_routine(principal, after)
+        self._clear_routine_slots(principal, slots, cancel=after.state is RoutineState.OFF, now=now)
+        return after
+
+    async def retire_routine(self, principal: PrincipalId, routine_id: int, *, expected_revision: int, zone: str,
+                             now: datetime) -> None:
+        before = self._live_routine(principal, routine_id)
+        if expected_revision != before.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"the routine is at revision {before.revision}")
+        rules.check_routine_retire(before)
+        slots = self._routine_slots(principal, before, zone=zone, now=now)
+        self._clear_routine_slots(principal, slots, cancel=True, now=now)
+        self._store.routines[(principal, routine_id)] = (replace(before, revision=before.revision + 1,
+                                                                 updated_at=now), now)
+
     async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, *, expected_revision: int,
                           zone: str, now: datetime) -> LifeEntry:
         entry = self._live_entry(principal, entry_id)
@@ -1454,7 +1543,7 @@ class InMemoryData:
             for owner, s in self._store.sleeps.values())
         plan = rules.check_plan_limits(plan, before, [e for e in entries if e.kind is LifeKind.PLAN],
                                        [e for e in entries if e.kind is LifeKind.ARC], origin=origin, zone=where,
-                                       now=now, asleep_in=asleep_in)
+                                       now=now, asleep_in=asleep_in, routine=self._routine_of(principal, before))
         return rules.planned_entry(persona_id, plan, before, origin, now), before is None
 
     def _keep_planned(self, principal: PrincipalId, planned: tuple[LifeEntry, bool]) -> LifeEntry:
@@ -1468,7 +1557,7 @@ class InMemoryData:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a cancelled slot says why")
         before = rules.live_plan_of(self._live_entry(principal, entry_id), persona_id)
         rules.check_cancel(before, self._plans(principal, before.persona_id), origin=origin,
-                           zone=rules.check_zone(zone), now=now)
+                           zone=rules.check_zone(zone), now=now, routine=self._routine_of(principal, before))
         return replace(before, plan_state=PlanState.CANCELLED, reason=why, origin=origin,
                        revision=before.revision + 1, updated_at=now)
 

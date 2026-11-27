@@ -148,6 +148,15 @@ from himari.data.api import (
     MAX_PERSONAS,
     PERSONA_FIELDS,
     MAX_LIST_LIMIT,
+    DEFAULT_TRIAL_DAYS,
+    MAX_ROUTINE_NAME_CHARS,
+    MAX_ROUTINE_TEXT_CHARS,
+    MAX_ROUTINES,
+    MAX_TRIAL_DAYS,
+    Routine,
+    RoutineSay,
+    RoutineState,
+    RoutineWrite,
     MAX_ARC_CHARS,
     MAX_ARC_TITLE_CHARS,
     MAX_WORK_CHARS,
@@ -490,6 +499,45 @@ class LifeEditBody(_Body):
     revision: int = Field(ge=1)  # the revision the entry was edited from
     title: str | None = None  # an arc's or a work piece's title; null or left out: kept
     summary: str | None = None  # a work piece's one line; null or left out: kept
+
+
+class RoutineBody(_Body):  # character-routine §13.4: a routine as the owner writes it (the limits are Data's)
+    name: str
+    text: str
+    start_from: str
+    start_to: str
+    minutes_min: int
+    minutes_max: int
+    weekdays: int = 127
+    state: Literal["trial", "fixed", "off"] = "trial"
+    trial_until: str | None = None
+    himari: Literal["move", "move_cancel", "none"] = "move"
+    end_from: str | None = None  # the sleep's only
+    end_to: str | None = None
+
+
+class RoutineAddBody(RoutineBody):
+    persona_id: int | None  # the persona whose routines the page showed; null: no persona
+
+
+class RoutineEditBody(RoutineBody):
+    revision: int = Field(ge=1)
+
+
+def routine_write(body: RoutineBody) -> RoutineWrite:
+    return RoutineWrite(body.name, body.text, body.start_from, body.start_to, body.minutes_min, body.minutes_max,
+                        body.weekdays, RoutineState(body.state), body.trial_until, RoutineSay(body.himari),
+                        body.end_from, body.end_to)
+
+
+def routine_view(routine: Routine, today: date) -> dict[str, Any]:
+    """§13.4: a routine as the Web shows it (whether a trial has ended, by the server's today)."""
+    return {"id": routine.routine_id, "name": routine.name, "text": routine.text,
+            "builtin": None if routine.builtin is None else routine.builtin.value,
+            "start_from": routine.start_from, "start_to": routine.start_to, "minutes_min": routine.minutes_min,
+            "minutes_max": routine.minutes_max, "end_from": routine.end_from, "end_to": routine.end_to,
+            "weekdays": routine.weekdays, "state": routine.state.value, "trial_until": routine.trial_until,
+            "trial_ended": routine.trial_ended(today), "himari": routine.himari.value, "revision": routine.revision}
 
 
 class ProjectEndBody(_Body):  # character-routine §11.4
@@ -1091,7 +1139,7 @@ PERSONA_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 
 def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
     """character-life §6: one entry of HIMARI's life."""
-    view = {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "time": entry.time_of_day,
+    view: dict[str, Any] = {"id": entry.entry_id, "kind": entry.kind.value, "day": entry.day, "time": entry.time_of_day,
             "text": entry.text, "origin": entry.origin.value, "revision": entry.revision,
             "created_at": _time(entry.created_at), "updated_at": _time(entry.updated_at)}
     if entry.kind is LifeKind.ARC:  # character-world §4: its title, open or closed, and how it ended
@@ -1108,7 +1156,11 @@ def life_entry_view(entry: LifeEntry) -> dict[str, Any]:
         view["arc_id"] = entry.arc_id
     if entry.kind is LifeKind.PLAN:  # character-day §4.1, §18.11: a slot of the schedule
         view |= {"minutes": entry.minutes, "plan_kind": None if entry.plan_kind is None else entry.plan_kind.value,
-                 "plan_state": None if entry.plan_state is None else entry.plan_state.value, "reason": entry.reason}
+                 "plan_state": None if entry.plan_state is None else entry.plan_state.value, "reason": entry.reason,
+                 # character-routine §13.4: the routine it was placed for, as read now (null: none, or deleted)
+                 "routine": None if entry.routine is None else {
+                     "id": entry.routine_id, "name": entry.routine.name, "trial": entry.routine.trial,
+                     "himari": entry.routine.himari.value}}
     return view
 
 
@@ -2055,6 +2107,56 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             return life_entry_view(await himari(request).edit_plan(who, plan_write(body, entry_id), body.revision))
         except DataError as error:
             raise life_refused(error) from None
+
+    # --- routines (character-routine §13.4): the chosen persona's, on the Web only --------------------
+
+    def routine_refused(error: DataError) -> ApiError:
+        if error.code is DataErrorCode.PLAN_REFUSED:  # the rule's own sentence
+            return ApiError(409, "routine_refused", error.message or "That routine is past the limits.")
+        if error.code is DataErrorCode.LIMIT_EXCEEDED:
+            return ApiError(409, "limit_exceeded", error.message or "Too many routines.")
+        return life_refused(error)
+
+    @app.get("/api/routines")
+    async def read_routines(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        chosen, routines = await application.routines(who)
+        today = datetime.now(ZoneInfo(application.time_zone)).date()
+        return {"persona": None if chosen is None else {"id": chosen.persona_id, "name": chosen.name},
+                "today": today.isoformat(), "routines": [routine_view(r, today) for r in routines],
+                "limits": {"routines": MAX_ROUTINES, "name_chars": MAX_ROUTINE_NAME_CHARS,
+                           "text_chars": MAX_ROUTINE_TEXT_CHARS, "trial_days": MAX_TRIAL_DAYS,
+                           "default_trial_days": DEFAULT_TRIAL_DAYS}}
+
+    @app.post("/api/routines", status_code=201)
+    async def add_routine(body: RoutineAddBody, request: Request,
+                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        try:
+            made = await application.add_routine(who, body.persona_id, routine_write(body))
+        except LifeChanged:
+            raise ApiError(409, "persona_changed", "Another persona is in use now; look again.") from None
+        except DataError as error:
+            raise routine_refused(error) from None
+        return routine_view(made, datetime.now(ZoneInfo(application.time_zone)).date())
+
+    @app.put("/api/routines/{routine_id}")
+    async def edit_routine(routine_id: int, body: RoutineEditBody, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        try:
+            changed = await application.edit_routine(who, routine_id, routine_write(body), body.revision)
+        except DataError as error:
+            raise routine_refused(error) from None
+        return routine_view(changed, datetime.now(ZoneInfo(application.time_zone)).date())
+
+    @app.delete("/api/routines/{routine_id}", status_code=204)
+    async def retire_routine(routine_id: int, revision: int, request: Request,
+                             who: PrincipalId = Depends(principal)) -> None:
+        try:
+            await himari(request).retire_routine(who, routine_id, revision)
+        except DataError as error:
+            raise routine_refused(error) from None
 
     @app.post("/api/life/arcs/{entry_id}/end")
     async def end_project(entry_id: int, body: ProjectEndBody, request: Request,

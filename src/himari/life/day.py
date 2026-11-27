@@ -114,18 +114,25 @@ def _steps(first: datetime, last: datetime) -> list[datetime]:
 
 
 def place_sleep(night: date, rng: Random, zone: tzinfo,
-                busy: Sequence[tuple[datetime, datetime]] = ()) -> PlacedSleep | None:
+                busy: Sequence[tuple[datetime, datetime]] = (), *,
+                starts: tuple[time, time] = SLEEP_STARTS, ends: tuple[time, time] = SLEEP_ENDS) -> PlacedSleep | None:
     """§5.2, §4.4: the night's sleep slot — a start drawn from 23:00 to 02:00 and an end from 07:00 to 10:00 (ten-
     minute steps), the end at least MIN_SLEEP_MINUTES after the start and by 12:00. ``busy``: the night's other
     slots, which it never covers: a start that would is pushed after them (in ten minutes, to 05:00 at the latest),
     the end comes before the next one; with no room later, the latest start back from the drawn one (to 21:00).
     When no span within the limits fits (a slot over 05:00 leaves none), the same search with the end allowed before
-    05:00 (it gets up for that slot); None: not even that (the night stays without a slot until room is made)."""
+    05:00 (it gets up for that slot); None: not even that (the night stays without a slot until room is made).
+    character-routine §13.2: ``starts`` and ``ends`` are the sleep routine's ranges (a start from 21:00 is on the
+    night's date, one before 05:00 on the morning's)."""
     morning = night + timedelta(days=1)
-    drawn = rng.choice(_steps(datetime.combine(night, SLEEP_STARTS[0], tzinfo=zone),
-                              datetime.combine(morning, SLEEP_STARTS[1], tzinfo=zone)))
-    wanted_end = rng.choice(_steps(datetime.combine(morning, SLEEP_ENDS[0], tzinfo=zone),
-                                   datetime.combine(morning, SLEEP_ENDS[1], tzinfo=zone)))
+
+    def on_night(at: time) -> datetime:
+        return datetime.combine(night if at >= NIGHT_STARTS else morning, at, tzinfo=zone)
+
+    drawn = rng.choice(_steps(on_night(starts[0]), on_night(starts[1])) or [on_night(starts[0])])
+    wanted_end = rng.choice(_steps(datetime.combine(morning, ends[0], tzinfo=zone),
+                                   datetime.combine(morning, ends[1], tzinfo=zone))
+                            or [datetime.combine(morning, ends[0], tzinfo=zone)])
     least = timedelta(minutes=MIN_SLEEP_MINUTES)
     by = datetime.combine(morning, LATEST_END, tzinfo=zone)
     ends_from = datetime.combine(morning, SLEEP_ENDS_FROM, tzinfo=zone)
@@ -164,24 +171,50 @@ def _ceil_up(moment: datetime) -> datetime:
 # --- placing a diary slot (character-diary §3) ----------------------------------------------------
 
 
-def place_diary(night: date, sleep_start: datetime, rng: Random, zone: tzinfo, now: datetime) -> PlacedSlot | None:
+def place_diary(night: date, sleep_start: datetime, rng: Random, zone: tzinfo, now: datetime, *,
+                start_from: time = DIARY_FROM, minutes: tuple[int, int] = (DIARY_MINUTES, DIARY_MINUTES)
+                ) -> PlacedSlot | None:
     """character-diary §3, §16.3: the night's diary slot, DIARY_MINUTES long, beside its sleep slot starting at
     ``sleep_start`` — a start drawn from 21:00 to DIARY_BEFORE before the sleep (ten-minute steps); when that range
     is empty (the sleep starts before 21:40), DIARY_BEFORE before the sleep but never before DIARY_EARLIEST. Never
     already past: a start before ``now`` moves to ``now`` rounded up to ten minutes. None when it would then end
-    after the sleep starts (the diary is written as HIMARI falls asleep)."""
+    after the sleep starts (the diary is written as HIMARI falls asleep). character-routine §13.2: ``start_from`` and
+    ``minutes`` (a length drawn in ten minutes) are the diary routine's."""
     sleep_start = sleep_start.astimezone(zone)
     soonest = _ceil_up(now.astimezone(zone))
-    first = datetime.combine(night, DIARY_FROM, tzinfo=zone)
+    length = rng.choice(_lengths(*minutes))
+    first = datetime.combine(night, start_from, tzinfo=zone)
     last = sleep_start - DIARY_BEFORE
     choices = [s for s in _steps(first, last) if s >= soonest]
     if choices:
         start = rng.choice(choices)
     else:
         start = max(min(last, first), datetime.combine(night, DIARY_EARLIEST, tzinfo=zone), soonest)
-    if start + timedelta(minutes=DIARY_MINUTES) > sleep_start:
+    if start + timedelta(minutes=length) > sleep_start:
         return None
-    return PlacedSlot(start.date().isoformat(), start.strftime("%H:%M"), DIARY_MINUTES)
+    return PlacedSlot(start.date().isoformat(), start.strftime("%H:%M"), length)
+
+
+def _lengths(low: int, high: int) -> list[int]:
+    """Lengths from ``low`` to ``high`` minutes in ten-minute steps (``low`` itself first; ``high`` when it is off)."""
+    out = list(range(low, high + 1, STEP_MINUTES))
+    return out if out[-1] == high else [*out, high]
+
+
+def place_routine(day: date, start_range: tuple[time, time], minutes: tuple[int, int], rng: Random, zone: tzinfo,
+                  now: datetime, sleeps: Sequence[tuple[datetime, datetime]]) -> PlacedSlot | None:
+    """character-routine §13.2: a routine's slot on ``day`` — a start drawn in ten minutes from its range (today:
+    only from now on) and a length from its range, never over a sleep slot (``sleeps``); None when no start fits."""
+    length = rng.choice(_lengths(*minutes))
+    soonest = _ceil_up(now.astimezone(zone))
+    starts = [s for s in _steps(datetime.combine(day, start_range[0], tzinfo=zone),
+                                datetime.combine(day, start_range[1], tzinfo=zone)) if s >= soonest]
+    rng.shuffle(starts)
+    for start in starts:
+        end = start + timedelta(minutes=length)
+        if not any(b[0] < end and start < b[1] for b in sleeps):
+            return PlacedSlot(start.date().isoformat(), start.strftime("%H:%M"), length)
+    return None
 
 
 def diary_of_night(plans: Sequence[LifeEntry], night: date, zone: tzinfo) -> LifeEntry | None:

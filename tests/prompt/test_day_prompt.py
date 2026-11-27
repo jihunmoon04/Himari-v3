@@ -5,6 +5,8 @@ context."""
 
 from __future__ import annotations
 
+import dataclasses
+
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -22,6 +24,8 @@ from himari.data.api import (
     LifeOrigin,
     PersistedStateBasis,
     PlanKind,
+    RoutineMark,
+    RoutineSay,
     PlanState,
     SleepRecord,
     SleepState,
@@ -104,6 +108,22 @@ def test_the_schedule_tells_today_and_tomorrow_with_what_no_longer_stands() -> N
     assert data["tomorrow"] == [
         {"id": 1, "kind": "sleep", "text": "잠", "start": "00:15", "end": "08:15", "minutes": 480},
         {"id": 3, "kind": "together", "text": "게임", "start": "15:00", "end": "17:00", "minutes": 120}]
+
+
+def test_a_routines_slot_says_its_routine_whether_on_trial_and_what_himari_may_do() -> None:
+    """character-routine §13.3."""
+    def marked(entry_id: int, at: str, mark: RoutineMark) -> LifeEntry:
+        return dataclasses.replace(slot(entry_id, "2026-11-26", at, 40, PlanKind.OWN, "저녁 먹는 중"), routine_id=9,
+                                   routine=mark)
+
+    data = himari_schedule_data((marked(5, "18:40", RoutineMark("저녁 식사", True, RoutineSay.MOVE)),
+                                 marked(6, "19:40", RoutineMark("간식", False, RoutineSay.NONE)),
+                                 marked(7, "20:40", RoutineMark("산책", False, RoutineSay.MOVE_CANCEL))), NOW)
+    told = data["today"]
+    assert isinstance(told, list)
+    assert [(t["routine"], t.get("trial"), t.get("himari")) for t in told] == [
+        ("저녁 식사", True, "move only"), ("간식", None, "leave"), ("산책", None, None)]
+    assert "daily habits" in SCHEDULE_RULE and '"leave": neither' in SCHEDULE_RULE
 
 
 def test_the_sleep_tells_drowsy_minutes_the_last_sleep_and_a_fresh_waking() -> None:
