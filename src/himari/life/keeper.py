@@ -27,7 +27,7 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from random import Random
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -54,6 +54,8 @@ from himari.data.api import (
     Persona,
     PlanKind,
     PlanWrite,
+    Routine,
+    RoutineBuiltin,
     SleepRecord,
     SleepState,
     SleepStore,
@@ -86,6 +88,10 @@ class KeeperData(LifeStore, LifeWriteLog, SleepStore, Protocol):  # what the kee
     async def last_event(self, scope: TrustedScope) -> tuple[int, datetime] | None: ...
 
     async def last_user_message_at(self, principal: PrincipalId) -> datetime | None: ...
+
+
+def _time(at: str) -> time:
+    return time(int(at[:2]), int(at[3:]))
 
 
 def wall_clock() -> datetime:
@@ -305,6 +311,7 @@ class DayKeeper:
             sleep = await self._data.current_sleep(principal, persona_id)
             if sleep is not None:
                 await self._woke_on_time(principal, sleep, plans, now)
+            # character-routine §13.2: the sleep and diary slots by their built-in routines, then the owner's
             night = day.current_night(now.astimezone(self._zone))
             for wanted in (night, night + timedelta(days=1)):
                 if day.slot_of_night(plans, wanted, self._zone) is None:
@@ -314,6 +321,7 @@ class DayKeeper:
                         log.warning("the day keeper could not place a slot for %s: %s", principal, error)
                     plans = await self._plans(principal, persona_id, now)
             await self._place_diaries(principal, persona_id, now, plans)
+            await self._place_routines(principal, persona_id, now)
 
     async def _place_diaries(self, principal: PrincipalId, persona_id: int, now: datetime,
                              plans: Sequence[LifeEntry]) -> None:
@@ -329,11 +337,48 @@ class DayKeeper:
             except DataError as error:
                 log.warning("the day keeper could not place a diary slot for %s: %s", principal, error)
 
+    async def _builtin(self, principal: PrincipalId, persona_id: int, which: RoutineBuiltin) -> Routine | None:
+        """character-routine §13.2 (review P1-1): the persona's built-in routine as it is now (read at each placing)."""
+        return next((r for r in await self._data.routines_of(principal, persona_id, now=self._clock())
+                     if r.builtin is which), None)
+
+    async def _place_routines(self, principal: PrincipalId, persona_id: int, now: datetime) -> None:
+        """character-routine §13.2: today's and tomorrow's slots of the owner's routines that are on, each once a day
+        (a slot of it that day, cancelled too, stands for it), never over a sleep slot; none when nothing fits. Run
+        at each look too (review P1-3), so a routine added or changed is on the schedule within a minute."""
+        routines = [r for r in await self._data.routines_of(principal, persona_id, now=now) if r.builtin is None]
+        if not routines:
+            return
+        plans = await self._plans(principal, persona_id, now)
+        today = now.astimezone(self._zone).date()
+        sleeps = [s for e in plans if e.sleep_slot and (s := plan_span(e, self._zone)) is not None]
+        for wanted in (today, today + timedelta(days=1)):
+            for routine in routines:
+                if not routine.on(wanted) or any(e.routine_id == routine.routine_id and e.day == wanted.isoformat()
+                                                 for e in plans):
+                    continue
+                placed = day.place_routine(wanted, (_time(routine.start_from), _time(routine.start_to)),
+                                           (routine.minutes_min, routine.minutes_max), self._rng, self._zone, now,
+                                           sleeps)
+                if placed is None:
+                    continue
+                try:
+                    await self._data.write_plan(principal, persona_id, PlanWrite(
+                        placed.day, placed.time_of_day, placed.minutes, PlanKind.OWN, routine.text,
+                        routine_id=routine.routine_id), origin=LifeOrigin.WRITER, zone=self.time_zone, now=now)
+                except DataError as error:
+                    log.warning("the day keeper could not place routine %s for %s: %s", routine.routine_id,
+                                principal, error)
+
     async def _place(self, principal: PrincipalId, persona_id: int, night: date, plans: Sequence[LifeEntry],
                      now: datetime) -> None:
         busy = [s for e in plans if e.live_plan and e.plan_kind not in (PlanKind.SLEEP, PlanKind.DIARY)
                 and (s := plan_span(e, self._zone)) is not None]  # character-diary §16.2: the sleep may cover it
-        placed = day.place_sleep(night, self._rng, self._zone, busy)
+        sleep = await self._builtin(principal, persona_id, RoutineBuiltin.SLEEP)
+        # review P1-2: never a start already past (a sleep slot placed again in the evening)
+        placed = (day.place_sleep(night, self._rng, self._zone, busy, now=now) if sleep is None else day.place_sleep(
+            night, self._rng, self._zone, busy, starts=(_time(sleep.start_from), _time(sleep.start_to)),
+            ends=(_time(sleep.end_from or "07:00"), _time(sleep.end_to or "10:00")), now=now))
         if placed is None:  # §19.1: the night is full of slots — none until room is made (looked at again each time)
             if (principal, night) not in self._unplaced:
                 self._unplaced.add((principal, night))
@@ -341,7 +386,8 @@ class DayKeeper:
             return
         self._unplaced.discard((principal, night))
         await self._data.write_plan(principal, persona_id, PlanWrite(
-            placed.day, placed.time_of_day, placed.minutes, PlanKind.SLEEP, SLEEP_TEXT),
+            placed.day, placed.time_of_day, placed.minutes, PlanKind.SLEEP, SLEEP_TEXT,
+            routine_id=None if sleep is None else sleep.routine_id),
             origin=LifeOrigin.WRITER, zone=self.time_zone, now=now)
         await self._place_diary(principal, persona_id, night, await self._plans(principal, persona_id, now), now)
 
@@ -355,11 +401,15 @@ class DayKeeper:
         span = None if slot is None else plan_span(slot, self._zone)
         if span is None:
             return
-        placed = day.place_diary(night, span[0], self._rng, self._zone, now)
+        diary = await self._builtin(principal, persona_id, RoutineBuiltin.DIARY)
+        placed = (day.place_diary(night, span[0], self._rng, self._zone, now) if diary is None else day.place_diary(
+            night, span[0], self._rng, self._zone, now, start_from=_time(diary.start_from),
+            minutes=(diary.minutes_min, diary.minutes_max)))
         if placed is None:
             return
         await self._data.write_plan(principal, persona_id, PlanWrite(
-            placed.day, placed.time_of_day, placed.minutes, PlanKind.DIARY, DIARY_TEXT),
+            placed.day, placed.time_of_day, placed.minutes, PlanKind.DIARY, DIARY_TEXT,
+            routine_id=None if diary is None else diary.routine_id),
             origin=LifeOrigin.WRITER, zone=self.time_zone, now=now)
 
     # --- applying what is due ------------------------------------------------------------------
@@ -400,6 +450,7 @@ class DayKeeper:
             if any(t.step is Step.PLACE for t in found):
                 plans = await self._plans(principal, persona_id, now)
             await self._place_diaries(principal, persona_id, now, plans)  # character-diary §3: a night with no diary
+            await self._place_routines(principal, persona_id, now)  # character-routine §13.2 (review P1-3)
             view = day.sleep_view(now, day.tonight(plans, now, self._zone), sleep, state, self._zone)
             self._tell(principal, view.state)
         for scope_closed in closed:  # outside the lock: the passes and the world take their time

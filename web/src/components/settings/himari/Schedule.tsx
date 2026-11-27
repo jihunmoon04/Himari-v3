@@ -1,11 +1,13 @@
 // Settings → HIMARI → Schedule (character-day §12, §18.12; character-routine §9.2): HIMARI's slots from today (the
 // server's) on, by day, each with its kind, start and length, and a cancelled or missed one with why. The owner adds,
 // edits and deletes slots; the sleep slot and (character-diary §10) the diary slot only move (never deleted). A slot of
-// a date before today is not here: it is in that date's record (the Records tab).
+// a date before today is not here: it is in that date's record (the Records tab). character-routine §13.4: under it,
+// the routines (the built-in sleep and diary, and the owner's own), and a slot placed for one shows its name.
 import { useState } from "react";
 import type { Life } from "@/api/settings";
 import { Button } from "@/components/ui/button";
 import { dayLabel, slotsByDay } from "@/features/schedule";
+import { RoutinesGroup } from "./Routines";
 import { Group, PlanEditor, projectsOf, SlotRow, useEditing } from "./shared";
 
 export function ScheduleTab({ life, today }: { life: Life; today: string }) {
@@ -47,9 +49,12 @@ export function ScheduleTab({ life, today }: { life: Life; today: string }) {
     </div>
   );
   return (
-    <Group title="Schedule" note="HIMARI's slots from today on; the sleep and diary slots only move"
-      top={addSlot} empty="Nothing on the schedule from today on.">
-      {schedule}
-    </Group>
+    <div className="space-y-6">
+      <Group title="Schedule" note="HIMARI's slots from today on; the sleep and diary slots only move"
+        top={addSlot} empty="Nothing on the schedule from today on.">
+        {schedule}
+      </Group>
+      <RoutinesGroup />
+    </div>
   );
 }

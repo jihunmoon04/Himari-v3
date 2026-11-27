@@ -97,7 +97,46 @@ export interface LifeEntry {
   plan_kind?: PlanKind | null;
   plan_state?: PlanState | null;
   reason?: string | null; // character-routine §11.4: also why a project was last started, changed or ended
+  // character-routine §13.4: a slot the server placed for a routine (its name, whether on trial, HIMARI's say)
+  routine?: { id: number; name: string; trial: boolean; himari: RoutineSay } | null;
 }
+
+/** character-routine §13: a routine of the persona in use — the built-in sleep and diary (only their range and length
+ *  change) and the owner's own, which the server places on the schedule each day it is on. */
+export type RoutineState = "trial" | "fixed" | "off";
+export type RoutineSay = "move" | "move_cancel" | "none";
+export interface Routine {
+  id: number;
+  name: string;
+  text: string; // the slot's line, in HIMARI's voice
+  builtin: "sleep" | "diary" | null;
+  start_from: string; // HH:MM
+  start_to: string; // HH:MM (the diary: until 40 minutes before its sleep)
+  minutes_min: number;
+  minutes_max: number;
+  end_from: string | null; // the sleep's end range
+  end_to: string | null;
+  weekdays: number; // Monday = 1 ... Sunday = 64
+  state: RoutineState;
+  trial_until: string | null; // a trial's last day
+  trial_ended: boolean;
+  himari: RoutineSay;
+  revision: number;
+}
+export type RoutineInput = Omit<Routine, "id" | "builtin" | "trial_ended" | "revision">;
+export interface Routines {
+  persona: { id: number; name: string } | null;
+  today: string;
+  routines: Routine[];
+  limits: { routines: number; name_chars: number; text_chars: number; trial_days: number; default_trial_days: number };
+}
+export const readRoutines = () => get<Routines>("/api/routines");
+/** ``personaId`` as for a fact; a routine past the limits is refused with ``routine_refused`` and says why. */
+export const addRoutine = (routine: RoutineInput, personaId: number | null) =>
+  post<Routine>("/api/routines", { ...routine, persona_id: personaId });
+export const editRoutine = (id: number, routine: RoutineInput, revision: number) =>
+  put<Routine>(`/api/routines/${id}`, { ...routine, revision });
+export const deleteRoutine = (id: number, revision: number) => del<void>(`/api/routines/${id}?revision=${revision}`);
 
 /** character-day §5.1: HIMARI's sleep now (the server keeps it), for the persona in use. */
 export type SleepState = "awake" | "drowsy" | "asleep" | "half_asleep";

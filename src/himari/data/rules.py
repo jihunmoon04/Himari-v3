@@ -29,10 +29,25 @@ from himari.data.api import (
     SCHEDULE_DAYS,
     SLEEP_ENDS_BY,
     SLEEP_ENDS_FROM,
+    ALL_WEEKDAYS,
+    ROUTINE_OFF_REASON,
+    DIARY_MINUTES,
+    DIARY_TEXT,
+    MAX_ROUTINE_NAME_CHARS,
+    MAX_ROUTINE_TEXT_CHARS,
+    MAX_ROUTINES,
+    MAX_TRIAL_DAYS,
     PlanKind,
     PlanOp,
+    PlanState,
     PlanWrite,
     ProjectWrite,
+    Routine,
+    RoutineBuiltin,
+    RoutineMark,
+    RoutineSay,
+    RoutineState,
+    RoutineWrite,
     SleepRecord,
     night_of,
     plan_span,
@@ -1365,6 +1380,9 @@ def check_plan_write(plan: object) -> PlanWrite:
     arc = plan.arc_id if plan.kind is PlanKind.WORK else None
     if arc is not None and (isinstance(arc, bool) or not isinstance(arc, int) or arc < 1):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a project is an arc's id")
+    if plan.routine_id is not None and (isinstance(plan.routine_id, bool) or not isinstance(plan.routine_id, int)
+                                        or plan.routine_id < 1):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a routine is its id")
     return dataclasses.replace(plan, day=check_life_day(plan.day), time_of_day=at,
                                text=check_life_text(LifeKind.PLAN, plan.text), arc_id=arc,
                                reason=check_plan_reason(plan.reason))
@@ -1489,7 +1507,7 @@ def _uncovered(start: datetime, end: datetime, plans: Sequence[LifeEntry], zone:
 
 def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence[LifeEntry],
                       arcs: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo, now: datetime,
-                      asleep_in: bool = False) -> PlanWrite:
+                      asleep_in: bool = False, routine: Routine | None = None) -> PlanWrite:
     """§4.2, §4.4: a checked slot (``check_plan_write``) against the persona's schedule — ``before`` the live slot
     it changes (None: a new one), ``plans`` every plan of the persona (live or not), ``arcs`` its arcs — as
     ``origin`` writes it at ``now``; the write as kept (a sleep slot stays one and keeps its text: only its times
@@ -1498,6 +1516,16 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
     comes before the fall)."""
     local = now.astimezone(zone)
     start, end = _span(plan.day, plan.time_of_day, plan.minutes, zone)
+    # character-routine §13.1: only the keeper puts a slot on a routine; a change keeps the slot's routine, and
+    # HIMARI does with a routine's slot what the routine lets it (only its times: its kind and text stay)
+    plan = dataclasses.replace(plan, routine_id=plan.routine_id if before is None and origin is LifeOrigin.WRITER
+                               else None)
+    if origin is LifeOrigin.HIMARI and before is not None and routine is not None:
+        _himari_may(routine, cancel=False)
+        plan = dataclasses.replace(plan, kind=before.plan_kind or plan.kind, text=before.text, arc_id=before.arc_id)
+        if routine.builtin is None and plan.day != before.day:  # review P2-2: never two of a day's routine
+            raise _refused(f"This slot is your routine \"{routine.name}\" of {before.day}: move it within that day"
+                           + (", or cancel it." if routine.himari is RoutineSay.MOVE_CANCEL else "."))
     if before is not None and (before.plan_kind is PlanKind.SLEEP) != (plan.kind is PlanKind.SLEEP):
         raise _refused("A sleep slot stays a sleep slot, and no other slot becomes one.")
     if before is not None and (before.plan_kind is PlanKind.DIARY) != (plan.kind is PlanKind.DIARY):
@@ -1529,8 +1557,9 @@ def check_plan_limits(plan: PlanWrite, before: LifeEntry | None, plans: Sequence
         if origin is LifeOrigin.WRITER:  # the keeper's own rules place and move it; it never covers a live slot
             _uncovered(start, end, plans, zone, now)
             return plan
-    elif origin is LifeOrigin.WRITER and plan.kind is not PlanKind.DIARY:
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the keeper writes sleep and diary slots only")
+    elif origin is LifeOrigin.WRITER and plan.kind is not PlanKind.DIARY and not (
+            plan.kind is PlanKind.OWN and plan.routine_id is not None and before is None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "the keeper writes sleep, diary and routine slots only")
     _counted([*plans, *arcs], None if before is None else before.entry_id, origin, zone, now)
     if before is not None and (span := plan_span(before, zone)) is not None and span[1] <= now:
         raise _refused(f"That slot is over {_slot_words(before, zone)}; it cannot be changed.")
@@ -1568,7 +1597,7 @@ def planned_entry(persona_id: int, plan: PlanWrite, before: LifeEntry | None, or
     if before is None:
         return LifeEntry(0, persona_id, LifeKind.PLAN, plan.day, plan.text, origin, 1, now, now,
                          time_of_day=plan.time_of_day, arc_id=plan.arc_id, minutes=plan.minutes, plan_kind=plan.kind,
-                         reason=plan.reason)
+                         reason=plan.reason, routine_id=plan.routine_id)
     return dataclasses.replace(before, day=plan.day, time_of_day=plan.time_of_day, minutes=plan.minutes,
                                text=plan.text, arc_id=plan.arc_id, plan_kind=plan.kind,
                                reason=plan.reason if plan.reason is not None else before.reason, origin=origin,
@@ -1576,17 +1605,27 @@ def planned_entry(persona_id: int, plan: PlanWrite, before: LifeEntry | None, or
 
 
 def check_cancel(before: LifeEntry, plans: Sequence[LifeEntry], *, origin: LifeOrigin, zone: tzinfo,
-                 now: datetime) -> None:
+                 now: datetime, routine: Routine | None = None) -> None:
     """§4.3: a live slot may be cancelled — never a sleep slot (character-diary §3: nor a diary slot), never one
     over; HIMARI's within its day's count (``plans``: the persona's plans and arcs, for it)."""
     if before.plan_kind is PlanKind.SLEEP:
         raise _refused("A sleep slot cannot be cancelled or deleted; move it instead.")
     if before.plan_kind is PlanKind.DIARY:
         raise _refused("The diary is never skipped: a diary slot cannot be cancelled or deleted; move it instead.")
+    if origin is LifeOrigin.HIMARI and routine is not None:  # character-routine §13.1
+        _himari_may(routine, cancel=True)
     span = plan_span(before, zone)
     if span is not None and span[1] <= now:
         raise _refused(f"That slot is over {_slot_words(before, zone)}; it cannot be changed.")
     _counted(plans, before.entry_id, origin, zone, now)
+
+
+def _himari_may(routine: Routine, *, cancel: bool) -> None:
+    """character-routine §13.1: what HIMARI may do with a slot of ``routine`` (PLAN_REFUSED otherwise)."""
+    if routine.himari is RoutineSay.NONE:
+        raise _refused(f"This slot is your routine \"{routine.name}\": the user set it, so leave it as it is.")
+    if cancel and routine.himari is RoutineSay.MOVE:
+        raise _refused(f"This slot is your routine \"{routine.name}\": you may move it, not cancel it.")
 
 
 def check_himari_count(plans: Sequence[LifeEntry], entry_id: int | None, zone: tzinfo, now: datetime) -> None:
@@ -1653,3 +1692,172 @@ def sleep_now(plans: Sequence[LifeEntry], *, zone: tzinfo, now: datetime,
     write = PlanWrite(start.date().isoformat(), _clock(start), minutes, PlanKind.SLEEP, slot.text, slot.entry_id,
                       reason=reason)
     return slot, write
+
+
+# --- HIMARI's routines (character-routine v0.1 §13.1) ---------------------------------------------
+
+_NIGHT_AXIS_START = 21 * 60  # minutes: a night's clock runs from 21:00 ...
+
+
+def _night_minutes(at: str) -> int:
+    """A clock time on the night's axis: minutes from 21:00 (05:00 the morning after: 480; 12:00: 900)."""
+    minutes = int(at[:2]) * 60 + int(at[3:])
+    return minutes - _NIGHT_AXIS_START if minutes >= _NIGHT_AXIS_START else minutes + 24 * 60 - _NIGHT_AXIS_START
+
+
+def _step_time(value: object, what: str) -> str:
+    at = check_time_of_day(value)
+    if at is None or int(at[3:]) % 10:
+        raise _refused(f"{what} is a time in ten minutes (HH:M0).")
+    return at
+
+
+def _routine_line(value: object, limit: int, what: str) -> str:
+    if not isinstance(value, str) or any(unicodedata.category(c) in ("Cc", "Cs") for c in value):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{what} is one line of text")
+    line = " ".join(value.split())
+    if not line:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{what} is one line of text")
+    if len(line) > limit:
+        raise DataError(DataErrorCode.TOO_LARGE, f"{what} is at most {limit} characters")
+    return line
+
+
+def _whole(value: object, low: int, high: int, sentence: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise _refused(sentence)
+    return value
+
+
+BUILTIN_SLEEP = RoutineWrite("잠", "잠", "23:00", "02:00", MIN_SLEEP_MINUTES, MAX_SLEEP_MINUTES, ALL_WEEKDAYS,
+                             RoutineState.FIXED, None, RoutineSay.MOVE, "07:00", "10:00")
+BUILTIN_DIARY = RoutineWrite("일기", DIARY_TEXT, "21:00", "21:00", DIARY_MINUTES, DIARY_MINUTES, ALL_WEEKDAYS,
+                             RoutineState.FIXED, None, RoutineSay.MOVE)
+BUILTINS = {RoutineBuiltin.SLEEP: BUILTIN_SLEEP, RoutineBuiltin.DIARY: BUILTIN_DIARY}
+
+
+def builtin_routine(builtin: RoutineBuiltin, persona_id: int, now: datetime) -> Routine:
+    """§13.1: a built-in routine with its first values (today's code's), to insert (id 0)."""
+    w = BUILTINS[builtin]
+    return Routine(0, persona_id, w.name, w.text, builtin, w.start_from, w.start_to, w.minutes_min, w.minutes_max,
+                   w.weekdays, w.state, None, w.himari, 1, now, now, w.end_from, w.end_to)
+
+
+def checked_routine(write: object, before: Routine | None, live: Sequence[Routine], *, persona_id: int,
+                    today: date, now: datetime) -> Routine:
+    """§13.1: ``write`` as kept — a new routine of the owner (``before`` None; ``live``: the persona's routines, for
+    MAX_ROUTINES) or ``before`` changed (a built-in only in its range and length). PLAN_REFUSED with the sentence,
+    LIMIT_EXCEEDED, TOO_LARGE, INVALID_ARGUMENT. The id, revision and times are the store's to finish."""
+    if not isinstance(write, RoutineWrite):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a routine")
+    if before is None and len(live) >= MAX_ROUTINES:
+        raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"a persona keeps at most {MAX_ROUTINES} routines")
+    builtin = None if before is None else before.builtin
+    start_from = _step_time(write.start_from, "A routine's earliest start")
+    revision = 1 if before is None else before.revision + 1
+    created = now if before is None else before.created_at
+    routine_id = 0 if before is None else before.routine_id
+    if builtin is RoutineBuiltin.SLEEP:
+        assert before is not None
+        start_to = _step_time(write.start_to, "The sleep's latest start")
+        end_from = _step_time(write.end_from, "The sleep's earliest end")
+        end_to = _step_time(write.end_to, "The sleep's latest end")
+        first, last = _night_minutes(start_from), _night_minutes(start_to)
+        if not (0 <= first <= last <= 480):
+            raise _refused(f"The sleep starts between {NIGHT_STARTS:%H:%M} and {NIGHT_ENDS:%H:%M}, earliest first.")
+        wake_first, wake_last = _night_minutes(end_from), _night_minutes(end_to)
+        if not (480 <= wake_first <= wake_last <= 900):
+            raise _refused(f"The sleep ends between {SLEEP_ENDS_FROM:%H:%M} and {SLEEP_ENDS_BY:%H:%M}, earliest "
+                           "first.")
+        if wake_last - first < MIN_SLEEP_MINUTES or wake_first - last > MAX_SLEEP_MINUTES:
+            raise _refused(f"Some start and end in these ranges must be {MIN_SLEEP_MINUTES // 60} to "
+                           f"{MAX_SLEEP_MINUTES // 60} hours apart.")
+        return dataclasses.replace(before, start_from=start_from, start_to=start_to, end_from=end_from,
+                                   end_to=end_to, revision=revision, updated_at=now)
+    minutes_min = _whole(write.minutes_min, 10, MAX_PLAN_MINUTES,
+                         f"A routine is 10 to {MAX_PLAN_MINUTES} minutes long.")
+    minutes_max = _whole(write.minutes_max, minutes_min, MAX_PLAN_MINUTES,
+                         "A routine's longest length is at least its shortest.")
+    if minutes_min % 10 or minutes_max % 10:  # review P2-3: in ten minutes, as every range
+        raise _refused("A routine's lengths are in ten minutes.")
+    if builtin is RoutineBuiltin.DIARY:
+        assert before is not None
+        if not (f"{DIARY_EARLIEST:%H:%M}" <= start_from):
+            raise _refused(f"The diary starts from {DIARY_EARLIEST:%H:%M}.")
+        if not MIN_DIARY_MINUTES <= minutes_min <= minutes_max <= MAX_DIARY_MINUTES:
+            raise _refused(f"The diary is {MIN_DIARY_MINUTES} to {MAX_DIARY_MINUTES} minutes long.")
+        return dataclasses.replace(before, start_from=start_from, start_to=start_from, minutes_min=minutes_min,
+                                   minutes_max=minutes_max, revision=revision, updated_at=now)
+    name = _routine_line(write.name, MAX_ROUTINE_NAME_CHARS, "A routine's name")
+    text = _routine_line(write.text, MAX_ROUTINE_TEXT_CHARS, "A routine's line")
+    start_to = _step_time(write.start_to, "A routine's latest start")
+    if start_to < start_from:
+        raise _refused("A routine's start range runs earliest first, within one day.")
+    weekdays = _whole(write.weekdays, 1, ALL_WEEKDAYS, "A routine is on at least one weekday.")
+    if not isinstance(write.state, RoutineState) or not isinstance(write.himari, RoutineSay):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a routine's state and HIMARI's say are their names")
+    until = None
+    if write.state is RoutineState.TRIAL:
+        try:
+            until = date.fromisoformat(str(write.trial_until)).isoformat()
+        except ValueError:
+            raise _refused("A trial routine says its last day (YYYY-MM-DD).") from None
+        kept = before is not None and before.trial_until == until
+        if not kept and not today.isoformat() <= until <= (today + timedelta(days=MAX_TRIAL_DAYS - 1)).isoformat():
+            raise _refused(f"A trial runs from today for 1 to {MAX_TRIAL_DAYS} days.")
+    return Routine(routine_id, persona_id, name, text, None, start_from, start_to, minutes_min, minutes_max, weekdays,
+                   write.state, until, write.himari, revision, created, now)
+
+
+def routine_mark(routine: Routine, today: date) -> RoutineMark:
+    """§13.1, §13.3: what a slot's routine adds when read."""
+    return RoutineMark(routine.name, routine.state is RoutineState.TRIAL and not routine.trial_ended(today),
+                       routine.himari)
+
+
+def check_routine_retire(routine: Routine) -> None:
+    """§13.1 (R3): a built-in routine is never deleted."""
+    if routine.builtin is not None:
+        raise _refused(f"The {routine.builtin.value} routine is never deleted; change its range or length instead.")
+
+
+def routine_slots_to_clear(routine: Routine, plans: Sequence[LifeEntry], zone: tzinfo,
+                           now: datetime) -> list[LifeEntry]:
+    """§13.1 (R4): the routine's slots the keeper placed and nobody moved, not started yet — with the sleep's, the
+    nights' unmoved diary slots too (placed beside it)."""
+    def unmoved(entry: LifeEntry) -> bool:
+        span = plan_span(entry, zone)
+        return entry.live_plan and entry.origin is LifeOrigin.WRITER and span is not None and span[0] > now
+
+    kind = {RoutineBuiltin.SLEEP: PlanKind.SLEEP, RoutineBuiltin.DIARY: PlanKind.DIARY}.get(routine.builtin) \
+        if routine.builtin is not None else None
+    # review P2-1: a built-in's also the unmoved slots of its kind placed with no routine (before v31, or before it)
+    mine = [e for e in plans if unmoved(e) and (e.routine_id == routine.routine_id
+                                                or (kind is not None and e.routine_id is None and e.plan_kind is kind))]
+    if routine.builtin is RoutineBuiltin.SLEEP:
+        mine += [e for e in plans if e.plan_kind is PlanKind.DIARY and unmoved(e) and e not in mine]
+    return mine
+
+
+def routine_order(routine: Routine) -> tuple[int, int]:
+    """§13.1: built-ins first (the sleep, then the diary), then by id."""
+    rank = {RoutineBuiltin.SLEEP: 0, RoutineBuiltin.DIARY: 1}
+    return (rank.get(routine.builtin, 2) if routine.builtin is not None else 2, routine.routine_id)
+
+
+def routine_cancelled(slot: LifeEntry, now: datetime) -> LifeEntry:
+    """§13.1: a slot of a routine turned off or deleted, cancelled (by the keeper) with ROUTINE_OFF_REASON."""
+    return dataclasses.replace(slot, plan_state=PlanState.CANCELLED, reason=ROUTINE_OFF_REASON,
+                               origin=LifeOrigin.WRITER, revision=slot.revision + 1, updated_at=now)
+
+
+def check_routine_slot(plan: PlanWrite, routine: Routine | None, persona_id: int) -> None:
+    """§13.2 (review P2-4): a slot the keeper writes for a routine — the routine live, the persona's, of the slot's
+    kind and (one of the owner's) on that day; INVALID_ARGUMENT otherwise (the keeper logs it and goes on)."""
+    if plan.routine_id is None:
+        return
+    kind = {RoutineBuiltin.SLEEP: PlanKind.SLEEP, RoutineBuiltin.DIARY: PlanKind.DIARY}.get(routine.builtin) \
+        if routine is not None and routine.builtin is not None else PlanKind.OWN
+    if routine is None or routine.persona_id != persona_id or plan.kind is not kind or (
+            routine.builtin is None and not routine.on(date.fromisoformat(plan.day))):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"routine {plan.routine_id} is not on that day for the persona")

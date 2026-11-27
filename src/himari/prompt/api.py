@@ -58,6 +58,7 @@ from himari.data.api import (
     ConversationEvent,
     DayBefore,
     PlanKind,
+    RoutineSay,
     SleepState,
     SleepView,
     plan_kind_of,
@@ -1071,6 +1072,12 @@ def slot_data(entry: LifeEntry, zone: tzinfo) -> dict[str, object]:
         item["state"] = entry.plan_state.value
     if entry.reason:
         item["reason"] = entry.reason
+    if entry.routine is not None:  # character-routine §13.3: a slot of one of its routines, and what it may do
+        item["routine"] = entry.routine.name
+        if entry.routine.trial:
+            item["trial"] = True
+        if entry.routine.himari is not RoutineSay.MOVE_CANCEL:
+            item["himari"] = "move only" if entry.routine.himari is RoutineSay.MOVE else "leave"
     return item
 
 
@@ -1326,8 +1333,10 @@ SCHEDULE_RULE = (
     "with schedule_write. If it falls in your sleep slot, move the sleep slot first — you may put it off, never drop "
     "it — then write it. Move or cancel your own slots as your day changes, always with your reason in your own "
     "words. A <wake> reason \"together\" means such a time has come: start it with them. The diary slot is when you "
-    "write today's diary: you may move it, never cancel it, and until it comes there is no diary of today yet. Keep "
-    "the schedule quietly: do not read it out or talk about the tools."
+    "write today's diary: you may move it, never cancel it, and until it comes there is no diary of today yet. A slot "
+    "with a routine is one of your daily habits: move it or skip it only as far as it says (\"move only\": never "
+    "cancel it; \"leave\": neither), with your reason. Keep the schedule quietly: do not read it out or talk about "
+    "the tools."
 )
 # character-routine §11.3: after SCHEDULE_RULE and SLEEP_RULE, in the day session only. Projects are HIMARI's own to
 # start, change and end with the project Tools; the diary may still move them too.

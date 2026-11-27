@@ -64,6 +64,9 @@ function Editor({ title, help, queryKey, read, save }: {
     <section className="space-y-2" aria-label={title}>
       <h2 className="text-base font-semibold">{title}</h2>
       <p className="text-sm text-muted">{help}</p>
+      <p className="text-xs text-faint">
+        Times written here do not put anything on HIMARI&apos;s schedule; use Settings → HIMARI → Schedule → Routines.
+      </p>
       <textarea aria-label={title} value={value} readOnly={saving /* what is saved is what was written */}
         onChange={(event) => setText(event.target.value)} rows={10}
         className="block w-full resize-y rounded-lg border border-line bg-bg p-3 font-mono text-sm outline-none focus:border-faint" />

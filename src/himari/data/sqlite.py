@@ -87,6 +87,11 @@ from himari.data.api import (
     PlanState,
     PlanWrite,
     ProjectWrite,
+    Routine,
+    RoutineBuiltin,
+    RoutineSay,
+    RoutineState,
+    RoutineWrite,
     SleepRecord,
     life_day,
     WokeBy,
@@ -226,7 +231,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -887,13 +892,42 @@ ALTER TABLE life_writes ADD COLUMN basis_sequence INTEGER;
 ALTER TABLE life_writes ADD COLUMN basis_at TEXT;
 ALTER TABLE sleeps ADD COLUMN closed_session TEXT;
 """
+# v31 (character-routine v0.1 §13.1): a persona's routines (the built-in sleep and diary among them) and the
+# routine a slot was placed for.
+_V31_ADDITIONS = """
+CREATE TABLE routines (
+    owner TEXT NOT NULL,
+    routine_id INTEGER NOT NULL,
+    persona_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    text TEXT NOT NULL,
+    builtin TEXT,
+    start_from TEXT NOT NULL,
+    start_to TEXT NOT NULL,
+    minutes_min INTEGER NOT NULL,
+    minutes_max INTEGER NOT NULL,
+    end_from TEXT,
+    end_to TEXT,
+    weekdays INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    trial_until TEXT,
+    himari TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    retired_at TEXT,
+    PRIMARY KEY (owner, routine_id)
+) STRICT;
+CREATE INDEX routines_by_persona ON routines (owner, persona_id);
+ALTER TABLE life_entries ADD COLUMN routine_id INTEGER;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
               _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
               _V18_ADDITIONS, _V19_ADDITIONS, _V20_ADDITIONS, _V21_ADDITIONS,
               _V22_ADDITIONS, _V23_ADDITIONS, _V24_ADDITIONS, _V25_ADDITIONS,
               _V26_ADDITIONS, _V27_ADDITIONS, _V28_ADDITIONS, _V29_ADDITIONS,
-              _V30_ADDITIONS)  # what each version from v3 added
+              _V30_ADDITIONS, _V31_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1374,7 +1408,25 @@ def _life_entry(row: sqlite3.Row) -> LifeEntry:
                      row["plan_id"], row["so_far"], None if row["about"] is None else ThoughtAbout(row["about"]),
                      _moment(row["expires_at"]), bool(row["draft"]), row["minutes"],
                      None if row["plan_kind"] is None else PlanKind(row["plan_kind"]),
-                     None if row["plan_state"] is None else PlanState(row["plan_state"]), row["reason"])
+                     None if row["plan_state"] is None else PlanState(row["plan_state"]), row["reason"],
+                     row["routine_id"])
+
+
+def _routine_values(routine: Routine) -> tuple[object, ...]:
+    return (routine.routine_id, routine.persona_id, routine.name, routine.text,
+            None if routine.builtin is None else routine.builtin.value, routine.start_from, routine.start_to,
+            routine.minutes_min, routine.minutes_max, routine.end_from, routine.end_to, routine.weekdays,
+            routine.state.value, routine.trial_until, routine.himari.value, routine.revision,
+            _timestamp(routine.created_at), _timestamp(routine.updated_at))
+
+
+def _routine(row: sqlite3.Row) -> Routine:
+    return Routine(row["routine_id"], row["persona_id"], row["name"], row["text"],
+                   None if row["builtin"] is None else RoutineBuiltin(row["builtin"]), row["start_from"],
+                   row["start_to"], row["minutes_min"], row["minutes_max"], row["weekdays"],
+                   RoutineState(row["state"]), row["trial_until"], RoutineSay(row["himari"]), row["revision"],
+                   datetime.fromisoformat(row["created_at"]), datetime.fromisoformat(row["updated_at"]),
+                   row["end_from"], row["end_to"])
 
 
 def _sleep(row: sqlite3.Row) -> SleepRecord:
@@ -2714,7 +2766,7 @@ class SqliteData:
     _LIFE_COLUMNS = ("entry_id, persona_id, kind, day, text, origin, revision, created_at, updated_at,"
                      " source_conversation, source_sequences, source, tag, month_day, time_of_day, title, end_day,"
                      " ending, arc_id, summary, plan_id, so_far, about, expires_at, draft, minutes, plan_kind,"
-                     " plan_state, reason")
+                     " plan_state, reason, routine_id")
 
     def _live_entry(self, tx: _Tx, principal: PrincipalId, entry_id: object) -> LifeEntry:
         row = None if isinstance(entry_id, bool) or not isinstance(entry_id, int) else tx.one(
@@ -2739,9 +2791,9 @@ class SqliteData:
         tx.execute("INSERT INTO life_entries (owner, entry_id, persona_id, kind, day, text, origin, revision,"
                    " created_at, updated_at, retired_at, source_conversation, source_sequences, source, tag,"
                    " month_day, time_of_day, title, end_day, ending, arc_id, summary, plan_id, so_far, about,"
-                   " expires_at, draft, minutes, plan_kind, plan_state, reason)"
+                   " expires_at, draft, minutes, plan_kind, plan_state, reason, routine_id)"
                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                   " ?, ?, ?, ?)",
+                   " ?, ?, ?, ?, ?)",
                    principal, entry.entry_id, entry.persona_id, entry.kind.value, entry.day, entry.text,
                    entry.origin.value, entry.revision, _timestamp(entry.created_at), _timestamp(entry.updated_at),
                    entry.source_conversation, json.dumps(list(entry.source_sequences)), entry.source,
@@ -2750,7 +2802,7 @@ class SqliteData:
                    None if entry.about is None else entry.about.value,
                    None if entry.expires_at is None else _timestamp(entry.expires_at), int(entry.draft),
                    entry.minutes, None if entry.plan_kind is None else entry.plan_kind.value,
-                   None if entry.plan_state is None else entry.plan_state.value, entry.reason)
+                   None if entry.plan_state is None else entry.plan_state.value, entry.reason, entry.routine_id)
         return entry
 
     @staticmethod
@@ -2799,8 +2851,12 @@ class SqliteData:
                           " OR (kind='work' AND arc_id IN (SELECT a.entry_id FROM life_entries a WHERE a.owner=?"
                           " AND a.kind='arc' AND a.end_day IS NULL AND a.retired_at IS NULL)))",
                           principal, persona_id, since, since, since, principal)
-            # character-mind §5.2: a kept thought is listed until it expires
-            return rules.order_life(e for e in map(_life_entry, rows) if rules.live_thought(e, at))
+            # character-mind §5.2: a kept thought is listed until it expires; character-routine §13.1: a slot with
+            # its routine's mark
+            marks = {r.routine_id: rules.routine_mark(r, at.date()) for r in self._routines(tx, principal, persona_id)}
+            return rules.order_life(
+                e if e.routine_id not in marks else dataclasses.replace(e, routine=marks[e.routine_id])
+                for e in map(_life_entry, rows) if rules.live_thought(e, at))
 
     async def list_life_days(self, principal: PrincipalId, persona_id: int, *, until: str, since: str | None = None,
                              limit: int | None = None) -> tuple[LifeEntry, ...]:
@@ -2870,6 +2926,106 @@ class SqliteData:
                                      source=source)
         return self._new_life(tx, principal, made) if made.entry_id == 0 else self._rewrite_life(tx, principal, made)
 
+    # --- routines (character-routine v0.1 §13.1) ------------------------------------------------
+
+    _ROUTINE_COLUMNS = ("routine_id, persona_id, name, text, builtin, start_from, start_to, minutes_min, minutes_max,"
+                        " end_from, end_to, weekdays, state, trial_until, himari, revision, created_at, updated_at")
+
+    def _routines(self, tx: _Tx, principal: PrincipalId, persona_id: int) -> list[Routine]:
+        """The persona's live routines, built-ins first (sleep, diary), then by id."""
+        found = [_routine(r) for r in tx.all(
+            f"SELECT {self._ROUTINE_COLUMNS} FROM routines WHERE owner=? AND persona_id=? AND retired_at IS NULL",
+            principal, persona_id)]
+        return sorted(found, key=rules.routine_order)
+
+    def _routine_of(self, tx: _Tx, principal: PrincipalId, slot: LifeEntry | None) -> Routine | None:
+        """The live routine a slot was placed for, if any."""
+        if slot is None or slot.routine_id is None:
+            return None
+        row = tx.one(f"SELECT {self._ROUTINE_COLUMNS} FROM routines WHERE owner=? AND routine_id=?"
+                     " AND retired_at IS NULL", principal, slot.routine_id)
+        return None if row is None else _routine(row)
+
+    def _put_routine(self, tx: _Tx, principal: PrincipalId, routine: Routine) -> Routine:
+        if routine.routine_id == 0:
+            last = tx.one("SELECT MAX(routine_id) AS n FROM routines WHERE owner=?", principal)
+            routine = dataclasses.replace(routine, routine_id=(int(last["n"] or 0) if last else 0) + 1)
+            tx.execute(f"INSERT INTO routines (owner, {self._ROUTINE_COLUMNS}) VALUES"
+                       " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", principal, *_routine_values(routine))
+            return routine
+        tx.execute("UPDATE routines SET name=?, text=?, start_from=?, start_to=?, minutes_min=?, minutes_max=?,"
+                   " end_from=?, end_to=?, weekdays=?, state=?, trial_until=?, himari=?, revision=?, updated_at=?"
+                   " WHERE owner=? AND routine_id=?", routine.name, routine.text, routine.start_from,
+                   routine.start_to, routine.minutes_min, routine.minutes_max, routine.end_from, routine.end_to,
+                   routine.weekdays, routine.state.value, routine.trial_until, routine.himari.value, routine.revision,
+                   _timestamp(routine.updated_at), principal, routine.routine_id)
+        return routine
+
+    def _ensured_routines(self, tx: _Tx, principal: PrincipalId, persona_id: int, now: datetime) -> list[Routine]:
+        """§13.1: the persona's routines, its built-ins made now when missing."""
+        live = self._routines(tx, principal, persona_id)
+        have = {r.builtin for r in live}
+        for builtin in RoutineBuiltin:
+            if builtin not in have:
+                self._put_routine(tx, principal, rules.builtin_routine(builtin, persona_id, now))
+        return live if len(have - {None}) == len(RoutineBuiltin) else self._routines(tx, principal, persona_id)
+
+    def _live_routine(self, tx: _Tx, principal: PrincipalId, routine_id: object) -> Routine:
+        row = None if isinstance(routine_id, bool) or not isinstance(routine_id, int) else tx.one(
+            f"SELECT {self._ROUTINE_COLUMNS} FROM routines WHERE owner=? AND routine_id=? AND retired_at IS NULL",
+            principal, routine_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no routine {routine_id}")
+        return _routine(row)
+
+    def _clear_routine_slots(self, tx: _Tx, principal: PrincipalId, routine: Routine, *, cancel: bool, zone: str,
+                             now: datetime) -> None:
+        """§13.1 (R4): its slots nobody moved, not started yet — retired (placed again) or, ``cancel``, cancelled."""
+        plans = [e for e in self._plans(tx, principal, routine.persona_id) if e.kind is LifeKind.PLAN]
+        for slot in rules.routine_slots_to_clear(routine, plans, rules.check_zone(zone), now):
+            if cancel:
+                self._rewrite_life(tx, principal, rules.routine_cancelled(slot, now))
+            else:
+                self._retire_life(tx, principal, slot, now)
+
+    async def routines_of(self, principal: PrincipalId, persona_id: int, *, now: datetime) -> tuple[Routine, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        with self._tx() as tx:
+            return tuple(self._ensured_routines(tx, principal, persona_id, now))
+
+    async def add_routine(self, principal: PrincipalId, persona_id: int, routine: RoutineWrite, *, zone: str,
+                          now: datetime) -> Routine:
+        persona_id = rules.check_life_persona(persona_id)
+        today = now.astimezone(rules.check_zone(zone)).date()
+        with self._tx() as tx:
+            live = self._ensured_routines(tx, principal, persona_id, now)
+            return self._put_routine(tx, principal, rules.checked_routine(routine, None, live, persona_id=persona_id,
+                                                                          today=today, now=now))
+
+    async def edit_routine(self, principal: PrincipalId, routine_id: int, routine: RoutineWrite, *,
+                           expected_revision: int, zone: str, now: datetime) -> Routine:
+        today = now.astimezone(rules.check_zone(zone)).date()
+        with self._tx() as tx:
+            before = self._live_routine(tx, principal, routine_id)
+            if expected_revision != before.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the routine is at revision {before.revision}")
+            after = self._put_routine(tx, principal, rules.checked_routine(
+                routine, before, (), persona_id=before.persona_id, today=today, now=now))
+            self._clear_routine_slots(tx, principal, after, cancel=after.state is RoutineState.OFF, zone=zone,
+                                      now=now)
+            return after
+
+    async def retire_routine(self, principal: PrincipalId, routine_id: int, *, expected_revision: int, zone: str,
+                             now: datetime) -> None:
+        with self._tx() as tx:
+            before = self._live_routine(tx, principal, routine_id)
+            if expected_revision != before.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"the routine is at revision {before.revision}")
+            rules.check_routine_retire(before)
+            self._clear_routine_slots(tx, principal, before, cancel=True, zone=zone, now=now)
+            tx.execute("UPDATE routines SET retired_at=?, revision=?, updated_at=? WHERE owner=? AND routine_id=?",
+                       _timestamp(now), before.revision + 1, _timestamp(now), principal, routine_id)
+
     async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, *, expected_revision: int,
                           zone: str, now: datetime) -> LifeEntry:
         with self._tx() as tx:
@@ -2896,7 +3052,11 @@ class SqliteData:
             "SELECT 1 FROM sleeps WHERE owner=? AND slot_id=? AND woke_at IS NULL", principal,
             before.entry_id) is not None
         plan = rules.check_plan_limits(plan, before, plans, [e for e in entries if e.kind is LifeKind.ARC],
-                                       origin=origin, zone=where, now=now, asleep_in=asleep_in)
+                                       origin=origin, zone=where, now=now, asleep_in=asleep_in,
+                                       routine=self._routine_of(tx, principal, before))
+        if before is None and plan.routine_id is not None:  # character-routine §13.2: the keeper's, checked
+            rules.check_routine_slot(plan, self._routine_of(tx, principal, rules.planned_entry(
+                persona_id, plan, None, origin, now)), persona_id)
         made = rules.planned_entry(persona_id, plan, before, origin, now)
         return self._new_life(tx, principal, made) if before is None else self._rewrite_life(tx, principal, made)
 
@@ -2907,7 +3067,7 @@ class SqliteData:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a cancelled slot says why")
         before = rules.live_plan_of(self._live_entry(tx, principal, entry_id), persona_id)
         rules.check_cancel(before, self._plans(tx, principal, before.persona_id), origin=origin,
-                           zone=rules.check_zone(zone), now=now)
+                           zone=rules.check_zone(zone), now=now, routine=self._routine_of(tx, principal, before))
         return self._rewrite_life(tx, principal, dataclasses.replace(
             before, plan_state=PlanState.CANCELLED, reason=why, origin=origin, revision=before.revision + 1,
             updated_at=now))

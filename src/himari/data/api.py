@@ -1823,6 +1823,14 @@ DIARY_MINUTES = 30
 MIN_DIARY_MINUTES = 10
 MAX_DIARY_MINUTES = 60
 DIARY_EARLIEST = time(18, 0)  # the diary slot of date D starts from D 18:00, and ends before D's night's sleep slot
+# character-routine §13.1: the routines a persona keeps (the built-in sleep and diary among them)
+MAX_ROUTINES = 20  # a persona's, the built-ins too
+MAX_ROUTINE_NAME_CHARS = 40
+MAX_ROUTINE_TEXT_CHARS = 100
+DEFAULT_TRIAL_DAYS = 7
+MAX_TRIAL_DAYS = 60
+ALL_WEEKDAYS = 127  # Monday = 1 ... Sunday = 64
+ROUTINE_OFF_REASON = "반복 일정을 껐다"  # a slot of a routine turned off or deleted, cancelled with this
 
 
 class LifeKind(Enum):
@@ -1869,6 +1877,92 @@ class PlanState(Enum):
 
     CANCELLED = "cancelled"  # HIMARI cancelled it (with why)
     MISSED = "missed"  # a ``together`` slot the user never came to (§5.4)
+
+
+class RoutineBuiltin(Enum):
+    """character-routine §13.1: a built-in routine — never deleted or turned off, only its range and length edited."""
+
+    SLEEP = "sleep"
+    DIARY = "diary"
+
+
+class RoutineState(Enum):
+    """§13.1: a routine on trial (until ``trial_until``; then as off), fixed, or off."""
+
+    TRIAL = "trial"
+    FIXED = "fixed"
+    OFF = "off"
+
+
+class RoutineSay(Enum):
+    """§13.1: what HIMARI may do with a slot of the routine."""
+
+    MOVE = "move"  # only move it (its kind and text kept)
+    MOVE_CANCEL = "move_cancel"  # move or cancel it
+    NONE = "none"  # leave it as it is
+
+
+@dataclass(frozen=True)
+class RoutineWrite(DeepFrozen):
+    """§13.1: a routine as the owner writes it. A built-in's name, text, weekdays, state and ``himari`` are kept (only
+    its range and length change); ``end_from``/``end_to`` only for the sleep; ``trial_until`` a TRIAL's last day
+    (YYYY-MM-DD: from today to MAX_TRIAL_DAYS on, or the one it had)."""
+
+    name: str
+    text: str
+    start_from: str
+    start_to: str
+    minutes_min: int
+    minutes_max: int
+    weekdays: int = ALL_WEEKDAYS
+    state: RoutineState = RoutineState.TRIAL
+    trial_until: str | None = None
+    himari: RoutineSay = RoutineSay.MOVE
+    end_from: str | None = None
+    end_to: str | None = None
+
+
+@dataclass(frozen=True)
+class Routine(DeepFrozen):
+    """§13.1: one routine of a persona, as kept."""
+
+    routine_id: int
+    persona_id: int
+    name: str
+    text: str
+    builtin: RoutineBuiltin | None
+    start_from: str  # HH:MM
+    start_to: str  # HH:MM (the diary's: none — 40 minutes before its sleep)
+    minutes_min: int
+    minutes_max: int
+    weekdays: int
+    state: RoutineState
+    trial_until: str | None  # YYYY-MM-DD, a TRIAL's last day
+    himari: RoutineSay
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    end_from: str | None = None  # the sleep's end range
+    end_to: str | None = None
+
+    def on(self, day: date) -> bool:
+        """§13.1: placed on ``day`` — fixed, or on trial to its last day — and on its weekday."""
+        if self.state is RoutineState.OFF or not self.weekdays & (1 << day.weekday()):
+            return False
+        return self.state is RoutineState.FIXED or (self.trial_until is not None
+                                                    and day.isoformat() <= self.trial_until)
+
+    def trial_ended(self, today: date) -> bool:
+        return self.state is RoutineState.TRIAL and (self.trial_until is None or today.isoformat() > self.trial_until)
+
+
+@dataclass(frozen=True)
+class RoutineMark(DeepFrozen):
+    """§13.1, §13.3: what a slot's routine adds when it is read (never stored with the slot)."""
+
+    name: str
+    trial: bool
+    himari: RoutineSay
 
 
 class BondTag(Enum):
@@ -1927,6 +2021,9 @@ class LifeEntry(DeepFrozen):
     plan_kind: PlanKind | None = None
     plan_state: PlanState | None = None
     reason: str | None = None
+    # character-routine §13.1: the routine that placed the slot (v31), and, read with it (never stored), its mark
+    routine_id: int | None = None
+    routine: RoutineMark | None = None
 
     @property
     def arc_open(self) -> bool:
@@ -2015,6 +2112,7 @@ class PlanWrite(DeepFrozen):
     entry_id: int | None = None
     arc_id: int | None = None
     reason: str | None = None
+    routine_id: int | None = None  # character-routine §13.2: the keeper's slot of a routine (a new one only)
 
 
 class PlanOp(Enum):
@@ -2268,6 +2366,28 @@ class LifeStore(Protocol):
     async def mark_plan_missed(self, principal: PrincipalId, entry_id: int, *, now: datetime) -> LifeEntry:
         """character-day §5.4: a live ``together`` slot the user never came to (``missed``, by the keeper).
         NOT_FOUND: no live plan; INVALID_ARGUMENT: not a ``together`` slot."""
+        ...
+
+    async def routines_of(self, principal: PrincipalId, persona_id: int, *, now: datetime) -> tuple[Routine, ...]:
+        """character-routine §13.1: the persona's routines, built-ins first (made now when missing), then by id."""
+        ...
+
+    async def add_routine(self, principal: PrincipalId, persona_id: int, routine: RoutineWrite, *, zone: str,
+                          now: datetime) -> Routine:
+        """§13.1: the owner's new routine (never a built-in). PLAN_REFUSED past the limits (its sentence),
+        LIMIT_EXCEEDED past MAX_ROUTINES, TOO_LARGE, INVALID_ARGUMENT."""
+        ...
+
+    async def edit_routine(self, principal: PrincipalId, routine_id: int, routine: RoutineWrite, *,
+                           expected_revision: int, zone: str, now: datetime) -> Routine:
+        """§13.1: the owner's change; the slots the keeper placed for it and nobody moved, not started yet, are
+        retired (placed again with the new values) — off: cancelled. NOT_FOUND, VERSION_CONFLICT, as add."""
+        ...
+
+    async def retire_routine(self, principal: PrincipalId, routine_id: int, *, expected_revision: int, zone: str,
+                             now: datetime) -> None:
+        """§13.1: the owner deletes a routine (never a built-in: PLAN_REFUSED); its unmoved slots not started yet are
+        cancelled."""
         ...
 
     async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, *, expected_revision: int,

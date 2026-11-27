@@ -110,6 +110,8 @@ V29_UNDO = ("ALTER TABLE life_writes DROP COLUMN conversation_id", "DROP TABLE d
             *(f"ALTER TABLE life_entries DROP COLUMN {c}" for c in ("reason", "plan_state", "plan_kind", "minutes")))
 V30_UNDO = ("ALTER TABLE sleeps DROP COLUMN closed_session", "ALTER TABLE life_writes DROP COLUMN basis_at",
             "ALTER TABLE life_writes DROP COLUMN basis_sequence")
+# what v31 added (character-routine v0.1 §13.1), undone
+V31_UNDO = ("ALTER TABLE life_entries DROP COLUMN routine_id", "DROP INDEX routines_by_persona", "DROP TABLE routines")
 # what v20 added (V3-P108), undone
 V20_UNDO = ("DROP TABLE persona_choice", "DROP TABLE persona_ids", "DROP INDEX personas_by_name",
             "DROP TABLE personas")

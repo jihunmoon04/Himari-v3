@@ -104,6 +104,8 @@ from himari.data.api import (
     AsleepAnswer,
     LifeJob,
     LifeKind,
+    Routine,
+    RoutineWrite,
     LifeOrigin,
     PlanWrite,
     SleepRecord,
@@ -1282,6 +1284,46 @@ class Application:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"the entry is at revision {found.revision}")
         return await self.data.write_plan(principal, found.persona_id, plan, origin=LifeOrigin.USER,
                                           zone=self.time_zone, now=datetime.now(UTC))
+
+    # --- routines (character-routine v0.1 §13.4) ------------------------------------------------
+
+    async def routines(self, principal: PrincipalId) -> tuple[Persona | None, tuple[Routine, ...]]:
+        """§13.4: the persona chosen now and its routines (the built-ins made on first read)."""
+        chosen = await self.data.active_persona(principal)
+        return chosen, await self.data.routines_of(principal, NO_PERSONA if chosen is None else chosen.persona_id,
+                                                   now=datetime.now(UTC))
+
+    async def _routine_shown(self, principal: PrincipalId, routine_id: int) -> Routine:
+        """A routine of the persona chosen now (NOT_FOUND otherwise: never one of a persona the page did not show)."""
+        found = next((r for r in (await self.routines(principal))[1] if r.routine_id == routine_id), None)
+        if found is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no routine {routine_id}")
+        return found
+
+    def _replace_slots(self, principal: PrincipalId) -> None:
+        """§13.1 (R4): the keeper places the routines' slots again soon (the ones cleared by the change)."""
+        if self.keeper is not None:
+            self.keeper.poke_soon(principal)
+
+    async def add_routine(self, principal: PrincipalId, persona_id: int | None, routine: RoutineWrite) -> Routine:
+        """§13.4: the owner's routine for the persona the page showed; LifeChanged as for a fact."""
+        shown = await self._persona_shown(principal, persona_id)
+        made = await self.data.add_routine(principal, shown, routine, zone=self.time_zone, now=datetime.now(UTC))
+        self._replace_slots(principal)
+        return made
+
+    async def edit_routine(self, principal: PrincipalId, routine_id: int, routine: RoutineWrite,
+                           revision: int) -> Routine:
+        await self._routine_shown(principal, routine_id)
+        changed = await self.data.edit_routine(principal, routine_id, routine, expected_revision=revision,
+                                               zone=self.time_zone, now=datetime.now(UTC))
+        self._replace_slots(principal)
+        return changed
+
+    async def retire_routine(self, principal: PrincipalId, routine_id: int, revision: int) -> None:
+        await self._routine_shown(principal, routine_id)
+        await self.data.retire_routine(principal, routine_id, expected_revision=revision, zone=self.time_zone,
+                                       now=datetime.now(UTC))
 
     async def end_project(self, principal: PrincipalId, entry_id: int, ending: str, revision: int) -> LifeEntry:
         """character-routine §11.4: the user ends an open project of the chosen persona, at the revision the page

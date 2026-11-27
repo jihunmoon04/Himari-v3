@@ -29,6 +29,7 @@ from himari.data.api import (
     PlanKind,
     PlanOp,
     PlanWrite,
+    RoutineSay,
     plan_kind_of,
     plan_span,
 )
@@ -92,7 +93,11 @@ def slot_line(entry: LifeEntry, zone: ZoneInfo) -> str:
                 + (f" (ends {span[1]:%m-%d})" if span[1].date() != span[0].date() else ""))
     state = "" if entry.plan_state is None else f" [{entry.plan_state.value}]"
     why = f" — {entry.reason}" if entry.reason else ""
-    return f"id {entry.entry_id} · {when} · {plan_kind_of(entry).value}{state} · {entry.text}{why}"
+    mark = entry.routine
+    routine = "" if mark is None else (  # character-routine §13.3: one of its routines, and what it may do
+        f" (routine {mark.name}{', trial' if mark.trial else ''}"
+        f"{'' if mark.himari is RoutineSay.MOVE_CANCEL else ', move only' if mark.himari is RoutineSay.MOVE else ', leave'})")
+    return f"id {entry.entry_id} · {when} · {plan_kind_of(entry).value}{state}{routine} · {entry.text}{why}"
 
 
 class _Schedule:
