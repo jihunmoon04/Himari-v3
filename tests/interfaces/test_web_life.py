@@ -61,6 +61,9 @@ def error_code(response: Any) -> str:
 
 def test_the_chosen_personas_life_is_seen_added_to_edited_and_retired(server: Server) -> None:
     empty = server.client.get("/api/life").json()
+    assert server.application is not None
+    today = datetime.now(ZoneInfo(server.application.time_zone)).date()  # character-routine §9.2: the server's
+    assert (empty.pop("today"), empty.pop("since")) == (today.isoformat(), (today - timedelta(days=30)).isoformat())
     now = empty.pop("now")  # character-day §4.5: never asleep by the clock; the day keeper's sleep (awake here)
     assert now is None
     # character-day §18.11: the sleep now (no slot placed yet: no look ran) and no sleep yet
@@ -261,12 +264,12 @@ def test_the_life_sends_the_last_30_days_and_its_history_reads_on_from_there(ser
     assert server.application is not None
     zone = ZoneInfo(server.application.time_zone)
     today = datetime.now(zone).date()
-    day = {n: (today - timedelta(days=n)).isoformat() for n in (0, 29, 30, 31, 45, 59, 60, 61, 90)}
+    day = {n: (today - timedelta(days=n)).isoformat() for n in (0, 29, 30, 31, 45, 59, 60, 61, 90, 200, 229)}
 
     async def lived() -> None:
         assert server.application is not None
         data = server.application.data
-        for n in (0, 30, 31, 45, 90):
+        for n in (0, 30, 31, 45, 90, 200):
             write_id = await data.begin_life_write(ME, LifeWriteStart(0, day[n], "p", "m", b"{}", "j", 1,
                                                                       job=LifeJob.WORLD))
             await data.mark_life_write_dispatched(write_id)
@@ -286,9 +289,11 @@ def test_the_life_sends_the_last_30_days_and_its_history_reads_on_from_there(ser
 
     server.client.portal.call(lived)  # type: ignore[union-attr]
     life = server.client.get("/api/life").json()
+    assert (life["today"], life["since"]) == (day[0], day[30])
     assert [(e["kind"], e["day"]) for e in life["entries"]] == [("event", day[0]), ("event", day[30])]
     assert [s["fell_at"][:10] for s in life["sleeps"]] == [
         datetime.combine(today - timedelta(days=29), time(23), zone).astimezone(UTC).date().isoformat()]
+    assert life["sleeps"][0]["day"] == day[29]  # the date it fell asleep in the user's zone, as the entries'
 
     first = server.client.get("/api/life/history").json()  # the 30 dates before /api/life's first
     assert (first["from"], first["before"], first["more"]) == (day[60], day[30], True)
@@ -300,14 +305,18 @@ def test_the_life_sends_the_last_30_days_and_its_history_reads_on_from_there(ser
     assert first["sleeps"][0]["how_woke"] == "schedule"
 
     second = server.client.get("/api/life/history", params={"before": first["from"], "days": 30}).json()
-    assert (second["from"], second["before"], second["more"]) == ((today - timedelta(days=90)).isoformat(),
-                                                                   day[60], False)
+    assert (second["from"], second["before"], second["more"]) == (day[90], day[60], True)
     assert [(e["kind"], e["day"]) for e in second["entries"]] == [("diary", day[61]), ("event", day[90])]
     assert second["sleeps"] == []
+    # review 2: nothing from 91 to 199 days ago — the next read reaches back to the 30 dates ending at the one that
+    # has something, never a page of nothing
+    third = server.client.get("/api/life/history", params={"before": second["from"]}).json()
+    assert (third["from"], third["before"], third["more"]) == (day[229], day[90], False)
+    assert [(e["kind"], e["day"]) for e in third["entries"]] == [("event", day[200])]
     one = server.client.get("/api/life/history", params={"before": day[30], "days": 1}).json()
     assert (one["from"], [e["day"] for e in one["entries"]], one["more"]) == (day[31], [day[31]], True)
-    for bad in ({"days": 0}, {"days": 61}, {"before": "2026-13-01"}, {"before": "2026-1-01"},
-                {"before": "0001-01-01"}):
+    for bad in ({"days": 0}, {"days": 61}, {"days": "abc"}, {"days": "1.5"}, {"days": ""}, {"before": "2026-13-01"},
+                {"before": "2026-1-01"}, {"before": "0001-01-01"}):
         refused = server.client.get("/api/life/history", params=bad)
         assert (refused.status_code, error_code(refused)) == (400, "invalid_argument"), bad
     server.client.delete("/api/session", headers=SEND)

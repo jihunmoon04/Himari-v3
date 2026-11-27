@@ -33,12 +33,17 @@ export function aLife(): Life {
   };
 }
 
-/** The life the next read gives (and the history pages, in order, when given). */
+/** The life the reads give, and its history pages in order: the first for no ``before``, each next one for the
+ *  ``before`` that is the page before's ``from`` (as often as asked: a change reads them again). */
 export function living(life: Life, ...pages: LifeHistory[]) {
   vi.mocked(readLife).mockImplementation(async () => life);
   const history = vi.mocked(readLifeHistory);
   history.mockReset();
-  for (const page of pages) history.mockResolvedValueOnce(page);
+  history.mockImplementation(async (before?: string) => {
+    const found = before === undefined ? pages[0] : pages.find((_, index) => pages[index - 1]?.from === before);
+    if (!found) throw new Error(`no history page before ${before ?? "the life"}`);
+    return found;
+  });
 }
 
 function Where() {

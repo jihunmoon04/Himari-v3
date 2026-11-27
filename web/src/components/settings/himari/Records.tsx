@@ -1,8 +1,10 @@
 // Settings → HIMARI → Records (character-routine §9.2): HIMARI's days, a line a date, newest first (today too), each
 // saying what the date holds. Opened, a date shows its diary and events (edited like any entry), its slots (only read:
 // a cancelled or missed one with why), the sleeps that fell then (when and how it fell asleep and woke) and the work
-// pieces made then (edited like any entry). First the last 30 days the life sends; "Show older" reads on 30 days at a
-// time (/api/life/history).
+// pieces made then (edited like any entry). First the last 30 days the life sends (from its ``since``: a piece of an
+// open project older than that is under Projects, and here only once the older dates are read); "Show older" reads on
+// 30 days at a time, past dates with nothing (/api/life/history). The older pages are read again after the owner's
+// own changes and a persona change, never on focus or HIMARI's sleep (character-routine §9.2, review 1).
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { readLifeHistory, type Life, type LifeEntry } from "@/api/settings";
@@ -31,7 +33,7 @@ function DayRow({ record, today, open, onToggle, editing, locked, limits, projec
   const body = `record-${record.day}`;
   return (
     <li className="rounded-lg border border-line text-sm" aria-label={`Record ${record.day}`}>
-      <button type="button" aria-expanded={open} aria-controls={body} onClick={onToggle}
+      <button type="button" aria-expanded={open} aria-controls={open ? body : undefined} onClick={onToggle}
         className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-raised">
         <span className="min-w-0 flex-1 break-words">{recordLine(record, today)}</span>
         <span className="text-xs text-faint" aria-hidden>{open ? "▾" : "▸"}</span>
@@ -57,7 +59,7 @@ function DayRow({ record, today, open, onToggle, editing, locked, limits, projec
   );
 }
 
-export function RecordsTab({ life, today }: { life: Life; today: string }) {
+export function RecordsTab({ life, today, since }: { life: Life; today: string; since: string }) {
   const client = useQueryClient();
   const editing = useEditing();
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -69,13 +71,16 @@ export function RecordsTab({ life, today }: { life: Life; today: string }) {
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => (last.more ? last.from : undefined),
     enabled: asked,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
   const pages = history.data?.pages ?? [];
   const { titles, projectOf: planProject } = projectsOf(life.entries);
   // a work slot's project, and a piece's
   const projectOf = (entry: LifeEntry) => entry.kind === "work" && entry.arc_id != null
     ? titles.get(entry.arc_id) ?? null : planProject(entry);
-  const records = recordDays([...life.entries, ...pages.flatMap((page) => page.entries)],
+  const shown = life.entries.filter((entry) => !entry.day || entry.day >= since);
+  const records = recordDays([...shown, ...pages.flatMap((page) => page.entries)],
     [...(life.sleeps ?? []), ...pages.flatMap((page) => page.sleeps)], today);
   const locked = editing.busy || editing.open !== null;
   const toggle = (day: string) => setOpened((was) => {
@@ -99,7 +104,7 @@ export function RecordsTab({ life, today }: { life: Life; today: string }) {
   return (
     <div className="space-y-3">
       <Group title="Records" note="a line a date, newest first; open one for its diary, events, slots, sleep and pieces"
-        empty="Nothing recorded in the last 30 days.">
+        empty={pages.length ? "Nothing recorded." : "Nothing recorded in the last 30 days."}>
         {rows}
       </Group>
       <div className="flex items-center justify-end gap-3">

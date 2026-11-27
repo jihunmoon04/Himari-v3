@@ -105,12 +105,14 @@ export interface SleepView {
   state: SleepState;
   deep?: boolean | null; // asleep: in its first three hours (hard to wake)
   minutes_to_sleep?: number | null; // awake or drowsy: until tonight's sleep slot starts
-  tonight?: { day: string; time: string; minutes: number } | null; // tonight's sleep slot
+  // tonight's sleep slot (or the one under way)
+  tonight?: { id?: number; day: string; time: string; minutes: number } | null;
 }
 
 /** character-day §5.1: one night's sleep, as the sleep log keeps it. */
 export interface SleepRecord {
   id?: number;
+  day?: string; // the date it fell asleep, in the user's zone (the server's), as the entries' dates
   fell_at: string;
   how_fell: "schedule" | "tool" | "missed"; // its sleep slot came, it went early by itself, waiting for a promise
   woke_at: string | null; // null: still asleep
@@ -128,6 +130,9 @@ export interface HimariNow { asleep: boolean; doing: string | null; since: strin
 
 export interface Life {
   persona: { id: number; name: string } | null; // null: no persona chosen (the default's life)
+  // character-routine §9.2: today in the user's zone (the server's, which dates every entry) and the first date sent
+  today?: string;
+  since?: string;
   enabled: boolean; // whether the life is used now (the companion and life are on)
   writer: { running: boolean; told: string };
   mood?: HimariMood | null; // null: none now (or the life is off)

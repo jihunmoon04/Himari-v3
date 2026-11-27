@@ -1,7 +1,7 @@
 // Settings → HIMARI → Today (character-routine §9.2): HIMARI now — whether its life runs, the model its self runs
 // use, its work, the world it is told and its mood, what it does and its sleep (character-state, character-day §18.12)
-// — then its slots for today and tomorrow (only read here: they are moved and changed on the Schedule tab) and what
-// the world made happen to it today (edited like any entry).
+// — then its slots for today and tomorrow, with last night's sleep slot while HIMARI is still in it (only read here:
+// they are moved and changed on the Schedule tab), and what the world made happen to it today (edited like any entry).
 import { Fragment, type ReactNode } from "react";
 import { Link } from "react-router";
 import type { Life } from "@/api/settings";
@@ -24,7 +24,11 @@ export function TodayTab({ life, today }: { life: Life; today: string }) {
   if (sleep) nowParts.push(`Sleep: ${sleepText(sleep)}`);
   const working = workLine(work, projectOf);
   const tomorrow = addDays(today, 1);
-  const days = slotsByDay(entries).filter(({ day }) => day === today || day === tomorrow).map(({ day, slots }) => (
+  const yesterday = addDays(today, -1);
+  const running = sleep?.tonight?.id; // the sleep slot under way (or tonight's)
+  const shown = entries.filter((entry) => entry.kind === "plan"
+    && (entry.day === today || entry.day === tomorrow || (entry.day === yesterday && entry.id === running)));
+  const days = slotsByDay(shown).map(({ day, slots }) => (
     <li key={day} className="space-y-2" aria-label={`Day ${day}`}>
       <p className="text-xs font-medium text-muted">{dayLabel(day, today)}</p>
       <ul className="space-y-2">

@@ -1114,7 +1114,7 @@ def test_a_device_reads_the_personas_names_and_chooses_one_never_their_text(serv
         response = server.client.request(method, path, json={"persona_id": None, "revision": 4}, headers=SEND)
         assert (response.status_code, error_code(response)) == (403, "not_a_device"), path
     for method, path in (("GET", "/api/personas"), ("PUT", "/api/personas/choice"), ("GET", "/api/life"),
-                         ("GET", "/api/bond"), ("POST", "/api/personas")):
+                         ("GET", "/api/life/history"), ("GET", "/api/bond"), ("POST", "/api/personas")):
         response = server.device.request(method, path, json={"persona_id": None, "revision": 4}, headers=me)
         assert (response.status_code, error_code(response)) == (403, "device_scope"), path
 

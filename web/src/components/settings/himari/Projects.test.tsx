@@ -90,6 +90,20 @@ describe("the Projects tab", () => {
       30, "냉각부 설계.\n증발열은 포신 뒤로.", 1, "냉각부", "냉각부 끝!"));
   });
 
+  it("shows a piece of an open project older than the 30 days sent (not a stray date in Records)", async () => {
+    living({
+      ...aLife(),
+      since: "2026-10-27",
+      entries: [
+        { ...entry(11, "arc", "2026-10-01", "설정집 한 권", "writer"), title: "블랙홀 전자포", status: "open" },
+        { ...entry(30, "work", "2026-10-12", "포신.", "writer"), time: "20:00", title: "포신", summary: "포신 끝.",
+          arc_id: 11, plan_id: 20 },
+      ],
+    });
+    await shown();
+    expect(within(part("Open projects").getByLabelText("Project 블랙홀 전자포")).getByText("포신 끝.")).toBeTruthy();
+  });
+
   it("says when there are no projects and the worker is off", async () => {
     living({ ...aLife(), work: { running: false, next: null } });
     await shown();

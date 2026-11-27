@@ -43,7 +43,7 @@ describe("the Schedule tab", () => {
     living(withSchedule());
     await shown();
     const schedule = part("Schedule");
-    expect(screen.getByText(/from today to six days on/)).toBeTruthy();
+    expect(screen.getByText(/from today on; the sleep and diary slots only move/)).toBeTruthy();
     expect(schedule.getAllByText(/^2026-11-2\d/).map((line) => line.textContent))
       .toEqual(["2026-11-26 · today", "2026-11-27 · tomorrow"]);
     expect(schedule.queryByLabelText("Day 2026-11-25")).toBeNull(); // in that date's record
@@ -58,6 +58,27 @@ describe("the Schedule tab", () => {
     const tomorrow = within(schedule.getByLabelText("Day 2026-11-27"));
     expect(tomorrow.getByText("Together")).toBeTruthy();
     expect(tomorrow.getByText("by HIMARI")).toBeTruthy();
+  });
+
+  it("starts at the server's today, not the browser's (review 3)", async () => {
+    living({ ...withSchedule(), today: "2026-11-27", since: "2026-10-28" }); // the browser says 11-26
+    await shown();
+    const schedule = part("Schedule");
+    expect(schedule.getAllByText(/^2026-11-2\d/).map((line) => line.textContent)).toEqual(["2026-11-27 · today"]);
+    fireEvent.click(schedule.getByRole("button", { name: "Add a slot" }));
+    expect((screen.getByLabelText("Slot day") as HTMLSelectElement).value).toBe("2026-11-27");
+  });
+
+  it("says the persona changed when a slot's add is refused for it, and keeps what was written", async () => {
+    vi.mocked(addPlan).mockRejectedValueOnce(new ApiError(409, "persona_changed", "The persona changed."));
+    await shown();
+    fireEvent.click(part("Schedule").getByRole("button", { name: "Add a slot" }));
+    fireEvent.change(screen.getByLabelText("Slot start"), { target: { value: "16:00" } });
+    fireEvent.change(screen.getByLabelText("Slot text"), { target: { value: "책 읽기" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add slot" }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      "The persona in use changed since this page was read; nothing was added.", "error"));
+    expect((screen.getByLabelText("Slot text") as HTMLTextAreaElement).value).toBe("책 읽기");
   });
 
   it("says when nothing is on from today", async () => {

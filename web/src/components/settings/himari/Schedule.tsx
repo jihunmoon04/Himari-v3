@@ -1,5 +1,5 @@
-// Settings → HIMARI → Schedule (character-day §12, §18.12; character-routine §9.2): HIMARI's slots from today to six
-// days on, by day, each with its kind, start and length, and a cancelled or missed one with why. The owner adds,
+// Settings → HIMARI → Schedule (character-day §12, §18.12; character-routine §9.2): HIMARI's slots from today (the
+// server's) on, by day, each with its kind, start and length, and a cancelled or missed one with why. The owner adds,
 // edits and deletes slots; the sleep slot and (character-diary §10) the diary slot only move (never deleted). A slot of
 // a date before today is not here: it is in that date's record (the Records tab).
 import { useState } from "react";
@@ -47,7 +47,7 @@ export function ScheduleTab({ life, today }: { life: Life; today: string }) {
     </div>
   );
   return (
-    <Group title="Schedule" note="HIMARI's slots from today to six days on; the sleep and diary slots only move"
+    <Group title="Schedule" note="HIMARI's slots from today on; the sleep and diary slots only move"
       top={addSlot} empty="Nothing on the schedule from today on.">
       {schedule}
     </Group>

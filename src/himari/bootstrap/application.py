@@ -1532,7 +1532,9 @@ class Application:
     async def life_history(self, principal: PrincipalId, before: date | None,
                            days: int = LIFE_HISTORY_DAYS) -> LifeHistory:
         """character-routine §9.1: the record of the persona chosen now over the ``days`` dates before ``before``
-        (None: the first date life() shows, so the history carries on from it). ValueError: ``days`` not
+        (None: the first date life() shows, so the history carries on from it). When those dates hold nothing, the
+        window reaches back to the newest older date that does (review 2: a gap of months is one read, never pages
+        of nothing), so ``since`` may be more than ``days`` before ``before``. ValueError: ``days`` not
         1..LIFE_HISTORY_MAX_DAYS."""
         if not 1 <= days <= LIFE_HISTORY_MAX_DAYS:
             raise ValueError(f"days is 1..{LIFE_HISTORY_MAX_DAYS}")
@@ -1541,13 +1543,22 @@ class Application:
         start = end - timedelta(days=days)
         chosen = await self.data.active_persona(principal)
         persona_id = NO_PERSONA if chosen is None else chosen.persona_id
+        newest = await self._newest_before(principal, persona_id, end, zone)
+        if newest is not None and newest < start:  # nothing in the window: it ends after the next date that has some
+            start = newest + timedelta(days=1) - timedelta(days=days)
         start_at, end_at = datetime.combine(start, time(), zone), datetime.combine(end, time(), zone)
         entries = await self.data.list_life_days(principal, persona_id, since=start.isoformat(),
                                                  until=end.isoformat())
         sleeps = await self.data.list_sleeps(principal, persona_id, since=start_at, until=end_at)
-        more = bool(await self.data.list_life_days(principal, persona_id, until=start.isoformat(), limit=1)
-                    or await self.data.list_sleeps(principal, persona_id, until=start_at, limit=1))
+        more = await self._newest_before(principal, persona_id, start, zone) is not None
         return LifeHistory(entries, sleeps, start.isoformat(), end.isoformat(), more)
+
+    async def _newest_before(self, principal: PrincipalId, persona_id: int, day: date, zone: ZoneInfo) -> date | None:
+        """The newest date before ``day`` with a dated entry or a sleep that fell then (None: none) — one row each."""
+        entries = await self.data.list_life_days(principal, persona_id, until=day.isoformat(), limit=1)
+        sleeps = await self.data.list_sleeps(principal, persona_id, until=datetime.combine(day, time(), zone), limit=1)
+        return max([date.fromisoformat(e.day) for e in entries if e.day is not None]
+                   + [s.fell_at.astimezone(zone).date() for s in sleeps], default=None)
 
     async def next_world(self, principal: PrincipalId) -> datetime | None:
         """character-mind §8, character-day §6: when the world next decides HIMARI's day (None: no story writer) —

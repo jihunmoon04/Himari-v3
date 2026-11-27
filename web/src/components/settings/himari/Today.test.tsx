@@ -103,6 +103,25 @@ describe("the Today tab", () => {
     expect(where()).toBe("/settings/himari/schedule");
   });
 
+  it("shows last night's sleep slot while HIMARI is still in it, and goes by the server's today", async () => {
+    const night = { ...slot(40, "2026-11-25", "23:30", "잠", { plan_kind: "sleep" }), minutes: 460 };
+    const tonight = { id: 40, day: "2026-11-25", time: "23:30", minutes: 460 };
+    living({ ...aLife(), entries: [slot(41, "2026-11-26", "15:00", "산책"), night, slot(43, "2026-11-25", "21:00", "어제 일")],
+      now: { asleep: true, doing: null, since: null }, sleep: { state: "asleep", deep: false, tonight } });
+    await shownAt();
+    const days = part("Today and tomorrow");
+    expect(days.getAllByText(/^2026-11-2\d/).map((line) => line.textContent))
+      .toEqual(["2026-11-25 · yesterday", "2026-11-26 · today"]);
+    expect(within(days.getByLabelText("Day 2026-11-25")).getByText("23:30–07:10 · 7h 40m")).toBeTruthy();
+    expect(days.queryByText("어제 일")).toBeNull(); // only the slot it sleeps in
+    cleanup();
+    living({ ...aLife(), today: "2026-11-27", since: "2026-10-28", entries: [slot(41, "2026-11-26", "15:00", "산책"),
+      slot(42, "2026-11-28", "10:00", "모레 일")] }); // the server's today is the browser's tomorrow
+    await shownAt();
+    expect(part("Today and tomorrow").getAllByText(/^2026-11-2\d/).map((line) => line.textContent))
+      .toEqual(["2026-11-28 · tomorrow"]);
+  });
+
   it("lists today's events, edited like any entry, and none of another day", async () => {
     living({
       ...aLife(),

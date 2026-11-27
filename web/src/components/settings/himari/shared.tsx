@@ -1,8 +1,9 @@
 // What the tabs of Settings → HIMARI share (character-routine §9.2): the life's query, the wording, an entry's row and
 // editor (edited from the revision opened; a save over a change made elsewhere is refused with 409 and says so), a
-// schedule slot's row and editor, and the delete that asks first (entries retire: no undo).
+// schedule slot's row and editor, and the delete that asks first (entries retire: no undo). An editor with changes
+// not saved says so to the section (useUnsaved), which asks before a tab change would throw them away.
 import { useQueryClient } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { ApiError } from "@/api/client";
 import {
   addLifeFact, addPlan, deleteLife, editLife, editPlan, type Life, type LifeEntry, type LifeKind, type LifeOrigin,
@@ -48,6 +49,19 @@ const SUMMARY_CHARS = 200;
 const EVENT_CHARS = 200;
 export const when = (entry: LifeEntry) => `${entry.day ?? ""}${entry.time ? ` ${entry.time}` : ""}`;
 
+/** Where the editors say whether they hold changes not saved (keyed by each editor's own token). */
+export const Unsaved = createContext<(token: symbol, dirty: boolean) => void>(() => {});
+
+/** This editor holds changes not saved (``dirty``) until it closes. */
+export function useUnsaved(dirty: boolean) {
+  const report = useContext(Unsaved);
+  const [token] = useState(() => Symbol("editor"));
+  useEffect(() => {
+    report(token, dirty);
+    return () => report(token, false);
+  }, [report, token, dirty]);
+}
+
 /** character-work §8: the projects' titles by id, and a work plan's project. */
 export function projectsOf(entries: readonly LifeEntry[]) {
   const titles = new Map(entries.filter((entry) => entry.kind === "arc").map((entry) => [entry.id, entry.title]));
@@ -72,6 +86,7 @@ function Editor({ entry, revision, limits, onDone }: {
     : limits.chars;
   const changed = text !== entry.text || (titled && title !== (entry.title ?? ""))
     || (piece && summary !== (entry.summary ?? ""));
+  useUnsaved(changed);
   const save = async () => {
     setSaving(true);
     try {
@@ -242,6 +257,8 @@ export function PlanEditor({ entry, revision, personaId, projects, today, max, o
   const days = scheduleDays(today);
   if (entry?.day && !days.includes(entry.day)) days.unshift(entry.day);
   const length = Number(minutes);
+  useUnsaved(day !== (entry?.day ?? today) || time !== (entry?.time ?? "") || minutes !== String(entry?.minutes ?? 60)
+    || kind !== (was ?? "own") || text !== (entry?.text ?? ""));
   const valid = /^\d{2}:\d{2}$/.test(time) && Number.isInteger(length) && length >= range.min && length <= range.max
     && (moves || text.trim() !== "") && (kind !== "work" || project !== null);
   const save = async () => {
@@ -352,6 +369,7 @@ export function AddFact({ personaId, full, max }: { personaId: number | null; fu
   const client = useQueryClient();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  useUnsaved(text.trim() !== "");
   const submit = async () => {
     setBusy(true);
     try {

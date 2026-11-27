@@ -2805,13 +2805,13 @@ class SqliteData:
         until = rules.check_life_day(until)
         since = None if since is None else rules.check_life_day(since)
         kinds = sorted(kind.value for kind in rules.DAY_KINDS)
-        with self._tx() as tx:
+        with self._tx() as tx:  # in list_life's order, so a limit reads only that many rows (review 1)
             rows = tx.all(f"SELECT {self._LIFE_COLUMNS} FROM life_entries WHERE owner=? AND persona_id=?"
                           f" AND retired_at IS NULL AND kind IN ({', '.join('?' for _ in kinds)})"
-                          " AND day IS NOT NULL AND day < ? AND (? IS NULL OR day >= ?)",
-                          principal, persona_id, *kinds, until, since, since)
-        found = rules.order_life(map(_life_entry, rows))
-        return found if limit is None else found[:max(0, limit)]
+                          " AND day IS NOT NULL AND day < ? AND (? IS NULL OR day >= ?)"
+                          " ORDER BY day DESC, kind='diary' DESC, entry_id DESC LIMIT ?",
+                          principal, persona_id, *kinds, until, since, since, -1 if limit is None else max(0, limit))
+        return rules.order_life(map(_life_entry, rows))
 
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         persona_id = rules.check_life_persona(persona_id)

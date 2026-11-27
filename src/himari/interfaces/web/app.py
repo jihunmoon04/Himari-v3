@@ -1122,9 +1122,11 @@ def sleep_view_json(view: SleepView | None, zone: ZoneInfo) -> dict[str, Any] | 
     return out
 
 
-def sleep_record_view(sleep: SleepRecord) -> dict[str, Any]:
-    """character-day §12: one sleep of the record."""
-    return {"id": sleep.sleep_id, "fell_at": _time(sleep.fell_at), "how_fell": sleep.how_fell.value,
+def sleep_record_view(sleep: SleepRecord, zone: ZoneInfo) -> dict[str, Any]:
+    """character-day §12: one sleep of the record; character-routine §9.2 (review 3): ``day``, the date it fell
+    asleep in the user's zone (the date of the record it is in, as the entries' dates)."""
+    return {"id": sleep.sleep_id, "day": sleep.fell_at.astimezone(zone).date().isoformat(),
+            "fell_at": _time(sleep.fell_at), "how_fell": sleep.how_fell.value,
             "woke_at": _time(sleep.woke_at), "how_woke": None if sleep.how_woke is None else sleep.how_woke.value,
             "messages": sleep.messages, "mumbles": sleep.mumbles, "closed_day": sleep.closed_day}
 
@@ -1966,9 +1968,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         """The chosen persona's facts, and its plans, diaries, work pieces and events of the last 30 days on
         (character-routine §9.1; older ones: /api/life/history)."""
         application = himari(request)
+        zone = ZoneInfo(application.time_zone)
         chosen, entries = await application.life(who)
         mood, now = await application.himari_state(who)  # character-state §2, §3: as a turn would see them
         return {"persona": None if chosen is None else {"id": chosen.persona_id, "name": chosen.name},
+                # character-routine §9.2 (review 3): today in the user's zone, and the first date sent (the Web's
+                # Schedule starts today, its Records end today and read older dates before ``since``)
+                "today": datetime.now(zone).date().isoformat(), "since": application.life_since().isoformat(),
                 "enabled": application.life_enabled,
                 "writer": {"running": application.life_writer is not None, "told": application.auto_life},
                 # character-work §8: the worker runs with the story writer; the next work plan
@@ -1989,7 +1995,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 # character-day §12, §18.11: the sleep now; character-routine §9.1: the sleeps that fell in the last
                 # 30 days, as the entries (newest first)
                 "sleep": sleep_view_json(await application.sleep_view(who), ZoneInfo(application.time_zone)),
-                "sleeps": [sleep_record_view(s) for s in await application.sleeps(who)],
+                "sleeps": [sleep_record_view(s, zone) for s in await application.sleeps(who)],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                            "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
                            "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS,
@@ -1997,11 +2003,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.get("/api/life/history")
     async def read_life_history(request: Request, who: PrincipalId = Depends(principal), before: str | None = None,
-                                days: int = LIFE_HISTORY_DAYS) -> dict[str, Any]:
+                                days: str | None = None) -> dict[str, Any]:
         """character-routine §9.1: the chosen persona's record over the ``days`` dates (the user's) before ``before``
         (left out: the first date /api/life shows) — its diaries, events, plans (cancelled and missed too), work
-        pieces and the sleeps that fell then — and whether anything older is kept (``more``: read on from ``from``)."""
-        if not 1 <= days <= LIFE_HISTORY_MAX_DAYS:
+        pieces and the sleeps that fell then — and whether anything older is kept (``more``: read on from ``from``).
+        Dates with nothing are skipped: ``from`` reaches back to the next older date that has something."""
+        count = LIFE_HISTORY_DAYS if days is None else int(days) if re.fullmatch(r"[0-9]{1,3}", days) else 0
+        if not 1 <= count <= LIFE_HISTORY_MAX_DAYS:  # a number 1..60 (review 7: never a parse error of its own)
             raise ApiError(400, "invalid_argument", f"days is 1..{LIFE_HISTORY_MAX_DAYS}")
         end = None
         if before is not None:
@@ -2012,11 +2020,11 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             if end is None:
                 raise ApiError(400, "invalid_argument", "before is a date, YYYY-MM-DD")
         try:
-            history = await himari(request).life_history(who, end, days)
+            history = await himari(request).life_history(who, end, count)
         except OverflowError:  # before the first dates there are
             raise ApiError(400, "invalid_argument", "before is a date, YYYY-MM-DD") from None
         return {"entries": [life_entry_view(e) for e in history.entries],
-                "sleeps": [sleep_record_view(s) for s in history.sleeps],
+                "sleeps": [sleep_record_view(s, ZoneInfo(himari(request).time_zone)) for s in history.sleeps],
                 "from": history.since, "before": history.before, "more": history.more}
 
     def plan_write(body: PlanBody | PlanEditBody, entry_id: int | None) -> PlanWrite:

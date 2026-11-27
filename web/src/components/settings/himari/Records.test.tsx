@@ -132,11 +132,54 @@ describe("the Records tab", () => {
     expect(readLifeHistory).toHaveBeenLastCalledWith("2026-09-27");
     expect(await screen.findByText("Nothing older.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Show older" })).toBeNull();
-    // an older date's entry is edited like any
+    // an older date's entry is edited like any, and the older pages are read again after it (review 10)
+    const reads = vi.mocked(readLifeHistory).mock.calls.length;
     fireEvent.click(record("2026-10-20").getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByLabelText("Entry text"), { target: { value: "옛날의 일." } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(editLife).toHaveBeenCalledWith(71, "옛날의 일.", 1));
+    await waitFor(() => expect(vi.mocked(readLifeHistory).mock.calls.slice(reads).map((call) => call[0]))
+      .toEqual([undefined, "2026-09-27"]));
+  });
+
+  it("goes by the server's today and dates, and leaves an old project piece until its dates are read", async () => {
+    living({
+      ...withRecords(),
+      today: "2026-11-25", since: "2026-10-26", // the browser says 11-26
+      entries: [...withRecords().entries,
+        { ...entry(31, "work", "2026-10-12", "포신.", "writer"), time: "20:00", title: "포신", summary: "포신 끝.",
+          arc_id: 11, plan_id: 19 }],
+      sleeps: [night(3, "2026-11-25T01:00:00", "2026-11-25T08:00:00", { day: "2026-11-24" })],
+    }, page("2026-09-26", "2026-10-26", false, [
+      { ...entry(31, "work", "2026-10-12", "포신.", "writer"), time: "20:00", title: "포신", summary: "포신 끝.",
+        arc_id: 11, plan_id: 19 }]));
+    await shown();
+    expect(lines()).toEqual([
+      "2026-11-25 (Wed) · today · diary · 2 events · 2 slots · 1 piece▸",
+      "2026-11-24 (Tue) · diary · sleep▸", // the server's date of the sleep, not the browser's
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+    await screen.findByRole("listitem", { name: "Record 2026-10-12" });
+    expect(record("2026-10-12").getByRole("button", { expanded: false }).textContent).toBe("2026-10-12 (Mon) · 1 piece▸");
+    expect(await screen.findByText("Nothing older.")).toBeTruthy();
+  });
+
+  it("points its toggle at the date's body only while it is open", async () => {
+    await shown();
+    const toggle = record("2026-11-24").getByRole("button", { expanded: false });
+    expect(toggle.getAttribute("aria-controls")).toBeNull();
+    fireEvent.click(toggle);
+    const controls = toggle.getAttribute("aria-controls");
+    expect(controls && document.getElementById(controls)?.textContent).toContain("늦잠을 잤다.");
+  });
+
+  it("says nothing is recorded at all once nothing older is found", async () => {
+    living({ ...aLife(), entries: [], sleeps: [] }, page("2026-09-27", "2026-10-27", false));
+    await shown();
+    expect(part("Records").getByText("Nothing recorded in the last 30 days.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show older" }));
+    expect(await screen.findByText("Nothing older.")).toBeTruthy();
+    expect(part("Records").getByText("Nothing recorded.")).toBeTruthy();
   });
 
   it("says when nothing is recorded and when older dates could not be read", async () => {

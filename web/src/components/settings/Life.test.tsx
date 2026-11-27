@@ -62,6 +62,28 @@ describe("the HIMARI section", () => {
     expect(current()).toBe("Today");
   });
 
+  it("asks before a tab change throws away changes not saved, and not when there are none (review 5)", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    await shownAt("/settings/himari/about");
+    fireEvent.click(part("Facts").getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("link", { name: "Records" })); // opened, nothing changed: no question
+    expect(confirm).not.toHaveBeenCalled();
+    expect(where()).toBe("/settings/himari/records");
+    fireEvent.click(screen.getByRole("link", { name: "About HIMARI" }));
+    fireEvent.click(part("Facts").getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Entry text"), { target: { value: "고친 사실." } });
+    fireEvent.click(screen.getByRole("link", { name: "Projects" }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe("/settings/himari/about"); // stayed, with the text
+    expect((screen.getByLabelText("Entry text") as HTMLTextAreaElement).value).toBe("고친 사실.");
+    fireEvent.click(screen.getByRole("link", { name: "Projects" }));
+    expect(where()).toBe("/settings/himari/projects");
+    fireEvent.click(screen.getByRole("link", { name: "About HIMARI" })); // the editor closed with the tab
+    fireEvent.click(screen.getByRole("link", { name: "Today" }));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    confirm.mockRestore();
+  });
+
   it("keeps the old address of the section, with its tab, and drops a tab of another section", async () => {
     await shownAt("/settings/life/records");
     expect(where()).toBe("/settings/himari/records");

@@ -59,10 +59,11 @@ export function slotsByDay(entries: readonly LifeEntry[]): { day: string; slots:
     .map(([day, slots]) => ({ day, slots: slots.sort((a, b) => (a.time ?? "").localeCompare(b.time ?? "")) }));
 }
 
-/** A day's heading: its date, and "today" or "tomorrow" when it is. */
+/** A day's heading: its date, and "today", "tomorrow" or "yesterday" when it is. */
 export function dayLabel(day: string, today: string): string {
   if (day === today) return `${day} · today`;
   if (day === addDays(today, 1)) return `${day} · tomorrow`;
+  if (day === addDays(today, -1)) return `${day} · yesterday`;
   return day;
 }
 
@@ -126,7 +127,8 @@ export interface DayRecord {
 }
 
 /** The record by date, newest first, from today back: the dated entries (each once, whichever read brought it) and
- *  the sleeps by the date they fell on this browser's clock. Nothing after today (the Schedule tab has it). */
+ *  the sleeps by the date they fell (the server's ``day``; else on this browser's clock). Nothing after today (the
+ *  Schedule tab has it). */
 export function recordDays(entries: readonly LifeEntry[], sleeps: readonly SleepRecord[], today: string): DayRecord[] {
   const days = new Map<string, DayRecord>();
   const of = (day: string) => {
@@ -149,7 +151,7 @@ export function recordDays(entries: readonly LifeEntry[], sleeps: readonly Sleep
   const slept = new Set<string>();
   for (const sleep of sleeps) {
     const key = sleep.id != null ? String(sleep.id) : sleep.fell_at;
-    const day = localDay(new Date(sleep.fell_at));
+    const day = sleep.day ?? localDay(new Date(sleep.fell_at));
     if (slept.has(key) || day > today) continue;
     slept.add(key);
     of(day).sleeps.push(sleep);

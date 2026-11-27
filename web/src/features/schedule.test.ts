@@ -41,9 +41,11 @@ describe("the schedule's days and times (character-day §4)", () => {
     expect(spanOf({ time: "22:10", minutes: 30 })).toBe("22:10–22:40 · 30m");
   });
 
-  it("names today and tomorrow", () => {
+  it("names today, tomorrow and yesterday", () => {
     expect([dayLabel("2026-11-26", "2026-11-26"), dayLabel("2026-11-27", "2026-11-26"), dayLabel("2026-11-28", "2026-11-26")])
       .toEqual(["2026-11-26 · today", "2026-11-27 · tomorrow", "2026-11-28"]);
+    expect([dayLabel("2026-11-25", "2026-11-26"), dayLabel("2026-11-24", "2026-11-26")])
+      .toEqual(["2026-11-25 · yesterday", "2026-11-24"]);
   });
 });
 
