@@ -152,3 +152,12 @@
 ### 9.3 확인
 
 서버: 새 API와 사건 범위의 테스트, 엄격 mypy, `check_imports`, 영향 받는 테스트 묶음. Web: typecheck, lint, vitest. 검수는 Claude(Orca 작업자)로 한다(소유자, 2026-11-27).
+
+## 10. 1단계 구현에서 정한 것
+
+1. **사건은 이미 30일이었다.** 사건은 `day`가 있어 `list_life(since=…)`가 이미 걸렀다. §1의 1은 사건이 아니라 지난 일정이 일정 묶음에 섞여 보인 것이었다. 범위를 확인하는 테스트만 더했다.
+2. Data 읽기는 `list_life`에 `until`을 더하지 않고 새 `list_life_days(principal, persona_id, *, until, since=None, limit=None)`(날짜 있는 항목만, 최신부터)와 `list_sleeps(principal, persona_id, *, since=None, until=None, limit=None)`(잠든 때로)를 두었다.
+3. `/api/life`의 `sleeps`는 "마지막 14번"에서 "지난 30일에 잠든 것"으로 바뀐다(모양은 그대로). 기록 탭의 15–30일 전 날짜에도 잠이 보이게. 하루 지기가 꺼져 있어도 Data에서 읽는다.
+4. 기록 API의 `before`는 빼도 된다(빼면 `/api/life`가 덮는 첫 날짜). 첫 "Show older"는 날짜 없이 보내 서버 시간대에 맞춘다. `days`나 날짜가 틀리면 400 `invalid_argument`.
+5. 작업 상태 줄은 Today와 Projects 둘 다에 보인다. 오늘 사건은 Today에서도 고칠 수 있다. 기록 탭에서 오늘의 칸은 읽기만이고, 잠의 날짜는 브라우저 시계로 잠든 날이다.
+6. `tests/life/test_worker.py`의 라운드 시험이 정오 뒤에 실패했다(H-86에서 세계의 범위가 자정까지 늘어, 실제 시계로 도는 시험에서 세계가 대본 답을 먼저 가져감). 시계를 오늘 서울 10:00에 고정했다.

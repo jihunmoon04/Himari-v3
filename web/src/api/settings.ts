@@ -110,6 +110,7 @@ export interface SleepView {
 
 /** character-day §5.1: one night's sleep, as the sleep log keeps it. */
 export interface SleepRecord {
+  id?: number;
   fell_at: string;
   how_fell: "schedule" | "tool" | "missed"; // its sleep slot came, it went early by itself, waiting for a promise
   woke_at: string | null; // null: still asleep
@@ -134,13 +135,15 @@ export interface Life {
   // character-world §2, §3: whether the weather and the day's topics are used (as told at startup), today's weather
   // character-mind §8: when the world next decides HIMARI's day (null: no life runs)
   world?: { weather: string; today: string | null; topics: string; next?: string | null };
-  // facts, arcs, then plans, work pieces and diaries, newest day first (the last 30 days on), then the kept thoughts
+  // facts, arcs, then plans, work pieces, events and diaries, newest day first (the last 30 days on, and every piece
+  // of an open project), then the kept thoughts
   entries: LifeEntry[];
   // character-work §8: whether the worker runs (with the story writer) and the next work plan
   work?: { running: boolean; next: LifeEntry | null };
   // character-mind §8: the model HIMARI's self runs (the day's review) use now, and why; null: no life runs
   mind?: { model: string; reason: string } | null;
-  // character-day §12: HIMARI's sleep now (null: the life is off) and its last 14 sleeps, newest first
+  // character-day §12: HIMARI's sleep now (null: the life is off); character-routine §9.1: the sleeps that fell in
+  // the last 30 days, newest first
   sleep?: SleepView | null;
   sleeps?: SleepRecord[];
   limits: { facts: number; chars: number; diary_chars: number; arc_chars?: number; arc_title_chars?: number;
@@ -157,7 +160,26 @@ export interface PlanInput {
   arc_id?: number | null;
 }
 
+/** character-routine §9.1: HIMARI's record over the dates ``from`` up to before ``before`` (its plans, cancelled and
+ *  missed too, its diaries, events and work pieces, newest day first, and the sleeps that fell then), and whether
+ *  anything older is kept (``more``: read on with ``before = from``). */
+export interface LifeHistory {
+  entries: LifeEntry[];
+  sleeps: SleepRecord[];
+  from: string;
+  before: string;
+  more: boolean;
+}
+
 export const readLife = () => get<Life>("/api/life");
+/** ``before`` left out: the dates just before the ones readLife shows (its last 30 days); ``days`` 1..60, else 30. */
+export const readLifeHistory = (before?: string, days?: number) => {
+  const query = new URLSearchParams();
+  if (before !== undefined) query.set("before", before);
+  if (days !== undefined) query.set("days", String(days));
+  const params = query.toString();
+  return get<LifeHistory>(`/api/life/history${params ? `?${params}` : ""}`);
+};
 /** ``personaId``: the persona the page shows (null for the default); refused with ``persona_changed`` when another
  * one was chosen since. */
 export const addLifeFact = (text: string, personaId: number | null) =>

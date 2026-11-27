@@ -2170,6 +2170,14 @@ class LifeStore(Protocol):
         Never the bond (character-bond: BondStore.list_bond)."""
         ...
 
+    async def list_life_days(self, principal: PrincipalId, persona_id: int, *, until: str, since: str | None = None,
+                             limit: int | None = None) -> tuple[LifeEntry, ...]:
+        """character-routine §9.1: the persona's live dated entries — its plans (cancelled and missed too, the sleep
+        and diary slots too), diaries, work pieces and events — dated ``since`` (None: from the first) up to before
+        ``until`` (YYYY-MM-DD both), newest date first as list_life orders them, at most ``limit`` (None: all).
+        Never a fact, an arc, a kept thought or the bond."""
+        ...
+
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         """The user's fact (origin USER), at revision 1. At MAX_LIFE_FACTS the
         oldest fact not the user's retires first (§2)."""
@@ -2805,6 +2813,12 @@ class SleepStore(Protocol):
 
     async def recent_sleeps(self, principal: PrincipalId, persona_id: int, *, limit: int) -> tuple[SleepRecord, ...]:
         """The persona's latest sleeps, newest first."""
+        ...
+
+    async def list_sleeps(self, principal: PrincipalId, persona_id: int, *, since: datetime | None = None,
+                          until: datetime | None = None, limit: int | None = None) -> tuple[SleepRecord, ...]:
+        """character-routine §9.1: the persona's sleeps that fell at ``since`` (None: from the first) or later and
+        before ``until`` (None: to the last), newest first, at most ``limit`` (None: all)."""
         ...
 
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,

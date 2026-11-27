@@ -49,7 +49,7 @@ from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 from typing import Any, BinaryIO, Literal
 
@@ -67,6 +67,8 @@ from himari.bootstrap.application import (
     DayClosed,
     DeleteNotice,
     FileNameRefused,
+    LIFE_HISTORY_DAYS,
+    LIFE_HISTORY_MAX_DAYS,
     LifeChanged,
     MemoryLine,
     AutoMemoryStatus,
@@ -1961,7 +1963,8 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     @app.get("/api/life")
     async def read_life(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """The chosen persona's facts, and its plans and diaries of the last 30 days on."""
+        """The chosen persona's facts, and its plans, diaries, work pieces and events of the last 30 days on
+        (character-routine §9.1; older ones: /api/life/history)."""
         application = himari(request)
         chosen, entries = await application.life(who)
         mood, now = await application.himari_state(who)  # character-state §2, §3: as a turn would see them
@@ -1983,13 +1986,38 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                           # §6: after the day's closing, else noon)
                           "next": _time(await application.next_world(who))},
                 "entries": [life_entry_view(e) for e in entries],
-                # character-day §12, §18.11: the sleep now and the latest sleeps (newest first)
+                # character-day §12, §18.11: the sleep now; character-routine §9.1: the sleeps that fell in the last
+                # 30 days, as the entries (newest first)
                 "sleep": sleep_view_json(await application.sleep_view(who), ZoneInfo(application.time_zone)),
                 "sleeps": [sleep_record_view(s) for s in await application.sleeps(who)],
                 "limits": {"facts": MAX_LIFE_FACTS, "chars": MAX_LIFE_CHARS, "diary_chars": MAX_DIARY_CHARS,
                            "arc_chars": MAX_ARC_CHARS, "arc_title_chars": MAX_ARC_TITLE_CHARS,
                            "work_chars": MAX_WORK_CHARS, "summary_chars": MAX_WORK_SUMMARY_CHARS,
                            "event_chars": MAX_EVENT_CHARS}}
+
+    @app.get("/api/life/history")
+    async def read_life_history(request: Request, who: PrincipalId = Depends(principal), before: str | None = None,
+                                days: int = LIFE_HISTORY_DAYS) -> dict[str, Any]:
+        """character-routine §9.1: the chosen persona's record over the ``days`` dates (the user's) before ``before``
+        (left out: the first date /api/life shows) — its diaries, events, plans (cancelled and missed too), work
+        pieces and the sleeps that fell then — and whether anything older is kept (``more``: read on from ``from``)."""
+        if not 1 <= days <= LIFE_HISTORY_MAX_DAYS:
+            raise ApiError(400, "invalid_argument", f"days is 1..{LIFE_HISTORY_MAX_DAYS}")
+        end = None
+        if before is not None:
+            try:
+                end = date.fromisoformat(before) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", before) else None
+            except ValueError:
+                end = None
+            if end is None:
+                raise ApiError(400, "invalid_argument", "before is a date, YYYY-MM-DD")
+        try:
+            history = await himari(request).life_history(who, end, days)
+        except OverflowError:  # before the first dates there are
+            raise ApiError(400, "invalid_argument", "before is a date, YYYY-MM-DD") from None
+        return {"entries": [life_entry_view(e) for e in history.entries],
+                "sleeps": [sleep_record_view(s) for s in history.sleeps],
+                "from": history.since, "before": history.before, "more": history.more}
 
     def plan_write(body: PlanBody | PlanEditBody, entry_id: int | None) -> PlanWrite:
         return PlanWrite(body.day, body.time, body.minutes, PlanKind(body.plan_kind), body.text, entry_id,

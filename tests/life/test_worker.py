@@ -372,9 +372,12 @@ def test_the_lifes_own_daily_budget_defers_it() -> None:
 def test_rounds_start_after_a_delay_and_cover_only_principals_who_talked_lately() -> None:
     async def scenario() -> None:
         offset = timedelta(0)
+        # 10:00 in Seoul today: the diary of last night is due (write_at 00:00), the world not yet (it decides from
+        # noon, character-day §6), so the scripted answers go to the review and its facts whatever the real hour
+        base = datetime.combine(datetime.now(UTC).date(), time(1, 0), tzinfo=UTC)
 
         def clock() -> datetime:
-            return datetime.now(UTC) + offset
+            return base + offset
 
         store, data, provider, writer = setup(day_answer(plans=[]), settled(), clock=clock,
                                               settings=LifeSettings("m", write_at=time(0, 0), time_zone="Asia/Seoul"))

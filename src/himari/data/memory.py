@@ -1363,6 +1363,17 @@ class InMemoryData:
                  or (e.kind is LifeKind.ARC and (e.end_day is None or e.end_day >= since))
                  or (e.kind is LifeKind.WORK and e.arc_id in open_arcs)))
 
+    async def list_life_days(self, principal: PrincipalId, persona_id: int, *, until: str, since: str | None = None,
+                             limit: int | None = None) -> tuple[LifeEntry, ...]:
+        persona_id = rules.check_life_persona(persona_id)
+        until = rules.check_life_day(until)
+        since = None if since is None else rules.check_life_day(since)
+        found = rules.order_life(
+            e for (owner, _), (e, retired) in self._store.life.items()
+            if owner == principal and retired is None and e.persona_id == persona_id and e.kind in rules.DAY_KINDS
+            and e.day is not None and e.day < until and (since is None or e.day >= since))
+        return found if limit is None else found[:max(0, limit)]
+
     async def add_life_fact(self, principal: PrincipalId, persona_id: int, text: str) -> LifeEntry:
         persona_id = rules.check_life_persona(persona_id)
         text = rules.check_life_text(LifeKind.FACT, text)
@@ -1888,6 +1899,13 @@ class InMemoryData:
         found = sorted(self._sleeps_of(principal, rules.check_life_persona(persona_id)), key=lambda s: s.sleep_id,
                        reverse=True)
         return tuple(found[:max(0, limit)])
+
+    async def list_sleeps(self, principal: PrincipalId, persona_id: int, *, since: datetime | None = None,
+                          until: datetime | None = None, limit: int | None = None) -> tuple[SleepRecord, ...]:
+        found = sorted((s for s in self._sleeps_of(principal, rules.check_life_persona(persona_id))
+                        if (until is None or s.fell_at < until) and (since is None or s.fell_at >= since)),
+                       key=lambda s: (s.fell_at, s.sleep_id), reverse=True)
+        return tuple(found if limit is None else found[:max(0, limit)])
 
     async def note_closing(self, principal: PrincipalId, persona_id: int, sleep_id: int, *, at: datetime,
                            before: DayBefore | None, conversation_id: ConversationId | None = None) -> bool:

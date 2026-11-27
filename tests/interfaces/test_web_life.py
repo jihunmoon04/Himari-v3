@@ -4,9 +4,10 @@ retired from the revision shown; a device may not use it (D4)."""
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -27,6 +28,8 @@ from himari.data.api import (  # noqa: E402
     NEW_ARC,
     ArcMove,
     ArcOp,
+    FellBy,
+    LifeOrigin,
     LifePlan,
     LifeWriteStart,
     LifeJob,
@@ -35,6 +38,7 @@ from himari.data.api import (  # noqa: E402
     ThoughtAbout,
     ThoughtChange,
     ThoughtOp,
+    WokeBy,
     WorkPiece,
 )
 from himari.interfaces.web import app as web  # noqa: E402
@@ -248,3 +252,63 @@ def test_an_event_is_seen_with_its_day_and_time_and_is_edited_and_deleted(server
                              headers=SEND)
     assert (long.status_code, error_code(long)) == (422, "too_large")
     assert server.client.delete(f"/api/life/{event['id']}", params={"revision": 2}, headers=SEND).status_code == 204
+
+
+def test_the_life_sends_the_last_30_days_and_its_history_reads_on_from_there(server: Server) -> None:
+    """character-routine §9.1: /api/life sends the events (as the plans and diaries) of the last 30 days and later;
+    /api/life/history reads the dates before, by default from where /api/life stops, with the cancelled slots and
+    the sleeps that fell then, and says whether anything older is kept."""
+    assert server.application is not None
+    zone = ZoneInfo(server.application.time_zone)
+    today = datetime.now(zone).date()
+    day = {n: (today - timedelta(days=n)).isoformat() for n in (0, 29, 30, 31, 45, 59, 60, 61, 90)}
+
+    async def lived() -> None:
+        assert server.application is not None
+        data = server.application.data
+        for n in (0, 30, 31, 45, 90):
+            write_id = await data.begin_life_write(ME, LifeWriteStart(0, day[n], "p", "m", b"{}", "j", 1,
+                                                                      job=LifeJob.WORLD))
+            await data.mark_life_write_dispatched(write_id)
+            await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+            await data.add_events(write_id, [WorldEvent("15:00", f"{n}일 전의 일.")], now=datetime.now(UTC))
+        write_id = await data.begin_life_write(ME, LifeWriteStart(0, day[61], "p", "m", b"{}", "j", 1))
+        await data.mark_life_write_dispatched(write_id)
+        await data.record_life_write(write_id, RawReceived(b"{}", "j"))
+        (_, plan) = await data.apply_life_write(write_id, LifePlan("61일 전의 일기.", ((day[60], "산책."),),
+                                                                   times=("15:00",)), now=datetime.now(UTC))
+        await data.cancel_plan(ME, plan.entry_id, "비가 와서", origin=LifeOrigin.USER, zone=str(zone),
+                               now=datetime.combine(today - timedelta(days=61), time(9), zone))
+        for n in (29, 59):  # a sleep that fell at 23:00 n days ago
+            at = datetime.combine(today - timedelta(days=n), time(23), zone)
+            sleep = await data.open_sleep(ME, 0, at=at, how=FellBy.SCHEDULE)
+            await data.end_sleep(ME, sleep.sleep_id, at=at + timedelta(hours=8), how=WokeBy.SCHEDULE)
+
+    server.client.portal.call(lived)  # type: ignore[union-attr]
+    life = server.client.get("/api/life").json()
+    assert [(e["kind"], e["day"]) for e in life["entries"]] == [("event", day[0]), ("event", day[30])]
+    assert [s["fell_at"][:10] for s in life["sleeps"]] == [
+        datetime.combine(today - timedelta(days=29), time(23), zone).astimezone(UTC).date().isoformat()]
+
+    first = server.client.get("/api/life/history").json()  # the 30 dates before /api/life's first
+    assert (first["from"], first["before"], first["more"]) == (day[60], day[30], True)
+    assert [(e["kind"], e["day"]) for e in first["entries"]] == [("event", day[31]), ("event", day[45]),
+                                                                  ("plan", day[60])]
+    plan = first["entries"][2]
+    assert (plan["plan_state"], plan["reason"], plan["time"]) == ("cancelled", "비가 와서", "15:00")
+    assert len(first["sleeps"]) == 1 and set(first["sleeps"][0]) == set(life["sleeps"][0])
+    assert first["sleeps"][0]["how_woke"] == "schedule"
+
+    second = server.client.get("/api/life/history", params={"before": first["from"], "days": 30}).json()
+    assert (second["from"], second["before"], second["more"]) == ((today - timedelta(days=90)).isoformat(),
+                                                                   day[60], False)
+    assert [(e["kind"], e["day"]) for e in second["entries"]] == [("diary", day[61]), ("event", day[90])]
+    assert second["sleeps"] == []
+    one = server.client.get("/api/life/history", params={"before": day[30], "days": 1}).json()
+    assert (one["from"], [e["day"] for e in one["entries"]], one["more"]) == (day[31], [day[31]], True)
+    for bad in ({"days": 0}, {"days": 61}, {"before": "2026-13-01"}, {"before": "2026-1-01"},
+                {"before": "0001-01-01"}):
+        refused = server.client.get("/api/life/history", params=bad)
+        assert (refused.status_code, error_code(refused)) == (400, "invalid_argument"), bad
+    server.client.delete("/api/session", headers=SEND)
+    assert server.client.get("/api/life/history").status_code == 401

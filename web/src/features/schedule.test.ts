@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { LifeEntry } from "@/api/settings";
 import {
-  addDays, dayLabel, endOf, lengthOf, minutesOf, onlyMoves, scheduleDays, sleepNote, sleepText, slotsByDay, spanOf,
+  addDays, dayLabel, endOf, lengthOf, minutesOf, onlyMoves, recordDays, recordLine, scheduleDays, sleepNote, sleepText,
+  slotsByDay, spanOf, weekdayOf,
 } from "./schedule";
 
 const at = "2026-11-26T01:00:00+00:00";
@@ -60,5 +61,25 @@ describe("HIMARI's sleep in words (character-day §5)", () => {
   it("says how a night went", () => {
     expect(sleepNote({ fell_at: at, how_fell: "missed", woke_at: at, how_woke: "schedule", messages: 1, mumbles: 0,
       closed_day: true })).toBe("fell asleep waiting for a promise · woke at its slot's end · 1 message · closed the day");
+  });
+});
+
+describe("the record by date (character-routine §9.2)", () => {
+  const sleep = (id: number, fell: string) => ({ id, fell_at: new Date(fell).toISOString(), how_fell: "schedule" as const,
+    woke_at: null, how_woke: null, messages: 0, mumbles: 0, closed_day: false });
+
+  it("names a date's weekday", () => {
+    expect([weekdayOf("2026-11-26"), weekdayOf("2026-11-29"), weekdayOf("2027-01-01")]).toEqual(["Thu", "Sun", "Fri"]);
+  });
+
+  it("groups the dated entries and the sleeps by date, newest first, each once and nothing after today", () => {
+    const diary = { ...plan(7, "2026-11-25", null), kind: "diary" as const };
+    const days = recordDays([plan(1, "2026-11-27", "03:00"), plan(2, "2026-11-26", "23:30"), plan(3, "2026-11-26", "15:00"),
+      diary, diary, { ...plan(8, null as unknown as string, null), kind: "fact" as const }],
+    [sleep(1, "2026-11-25T23:40:00"), sleep(1, "2026-11-25T23:40:00"), sleep(2, "2026-11-27T01:00:00")], "2026-11-26");
+    expect(days.map((d) => [d.day, d.slots.map((s) => s.id), d.diary.length, d.sleeps.length])).toEqual([
+      ["2026-11-26", [3, 2], 0, 0], ["2026-11-25", [], 1, 1]]);
+    expect(recordLine(days[0]!, "2026-11-26")).toBe("2026-11-26 (Thu) · today · 2 slots");
+    expect(recordLine(days[1]!, "2026-11-26")).toBe("2026-11-25 (Wed) · diary · sleep");
   });
 });

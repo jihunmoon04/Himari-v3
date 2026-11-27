@@ -43,7 +43,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
 from zoneinfo import ZoneInfo, available_timezones
@@ -689,7 +689,23 @@ def memory_pass_settings(provider: ProviderAdapter, *, memory: bool, auto: bool,
 
 LIFE_SECONDS = 600.0  # character-life §3: how often the story writer looks at each principal's day
 LIFE_SHOWN_DAYS = timedelta(days=30)  # §6: the plans and diaries the Web shows, back from today
+# character-routine §9.1: the dates one read of the life's history covers ("Show older"), at most and by default
+LIFE_HISTORY_MAX_DAYS = 60
+LIFE_HISTORY_DAYS = 30
 BOND_EPISODES = 60  # character-bond §1: the newest episodes the memories' timeline shows with the bond
+
+
+@dataclass(frozen=True)
+class LifeHistory:
+    """character-routine §9.1: the dated record of the persona chosen now from ``since`` up to before ``before``
+    (the user's dates) — its plans (cancelled and missed too), diaries, work pieces and events, newest date first,
+    and the sleeps that fell then, newest first — and whether anything older is kept (``more``)."""
+
+    entries: tuple[LifeEntry, ...]
+    sleeps: tuple[SleepRecord, ...]
+    since: str
+    before: str
+    more: bool
 
 
 class LifeChanged(RuntimeError):
@@ -1244,8 +1260,11 @@ class Application:
         return None if self.keeper is None else await self.keeper.sleep_view(principal)
 
     async def sleeps(self, principal: PrincipalId) -> tuple[SleepRecord, ...]:
-        """§12: the latest sleeps (newest first)."""
-        return () if self.keeper is None else await self.keeper.recent_sleeps(principal)
+        """§12, character-routine §9.1: the sleeps of the persona chosen now that fell in the last LIFE_SHOWN_DAYS and
+        later, as the plans and diaries the Web shows (newest first)."""
+        chosen = await self.data.active_persona(principal)
+        return await self.data.list_sleeps(principal, NO_PERSONA if chosen is None else chosen.persona_id,
+                                           since=datetime.combine(self.life_since(), time(), ZoneInfo(self.time_zone)))
 
     async def write_plan(self, principal: PrincipalId, persona_id: int | None, plan: PlanWrite) -> LifeEntry:
         """§4.2, §18.11: the user's slot (origin USER) for the persona the page showed; LifeChanged as for a fact;
@@ -1497,14 +1516,38 @@ class Application:
 
     # --- HIMARI's life (character-life v0.1 §6) ---------------------------------------------
 
+    def life_since(self) -> date:
+        """The first date the Web's life shows (LIFE_SHOWN_DAYS back from today, the server's zone)."""
+        return datetime.now(ZoneInfo(self.time_zone)).date() - LIFE_SHOWN_DAYS
+
     async def life(self, principal: PrincipalId) -> tuple[Persona | None, tuple[LifeEntry, ...]]:
         """The persona chosen now (None: no persona, whose life is NO_PERSONA's, L2) and its
-        life: every fact, and the plans and diaries of the last LIFE_SHOWN_DAYS and later."""
+        life: every fact, and the plans, diaries, work pieces and (character-routine §9.1) events of the last
+        LIFE_SHOWN_DAYS and later, with every piece of an open arc."""
         chosen = await self.data.active_persona(principal)
-        since = (datetime.now(ZoneInfo(self.time_zone)).date() - LIFE_SHOWN_DAYS).isoformat()
         entries = await self.data.list_life(principal, NO_PERSONA if chosen is None else chosen.persona_id,
-                                            since=since)
+                                            since=self.life_since().isoformat())
         return chosen, entries
+
+    async def life_history(self, principal: PrincipalId, before: date | None,
+                           days: int = LIFE_HISTORY_DAYS) -> LifeHistory:
+        """character-routine §9.1: the record of the persona chosen now over the ``days`` dates before ``before``
+        (None: the first date life() shows, so the history carries on from it). ValueError: ``days`` not
+        1..LIFE_HISTORY_MAX_DAYS."""
+        if not 1 <= days <= LIFE_HISTORY_MAX_DAYS:
+            raise ValueError(f"days is 1..{LIFE_HISTORY_MAX_DAYS}")
+        zone = ZoneInfo(self.time_zone)
+        end = self.life_since() if before is None else before
+        start = end - timedelta(days=days)
+        chosen = await self.data.active_persona(principal)
+        persona_id = NO_PERSONA if chosen is None else chosen.persona_id
+        start_at, end_at = datetime.combine(start, time(), zone), datetime.combine(end, time(), zone)
+        entries = await self.data.list_life_days(principal, persona_id, since=start.isoformat(),
+                                                 until=end.isoformat())
+        sleeps = await self.data.list_sleeps(principal, persona_id, since=start_at, until=end_at)
+        more = bool(await self.data.list_life_days(principal, persona_id, until=start.isoformat(), limit=1)
+                    or await self.data.list_sleeps(principal, persona_id, until=start_at, limit=1))
+        return LifeHistory(entries, sleeps, start.isoformat(), end.isoformat(), more)
 
     async def next_world(self, principal: PrincipalId) -> datetime | None:
         """character-mind §8, character-day §6: when the world next decides HIMARI's day (None: no story writer) —
